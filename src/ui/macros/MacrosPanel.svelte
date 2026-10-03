@@ -6,11 +6,20 @@
    * macros use a separate host-run Worker with action grants and typed inputs.
    */
   import { onMount } from "svelte";
+  import { SvelteSet } from "svelte/reactivity";
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { MacroDocument } from "../../core/documents";
-  import { runChatMacro } from "./run";
+  import { macroResultText, macroSelectionOf, runChatMacro, runSavedMacro } from "./run";
+  import {
+    MACRO_COMPOSITE_LIMITS,
+    macroCompositeDocumentError,
+    macroCompositeMacroIds,
+  } from "../../core/macroComposite";
+  import { macroAutomationGraphId, macroAutomationInputs } from "../../core/macroAutomation";
+  import { bindMacroArgFields, macroArgSchemaError, type MacroArgInput } from "../../core/macroArgs";
+  import { macroItemChoices, type MacroItemChoice } from "../../core/macroItems";
   import TaggerPanel from "./TaggerPanel.svelte";
   import FxSequencePanel from "./FxSequencePanel.svelte";
   import type { RequestCrosshairPick } from "./crosshairPicker";
@@ -23,6 +32,8 @@
   import type { CompendiumPack } from "../../core/compendium";
   import type { RequestSummonPick } from "./summonPicker";
   import ScriptMacroPanel from "./ScriptMacroPanel.svelte";
+  import MyWorldMacrosPanel from "./MyWorldMacrosPanel.svelte";
+  import { canSaveWorldMacros, playerMacroAuthoring } from "../../core/playerMacros";
   import type { AssetManifest } from "../../core/documents";
   import type { FxImportPermissions } from "../../core/fx";
 
@@ -35,6 +46,8 @@
     getFxAsset = null,
     listCompendia = null,
     activeSceneId = null,
+    selectedTokenId = null,
+    selectedItemRef = null,
     onPickSummon = null,
     onPickAnchor = null,
     onPreviewFx = null,
@@ -48,13 +61,17 @@
     getFxAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null;
     listCompendia?: (() => Promise<Array<{ packageId: string; packFile: string; pack: CompendiumPack }>>) | null;
     activeSceneId?: string | null;
+    /** D-388: the caller's single selected token, the default for a `from:"selected"` input. */
+    selectedTokenId?: string | null;
+    /** D-393: the most recently focused open item window as a qualified reference. */
+    selectedItemRef?: string | null;
     onPickSummon?: RequestSummonPick | null;
     /** GM-local canvas picking/rendering for the FX tab; null on a player shell. */
     onPickAnchor?: RequestCrosshairPick | null;
     onPreviewFx?: PreviewFxSequence | null;
     onStopFxPreview?: (() => void) | null;
   } = $props();
-  let tab = $state<"chat" | "fx" | "assets" | "manager" | "zones" | "tags" | "prefabs" | "summons" | "scripts">("chat");
+  let tab = $state<"chat" | "fx" | "assets" | "manager" | "zones" | "tags" | "prefabs" | "summons" | "scripts" | "automations" | "personal">("chat");
   let pickedAsset = $state<{ hash: string } | null>(null);
 
   function useAsset(hash: string): void {
@@ -62,16 +79,49 @@
     tab = "fx";
   }
   let viewerRole = $state("");
+  let personalAvailable = $state(false);
   const gm = $derived(viewerRole === "GM" || viewerRole === "ASSISTANT");
 
   let macros = $state<MacroDocument[]>([]);
+  /** TR-12/MC-01: a macro that runs one saved graph. The binding stays with the host. */
+  let automationMacros = $state<MacroDocument[]>([]);
+  /** MC-01 (D-386): macros that run several automation macros, in order. */
+  let compositeMacros = $state<MacroDocument[]>([]);
+  let compositeEditing = $state("");
+  let compositeName = $state("");
+  let compositeChildren = $state<string[]>([]);
+  let compositeError = $state("");
+  /** MC-02: the declared-input editor (GM) and the value form a caller fills in to run. */
+  let inputEditing = $state("");
+  let inputDraft = $state<MacroArgInput[]>([]);
+  /** The caller's live selection: what a `from: "selected"` input defaults to. */
+  let storeRevision = $state(0);
+  let itemChoices = $state<MacroItemChoice[]>([]);
+  const callerSelection = $derived.by(() => {
+    void storeRevision;
+    return macroSelectionOf(client, selectedTokenId, selectedItemRef);
+  });
+  let inputError = $state("");
+  let runEditing = $state("");
+  let runValues = $state<Record<string, string>>({});
+  let runError = $state("");
+  let macroStatus = $state("");
+  /** Request ids whose result should surface here; the host answers each one once. */
+  const pendingInvokes = new SvelteSet<string>();
   let name = $state("");
   let command = $state("");
 
   function refresh(): void {
     viewerRole = client.user?.role ?? "";
-    if (viewerRole !== "GM" && viewerRole !== "ASSISTANT" && tab !== "summons") tab = "scripts";
+    personalAvailable = canSaveWorldMacros(client.user, client.store.getAll("users")) ||
+      client.store.getAll("macros").some((macro) => playerMacroAuthoring(macro)?.userId === client.user?.id);
+    if (viewerRole !== "GM" && viewerRole !== "ASSISTANT" && !["scripts", "automations", "summons", "personal"].includes(tab))
+      tab = personalAvailable ? "personal" : "scripts";
+    storeRevision++;
+    itemChoices = macroItemChoices(client.store.world, client.user);
     macros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "chat");
+    automationMacros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "automation");
+    compositeMacros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "composite");
   }
 
   function create(): void {
@@ -110,22 +160,155 @@
     client.submit([{ kind: "delete", ref: { coll: "macros", id } }]);
   }
 
+  /** Start a fresh composite (or load one back into the editor for an update). */
+  function editComposite(macro: MacroDocument | null): void {
+    compositeError = "";
+    compositeEditing = macro?._id ?? "";
+    compositeName = macro?.name ?? "";
+    compositeChildren = macro ? [...(macroCompositeMacroIds(macro) ?? [])] : [];
+  }
+
+  function addCompositeChild(): void {
+    // The first child not already chosen — a composite runs each macro once.
+    const next = automationMacros.find((m) => !compositeChildren.includes(m._id));
+    if (!next) { compositeError = "Every saved automation macro is already in this composite."; return; }
+    if (compositeChildren.length >= MACRO_COMPOSITE_LIMITS.children) {
+      compositeError = `A composite runs at most ${MACRO_COMPOSITE_LIMITS.children} macros.`;
+      return;
+    }
+    compositeChildren = [...compositeChildren, next._id];
+    compositeError = "";
+  }
+
+  function setCompositeChild(index: number, id: string): void {
+    if (compositeChildren.includes(id) && compositeChildren[index] !== id) {
+      compositeError = "A composite runs each macro once.";
+      return;
+    }
+    compositeChildren = compositeChildren.map((current, i) => (i === index ? id : current));
+    compositeError = "";
+  }
+
+  function removeCompositeChild(index: number): void {
+    compositeChildren = compositeChildren.filter((_, i) => i !== index);
+    compositeError = "";
+  }
+
+  function saveComposite(): void {
+    compositeError = "";
+    const doc: MacroDocument = { _id: compositeEditing || globalThis.crypto.randomUUID(),
+      type: "macro", name: compositeName.trim(), ownership: { default: 1 }, flags: {}, system: {},
+      kind: "composite", command: "", composite: { macroIds: [...compositeChildren] } };
+    const problem = macroCompositeDocumentError(doc);
+    if (problem) { compositeError = problem; return; }
+    if (compositeChildren.some((id) => !automationMacros.some((m) => m._id === id))) {
+      compositeError = "A composite may only run saved automation macros.";
+      return;
+    }
+    if (compositeEditing) {
+      client.submit([{ kind: "update", ref: { coll: "macros", id: compositeEditing },
+        diff: { name: doc.name, composite: doc.composite as never } }]);
+      macroStatus = `Requested an update to composite "${doc.name}"`;
+    } else {
+      client.submit([{ kind: "create", coll: "macros", data: doc }]);
+      macroStatus = `Published composite "${doc.name}" — run it from this tab, a hotbar slot or /run`;
+    }
+    editComposite(null);
+  }
+
+  /** MC-02: declare the typed inputs a caller may send (stored on the macro's binding). */
+  function editInputs(macro: MacroDocument): void {
+    inputError = "";
+    inputEditing = inputEditing === macro._id ? "" : macro._id;
+    inputDraft = macroAutomationInputs(macro).map((field) => ({ ...field }));
+  }
+
+  function setInputType(index: number, type: MacroArgInput["type"]): void {
+    inputDraft = inputDraft.map((field, i) => {
+      if (i !== index) return field;
+      const next = { ...field, type };
+      if (!["token", "actor", "item"].includes(type)) delete next.from;
+      return next;
+    });
+  }
+  function setInputFlag(index: number, flag: "required" | "from", enabled: boolean): void {
+    inputDraft = inputDraft.map((field, i) => {
+      if (i !== index) return field;
+      const next = { ...field };
+      if (flag === "required") { if (enabled) next.required = true; else delete next.required; }
+      else { if (enabled) next.from = "selected"; else delete next.from; }
+      return next;
+    });
+  }
+
+  function saveInputs(macro: MacroDocument): void {
+    inputError = "";
+    const graphId = macroAutomationGraphId(macro);
+    if (!graphId) { inputError = "This macro has no graph binding."; return; }
+    const problem = macroArgSchemaError($state.snapshot(inputDraft));
+    if (problem) { inputError = problem; return; }
+    const inputs = $state.snapshot(inputDraft).map((field) => ({ name: field.name, type: field.type,
+      ...(field.required ? { required: true as const } : {}),
+      ...(field.from === "selected" ? { from: "selected" as const } : {}) }));
+    client.submit([{ kind: "update", ref: { coll: "macros", id: macro._id },
+      diff: { automation: { graphId, ...(inputs.length > 0 ? { inputs } : {}) } as never } }]);
+    macroStatus = inputs.length > 0
+      ? `Declared ${inputs.length} input(s) on ${macro.name}`
+      : `Cleared ${macro.name}'s declared inputs`;
+    inputEditing = "";
+  }
+
+  /** The caller's value form for a macro that declares inputs. */
+  function editRun(macro: MacroDocument): void {
+    runError = "";
+    if (runEditing === macro._id) { runEditing = ""; return; }
+    runEditing = macro._id;
+    runValues = Object.fromEntries(macroAutomationInputs(macro).map((field) => [field.name, ""]));
+  }
+
+  function runWithInputs(macro: MacroDocument): void {
+    runError = "";
+    // A blank field is "not spelled out": a `from: "selected"` input then takes the caller's
+    // selection and a required one is refused with the local reason.
+    const bound = bindMacroArgFields(macroAutomationInputs(macro), runValues, callerSelection);
+    if (!bound.ok) { runError = bound.error; return; }
+    const outcome = runSavedMacro(client, macro, bound.args);
+    if (!outcome.ok) { runError = outcome.error ?? "that macro cannot run here"; return; }
+    if (outcome.requestId) pendingInvokes.add(outcome.requestId);
+    macroStatus = `Requested ${macro.name}…`;
+    runEditing = "";
+  }
+
+  function childName(id: string): string {
+    return automationMacros.find((m) => m._id === id)?.name ?? "(missing macro)";
+  }
+
   function slotOf(m: MacroDocument): number {
     const core = (m.flags as { core?: { slot?: unknown } }).core;
     return typeof core?.slot === "number" ? core.slot : 0;
   }
 
   function runMacro(m: MacroDocument): void {
-    runChatMacro(client, m);
+    if (m.kind !== "automation" && m.kind !== "composite") { runChatMacro(client, m); return; }
+    // A macro that declares inputs asks for them first — never a silent default.
+    if (m.kind === "automation" && macroAutomationInputs(m).length > 0) { editRun(m); return; }
+    macroStatus = `Requested ${m.name}…`;
+    pendingInvokes.add(client.invokeMacro(m._id));
   }
 
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
     const offOps = bus.on("ops", refresh);
+    const offResult = bus.on("macroResult", (msg) => {
+      if (!pendingInvokes.has(msg.requestId)) return;
+      pendingInvokes.delete(msg.requestId);
+      macroStatus = macroResultText(msg);
+    });
     refresh();
     return () => {
       offSnapshot();
       offOps();
+      offResult();
     };
   });
 </script>
@@ -141,8 +324,12 @@
       <button type="button" data-macro-tags-tab aria-pressed={tab === "tags"} onclick={() => tab = "tags"}>Tags</button>
       <button type="button" data-macro-prefabs-tab aria-pressed={tab === "prefabs"} onclick={() => tab = "prefabs"}>Prefabs</button>
     {/if}
+    {#if personalAvailable || tab === "personal"}
+      <button type="button" data-my-world-macros-tab aria-pressed={tab === "personal"} onclick={() => tab = "personal"}>My world macros</button>
+    {/if}
     <button type="button" data-macro-summons-tab aria-pressed={tab === "summons"} onclick={() => tab = "summons"}>Summons</button>
     <button type="button" data-macro-script-tab aria-pressed={tab === "scripts"} onclick={() => tab = "scripts"}>Script macros</button>
+    <button type="button" data-macro-automations-tab aria-pressed={tab === "automations"} onclick={() => tab = "automations"}>Automation macros</button>
   </nav>
   <div class="tab-page" hidden={tab !== "chat"}>
   <form
@@ -204,8 +391,162 @@
   <div class="tab-page" hidden={tab !== "summons"}>
     <SummonsPanel {client} {bus} {listCompendia} {activeSceneId} {onPickSummon} />
   </div>
+  <div class="tab-page" hidden={tab !== "personal"}>
+    <MyWorldMacrosPanel {client} {bus} />
+  </div>
   <div class="tab-page" hidden={tab !== "scripts"}>
     <ScriptMacroPanel {client} {bus} />
+  </div>
+  <div class="tab-page" hidden={tab !== "automations"}>
+    <ul>
+      {#each automationMacros as m (m._id)}
+        <li data-automation-macro={m._id}>
+          <span class="name">{m.name}</span>
+          {#if gm}
+            <select
+              data-macro-slot
+              value={slotOf(m)}
+              aria-label={`Hotbar slot for ${m.name}`}
+              onchange={(e) => assignSlot(m, Number((e.target as HTMLSelectElement).value))}
+            >
+              <option value={0}>—</option>
+              {#each [1, 2, 3, 4, 5] as s (s)}
+                <option value={s}>{s}</option>
+              {/each}
+            </select>
+            <button type="button" onclick={() => remove(m._id)}>✕</button>
+          {/if}
+          {#if gm}
+            <button type="button" data-automation-inputs={m._id} onclick={() => editInputs(m)}>
+              Inputs{macroAutomationInputs(m).length > 0 ? ` (${macroAutomationInputs(m).length})` : ""}
+            </button>
+          {/if}
+          <button data-automation-macro-run type="button" onclick={() => runMacro(m)}>Run</button>
+        </li>
+        {#if inputEditing === m._id}
+          <li class="inputs-editor" data-automation-inputs-editor={m._id}>
+            {#each inputDraft as field, i (i)}
+              <input value={field.name} aria-label={`Input ${i + 1} name`} maxlength={32}
+                onchange={(e) => { inputDraft = inputDraft.map((f, at) => at === i ? { ...f, name: e.currentTarget.value } : f); }} />
+              <select value={field.type} aria-label={`Input ${i + 1} type`}
+                onchange={(e) => setInputType(i, e.currentTarget.value as MacroArgInput["type"])}>
+                <option value="string">string</option>
+                <option value="number">number</option>
+                <option value="boolean">boolean</option>
+                <option value="token">token</option>
+                <option value="actor">actor</option>
+                <option value="item">item</option>
+              </select>
+              <label><input type="checkbox" checked={field.required ?? false}
+                aria-label={`Input ${i + 1} required`}
+                onchange={(e) => setInputFlag(i, "required", e.currentTarget.checked)} /> req</label>
+              <label><input type="checkbox" checked={field.from === "selected"}
+                disabled={field.type !== "token" && field.type !== "actor" && field.type !== "item"}
+                aria-label={`Input ${i + 1} from selection`}
+                onchange={(e) => setInputFlag(i, "from", e.currentTarget.checked)} /> selected</label>
+              <button type="button" aria-label={`Remove input ${i + 1}`}
+                onclick={() => { inputDraft = inputDraft.filter((_, at) => at !== i); }}>✕</button>
+            {/each}
+            <button type="button" data-automation-input-add disabled={inputDraft.length >= 16}
+              onclick={() => { inputDraft = [...inputDraft, { name: `arg${inputDraft.length + 1}`, type: "string" }]; }}>Add input</button>
+            <button type="button" data-automation-input-save onclick={() => saveInputs(m)}>Save inputs</button>
+            {#if inputError}<small data-automation-input-error role="alert">{inputError}</small>{/if}
+          </li>
+        {/if}
+        {#if runEditing === m._id}
+          <li class="inputs-editor" data-automation-run-editor={m._id}>
+            {#each macroAutomationInputs(m) as field (field.name)}
+              <label>{field.name}{field.required ? " *" : ""}
+                {#if field.type === "boolean"}
+                  <select aria-label={field.name} onchange={(e) => { runValues = { ...runValues, [field.name]: e.currentTarget.value }; }}>
+                    <option value="false">false</option>
+                    <option value="true">true</option>
+                  </select>
+                {:else if field.type === "item"}
+                  <select aria-label={field.name} data-automation-item-arg={field.name} value={runValues[field.name] ?? ""}
+                    onchange={(e) => { runValues = { ...runValues, [field.name]: e.currentTarget.value }; }}>
+                    <option value="">{field.from === "selected" ? "Use selected item window" : "Choose an item"}</option>
+                    {#each itemChoices as choice (choice.reference)}
+                      <option value={choice.reference}>{choice.label}</option>
+                    {/each}
+                  </select>
+                {:else}
+                  <input aria-label={field.name}
+                    placeholder={field.from === "selected" ? "selected token" : field.type}
+                    oninput={(e) => { runValues = { ...runValues, [field.name]: e.currentTarget.value }; }} />
+                {/if}
+              </label>
+            {/each}
+            <button type="button" data-automation-run-with onclick={() => runWithInputs(m)}>Run</button>
+            {#if macroAutomationInputs(m).some((field) => field.from === "selected" && field.type !== "item")}
+              <small data-automation-run-selected>
+                {callerSelection?.tokenId ? "a blank selection field uses your selected token" : "select a token for the blank fields"}
+              </small>
+            {/if}
+            {#if macroAutomationInputs(m).some((field) => field.from === "selected" && field.type === "item")}
+              <small data-automation-run-item-selected>Selected item:
+                {itemChoices.find((choice) => choice.reference === callerSelection?.itemRef)?.label ?? "none — open an item window"}.
+                A blank item field uses the most recently focused open item window, not the token's first item.
+              </small>
+            {/if}
+            {#if runError}<small data-automation-run-error role="alert">{runError}</small>{/if}
+          </li>
+        {/if}
+      {/each}
+    </ul>
+    {#if automationMacros.length === 0}
+      <small>No automation macros yet — a GM publishes one from a saved graph in Active zones.</small>
+    {/if}
+    <hr />
+    <h4>Composites</h4>
+    <ul>
+      {#each compositeMacros as m (m._id)}
+        <li data-composite-macro={m._id}>
+          <span class="name">{m.name}</span>
+          <small data-composite-children>{macroCompositeMacroIds(m)?.length ?? 0} macro(s)</small>
+          {#if gm}
+            <button type="button" data-composite-edit onclick={() => editComposite(m)}>Edit</button>
+            <button type="button" onclick={() => remove(m._id)}>✕</button>
+          {/if}
+          <button data-composite-run type="button" onclick={() => runMacro(m)}>Run</button>
+        </li>
+      {/each}
+    </ul>
+    {#if compositeMacros.length === 0}
+      <small>No composites yet — a composite runs several automation macros in order.</small>
+    {/if}
+    {#if gm}
+      <div class="composite-editor" data-composite-editor>
+        <input bind:value={compositeName} data-composite-name
+          aria-label="Composite name" placeholder="Composite name" maxlength={MACRO_COMPOSITE_LIMITS.name} />
+        <ol data-composite-children-list>
+          {#each compositeChildren as id, i (i)}
+            <li>
+              <select data-composite-child value={id} aria-label={`Macro ${i + 1}`}
+                onchange={(e) => setCompositeChild(i, e.currentTarget.value)}>
+                {#each automationMacros as child (child._id)}
+                  <option value={child._id}>{child.name}</option>
+                {/each}
+              </select>
+              <small>#{i + 1} · {childName(id)}</small>
+              <button type="button" aria-label={`Remove macro ${i + 1}`}
+                onclick={() => removeCompositeChild(i)}>✕</button>
+            </li>
+          {/each}
+        </ol>
+        <div class="row">
+          <button type="button" data-composite-add onclick={addCompositeChild}
+            disabled={compositeChildren.length >= MACRO_COMPOSITE_LIMITS.children}>Add macro</button>
+          <button type="button" data-composite-save onclick={saveComposite}>
+            {compositeEditing ? "Update composite" : "Create composite"}
+          </button>
+          {#if compositeEditing}<button type="button" onclick={() => editComposite(null)}>Cancel</button>{/if}
+        </div>
+        <small data-composite-hint>Runs {MACRO_COMPOSITE_LIMITS.minimum}–{MACRO_COMPOSITE_LIMITS.children} automation macros in order, each in its own undo step.</small>
+        {#if compositeError}<small data-composite-error role="alert">{compositeError}</small>{/if}
+      </div>
+    {/if}
+    {#if macroStatus}<small data-automation-status role="status">{macroStatus}</small>{/if}
   </div>
 </div>
 
@@ -234,6 +575,44 @@
     gap: 3px;
   }
   li {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  h4 {
+    margin: 4px 0 0;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+  }
+  hr {
+    border: 0;
+    border-top: 1px solid #344957;
+    margin: 4px 0;
+  }
+  .composite-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .inputs-editor {
+    flex-wrap: wrap;
+    background: #16222c;
+    padding: 4px;
+    border-radius: 3px;
+  }
+  .composite-editor .row {
+    display: flex;
+    gap: 4px;
+  }
+  .composite-editor ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .composite-editor ol li {
     display: flex;
     align-items: center;
     gap: 4px;

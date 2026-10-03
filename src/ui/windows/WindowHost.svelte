@@ -12,6 +12,7 @@
   import MacrosPanel from "../macros/MacrosPanel.svelte";
   import SettingsPanel from "../settings/SettingsPanel.svelte";
   import JournalPopout from "../journals/JournalPopout.svelte";
+  import HandoutsPanel from "../journals/HandoutsPanel.svelte";
   import PF1eSheetWindow from "../sheets/PF1eSheetWindow.svelte";
   import PF1eItemWindow from "../sheets/PF1eItemWindow.svelte";
   import { openPF1eItemWindow } from "../sheets/pf1eItemWindow";
@@ -42,6 +43,8 @@
     client,
     bus,
     sceneId = null,
+    selectedTokenId = null,
+    selectedItemRef = null,
     onUndo,
     onRedo,
     packages = null,
@@ -70,6 +73,10 @@
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     sceneId?: string | null;
+    /** D-388: the caller's single selected token, the default for a `from:"selected"` input. */
+    selectedTokenId?: string | null;
+    /** D-393: most recently focused open item window, independent of token selection. */
+    selectedItemRef?: string | null;
     onUndo: () => void;
     onRedo: () => void;
     packages?: HostPackages | null;
@@ -265,10 +272,13 @@
           <CombatPanel {client} {bus} />
         {:else if win.kind === "help"}
           <HelpPanel {bindings} {isGM} />
+        {:else if win.kind === "journals"}
+          <HandoutsPanel {client} {bus} />
         {:else if win.kind === "permissions"}
           <PermissionsPanel {client} {bus} />
         {:else if win.kind === "macros"}
           <MacrosPanel {client} {bus} {onFxImport} {listFxAssets} {setFxAssetRights} {getFxAsset}
+            {selectedTokenId} {selectedItemRef}
             listCompendia={isGM && packages ? () => packages.compendia() : null} activeSceneId={sceneId}
             {onPickSummon} {onPickAnchor} {onPreviewFx} {onStopFxPreview} />
         {:else if win.kind === "settings"}

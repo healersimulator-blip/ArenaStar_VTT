@@ -25,7 +25,12 @@ import {
   putCheckpoint,
   putReport,
 } from "../../src/storage/strategicStore";
-import type { AutomationDocument, MacroDocument, TokenDocument } from "../../src/core/documents";
+import type { AutomationDocument, MacroDocument, TokenDocument, UserDocument } from "../../src/core/documents";
+import { ClientSync, type ClientEvents } from "../../src/client/sync";
+import { createTransportPair } from "../../src/net/memory";
+import { createEventBus } from "../../src/core/events";
+import { projectWorld } from "../../src/core/projection";
+import { canSaveWorldMacros, UNAPPROVED_SCRIPT_HASH, type PlayerMacroDraft } from "../../src/core/playerMacros";
 import { scriptApprovalHash, validateScriptMacro, type ScriptPolicy } from "../../src/core/scriptMacros";
 
 const token = (id: string, x: number, y: number): TokenDocument => ({
@@ -68,6 +73,87 @@ describe("world.zip export/import (§8)", () => {
 
   beforeEach(async () => {
     db = await openVttDb();
+  });
+
+  test("D-394 authenticated player saves reach the actual world ZIP and restore/copy with GM opt-in and original drafts", async () => {
+    const root = new MemDirHandle();
+    const app = await boot(root);
+    const authorId = "archive-author";
+    const author: UserDocument = { _id: authorId, type: "user", name: "Archive author", role: "PLAYER",
+      ownership: { default: 0 }, flags: {}, system: {}, character: null, color: "#fff" };
+    // Users are host-assigned (never created by generic intents); authenticate the fixture peer.
+    expect(app.host.commitSystem([{ kind: "create", coll: "users", data: author }]).ok).toBe(true);
+    await settle();
+    const pair = createTransportPair();
+    app.host.addSession("archive-player", pair.a, { id: authorId, role: "PLAYER", name: author.name });
+    const bus = createEventBus<ClientEvents>();
+    const player = new ClientSync({ transport: pair.b, bus, meta: app.store.meta });
+    await settle();
+    const results: ClientEvents["macroResult"][] = [];
+    bus.on("macroResult", (message) => results.push(message));
+    const chat: PlayerMacroDraft = { kind: "chat", name: "World-persisted roll", command: "/roll 1d20" };
+    const script: PlayerMacroDraft = { kind: "script", name: "World-persisted script draft", command: "return { original: true };",
+      sceneId: DEFAULT_SCENE_ID, inputs: [{ name: "note", type: "string" }] };
+    player.saveWorldMacro("archive-chat", chat);
+    await settle();
+    expect(results.at(-1)?.ok).toBe(false);
+    expect(app.store.get("macros", "archive-chat")).toBeUndefined();
+    app.gm.client.submit([{ kind: "update", ref: { coll: "users", id: authorId }, diff: { canSaveMacros: true } }]);
+    await settle();
+    expect(canSaveWorldMacros(player.user, player.store.getAll("users"))).toBe(true);
+    player.saveWorldMacro("archive-chat", chat);
+    await settle();
+    expect(results.at(-1)?.ok).toBe(true);
+    player.saveWorldMacro("archive-script", script);
+    await settle();
+    expect(results.at(-1)?.ok).toBe(true);
+    const exportedSeq = app.store.seq;
+    const archive = await exportWorldZip({ db, worldId: app.worldId, root, persister: app.persister });
+    const files = parseZip(new Uint8Array(await archive.arrayBuffer()));
+    const documents = JSON.parse(strFromU8(files.get("documents.json") as Uint8Array)) as WorldFileDocuments;
+    expect(documents.seq).toBe(exportedSeq);
+    const exportedAuthor = documents.docs.find((row) => row.coll === "users" && row.id === authorId)?.doc as UserDocument;
+    expect(exportedAuthor.canSaveMacros).toBe(true);
+    for (const [id, draft] of [["archive-chat", chat], ["archive-script", script]] as const) {
+      const doc = documents.docs.find((row) => row.coll === "macros" && row.id === id)?.doc as MacroDocument;
+      expect(doc.command).toBe(draft.command);
+      expect(doc.playerAuthoring).toEqual({ version: 1, userId: authorId, draft });
+      expect(doc.ownership).toEqual({ default: 0, [authorId]: 3 });
+    }
+    expect((documents.docs.find((row) => row.id === "archive-script")?.doc as MacroDocument).script).toMatchObject({
+      approvedHash: UNAPPROVED_SCRIPT_HASH, playerCallable: false, grants: [], runAs: "caller",
+    });
+    // Drift after the export; restore must restore the saved documents, not the current store.
+    player.deleteWorldMacro("archive-chat");
+    await settle();
+    expect(app.store.get("macros", "archive-chat")).toBeUndefined();
+    player.close();
+    await app.close();
+
+    for (const options of [{ mode: "copy" as const, worldId: "w-personal-copy" }, { mode: "replace" as const }]) {
+      const imported = await importWorldZip({ db, file: archive, root, ...options });
+      const reopened = await boot(root, imported.worldId);
+      try {
+        expect(reopened.store.seq).toBe(exportedSeq);
+        const savedUser = reopened.store.get("users", authorId);
+        expect(savedUser?.canSaveMacros).toBe(true);
+        const viewer = { id: authorId, role: "PLAYER" as const };
+        expect(canSaveWorldMacros(viewer, reopened.store.getAll("users"))).toBe(true);
+        for (const [id, draft] of [["archive-chat", chat], ["archive-script", script]] as const) {
+          expect(reopened.store.get("macros", id)?.playerAuthoring).toEqual({ version: 1, userId: authorId, draft });
+          expect(reopened.store.get("macros", id)?.command).toBe(draft.command);
+        }
+        const projected = projectWorld(reopened.store.world, reopened.store.seq, viewer).collections.macros;
+        expect(projected?.find((macro) => macro._id === "archive-script")?.command).toBe("");
+        expect(projected?.find((macro) => macro._id === "archive-script")?.playerAuthoring?.draft.command).toBe(script.command);
+        expect(projectWorld(reopened.store.world, reopened.store.seq, { id: "other", role: "PLAYER" }).collections.macros).toEqual([]);
+        const restoredScript = reopened.store.get("macros", "archive-script");
+        expect(restoredScript?.script).toMatchObject({ approvedHash: UNAPPROVED_SCRIPT_HASH, playerCallable: false });
+        expect(restoredScript?.scriptState?.recent).toEqual([]); // import never carries execution approval
+      } finally { await reopened.close(); }
+    }
+    await deleteWorldData(db, "w-personal-copy");
+    await deleteWorldData(db, app.worldId);
   });
 
   test("a user-provided FX pack cannot be exported until separate redistribution rights are granted", async () => {

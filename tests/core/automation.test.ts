@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
-import { planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState, type AutomationDefinition } from "../../src/core/automation";
-import type { ActorDocument, AutomationDocument, EffectDocument, ItemDocument, MessageDocument, SceneDocument, TileDocument, TokenDocument, WallDocument } from "../../src/core/documents";
+import { doorTransitionMethod, isHostDispatchedMethod, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState, type AutomationDefinition } from "../../src/core/automation";
+import { COMBAT_TRIGGER_METHODS } from "../../src/core/combat";
+import type { ActorDocument, AutomationDocument, EffectDocument, ItemDocument, MacroDocument, MessageDocument, SceneDocument, TileDocument, TokenDocument, WallDocument } from "../../src/core/documents";
 import { emptyWorld } from "../net/fixtures";
 import { worldSettingsDoc } from "../../src/core/worldSettings";
 
@@ -68,6 +69,136 @@ describe("host-side active-zone graph", () => {
     for (const method of ["click", "doubleClick", "hoverIn", "hoverOut"] as const)
       expect(message(method)).toMatchObject({ kind: "create", coll: "messages", data: { content: method } });
     expect(fire("enter")).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+  });
+
+  test("door changes are four distinct host-dispatched methods with a closed classifier", () => {
+    const definition: AutomationDefinition = { ...base,
+      methods: ["doorOpen", "doorClose", "doorLock", "doorUnlock"], gates: {},
+      steps: [
+        { id: "router", kind: "routeMethod", routes: { doorOpen: "arrival" }, otherwise: "other" },
+        { id: "arrival", kind: "landing", name: "arrival" },
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+        { id: "done", kind: "stop" },
+        { id: "other", kind: "landing", name: "other" },
+        { id: "fallback", kind: "chat", audience: "gm", content: "{{method}} ignored" },
+      ] };
+    expect(validateAutomation(definition).ok).toBe(true);
+    // A manual/click simulation is not one of the four events; the plan refuses the anchor.
+    const unrelated = planAutomation(world, automation(definition), { scene, tile, method: "click",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(unrelated).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+    const message = (method: "doorOpen" | "doorClose" | "doorLock" | "doorUnlock") => {
+      const outcome = planAutomation(world, automation(definition), { scene, tile, method,
+        caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+      return outcome.ok && "plan" in outcome
+        ? outcome.plan.ops.find((op) => op.kind === "create" && op.coll === "messages") : undefined;
+    };
+    expect(message("doorOpen")).toMatchObject({ data: { content: "doorOpen by p1" } });
+    expect(message("doorLock")).toMatchObject({ data: { content: "doorLock ignored" } });
+
+    expect(doorTransitionMethod(0, 1)).toBe("doorOpen");
+    expect(doorTransitionMethod(1, 0)).toBe("doorClose");
+    expect(doorTransitionMethod(0, 2)).toBe("doorLock");
+    expect(doorTransitionMethod(1, 2)).toBe("doorLock");
+    expect(doorTransitionMethod(2, 0)).toBe("doorUnlock");
+    expect(doorTransitionMethod(2, 1)).toBe("doorUnlock");
+    expect(doorTransitionMethod(0, 0)).toBeNull();
+    expect(doorTransitionMethod(1, 1)).toBeNull();
+    expect(doorTransitionMethod(2, 2)).toBeNull();
+    expect(doorTransitionMethod(3, 1)).toBeNull();
+    expect(doorTransitionMethod(0, -1)).toBeNull();
+    expect(doorTransitionMethod(Number.NaN, 1)).toBeNull();
+
+    for (const method of ["doorOpen", "doorClose", "doorLock", "doorUnlock", "sceneChange"] as const) {
+      expect(isHostDispatchedMethod(method)).toBe(true);
+      expect(SIMULATABLE_METHODS).not.toContain(method);
+    }
+    for (const method of SIMULATABLE_METHODS) expect(isHostDispatchedMethod(method)).toBe(false);
+    expect(new Set(SIMULATABLE_METHODS).size).toBe(SIMULATABLE_METHODS.length);
+  });
+
+  test("sceneLoad is a host-dispatched, routable method distinct from sceneChange", () => {
+    const definition: AutomationDefinition = { ...base,
+      methods: ["sceneLoad"], gates: {},
+      steps: [
+        { id: "router", kind: "routeMethod", routes: { sceneChange: "arrival" }, otherwise: "other" },
+        { id: "arrival", kind: "landing", name: "arrival" },
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+        { id: "done", kind: "stop" },
+        { id: "other", kind: "landing", name: "other" },
+        { id: "fallback", kind: "chat", audience: "gm", content: "{{method}} ignored" },
+      ] };
+    expect(validateAutomation(definition).ok).toBe(true);
+    const message = (method: "sceneLoad") => {
+      const outcome = planAutomation(world, automation(definition), { scene, tile, method,
+        caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+      return outcome.ok && "plan" in outcome
+        ? outcome.plan.ops.find((op) => op.kind === "create" && op.coll === "messages") : undefined;
+    };
+    // A load is not an activation: the router falls through to the other branch.
+    expect(message("sceneLoad")).toMatchObject({ data: { content: "sceneLoad ignored" } });
+    expect(isHostDispatchedMethod("sceneLoad")).toBe(true);
+    expect(SIMULATABLE_METHODS).not.toContain("sceneLoad");
+  });
+
+  test("lighting and time changes are host-dispatched, routable methods with no manual simulation", () => {
+    const definition: AutomationDefinition = { ...base,
+      methods: ["lightingChange", "timeChange"], gates: {},
+      steps: [
+        { id: "router", kind: "routeMethod", routes: { timeChange: "arrival" }, otherwise: "other" },
+        { id: "arrival", kind: "landing", name: "arrival" },
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+        { id: "done", kind: "stop" },
+        { id: "other", kind: "landing", name: "other" },
+        { id: "fallback", kind: "chat", audience: "gm", content: "{{method}} ignored" },
+      ] };
+    expect(validateAutomation(definition).ok).toBe(true);
+    const unrelated = planAutomation(world, automation(definition), { scene, tile, method: "manual",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(unrelated).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+    const message = (method: "lightingChange" | "timeChange") => {
+      const outcome = planAutomation(world, automation(definition), { scene, tile, method,
+        caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+      return outcome.ok && "plan" in outcome
+        ? outcome.plan.ops.find((op) => op.kind === "create" && op.coll === "messages") : undefined;
+    };
+    expect(message("timeChange")).toMatchObject({ data: { content: "timeChange by p1" } });
+    expect(message("lightingChange")).toMatchObject({ data: { content: "lightingChange ignored" } });
+    for (const method of ["lightingChange", "timeChange"] as const) {
+      expect(isHostDispatchedMethod(method)).toBe(true);
+      expect(SIMULATABLE_METHODS).not.toContain(method);
+    }
+  });
+
+  test("the five combat kinds are host-dispatched methods, routable and never simulatable", () => {
+    const definition: AutomationDefinition = { ...base,
+      methods: ["combatStart", "combatRound", "combatTurnStart", "combatTurnEnd", "combatEnd"], gates: {},
+      steps: [
+        { id: "router", kind: "routeMethod", routes: { combatStart: "arrival" }, otherwise: "other" },
+        { id: "arrival", kind: "landing", name: "arrival" },
+        { id: "notice", kind: "chat", audience: "gm", content: "{{method}} by {{user}}" },
+        { id: "done", kind: "stop" },
+        { id: "other", kind: "landing", name: "other" },
+        { id: "fallback", kind: "chat", audience: "gm", content: "{{method}} ignored" },
+      ] };
+    expect(validateAutomation(definition).ok).toBe(true);
+    // An ordinary click is not one of the five events; the plan refuses the anchor.
+    const unrelated = planAutomation(world, automation(definition), { scene, tile, method: "click",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(unrelated).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+    const message = (method: "combatStart" | "combatRound" | "combatTurnStart" | "combatTurnEnd" | "combatEnd") => {
+      const outcome = planAutomation(world, automation(definition), { scene, tile, method,
+        caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+      return outcome.ok && "plan" in outcome
+        ? outcome.plan.ops.find((op) => op.kind === "create" && op.coll === "messages") : undefined;
+    };
+    expect(message("combatStart")).toMatchObject({ data: { content: "combatStart by p1" } });
+    expect(message("combatTurnEnd")).toMatchObject({ data: { content: "combatTurnEnd ignored" } });
+
+    for (const method of COMBAT_TRIGGER_METHODS) {
+      expect(isHostDispatchedMethod(method)).toBe(true);
+      expect(SIMULATABLE_METHODS).not.toContain(method);
+    }
   });
 
   test("Filter by Token Trigger Count uses each selected token's staged per-graph history, not a global count", () => {
@@ -2379,5 +2510,475 @@ describe("MATT Move / Rotation / Delete Entities / Roll Table actions", () => {
       { id: "roll", kind: "rollTable", tableId: "big", audience: "scene", variable: "loot" } ] }),
       { scene, tile, token: runner, method: "enter", caller: actor, at: 1000, rng: () => 0.5 }, "gm");
     expect(oversized).toMatchObject({ ok: false, error: expect.stringMatching(/256-character variable bound/) });
+  });
+});
+
+// ─── TR-12: redirects — a named graph, the real method, the origin ───────────────
+
+describe("TR-12 redirects", () => {
+  const childGraph = (id: string, over: Partial<AutomationDefinition> = {}): AutomationDocument => ({
+    _id: id, type: "automation", name: id, ownership: { default: 0 }, flags: {}, system: {},
+    definition: { version: 1, sceneId: "s1", tileId: "zone", methods: ["enter"], gates: {}, steps: [
+      { id: "tell", kind: "chat", audience: "gm",
+        content: "child {{method}} from {{originMethod}} at {{originTile}}/{{originSource}}" },
+      { id: "mark", kind: "tags", edit: "add", tags: ["redirected"] },
+    ], ...over },
+  });
+  /** The chat line a plan writes: op `data` is a generic document, so read it structurally. */
+  const contentOf = (op: { data: unknown }): string => (op.data as { content: string }).content;
+  const parentDef = (step: Extract<AutomationDefinition["steps"][number], { kind: "redirect" }>,
+    over: Partial<AutomationDefinition> = {}): AutomationDefinition => ({
+    version: 1, sceneId: "s1", tileId: "zone", methods: ["enter"], gates: {},
+    steps: [step], ...over });
+  // The graph under test must be registered for the redirect to find its target: the
+  // world is built from the caller's own definition plus the named child.
+  function worldOf(def: AutomationDefinition, extra: AutomationDocument[] = []): ReturnType<typeof emptyWorld> {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    w.automations.push(automation(def), ...extra);
+    return w;
+  }
+  const redirect = (to: string, over: Partial<Extract<AutomationDefinition["steps"][number], { kind: "redirect" }>> = {})
+    : Extract<AutomationDefinition["steps"][number], { kind: "redirect" }> =>
+    ({ id: "go", kind: "redirect", automationId: to, ...over });
+
+  test("the step validates strictly and refuses an unknown shape", () => {
+    expect(validateAutomation(parentDef(redirect("child-1"))).ok).toBe(true);
+    expect(validateAutomation(parentDef(redirect("child-1", { method: "manual", tokens: "inside",
+      landing: "start", propagateStop: true }))).ok).toBe(true);
+    const bad = [
+      redirect(""),
+      redirect("has space"),
+      redirect("x".repeat(129)),
+      redirect("child-1", { tokens: "trigger" as never }),
+      redirect("child-1", { landing: "9bad" as never }),
+      redirect("child-1", { propagateStop: "yes" as never }),
+      redirect("child-1", { method: "trigger" as never }),
+      { id: "go", kind: "redirect", automationId: "child-1", graphId: "x" } as never,
+      { id: "go", kind: "redirect" } as never,
+    ];
+    for (const step of bad) expect(validateAutomation(parentDef(step)).ok, JSON.stringify(step)).toBe(false);
+  });
+
+  test("a redirect runs the named graph with this trigger's own method and origin", () => {
+    const def = parentDef(redirect("child-1"));
+    const w = worldOf(def, [childGraph("child-1")]);
+    const planned = planAutomation(w, automation(def), { scene, tile, token: runner, method: "enter",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    if (!planned.ok || !("plan" in planned)) throw new Error("a valid redirect must plan");
+    const messages = planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>));
+    expect(messages).toEqual(["child enter from enter at zone/tile"]);
+    // The child's own history records the real method — not a synthetic one.
+    const childState = planned.plan.ops.flatMap((op) => op.kind === "update" && op.ref.coll === "automations" &&
+      op.ref.id === "child-1" ? [op.diff.state] : []).at(-1) as { count: number; recent?: Array<{ method: string }> };
+    expect(childState.recent?.at(-1)?.method).toBe("enter");
+    // Parent and child share one envelope: both graphs' writes are in the same op list.
+    expect(planned.plan.ops.some((op) => op.kind === "create" && op.coll === "automations")).toBe(false);
+    expect(planned.plan.ops.some((op) => op.kind === "update" && op.ref.id === "a1")).toBe(true);
+  });
+
+  test("the target must exist, validate and accept the invoked method", () => {
+    const def = parentDef(redirect("child-1"));
+    const missing = planAutomation(worldOf(def), automation(def), { scene, tile, token: runner,
+      method: "enter", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(missing).toMatchObject({ ok: false, error: expect.stringMatching(/not in this world/) });
+
+    const wrongMethod = planAutomation(worldOf(def, [childGraph("child-1", { methods: ["exit"] })]),
+      automation(def), { scene, tile, token: runner, method: "enter", caller: actor, at: 1000,
+        rng: () => 0.25 }, "gm");
+    expect(wrongMethod).toMatchObject({ ok: false, error: expect.stringMatching(/does not accept the enter method/) });
+
+    const otherScene = planAutomation(worldOf(def, [childGraph("child-1", { sceneId: "s2" })]),
+      automation(def), { scene, tile, token: runner, method: "enter", caller: actor, at: 1000,
+        rng: () => 0.25 }, "gm");
+    expect(otherScene).toMatchObject({ ok: false, error: expect.stringMatching(/in this scene only/) });
+
+    const malformed = planAutomation(worldOf(def, [{ ...childGraph("child-1"),
+      definition: { ...childGraph("child-1").definition, methods: ["nope"] } as never }]),
+      automation(def), { scene, tile, token: runner, method: "enter", caller: actor, at: 1000,
+        rng: () => 0.25 }, "gm");
+    expect(malformed).toMatchObject({ ok: false, error: expect.stringMatching(/redirect target child-1/) });
+  });
+
+  test("manual mode calls a manual graph and still reports where it came from", () => {
+    const step = redirect("child-1", { method: "manual" });
+    const def = parentDef(step);
+    const rejected = planAutomation(worldOf(def, [childGraph("child-1")]), automation(def),
+      { scene, tile, token: runner, method: "enter", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(rejected).toMatchObject({ ok: false, error: expect.stringMatching(/does not accept the manual method/) });
+
+    const manualChild = childGraph("child-1", { methods: ["manual"] });
+    const planned = planAutomation(worldOf(def, [manualChild]), automation(def), { scene, tile,
+      token: runner, method: "enter", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    if (!planned.ok || !("plan" in planned)) throw new Error("a manual redirect must plan");
+    // `method` is what it was invoked as; `originMethod` and the source stay the truth.
+    const message = planned.plan.ops.find((op) => op.kind === "create" && op.coll === "messages");
+    expect(message ? contentOf(message as Extract<typeof planned.plan.ops[number], { kind: "create" }>) : null)
+      .toBe("child manual from enter at zone/tile");
+  });
+
+  test("a redirect chain is bounded, and a landing must exist in the target", () => {
+    // A -> B -> A: the recursion guard, not the depth cap, names the cycle.
+    const a: AutomationDefinition = parentDef(redirect("child-1"));
+    const b = childGraph("child-1", { steps: [redirect("a1")] });
+    const looped = planAutomation(worldOf(a, [b]), automation(a), { scene, tile, token: runner,
+      method: "enter", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(looped).toMatchObject({ ok: false, error: expect.stringMatching(/recursion/) });
+
+    const badLanding = planAutomation(worldOf(parentDef(redirect("child-1", { landing: "nowhere" })),
+      [childGraph("child-1")]), automation(parentDef(redirect("child-1", { landing: "nowhere" }))),
+      { scene, tile, token: runner, method: "enter", caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    expect(badLanding).toMatchObject({ ok: false, error: expect.stringMatching(/landing nowhere not found/) });
+  });
+
+  test("the target's own anchor decides `inside` tokens, never the caller's position", () => {
+    // The parent fires at `zone`, where the triggering runner stands; the child is anchored
+    // far away on `far`, which holds a different token. `inside` must read the target.
+    const far: TileDocument = { ...tile, _id: "far", x: 400, y: 300 };
+    const stale: TokenDocument = token("by-the-far-tile", 500, 400);
+    const staged: SceneDocument = { ...scene, tiles: [...scene.tiles, far], tokens: [...scene.tokens, stale] };
+    const def = parentDef(redirect("child-1", { tokens: "inside" }));
+    const w = emptyWorld();
+    w.scenes.push(staged);
+    w.automations.push(automation(def), childGraph("child-1", { tileId: "far" }));
+    const planned = planAutomation(w, automation(def), { scene: staged, tile, token: runner, method: "enter",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+    if (!planned.ok || !("plan" in planned)) throw new Error(`an inside redirect must plan: ${JSON.stringify(planned)}`);
+    const childState = planned.plan.ops.flatMap((op) => op.kind === "update" && op.ref.coll === "automations" &&
+      op.ref.id === "child-1" ? [op.diff.state] : []).at(-1) as { byToken: Record<string, { count: number }> };
+    expect(Object.keys(childState.byToken)).toEqual(["by-the-far-tile"]);
+  });
+});
+
+describe("TR-12 journal invocation", () => {
+  /** A graph with two landings: a plain start and a `vault` entry point. */
+  const vaultGraph = (): AutomationDocument => ({
+    _id: "vault-graph", type: "automation", name: "Vault", ownership: { default: 0 },
+    flags: {}, system: {}, definition: { version: 1, sceneId: "s1", tileId: "zone",
+      methods: ["manual"], gates: {}, steps: [
+        { id: "start", kind: "chat", audience: "gm", content: "front door" },
+        { id: "stop", kind: "landing", name: "vault" },
+        { id: "after", kind: "chat", audience: "gm", content: "vault {{method}}/{{originSource}}" },
+      ] },
+  });
+  const contentOf = (op: { data: unknown }): string => (op.data as { content: string }).content;
+
+  test("a root invocation can start at a named landing and keeps the journal origin", () => {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    const doc = vaultGraph();
+    w.automations.push(doc);
+    const planned = planAutomation(w, doc, { scene, tile, token: runner, method: "manual",
+      caller: actor, originSource: "journal", at: 1000, rng: () => 0.25 }, "gm", undefined, "vault");
+    if (!planned.ok || !("plan" in planned)) throw new Error(`a landed invocation must plan: ${JSON.stringify(planned)}`);
+    const lines = planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>));
+    // The steps before the landing did not run; the ones after it did, with the real origin.
+    expect(lines).toEqual(["vault manual/journal"]);
+  });
+
+  test("an unknown root landing fails the plan without touching the world", () => {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    const doc = vaultGraph();
+    w.automations.push(doc);
+    const planned = planAutomation(w, doc, { scene, tile, token: runner, method: "manual",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm", undefined, "nowhere");
+    expect(planned).toMatchObject({ ok: false, error: expect.stringMatching(/landing nowhere not found/) });
+    expect(w.scenes[0]?.tiles).toHaveLength(scene.tiles.length);
+  });
+
+  test("a landing cannot be combined with a continuation", () => {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    const doc = vaultGraph();
+    w.automations.push(doc);
+    const planned = planAutomation(w, doc, { scene, tile, token: runner, method: "manual",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm",
+      { graphId: doc._id, captureStepId: "s", stepIndex: 0, current: [], values: {}, scriptResults: {},
+        budgets: { steps: 1, invocations: 1, attributeReads: 0, actorFilterReads: 0, tileVariableReads: 0,
+          imageSelectionRolls: 0, healthRolls: 0, rotationRolls: 0, moveRolls: 0, gameTimeRolls: 0,
+          tableRolls: 0 }, postActionCount: 1, graphSteps: 1, tableResult: { present: false } }, "vault");
+    expect(planned).toMatchObject({ ok: false, error: "a landing cannot resume a continuation" });
+  });
+});
+
+// ─── MC-02 (D-389): a graph returns a typed value to its invoker ────────────────────
+
+describe("graph return values (MC-02)", () => {
+  const withSteps = (steps: AutomationDefinition["steps"]): AutomationDefinition =>
+    ({ ...base, gates: {}, steps });
+
+  test("a Return Value action is authored with a bounded scalar and an audience", () => {
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: "{{count}}", audience: "caller" }])).ok).toBe(true);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: 7, audience: "gm" }])).ok).toBe(true);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: false, audience: "caller" }])).ok).toBe(true);
+    // A loose field, an unknown audience and an unbounded value are refused at authoring.
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: 1, audience: "caller", extra: 1 } as never])).ok).toBe(false);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: 1, audience: "scene" } as never])).ok).toBe(false);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: "x".repeat(257), audience: "caller" }])).ok).toBe(false);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: Number.POSITIVE_INFINITY, audience: "caller" }])).ok).toBe(false);
+    expect(validateAutomation(withSteps([{ id: "r", kind: "result", value: "line\nbreak", audience: "caller" }])).ok).toBe(false);
+  });
+
+  test("the plan returns the value, interpolated, with the authored audience", () => {
+    const planned = plan(withSteps([
+      { id: "edit", kind: "tags", edit: "add", tags: ["opened"] },
+      { id: "r", kind: "result", value: "moved {{count}}", audience: "caller" },
+    ]));
+    expect(planned.ok).toBe(true);
+    if (!planned.ok || !("plan" in planned)) throw new Error("expected a plan");
+    expect(planned.plan.result).toEqual({ value: "moved 1", audience: "caller" });
+    // A typed literal stays typed.
+    const numeric = plan(withSteps([{ id: "r", kind: "result", value: 42, audience: "gm" }]));
+    if (!numeric.ok || !("plan" in numeric)) throw new Error("expected a plan");
+    expect(numeric.plan.result).toEqual({ value: 42, audience: "gm" });
+  });
+
+  test("no Return Value action means no result, and a skipped graph has none either", () => {
+    const none = plan(withSteps([{ id: "edit", kind: "tags", edit: "add", tags: ["opened"] }]));
+    if (!none.ok || !("plan" in none)) throw new Error("expected a plan");
+    expect(none.plan.result).toBeUndefined();
+    const skipped = plan({ ...base, methods: ["click"], steps: [{ id: "r", kind: "result", value: 1, audience: "caller" }] });
+    expect(skipped).toMatchObject({ ok: true, skipped: "method/anchor mismatch" });
+    expect((skipped as { plan?: unknown }).plan).toBeUndefined();
+  });
+
+  test("the last Return Value action the graph executes wins, on the executed path", () => {
+    // The jump skips the second action; the landing's own action is what the caller receives.
+    const planned = plan(withSteps([
+      { id: "r1", kind: "result", value: "first", audience: "caller" },
+      { id: "jump", kind: "jump", to: "hop" },
+      { id: "skipped", kind: "result", value: "never", audience: "caller" },
+      { id: "hop", kind: "landing", name: "hop" },
+      { id: "second", kind: "result", value: "last", audience: "gm" },
+    ]));
+    if (!planned.ok || !("plan" in planned)) throw new Error("expected a plan");
+    expect(planned.plan.result).toEqual({ value: "last", audience: "gm" });
+    expect(planned.plan.trace).toContain("result caller: first");
+    expect(planned.plan.trace).not.toContain("result caller: never");
+  });
+
+  test("a value that outgrows 256 characters after interpolation rejects the graph", () => {
+    const templated = plan(withSteps([{ id: "r", kind: "result", value: "{{count}}{{count}}{{count}}", audience: "caller" }]));
+    if (!templated.ok || !("plan" in templated)) throw new Error("expected a plan");
+    expect(templated.plan.result).toEqual({ value: "111", audience: "caller" });
+    // Two 200-character variables interpolate past the bound: refused, never truncated.
+    const refused = plan(withSteps([
+      { id: "v", kind: "set", name: "wide", value: "x".repeat(200) },
+      { id: "r", kind: "result", value: "{{wide}}{{wide}}", audience: "caller" },
+    ]));
+    expect(refused).toMatchObject({ ok: false, error: expect.stringMatching(/exceeded its bound/) });
+  });
+});
+
+// ─── MC-02 (D-390): a graph calls another saved macro, with typed args and a result ──
+
+describe("MC-02 Call Macro", () => {
+  const contentOf = (op: { data: unknown }): string => (op.data as { content: string }).content;
+  type CallStep = Extract<AutomationDefinition["steps"][number], { kind: "callMacro" }>;
+  const call = (macroId: string, over: Partial<CallStep> = {}): CallStep =>
+    ({ id: "call", kind: "callMacro", macroId, ...over });
+  const parentDef = (steps: AutomationDefinition["steps"]): AutomationDefinition =>
+    ({ version: 1, sceneId: "s1", tileId: "zone", methods: ["manual"], gates: {}, steps });
+  /** The child macro: a saved automation macro over `zone`, publishing a graph. */
+  const childMacro = (id: string, graphId: string, inputs?: unknown): MacroDocument => ({
+    _id: id, type: "macro", name: id, ownership: { default: 1 }, flags: {}, system: {},
+    kind: "automation", command: "", automation: { graphId, ...(inputs ? { inputs } : {}) },
+  } as unknown as MacroDocument);
+  const childGraph = (id: string, over: Partial<AutomationDefinition> = {}): AutomationDocument => ({
+    _id: id, type: "automation", name: id, ownership: { default: 0 }, flags: {}, system: {},
+    definition: { version: 1, sceneId: "s1", tileId: "zone", methods: ["manual"], gates: {},
+      steps: [{ id: "tell", kind: "chat", audience: "gm", content: "child {{method}}/{{arg.rounds}}/{{arg.label}}" }],
+      ...over },
+  });
+  function worldOf(def: AutomationDefinition, macros: MacroDocument[], graphs: AutomationDocument[]): ReturnType<typeof emptyWorld> {
+    const w = emptyWorld();
+    w.scenes.push(scene);
+    w.automations.push(automation(def), ...graphs);
+    w.macros.push(...macros);
+    return w;
+  }
+  const run = (w: ReturnType<typeof emptyWorld>, def: AutomationDefinition) =>
+    planAutomation(w, automation(def), { scene, tile, token: runner, method: "manual",
+      caller: actor, at: 1000, rng: () => 0.25 }, "gm");
+
+  test("the step validates its id, its bounded arguments, its variable and its error policy", () => {
+    expect(validateAutomation(parentDef([call("m-1")])).ok).toBe(true);
+    expect(validateAutomation(parentDef([call("m-1", { args: { rounds: 2, label: "{{count}}" }, capture: "child", onError: "continue" })])).ok).toBe(true);
+    expect(validateAutomation(parentDef([call("", {})])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { args: { "1bad": 1 } })])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { args: { rounds: "x".repeat(257) } })])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { args: Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`a${i}`, 1])) })])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { capture: "user" })])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { onError: "ignore" } as never)])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { propagateStop: true })])).ok).toBe(true);
+    expect(validateAutomation(parentDef([call("m-1", { propagateStop: "yes" } as never)])).ok).toBe(false);
+    expect(validateAutomation(parentDef([call("m-1", { extra: 1 } as never)])).ok).toBe(false);
+  });
+
+  test("a Stop inside the called graph ends that graph only, unless the caller opts in", () => {
+    const childWithStop = childGraph("child-graph", { steps: [
+      { id: "tell", kind: "chat", audience: "gm", content: "child spoke" },
+      { id: "halt", kind: "stop" },
+      { id: "never", kind: "chat", audience: "gm", content: "child after stop" },
+    ] } as Partial<AutomationDefinition>);
+    const def = parentDef([call("caller-macro"),
+      { id: "after", kind: "chat", audience: "gm", content: "parent done" }]);
+    const w = worldOf(def, [childMacro("caller-macro", "child-graph")], [childWithStop]);
+    const planned = run(w, def);
+    if (!planned.ok || !("plan" in planned)) throw new Error(`a stopped child must not stop the plan: ${JSON.stringify(planned)}`);
+    // Subroutine semantics: the child's Stop truncates the child, the caller carries on.
+    expect(planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>))).toEqual(["child spoke", "parent done"]);
+    // The opt-in `redirect`/`triggerTile` already offer does propagate it.
+    const asking = parentDef([call("caller-macro", { propagateStop: true }),
+      { id: "after", kind: "chat", audience: "gm", content: "parent done" }]);
+    const prop = run(worldOf(asking, [childMacro("caller-macro", "child-graph")], [childGraph("child-graph", { steps: [
+      { id: "tell", kind: "chat", audience: "gm", content: "child spoke" },
+      { id: "halt", kind: "stop" },
+    ] } as Partial<AutomationDefinition>)]), asking);
+    if (!prop.ok || !("plan" in prop)) throw new Error(`a propagating call must still plan: ${JSON.stringify(prop)}`);
+    expect(prop.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof prop.plan.ops[number], { kind: "create" }>))).toEqual(["child spoke"]);
+  });
+
+  test("the called graph runs inside the same plan, as manual, with its declared arguments", () => {
+    const def = parentDef([call("caller-macro", { args: { rounds: "{{count}}", label: "vault" } }),
+      { id: "after", kind: "chat", audience: "gm", content: "parent done" }]);
+    const w = worldOf(def, [childMacro("caller-macro", "child-graph",
+      [{ name: "rounds", type: "number", required: true }, { name: "label", type: "string" }])],
+      [childGraph("child-graph")]);
+    const planned = run(w, def);
+    if (!planned.ok || !("plan" in planned)) throw new Error(`a nested call must plan: ${JSON.stringify(planned)}`);
+    const lines = planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>));
+    // The child ran first (its own interpolation included the typed argument), then the parent.
+    expect(lines).toEqual(["child manual/1/vault", "parent done"]);
+    // One plan, one envelope: the child's tags are inside the parent's ops, not a second commit.
+    expect(planned.plan.trace.some((line) => line.includes("call caller-macro -> graph child-graph: 2 argument(s)"))).toBe(true);
+  });
+
+  test("item arguments forwarded to a child retain their exact parent and the actual caller's visibility", () => {
+    const def = parentDef([call("item-macro", { args: { tool: "{{arg.tool}}" } })]);
+    const w = worldOf(def, [childMacro("item-macro", "item-child", [{ name: "tool", type: "item", required: true }])],
+      [childGraph("item-child", { steps: [{ id: "tell", kind: "chat", audience: "gm", content: "item={{arg.tool}}" }] })]);
+    const makeItem = (): ItemDocument => ({ _id: "same", type: "item", name: "Item", ownership: { default: 3 },
+      flags: {}, system: {}, effects: [] });
+    w.actors.push({ _id: "public", type: "actor", name: "Public", ownership: { default: 1 },
+      flags: {}, system: {}, effects: [], items: [makeItem()] },
+      { _id: "private", type: "actor", name: "Private", ownership: { default: 0 },
+        flags: {}, system: {}, effects: [], items: [makeItem()] });
+    const event = { scene, tile, token: runner, method: "manual" as const,
+      caller: { id: "p", role: "PLAYER" as const }, at: 1000, rng: () => 0.25 };
+    const good = planAutomation(w, automation(def), { ...event, args: { tool: "public/same" } }, "gm");
+    if (!good.ok || !("plan" in good)) throw new Error(`a readable item must plan: ${JSON.stringify(good)}`);
+    expect(good.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof good.plan.ops[number], { kind: "create" }>))).toEqual(["item=public/same"]);
+    const denied = planAutomation(w, automation(def), { ...event, args: { tool: "private/same" } }, "gm");
+    expect(denied).toMatchObject({ ok: false, error: expect.stringContaining("call item-macro: invalid or invisible tool") });
+    expect(planAutomation(w, automation(def), { ...event, args: { tool: "same" } }, "gm"))
+      .toMatchObject({ ok: false }); // bare id cannot search actor inventories
+  });
+
+  test("a maximal qualified item ref forwards through a template without widening ordinary scalar/literal bounds", () => {
+    const actorId = "a".repeat(128), itemId = "i".repeat(128), reference = `${actorId}/${itemId}`;
+    const def = parentDef([call("item-macro", { args: { tool: "{{arg.tool}}" } })]);
+    const w = worldOf(def, [childMacro("item-macro", "item-child", [{ name: "tool", type: "item", required: true }])],
+      [childGraph("item-child", { steps: [{ id: "tell", kind: "chat", audience: "gm", content: "{{arg.tool}}" }] })]);
+    w.actors.push({ _id: actorId, type: "actor", name: "Actor", ownership: { default: 1 }, flags: {}, system: {}, effects: [],
+      items: [{ _id: itemId, type: "item", name: "Item", ownership: { default: 0 }, flags: {}, system: {}, effects: [] }] });
+    const good = planAutomation(w, automation(def), { scene, tile, method: "manual", caller: { id: "p", role: "PLAYER" },
+      args: { tool: reference }, at: 1000, rng: () => 0.25 }, "gm");
+    if (!good.ok || !("plan" in good)) throw new Error(`257-character typed ref must forward: ${JSON.stringify(good)}`);
+    expect(good.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof good.plan.ops[number], { kind: "create" }>))).toEqual([reference]);
+    // Saved Call Macro literals and returned scalar values keep their pre-existing 256 bound.
+    expect(validateAutomation(parentDef([call("item-macro", { args: { tool: reference } })])).ok).toBe(false);
+    expect(validateAutomation(parentDef([{ id: "return", kind: "result", value: reference, audience: "caller" }])).ok).toBe(false);
+  });
+
+  test("a refused argument, a missing target and a bad graph each fail with the call named", () => {
+    const args = { rounds: "abc" };
+    const typed = parentDef([call("caller-macro", { args })]);
+    const w = worldOf(typed, [childMacro("caller-macro", "child-graph", [{ name: "rounds", type: "number" }])],
+      [childGraph("child-graph")]);
+    expect(run(w, typed)).toMatchObject({ ok: false,
+      error: expect.stringMatching(/call caller-macro: invalid rounds/) });
+    // Undeclared name, missing required input and an unreadable token are the macro-invoke rules.
+    const stray = parentDef([call("caller-macro", { args: { nope: "1" } })]);
+    const w2 = worldOf(stray, [childMacro("caller-macro", "child-graph", [{ name: "rounds", type: "number" }])],
+      [childGraph("child-graph")]);
+    expect(run(w2, stray)).toMatchObject({ ok: false, error: expect.stringMatching(/unknown macro argument/) });
+    const missing = parentDef([call("caller-macro")]);
+    const w3 = worldOf(missing, [childMacro("caller-macro", "child-graph", [{ name: "rounds", type: "number", required: true }])],
+      [childGraph("child-graph")]);
+    expect(run(w3, missing)).toMatchObject({ ok: false, error: expect.stringMatching(/missing rounds/) });
+    // A macro that is not an automation macro, and a graph the macro does not have.
+    const chatMacro = { ...childMacro("chat-macro", "nope"), kind: "chat" } as MacroDocument;
+    const w4 = worldOf(parentDef([call("chat-macro")]), [chatMacro], [childGraph("child-graph")]);
+    expect(run(w4, parentDef([call("chat-macro")]))).toMatchObject({ ok: false,
+      error: expect.stringMatching(/is not a saved automation macro/) });
+    const w5 = worldOf(parentDef([call("caller-macro")]), [childMacro("caller-macro", "gone")], []);
+    expect(run(w5, parentDef([call("caller-macro")]))).toMatchObject({ ok: false,
+      error: expect.stringMatching(/its graph is unavailable/) });
+    // A graph that does not accept `manual`, and one whose anchor is not in this scene.
+    const w6 = worldOf(parentDef([call("caller-macro")]), [childMacro("caller-macro", "child-graph")],
+      [childGraph("child-graph", { methods: ["enter"] })]);
+    expect(run(w6, parentDef([call("caller-macro")]))).toMatchObject({ ok: false,
+      error: expect.stringMatching(/does not accept the manual method/) });
+    const w7 = worldOf(parentDef([call("caller-macro")]), [childMacro("caller-macro", "child-graph")],
+      [childGraph("child-graph", { tileId: "nowhere" })]);
+    expect(run(w7, parentDef([call("caller-macro")]))).toMatchObject({ ok: false,
+      error: expect.stringMatching(/its anchor is missing/) });
+  });
+
+  test("a child's error is reported with the call chain, and `continue` keeps the parent going", () => {
+    const failing = childGraph("child-graph", { steps: [{ id: "bad", kind: "door", mode: "open" }] });
+    const w = worldOf(parentDef([call("caller-macro")]), [childMacro("caller-macro", "child-graph")], [failing]);
+    const stacked = run(w, parentDef([call("caller-macro")]));
+    expect(stacked).toMatchObject({ ok: false,
+      error: expect.stringMatching(/call caller-macro \(graph child-graph\): door/) });
+    const soft = parentDef([call("caller-macro", { onError: "continue" }),
+      { id: "after", kind: "chat", audience: "gm", content: "kept going" }]);
+    const w2 = worldOf(soft, [childMacro("caller-macro", "child-graph")], [failing]);
+    const planned = run(w2, soft);
+    if (!planned.ok || !("plan" in planned)) throw new Error("a continued failure must still plan");
+    expect(planned.plan.trace.some((line) => line.includes("— continued"))).toBe(true);
+    expect(planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>))).toEqual(["kept going"]);
+  });
+
+  test("the called graph's return value can be captured into a variable the parent then uses", () => {
+    const returning = childGraph("child-graph",
+      { steps: [{ id: "r", kind: "result", value: "child said {{count}}", audience: "caller" }] });
+    const def = parentDef([call("caller-macro", { capture: "child" }),
+      { id: "after", kind: "chat", audience: "gm", content: "parent heard: {{child}}" }]);
+    const w = worldOf(def, [childMacro("caller-macro", "child-graph")], [returning]);
+    const planned = run(w, def);
+    if (!planned.ok || !("plan" in planned)) throw new Error("a capture must plan");
+    expect(planned.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof planned.plan.ops[number], { kind: "create" }>))).toEqual(["parent heard: child said 1"]);
+    // Only the ROOT graph's value is the invocation's result, so the child's value is not one.
+    expect(planned.plan.result).toBeUndefined();
+    // Without a Return Value action the captured variable is the empty string (never a leak).
+    const silentDef = parentDef([call("caller-macro", { capture: "child" }),
+      { id: "after", kind: "chat", audience: "gm", content: "heard [{{child}}]" }]);
+    const w2 = worldOf(silentDef, [childMacro("caller-macro", "child-graph")], [childGraph("child-graph")]);
+    const silent = run(w2, silentDef);
+    if (!silent.ok || !("plan" in silent)) throw new Error("a silent capture must plan");
+    // The child's own chat line is there; only its (absent) return value is not.
+    expect(silent.plan.ops.filter((op) => op.kind === "create" && op.coll === "messages")
+      .map((op) => contentOf(op as Extract<typeof silent.plan.ops[number], { kind: "create" }>)))
+      .toEqual(["child manual//", "heard []"]);
+  });
+
+  test("recursion is refused with the whole chain, inside the shared depth budget", () => {
+    // A macro whose graph is the graph containing the call: the stack check names both hops.
+    const def = parentDef([call("self-macro")]);
+    const w = worldOf(def, [childMacro("self-macro", "a1")], []);
+    expect(run(w, def)).toMatchObject({ ok: false,
+      error: expect.stringMatching(/call self-macro \(graph a1\): trigger tile recursion: a1 -> a1/) });
   });
 });

@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover and D-376 scene-change follow-ups appended below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-394, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -37,6 +37,24 @@ Consolidated historical archive through D-372, with the D-374 double-click, D-37
 - [D-374 archived verification report](#report-d374)
 - [D-375 archived verification report](#report-d375)
 - [D-376 archived verification report](#report-d376)
+- [D-377 archived verification report](#report-d377)
+- [D-378 archived verification report](#report-d378)
+- [D-379 archived verification report](#report-d379)
+- [D-380 archived verification report](#report-d380)
+- [D-381 archived verification report](#report-d381)
+- [D-382 archived verification report](#report-d382)
+- [D-383 archived verification report](#report-d383)
+- [D-384 archived verification report](#report-d384)
+- [D-385 archived verification report](#report-d385)
+- [D-386 archived verification report](#report-d386)
+- [D-387 archived verification report](#report-d387)
+- [D-388 archived verification report](#report-d388)
+- [D-389 archived verification report](#report-d389)
+- [D-390 archived verification report](#report-d390)
+- [D-391 archived verification report](#report-d391)
+- [D-392 archived verification report](#report-d392)
+- [D-393 archived verification report](#report-d393)
+- [D-394 archived verification report](#report-d394)
 
 <a id="report-d293-d319"></a>
 
@@ -4165,3 +4183,462 @@ The browser cases used npm-provisioned Chromium 153 for functional input coverag
 
 - This closes only the host-observed active-scene-transition slice. `sceneLoad`, combat/time/document, door/journal/macro, lighting/game-time, additional region triggers, complete MATT overlap/priority/guard behavior and cross-browser coverage remain incomplete.
 - A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d377"></a>
+
+## D377 — Host-dispatched door triggers (2026-10-02)
+
+**Scope:** Add the four door changes as host-dispatched active-zone methods. This covers only that event family; the rest of TR-01/A19 and A01–A41 remain open.
+
+### Implemented
+
+- `doorOpen`, `doorClose`, `doorLock` and `doorUnlock` are validated automation methods, following MATT's separate door-trigger kinds rather than one method plus a payload. The wizard labels each, method filters/`routeMethod`/`{{method}}` cover them, and `HOST_DISPATCHED_METHODS`/`SIMULATABLE_METHODS` now split host-observed events from caller-simulated ones; `automation.request` and the module `automation.fire` path accept only the simulatable set, so neither a GM nor a player can manufacture a door event.
+- A shared classifier owns the transition rule: state `0` closed, `1` open, `2` locked; into `2` = lock, out of `2` = unlock, `0↔1` = open/close, and same-value, malformed or any other pair yields null.
+- HostSync captures a wall's `door` pre-image for update ops before applying the envelope, compares it with the live document after apply and dispatches only on a real change. Anchors are the tiles/regions that contain the door's **midpoint** (MATT's "Tiles Under Door" equivalents), ordered by descending Sort then stable IDs, with scene/anchor visibility and the graph's `playerRunnable` gate re-checked immediately before each fire in the same live-document pattern as `sceneChange`. Restores (Undo/Redo/Revert) never replay. A graph's own `door` action commits under the host's own system identity, so that identity is synthesized as the caller (as the movement path does) and door→door chains share the movement dispatch's depth-8 host reentry cap.
+
+### Verification
+
+- Focused HostSync integration test — **1/1 passed**. All four transitions fire with exact `{{method}} by {{user}}` messages and history entries; a same-value update and a non-door wall edit fire nothing; a direct `doorOpen` request is rejected `invalid_schema` without a sequence change; two graphs anchored on the same door each fire once in deterministic document order; Undo of the change and of its fires reopens the door without replaying `doorOpen` (their counts shrink with the restored history); a published player plate toggles the door with a real `requestAutomationClick`, the GM-authored rule fires for the authoritative host commit while the player's replica receives neither graph nor GM-only message.
+- Core tests include the classifier's full truth table, the four methods' validation/routing (`doorOpen` routes to its landing while `doorLock` falls through), a `click` simulation being skipped as a method/anchor mismatch, and the host-dispatched/simulatable partition invariants.
+- Production `file://` Chromium 153 `e2e/active_zones.spec.ts` — **21/21 passed in 4.5 min** (one worker, zero retries). The new case probes the starter map for a clear sight lane, places a real door (closed) through the rail, authors a door-only graph on a wizard tile covering the door's midpoint, verifies the host-only graph shows no Simulate control and explains itself, then opens and closes the door with the canvas wall tool and reads one `doorOpen` and one `doorClose` message and history entry. This is functional browser evidence, not cross-browser or A41 performance evidence.
+- Full `corepack pnpm test` — **4,662 passed / 12 skipped**; 325 files passed / 2 skipped; 113.11 s. `corepack pnpm typecheck` — pass (64 Svelte components, zero blocking, one existing advisory at `src/ui/sim/ReplayPanel.svelte:29`); `corepack pnpm lint` — pass. Production app/system/available-starter builds pass; `pnpm size` — **3.857 MB raw / 1.104 MB gzip** (4,044,225 / 1,157,257 bytes), within the 6 MB budget; `git diff --check` — pass.
+- Regression batch of the final artifact — `e2e/automation_appearance.spec.ts` + `e2e/movement_actions.spec.ts` + `e2e/action_revert.spec.ts` — **36/36 passed in 11.9 min** (one worker, zero retries), and `e2e/active_zones.spec.ts` re-run on the same final artifact — **21/21 passed in 4.5 min**, including the door case at line 1048.
+
+### Remaining acceptance work
+
+- This closes only the four committed door-change slices. Door *interaction attempts* (MATT's "On Check Lock"), secret-door transitions and door-specific context fields in graph templates are not modelled. `sceneLoad`, combat/time/document/journal/macro triggers, lighting/game-time changes, region initiation/hover, the complete MATT overlap/priority/guard matrix and cross-browser coverage remain incomplete.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d378"></a>
+
+## D378 — Host-dispatched combat triggers (2026-10-02)
+
+**Scope:** Add MATT's five combat trigger kinds as host-dispatched active-zone methods. This covers only that event family; the rest of TR-01/A19 and A01–A41 remain open.
+
+### Implemented
+
+- `COMBAT_TRIGGER_METHODS` in `src/core/combat.ts` is the single name contract — `combatStart`, `combatRound`, `combatTurnStart`, `combatTurnEnd`, `combatEnd` — consumed by the automation union, the `METHODS`/`HOST_DISPATCHED_METHODS`/`SIMULATABLE_METHODS` split, the host's method-order map and the wizard, so no list can drift.
+- `combatTriggerEvents(before, after)` classifies a committed round/turn change host-side: a started encounter appearing (created at round ≥ 1) fires start → round → turn start; round 0 → ≥ 1 fires the same; a round advance fires turn end → round → turn start; a turn advance fires turn end → turn start; `previousTurn` back-steps fire a turn start only; a running encounter reset to round 0 or deleted fires `combatEnd`; combatant-only edits, same-value updates and unstarted (round 0) edits are not events. The event carries the current combatant as a single triggering token (`combatTurnEnd`/`combatEnd` report the combatant being left), documented as this engine's deviation from MATT's combatant-list context for start/round/end.
+- HostSync captures a `combats` pre-image for round/turn/combatant updates, creates and deletes before applying the envelope — never from diff-key presence, because the tracker's `push()` sends `round` and `turn` together on every change — and dispatches after commit, skipping restores. The encounter's scene resolves from its own `flags.core.sceneId` binding or the scene whose active-encounter pointer names it. Every graph anchored in that scene whose method list contains the event hears it (MATT's scene-wide combat scope; no midpoint/anchor geometry test), re-validated live, ordered one authored change at a time and within a change by descending Sort then stable IDs, with a depth-8 reentry cap and the system-caller synthesis used by the movement and door paths. `automation.request`/`automation.fire` refuse all five kinds.
+
+### Verification
+
+- `tests/core/combat.test.ts` — **23 passed**, including a ten-case truth table for the classifier: started create and round-0 create, a round-0 create staying quiet, turn advance and its two token contexts, the round-wrap trio, step-back-only turn start, a round 3 → 1 restart, end/delete with the last current combatant, combatant-only and same-value silence, an empty roster, and the shared-name contract.
+- `tests/core/automation.test.ts` — **94 passed**: the five kinds validate as graph methods, route through `routeMethod` (with an unmatched `combatTurnEnd` falling through), refuse an ordinary click simulation as a method/anchor mismatch, and are all host-dispatched and absent from `SIMULATABLE_METHODS`.
+- `tests/host/sync.test.ts` — **200 passed**. The new case walks create(round 0) → start → turn advance → round wrap → roster-only edit → GM and player spoof refusals → delete → re-create → Undo, asserting the exact ordered chat rows (`combatStart`, `combatRound`, `combatTurnStart`, `combatTurnEnd`, …), the per-graph `state.recent` method sequence, the two combatants' `ended`/`started` tags proving turn-end/turn-start token context, silence for roster-only edits, `invalid_schema` with an unchanged host sequence for forged requests, and a restore that leaves the message log exactly at its pre-create snapshot.
+- Production `file://` Chromium 153: new case `e2e/active_zones.spec.ts:1141` authors a five-method graph in the wizard (tile anchor anywhere in the scene), checks the host-only hint and the absent Simulate control, starts the tracker encounter, advances one turn, walks to round 2 and ends the encounter — asserting one chat row per change, exact occurrence counts, the ordered start/round/turn/turn-end sequence and one history row per method. Combined `active_zones.spec.ts` (22 cases) + `combat.spec.ts` run: **25/25 passed in 3.5 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,674 passed / 12 skipped** across 325 passing / 2 skipped files (**105.33 s**). `pnpm typecheck` — 64 Svelte components, 0 blocking, 1 existing advisory at `src/ui/sim/ReplayPanel.svelte:29`; lint clean. `pnpm size` — **3.860 MB raw / 1.104 MB gzip** (4,047,837 / 1,158,077 bytes), within the 6 MB budget; `git diff --check` clean.
+
+### Remaining acceptance work
+
+- This closes only the five committed combat-change slices. MATT's combatant-list token context for start/round/end is narrowed to the single current combatant; PF1e adapters that drive encounter state through real rules, `sceneLoad`, time, journal/macro, lighting/game-time and region-initiated methods remain open, as do the full MATT overlap/guard matrix and cross-browser coverage.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d379"></a>
+
+## D379 — Host-dispatched lighting and time triggers (2026-10-02)
+
+**Scope:** Add MATT's two environment trigger kinds — On Lighting Change and On Time Change — as host-dispatched active-zone methods. This covers only that event family; the rest of TR-01/A19 and A01–A41 remain open.
+
+### Implemented
+
+- `lightingChange` fires on a committed change to a scene's ambient darkness (`SceneDocument.darkness`, written by Settings → Ambient darkness or a graph's own Scene Lighting action) and `timeChange` on a committed change to the replicated world clock (`settings.system.clockSeconds` via `worldSettingsOps`, so the creating envelope, updates, PF1e round wraps and graph Game Time steps all count). Both join `HOST_DISPATCHED_METHODS`/`METHODS` and stay out of `SIMULATABLE_METHODS`.
+- HostSync captures the pre-images before apply — a scene's `darkness` for scene updates; the merged `readWorldClock` value for any `settings` write, including creates and deletes that would revert the key — and compares after apply, so a real change is required and a same-value write is silent.
+- Dispatch follows MATT's scene-wide scope, generalised into one shared `fireSceneGraphs` loop now used by combat, lighting and time (and the door/scene-change paths keep their own geometry-based dispatchers): every graph anchored in the scene whose method list contains the event, ordered by descending Sort then stable IDs, with the live re-validation pattern used before every fire. A lighting change targets **the changed scene** (active or not, as MATT reads the changed scene's tiles); a clock change targets the **active scene** (MATT's time trigger watches the scene the table is looking at). Neither carries a triggering token — MATT passes controlled canvas tokens, a client-side selection with no host equivalent — and both share one depth-8 reentry budget because a graph's own environment action re-enters. Restores (Undo/Redo/Revert) never replay.
+- The refactor of the verified combat dispatch onto the shared loop was re-checked by the existing 201-test host suite and the browser combat case in the same run.
+
+### Verification
+
+- `tests/host/sync.test.ts` — **201 passed**. The new case: a committed darkness edit fires once with the method in the host history; a same-value write is silent; a `worldSettingsOps` clock write fires once (its document-creation path included); an unrelated settings edit fires nothing; GM and player `automation.request` spoofs of both methods are rejected `invalid_schema` with an unchanged host sequence; a player clock write is rejected `forbidden` with the clock unchanged; a graph's own Scene Lighting action fires the destination graph (`lightingChange by gm-key`) with no triggering token recorded; and an Undo restores the darkness and reverts the graph's own chat row without appending a new event.
+- `tests/core/automation.test.ts` — **95 passed**: both methods validate, route through `routeMethod` (with an unmatched `lightingChange` falling through), refuse an unrelated manual simulation as a method/anchor mismatch, and are host-dispatched and absent from `SIMULATABLE_METHODS`.
+- Production `file://` Chromium 153: the new `e2e/active_zones.spec.ts:1231` case authored a two-method graph, confirmed the host-only hint and absent Simulate control, changed **Settings → Ambient darkness** to 0.4, repeated the same value, then changed it to 0.6, and advanced the clock with the hour button — asserting one chat row per real change, silence for the repeat, one history row per change (`lightingChange · gm` twice, `timeChange · gm` once, no token field). `active_zones.spec.ts` (23 cases) + `settings.spec.ts`: **23/23 passed in 3.0 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,676 passed / 12 skipped** across 325 passing / 2 skipped files (**92.92 s**). `pnpm typecheck` — 64 Svelte components, 0 blocking, 1 existing advisory at `src/ui/sim/ReplayPanel.svelte:29`; lint clean. `pnpm size` — **3.862 MB raw / 1.105 MB gzip** (4,049,125 / 1,158,490 bytes), within the 6 MB budget; `git diff --check` clean.
+
+### Remaining acceptance work
+
+- This closes only the two committed environment-change slices. MATT's per-percent **Lighting Animation** (a local canvas animation tick, not a world-state change) and its controlled-token context for these triggers are not modelled. `sceneLoad`, journal/macro and region-initiated methods are still open, as are the full MATT overlap/guard matrix and cross-browser coverage.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d380"></a>
+
+## D380 — Host-dispatched per-viewer scene load (2026-10-02)
+
+**Scope:** Add the per-viewer half of MATT's scene trigger as a host-dispatched method, separated from the activation event this engine already ships. This covers only that slice; the rest of TR-01/A19 and A01–A41 remain open.
+
+### Implemented
+
+- MATT has one `canvasready` mode, labelled "Scene Change", which its wiki describes as running "when the scene is loaded by a player … for each player loading in". This engine keeps the two moments distinguishable: `sceneChange` remains the committed activation transition (D-376, once per commit) and the new `sceneLoad` is **a viewer loading the active scene it does not already hold**. They never coincide, so a graph may declare both without double-firing.
+- HostSync keeps `loadedSceneByUser`: a session completing its join (approved player, or a GM/assistant loopback session added with a user) fires `sceneLoad` for the active scene when it differs from the remembered one. A plain reconnect to the same scene is silent; a viewer away while the table moved fires on return; a viewer present through the activation has its record updated by that commit (they already follow the scene) and is silent; with no active scene nothing fires. The dispatch is the shared scene-wide ordered loop (descending Sort, stable IDs, live re-validation), carries no triggering token, runs under the loading viewer's identity, and requires the graph to be `playerRunnable` for a non-GM viewer. `automation.request`/`automation.fire` refuse the method.
+- The wizard labels it "scene load" and reports it in the host-event hint; a scene-load-only graph offers no Simulate control.
+
+### Verification
+
+- `tests/host/sync.test.ts` — **203 passed**. New cases: a published graph fires once for a joining player with that player as `{{user}}` and one `sceneLoad` history entry; an unpublished graph stays silent for players across every load; a second player loads under their own id; GM and player spoofed requests are `invalid_schema` with an unchanged host sequence; a same-scene reconnect is silent; a returning viewer fires the *new* scene's graph and not the old scene's; a viewer connected through the activation is silent on reconnect; a world with no active scene fires nothing; and a GM/assistant loopback session counts as a load.
+- `tests/core/automation.test.ts` — **96 passed**: the method validates, calls no extra fields, routes through `routeMethod` (a load is not an activation, so the `sceneChange` route falls through to the other branch) and is host-dispatched and absent from `SIMULATABLE_METHODS`.
+- Production `file://` Chromium 153: the new `e2e/active_zones.spec.ts:1301` case authored a published scene-load graph, joined a real second browser context as a player, read the joining player's own user id from the player surface, and asserted the GM chat names that id exactly once, the host history holds one `sceneLoad` row for it, the graph shows the host-event hint with no Simulate control, and the player's shell holds no such message. `active_zones.spec.ts` (24 cases) + `join.spec.ts`: **25/25 passed in 4.2 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,679 passed / 12 skipped** across 325 passing / 2 skipped files (**107.79 s**). `pnpm typecheck` — 64 Svelte components, 0 blocking, 1 existing advisory at `src/ui/sim/ReplayPanel.svelte:29`; lint clean. `pnpm size` — **3.862 MB raw / 1.105 MB gzip** (4,049,540 / 1,158,615 bytes), within the 6 MB budget; `git diff --check` clean.
+
+### Remaining acceptance work
+
+- This closes only the per-viewer load slice. MATT's `canvasready` also fires when a GM's own canvas is retargeted and its triggers carry `controlled: gm/player` restrictions; neither is modelled. MATT's per-percent Lighting Animation, journal/macro initiation, region-initiated methods, the full overlap/guard matrix and cross-browser coverage remain open.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d381"></a>
+
+## D381 — Automation macros: a saved graph, run by reference (2026-10-02)
+
+**Scope:** TR-12 ("door/journal/macro triggers can fire a named automation without recreating it") and MC-01's `automation` macro kind. This covers only macro initiation; journal initiation, region redirects, chat-command invocation and the rest of MC-01–MC-11 remain open.
+
+### Implemented
+
+- `MacroDocument.kind` gains `"automation"` with one private binding, `automation: { graphId }`. The document rule (`src/core/macroAutomation.ts`) requires a bounded graph id, a name and an empty command, and forbids a stray binding on any other kind (and any other payload on this one).
+- **Authoring** (host, create and update): GM/assistant only; the referenced graph must exist in this world, validate, have a real anchor tile/region, and subscribe to `manual`. Fail-fast, with the runtime re-checking all of it before every fire.
+- **Invocation:** `macros.invoke` (0x4f) carries a macro id only. The host re-validates the definition and the `manual` method, and for a player requires a tile anchor (not a region), the `playerRunnable` gate, `read` + visibility on the anchor, and the graph's scene to be the scene that player currently has loaded. The fire is a `manual` event under the invoker's identity, with no triggering token, inside the graph's ordinary atomic envelope/undo. One fire per `requestId`; `macro.result` answers failures, and a non-GM never receives the graph's name, id or refusal reason.
+- **Secrecy:** `projectMacro` strips the binding for every non-script kind, the op path replaces the whole macro shape on a rebind or kind transition, and `stripMacroBindingDiff` blanks the key even when a caller has no resolver — so no path, including envelope-only mode, can forward a graph id to a player.
+- **UI:** *Saved zones* gains **Publish macro** (create, or refresh the name of, the macro bound to that graph); the Macros window gains an **Automation macros** tab for both shells (name, hotbar slot and delete for a GM; Run for everyone); the GM hotbar dispatches the kind through the same helper as the directory.
+
+### Verification
+
+- `tests/core/macroAutomation.test.ts` — **5/5**: binding validation, the document and stray rules, the snapshot projection (player keeps name/kind/slot, loses the binding; the GM keeps it), and the per-op paths — create, rename, rebind and kind transition — including the resolver-less path that previously forwarded the raw diff.
+- `tests/host/sync.test.ts` — **206/206**. New: a published macro fires for a player as that player (one `manual` history entry, neutral `Automation fired` detail, no messages in the player replica, macro delivered without binding or automations collection) and for the GM (`Fired Courtyard alert`), with Undo reverting exactly the graph's own transaction; the refusal matrix (unpublished gate, region anchor, hidden macro, missing macro, a graph in a scene the player is not in, `manual` removed then restored); authoring refusals (player-authored, missing graph, click-only graph, binding on a chat macro, command on an automation macro); a forged extra `graphId` field (`invalid_schema`) and a replayed request id (one fire). Writing those cases also pinned a real ordering rule: a graph must be committed before a macro may reference it.
+- Production `file://` Chromium 153: `e2e/active_zones.spec.ts:1371` authors the graph, publishes the macro from the zone list, runs it from the directory as the GM, then joins a real second browser context, asserts the graph id appears nowhere in the player's shell, runs the macro there and checks the host chat and per-graph history name each invoker. `active_zones.spec.ts` (25 cases) + `join.spec.ts`: **26/26 in 4.2 min**.
+- Full `corepack pnpm test` — **4,687 passed / 12 skipped** across 326 passing / 2 skipped files (**101.53 s**). `pnpm typecheck` — 64 components, 0 blocking, 1 existing advisory; lint clean. `pnpm size` — **3.870 MB raw / 1.107 MB gzip** (4,057,625 / 1,160,426 bytes), within the 6 MB budget; `git diff --check` clean. `PROTOCOL.md` documents the new kind; the wire boundary tables (`contracts`, `frame`, `fixtures`) were updated with it.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d382"></a>
+
+## D382 — Redirects: a region or door fires a named graph (2026-10-03)
+
+**Scope:** the redirect half of TR-12 — "Scene regions can fire a tile graph; door/journal/macro triggers can fire a named automation without recreating it. Preserve source/method/context through redirects." Journal initiation, chat-command invocation, the player hotbar, composite macros and per-invocation inputs stay open.
+
+### Implemented
+
+- New core step `{ id, kind: "redirect", automationId, tokens?: "triggering" | "current" | "inside", landing?, propagateStop?, method?: "inherit" | "manual" }` (`src/core/automation.ts`). `method: "manual"` (the default) is MATT's synthetic Trigger Tile: the target must subscribe to `manual`. `method: "inherit"` hands the target the **real** method — MATT's region behavior, and the reason a region can fire an `enter`-subscribed tile graph. `originMethod`, `originTileId` and the new `originSource` (`tile`/`region`) ride along, and `{{originSource}}` is a reserved binding.
+- Validation in both places: the definition check requires a bounded id and the listed enums; the runtime re-resolves the target live and refuses a missing graph, an invalid target definition, a cross-scene target, a target with no anchor in the event's scene, a `manual` step over a graph without `manual`, and an `inherit` step over a graph that does not subscribe to the real method. Token fanout ≤32; recursion stays inside the existing depth-8 / invocation / step budgets; the child shares the parent's plan, envelope and undo step.
+- Host authoring gate (`automationDocumentError`): the target must already be committed, valid, same-scene, anchored and method-compatible; a self-redirect is refused. Because the gate reads the live store, a forward reference inside a single submit is refused (the target must be saved first).
+- UI: the graph editor gains a **Trigger Automation** row (`AutomationPanel.svelte`) with target select (only saved graphs of this scene, never the graph itself), method, token source, landing and propagate-stop controls, plus the explanatory note.
+
+### Verification
+
+- `tests/core/automation.test.ts` — **102/102**, new `TR-12 redirects` group: definition validation (bounded id, method/token enums), inherit vs manual invocation, the child's own history recording the real method, same-envelope op ordering, the run-time refusal matrix (missing / invalid / cross-scene / wrong-method / anchorless targets), recursion and missing-landing errors, and `inside` resolving against the target's own anchor.
+- `tests/host/sync.test.ts` — **209/209** (three new cases). (1) A committed region entry fires a region graph whose redirect reaches a tile graph the token never visits: the child's chat names the real method and `{{originSource}}` = `region`, its history records `enter`, and one Undo removes both graphs' state. (2) A door change fires a child that has no anchor over the door, once per committed change, with a repeat same-value write firing nothing. (3) The authoring/refusal case: four refused saves (missing target, self-target, cross-scene target, manual over a non-manual graph) leave the store untouched; then a player's click on the child's own plate fires nothing, while a click on the parent's plate reaches the unpublished child exactly once — with no message, no `automations` collection and no rejection in the player's replica.
+- Production `file://` Chromium 153: `e2e/active_zones.spec.ts:984` authors a tile-anchored child and a **region** graph with a Trigger Automation row, asserts the editor offers the saved child but not the graph itself, fires the region graph and checks both chat lines (`Parent enter`, `Child enter@region`), both graphs at `1 run(s)`, and a single `seq` step for the parent and child together. `active_zones.spec.ts` (26 cases) + `join.spec.ts`: **27/27 in 4.7 min**.
+- Full `corepack pnpm test` — **4,696 passed / 12 skipped** across 326 passing / 2 skipped files (**105.56 s**). `pnpm typecheck` — 64 components, 0 blocking, 1 existing advisory (`ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.875 MB raw / 1.108 MB gzip** (4,063,666 / 1,161,546 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d383"></a>
+
+## D383 — Journal links: a handout fires a named graph (2026-10-03)
+
+**Scope:** the journal half of TR-12 — "door/journal/macro triggers can fire a named automation without recreating it. Preserve source/method/context through redirects." Chat-command invocation, the player hotbar, composite macros and per-invocation inputs stay open.
+
+### Implemented
+
+- **Syntax (MATT parity).** `@Tile[Tile.<tileId>]{label}`, `@Tile[Scene.<sceneId>.Tile.<tileId>]{label}`, a `landing:<name>` option and `active:true` parse into an ordered link list (`src/core/journalLinks.ts`: `journalLinks`, `visibleJournalLinks`, `journalSegments`). `active:true` is parse-only and cannot widen the host's gate; `@Tile[…]` without a `{label}` is plain text and consumes no ordinal, so the ordinal a player sends always matches the one they saw.
+- **Wire:** `journal.trigger` (**0x50**, client → host, channel `ops`) carries `{requestId, journalId, pageId, index}` and nothing else — no tile id, no scene id, no graph id. The host re-reads the stored page and resolves the link itself.
+- **Host (`handleJournalTrigger`):** resolves the ordinal against the live page, fires every un-paused `manual` graph anchored on the resolved tile (or on the region that lives over it, via `automationSourceTile`) in `_id` order, as a `manual` event with `originSource: "journal"` and the link's `landing`. Player policy = the page is readable **and** the ordinal is inside `visibleJournalLinks` **and** the target scene is the scene that player has loaded; anchor visibility and `playerRunnable` are deliberately *not* required, because the journal is the author's route. Refusals: `forbidden` + detail `"journal link unavailable"` (unreadable/foreign journal, out-of-range index, nonexistent anchor, malformed payload), `invalid_schema` for a forged field, `rate_limited`; the dedupe key is `${caller.id}:${requestId}` (cap 256). A paused or missing target graph is a silent no-op. One invocation is one reversible envelope.
+- **Secrecy/projection:** `projectPageText(page)` = `maskJournalLinkTargets(stripSecretText(text))` — a delivered page carries `@Tile[masked]` at the same ordinal, so the player's button stays enabled while the anchor id never leaves the host; the earlier `stripSecretsFromDiff` path and the lower journals-only branch were deleted, and `projectJournalDiff` now projects a `text` leaf and a whole `pages` array *up front* in `projectEnvelope`, so the envelope-only path is masked too. `<secret>` blocks are still withheld from players (a link inside one is invisible and its index unreachable).
+- **UI:** `JournalPage.svelte` is now the single page renderer (shared by `JournalsPanel` and `JournalPopout`); links render as `[data-journal-tile-link={index}]` buttons, disabled on a parse error, and a player sees a locked placeholder where a secret block sits. The player shell gains a **Handouts** window (`data-player-handouts`, `[data-handout-journal]`, `[data-handout-page]`, `src/ui/journals/HandoutsPanel.svelte`, `WindowHost` kind `"journals"`) that refreshes on `snapshot` and `ops`; the GM popout reveals secrets from `client.user?.role`.
+
+### Verification
+
+- `tests/core/journalLinks.test.ts` — **9/9**: parsing (both tile forms, options, label requirement, ordinals across secret blocks), the visible/masked views, and each error string.
+- `tests/core/projection.test.ts` — **27/27** (2 new): a `text` leaf is masked and secret-stripped on the diff path, and a whole `pages` array save is projected page by page.
+- `tests/core/automation.test.ts` — **105/105** (new `TR-12 journal invocation`): a landed start carries its start values with `{{originSource}}` = `journal`, an unknown landing fails the plan without touching the world, and a landing may not resume a continuation.
+- `tests/host/sync.test.ts` — **212/212** (3 end-to-end cases): a GM's link fires the tile graph (`manual`/`journal` in chat, `state.recent` + `byToken` history, one Undo reverting exactly that fire); `landing:` skips the pre-landing step; a paused graph is silent while a missing anchor, an out-of-range index and a malformed payload are refused; a joined player fires from a **masked** page whose replica holds no anchor id and no secret link, the far-scene link is refused for the player but allowed for the GM, an unreadable journal is refused, a forged field is `invalid_schema`, a replay retransmits, and the player replica ends with empty `automations`/`messages`.
+- Wire boundary: `tests/core/contracts.test.ts` — 12/12 (direction count **62**), `tests/net/frame.test.ts` — 9/9, `tests/net/fixtures.ts` carries the `jt-1` fixture; `PROTOCOL.md` documents `journal.trigger` (0x50).
+- Production `file://` Chromium 153: the new `e2e/active_zones.spec.ts:1061` case authors a **concealed** tile with a single `manual` graph (so the tile can never be seen and the graph is not published for canvas clicks), links that tile from a handout page with `@Tile[Tile.<id>]{open the gate}`, joins a real second browser context, opens the player's own Handouts window, asserts the button label and that the anchor id appears nowhere in the player's shell, clicks it, and reads the GM's chat line `Gate opened by <player id> from journal` with exactly one host `seq` step; `active_zones.spec.ts` (27 cases) + `join.spec.ts`: **28/28 in 4.9 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,713 passed / 12 skipped** across 327 passing / 2 skipped files (**105.61 s**). `corepack pnpm typecheck` — 66 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.884 MB raw / 1.110 MB gzip** (4,072,175 / 1,163,852 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d384"></a>
+
+## D384 — `/run`: a saved macro from the chat line (2026-10-03)
+
+**Scope:** the **chat-command** slice of MC-01 ("execute … macros from a common directory, hotbar, chat command, item/ability and tile/region action") and MC-03's "discoverable chat invocation". Arguments, return values and nested calls stay open.
+
+### Implemented
+
+- `src/core/macroCommand.ts` — pure `parseMacroCommand` (`/run` and `/macro`, case-insensitive, quoted names, a bare command as an empty name so the caller can print usage) and `resolveMacroByName` (exact first, then a **unique** case-insensitive match; ambiguous → nothing; never mutates the list). `MACRO_COMMAND_USAGE` is the single discoverable string.
+- `src/ui/macros/run.ts` — `runSavedMacro` now reports an outcome: `automation` → `macros.invoke` (returning its request id), `chat` → the pure chat path, and `script`/`sequence`/`summon`/`fxPreset` → a named "cannot run … from chat yet" instead of silence.
+- `src/ui/chat/ChatPanel.svelte` (shared by both shells) — the command is checked before the ordinary chat parser, dispatches like the directory/hotbar, and answers in a **caller-local** status line (`[data-chat-command-status]`, `aria-live`): usage, `no macro named "…"`, a kind notice, `Requested …` then the host's own `macro.result` (`Fired <graph>` for a GM, the neutral `Automation fired` / `Refused: automation macro unavailable` for a player). Local by construction — a status posted as a chat message would be a table-visible store op and the graph name is GM-private — and the command text never becomes a message. The input placeholder now advertises `/run <macro>`.
+
+### Verification
+
+- `tests/core/macroCommand.test.ts` — **10/10**: both command words, case-insensitivity, whitespace, quoted names (mismatched quotes stay literal), the bare-command usage case, non-commands (`/roll`, `/w`, `/runner`, mid-sentence), exact-over-folded resolution, unique folded resolution, an ambiguous fold resolving to nothing, missing/empty names, and list immutability.
+- Production `file://` Chromium 153: the new `e2e/active_zones.spec.ts:1622` case authors a published manual graph plus its macro and a second, deliberately unpublished graph plus its macro, then drives everything from the chat line: `/run` → the usage line, `/run Nothing here` → `no macro named "Nothing here"`, `/run Command bell` → `Fired Command bell` with exactly one `Command manual gm` line and no `/run` text in the log; a joined second browser context reads `Automation fired` for its own `/run Command bell`, with exactly one `Command manual <player id>` line on the host, the anchor id absent from the player shell and no GM-only line there either; and `/run Command draft` (delivered macro, unpublished graph) → `Refused: automation macro unavailable`, no `Draft manual` line and no draft graph id in the player shell. `active_zones.spec.ts` (28 cases) + `join.spec.ts`: **29/29 in 4.5 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,723 passed / 12 skipped** across 328 passing / 2 skipped files (**98.77 s**). `corepack pnpm typecheck` — 66 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.885 MB raw / 1.110 MB gzip** (4,073,667 / 1,164,421 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d385"></a>
+
+## D385 — A player macro hotbar (2026-10-03)
+
+**Scope:** the **hotbar** slice of MC-01 — the five macro slots for a player shell. `/run` arguments, composite macros and per-invocation inputs stay open.
+
+### Implemented
+
+- `src/ui/macros/MacroHotbar.svelte` — one five-slot row shared by both shells (`data-macro-hotbar`, `data-hotbar-slot={1..5}`, `disabled` when empty, the macro's name as the title), replacing the GM shell's inline markup and its now-dead CSS.
+- `src/ui/macros/run.ts` — `runMacroSlot(client, macro, host)` is the single per-kind dispatch: chat → the pure chat core (a `/roll` command rolls), automation → `macros.invoke` (request id returned), script → direct run or `onNeedsInput`, sequence → the caller's active scene, `summon`/`fxPreset` → named refusal. `MacroSlotHost` carries the two shell-owned hooks.
+- `src/app/App.svelte` — the GM hotbar now renders the shared row and its keymap calls the shared `runMacroSlot` (behaviour unchanged).
+- `src/app/JoinApp.svelte` — the player dock footer renders the row from their own delivered macros, and a keydown handler runs slots on keys **1–5** only when that slot holds a macro, ignoring modifiers and typing targets.
+
+### Verification
+
+- `tests/ui/macroHotbar.test.ts` — **9/9** with a recording client stub: slot binding (only 1–5, last macro wins, empty list → five empty slots); chat submit; a chat `/roll` command rolling instead of submitting; automation invoking by id and returning the request id; a script running directly, or diverting to `onNeedsInput` when it declares required inputs; a sequence requiring an active scene; `summon`/`fxPreset` refused with no client call; and a chat macro with no signed-in user still submitting.
+- Production `file://` Chromium 153: the new `e2e/active_zones.spec.ts:1752` case publishes a macro, binds slot 1 in the directory, asserts the GM's row shows the title while slot 2 stays disabled, clicks the GM slot for one run, joins a real second browser context, asserts the player row carries the same title with no graph id in that shell, clicks it (one run), types "1" into the player's chat box (no extra run) and then presses the number key with the input blurred (second run). `active_zones.spec.ts` (29 cases) + `join.spec.ts`: **30/30 in 4.8 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,732 passed / 12 skipped** across 329 passing / 2 skipped files (**96.97 s**). `corepack pnpm typecheck` — 67 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.886 MB raw / 1.111 MB gzip** (4,074,712 / 1,164,621 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d386"></a>
+
+## D386 — Composite macros (2026-10-03)
+
+**Scope:** the **composite** slice of MC-01 — one directory entry that runs several saved automation macros. Arguments, return values and nested/composite-of-composite calls (MC-02) stay open.
+
+### Implemented
+
+- `src/core/macroComposite.ts` — the binding (`{ macroIds: string[] }`, 2–8 distinct bounded ids, one key only), the document rule (name only: no command, no sequence/script/summon/preset/automation payload), the stray-binding mirror, and `macroCompositeMacroIds` for a *validated* read. `MacroDocument.kind` gains `"composite"`, and an automation macro may not carry a composite binding.
+- **Secrecy:** the child list is GM-only state — `projectMacro` strips it for every non-GM copy (snapshot, create and summon-shaped branches alike), the op path replaces the whole macro shape on a composite create/update/kind transition, and `stripMacroBindingDiff` now blanks `composite` (and `composite.*` dotted keys) even on a resolver-less envelope-only path.
+- **Host:** `handleMacroInvoke` resolves a `composite` into pre-flighted children with a new reusable pair — `resolveMacroFireTarget` (live definition, `manual`, anchor, `playerRunnable`, the caller's loaded scene, `docVisibleTo`) and `fireMacroTarget` — so a composite applies the *identical* policy to every child. All children are pre-flighted before the first fires (a child the caller may not run ⇒ nothing fires); a run-time child failure reports "Composite stopped at macro *i* of *n*"; each child keeps its own envelope/undo step. Authoring is GM-only and validated by `macroCompositeChildrenError`: children must exist, be automation macros (never another composite, never the composite itself), and each child's graph must itself pass the automation authoring gate.
+- **UI:** the directory's automation tab gains a composites list (name, child count, Edit/✕/Run for a GM) and an editor (name, ordered child rows with re-point/remove, Add macro up to eight, Create/Update). `runSavedMacro`, `runMacroSlot` and `MacrosPanel.runMacro` route `composite` through the same `macros.invoke` — **no new wire kind**, and no child id ever leaves the host. `/run <composite name>` works unchanged.
+
+### Verification
+
+- `tests/core/macroComposite.test.ts` — **7/7**: binding shape and limits (2–8, distinct, bounded, single key), the document rule and stray-binding mirrors (including a composite binding inside an automation macro), a validated read only for a well-formed composite, the snapshot projection (player keeps name/kind/slot, loses the list; GM keeps it), the create path, the whole-shape rebind (with a resolver) and the resolver-less path.
+- `tests/host/sync.test.ts` — **215/215** (three new cases): two children fire in order under the invoker's identity (`manual by <player>`, `second manual by <player>`), both graphs' histories name the invoker, the player's `macro.result` is the neutral `Automation fired`, the GM reads `Fired Opening script (2 macro(s))`, and two undos remove both children's writes; one unpublished child pre-flights the player's run into **nothing at all** while the GM's run of the same composite succeeds; and the authoring matrix (nested composite, missing child, duplicate child, single child, chat child, self-reference, command on a composite, stray binding on a chat macro, player-authored) leaves no composite behind before a valid pair commits and fires.
+- Production `file://` Chromium 153: the new `e2e/active_zones.spec.ts:1844` case publishes two graphs on one tile, publishes both macros, builds the composite in the new editor (two children, distinct ids, `2 macro(s)`), runs it from the directory (both chat lines in order, host `seq` advanced by exactly two commits) and then from `/run Opening script` (`Fired Opening script (2 macro(s))`), with each graph's own run counter at `2 run(s)`. `active_zones.spec.ts` (30 cases) + `join.spec.ts`: **31/31 in 1.4 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,742 passed / 12 skipped** across 330 passing / 2 skipped files (**114.59 s**). `corepack pnpm typecheck` — 67 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.895 MB raw / 1.113 MB gzip** (4,083,704 / 1,166,916 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d387"></a>
+
+## D387 — Typed macro invocation arguments (2026-10-03)
+
+**Scope:** the **typed named-argument** slice of MC-02 — a callable automation macro declares inputs and a caller supplies them. Positional shorthand is supported by the binder but has no dedicated editor affordance; selected-context inputs, return values, awaited nested calls/recursion and reusable helpers stay open.
+
+### Implemented
+
+- `src/core/macroArgs.ts` (new) — `MACRO_ARG_LIMITS { inputs: 16, bytes: 8192, string: 256, number: 1e9 }`; `MacroArgInput { name, type: "string"|"number"|"boolean"|"token", required? }`; `macroArgSchemaError` (authoring: list, ≤16, unique `[A-Za-z][A-Za-z0-9_]{0,31}` names, known types, known keys only), `macroArgInputs` (tolerant read), `validateMacroArgs(value, inputs, tokenVisible)` (host re-validation against a live declaration, with the caller's token visibility), `coerceMacroArgText` (typed coercion of a token), `splitMacroArgTokens` (one scan: `key="…"`/`key='…'`/`key=bare`, quoted or bare words; `key=` is always named and an unmatched quote stays verbatim), `bindMacroArgs` (named by name, positionals in declaration order onto the still-free inputs, required check), `macroArgValues` (`{{arg.<name>}}` context).
+- `src/core/macroAutomation.ts` — `MacroAutomationBinding` gains `inputs?: MacroArgInput[]` (validated by `macroAutomationBindingError`, whose wording is now "…graph id and its declared inputs"), plus the new `MacroAutomationPublic { inputs? }` and the tolerant `macroAutomationInputs(doc)`.
+- **Delivery:** the declared schema is callable metadata, so `projectMacro`'s non-script branch strips `automation` and **re-attaches `{ inputs }`** for a `kind:"automation"` macro; `MacroDocument.automation` is the union of the private binding and that public shape. `stripMacroBindingDiff` still blanks the private binding on update diffs, and the projected schema is re-attached there too — verified on a *live* player, not just a fresh snapshot.
+- `src/core/messages.ts` + `src/client/sync.ts` — `macros.invoke` gains an optional `args`; `invokeMacro(macroId, args?)`. **No new wire kind.**
+- `src/core/automation.ts` — `AutomationEvent.args`; the graph's interpolation values merge `macroArgValues(event.args)`; `textTemplate` resolves a dotted `arg.<name>` reference. Dotted names are deliberately not legal durable-variable names, so `RESERVED_VARIABLES` is untouched and an argument cannot shadow world state.
+- `src/host/sync.ts` — `MacroFireTarget.args`; `validateMacroArgs` runs **after** the target is resolved (the declaration and the token-visibility check need the resolved scene) and **before** anything fires.
+- `src/core/macroCommand.ts` — `parseMacroCommand` returns the argument `tail`. `src/ui/macros/run.ts`, `ChatPanel.svelte` (local binding + `[data-chat-command-status]` reason) and `MacrosPanel.svelte` (inputs editor `data-automation-inputs*`, run form `data-automation-run-editor`/`-run-with`/`-run-error`) carry the caller side.
+- `src/app/e2eHook.ts` — a `macroCallable()` probe on both shells (the automation macro a shell actually holds, as JSON) so the delivery guarantee is asserted in the browser instead of assumed.
+
+### Verification
+
+- `tests/core/macroArgs.test.ts` — **11/11**: schema errors, tokenizer (quoted/bare/`key=`/unmatched quote), binding by name and in declaration order, typed coercion, bounds, required/unknown/missing errors, `{{arg.*}}` context.
+- `tests/core/macroCommand.test.ts` — **11/11**: all expectations carry the new `tail`; named and positional examples.
+- `tests/host/sync.test.ts` — **217/217** (two new cases under `// ─── MC-02 (D-387)`): a macro declaring `rounds`/`label` — the delivered copy is exactly `{ inputs: [...] }` with no graph id in its JSON; supplied values interpolate (`rounds=3 label=open`), an omitted optional interpolates empty (`rounds=1 label=`); undeclared/missing/wrong-typed/over-long arguments refuse, fire nothing and show only the GM the reason ("invalid rounds", "missing rounds"); a later inputs edit reaches a **live** player through the update-diff path, the dropped input stops being accepted and the retained one still fires; a composite refuses arguments; a concealed token is a valid GM argument but not a player's, and an unreadable macro stays silent.
+- Production `file://` Chromium 153: `e2e/active_zones.spec.ts:1925` declares two inputs in the directory (`Inputs (2)`), runs from the directory form (`rounds=2 label=open`), gets a **local** "invalid rounds" from `/run Args bell rounds=abc`, joins a real second browser context, asserts the player's delivered macro carries `"rounds"`/`"required":true` and **no graph id**, gets a local "missing rounds" from `/run Args bell`, and then supplies the values for a real host fire. `active_zones.spec.ts` (31 cases) + `automation_appearance` + `movement_actions` + `action_revert` + `join.spec.ts`: **68/68 in 3.6 min** (one worker, zero retries).
+- Harness note: the first two browser runs of the new case failed at the player assertion with the neutral "Refused: automation macro unavailable" because the run served a **stale bundle** from before the delivery fix; the hook probe showed the executed app held no `inputs`, and after `pnpm test:fx:prepare` rebuilt the bundles the same case passed, with the hook reporting GM `{graphId, inputs:[rounds,label]}` vs player `{inputs:[rounds,label]}`. A green unit path plus a red browser path is a build-staleness signal, not necessarily a source bug.
+- Full `corepack pnpm test` — **4,756 passed / 12 skipped** across 331 passing / 2 skipped files (**114.31 s**). `corepack pnpm typecheck` — 67 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.903 MB raw / 1.115 MB gzip** (4,092,801 / 1,169,370 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d388"></a>
+
+## D388 — The caller's selected token as a macro input default (2026-10-03)
+
+**Scope:** the **selected token/actor context** slice of MC-02 — a declared input that defaults to what the caller has selected on the canvas. Item selection, return values, awaited nested calls/recursion and reusable helpers stay open.
+
+### Implemented
+
+- `src/core/macroArgs.ts` — `MacroArgType` gains `"actor"`; `MacroArgInput` gains `from?: "selected"` (legal only on a `token`/`actor` input — `macroArgSchemaError` refuses anything else); `MacroSelection {tokenId, actorId}` plus `macroSelection(token)` read a single selected token; `validateMacroArgs(value, inputs, visible)` takes a **per-type** read predicate instead of a token-only one, so an `actor` value must be an actor the caller can read and a `token` value a token the caller can see; `bindMacroArgs(inputs, tail, selection)` and the new `bindMacroArgFields(inputs, raw, selection)` (the run form's per-field binder) apply the default **after** named and positional values — an explicit value always wins — and refuse a required input with `select a token for <name>` when there is no selection, or `the selected token has no actor` when an `actor` default is required and the token links to none (an *optional* one is simply absent).
+- `src/host/sync.ts` — the argument validator is called with a per-type predicate: `token` → `tokenVisibleTo(caller, target.scene._id, id)` (unchanged), `actor` → the new `referenceVisibleTo(caller, id)` (`docVisibleTo` on the live actor). Nothing else on the host changed: the default is a client-side convenience, and the host still sees only an id in `args`.
+- `src/ui/macros/run.ts` — `macroSelectionOf(client, tokenId)` resolves a selected id against the caller's own replica; `MacroSlotHost.selection` carries the shell's selection; `runMacroSlot`'s automation branch now binds the macro's schema with the selection (and asks the shell to open the directory when a value must be typed), instead of sending an empty request.
+- UI: `MacrosPanel` takes `selectedTokenId`, its input editor offers the `actor` type and a per-row **selected** checkbox, the run form shows the default (`placeholder="selected token"`, `data-automation-run-selected`) and binds through the new binder; `ChatPanel`'s `/run` binds with the same selection; `WindowHost` threads `selectedTokenId` to the directory; both shells pass their shell-local selection (`App.svelte`, `JoinApp.svelte`).
+
+### Verification
+
+- `tests/core/macroArgs.test.ts` — **17/17** (six new): the schema rule (`from` only on token/actor, only `"selected"`, survives a validated read), an unreadable actor refused for both a spelled-out and a token-typed value, the default applied behind named and positional values, a null-actor selection for an optional vs required actor input, the run-form binder (blanks, stray keys, required), and `macroSelection`.
+- `tests/host/sync.test.ts` — **218/218** (one new case under `// ─── MC-02 (D-388)`): a selection-shaped schema (`target` token + `subject` actor both `from:"selected"`) fires with both values interpolated for a player who owns the actor; the same call naming an actor the player cannot read is refused neutrally with **nothing** committed while the GM's identical call succeeds; an empty call is the host's plain `missing target`; an optional actor default is simply absent.
+- Production `file://` Chromium 153: `e2e/active_zones.spec.ts:2038` — one `#add-token` token, a published manual graph (`struck {{arg.target}}`), the input declared as required + selected in the directory; the run form refuses locally with "select a token for target" while nothing is selected; a real canvas click on the token (a token's document point is its **centre**, so the hit test wants that exact point, not an offset) followed by an empty run produces `struck <id>`; clearing the selection restores the local refusal for `/run`; a joined player is refused locally with nothing selected, and after clicking their own canvas selection the same `/run` fires with **the identical token id** the GM's line named. `active_zones.spec.ts` (32 cases) + `automation_appearance` + `movement_actions` + `action_revert` + `join.spec.ts`: **69/69 in 4.0 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,763 passed / 12 skipped** across 331 passing / 2 skipped files. `corepack pnpm typecheck` — 67 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.905 MB raw / 1.116 MB gzip** (4,095,136 / 1,170,065 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d389"></a>
+
+## D389 — A graph's return value (2026-10-03)
+
+**Scope:** the **return value** slice of MC-02 — a graph hands a bounded scalar back to whoever invoked its macro. Macro-to-macro awaited calls that consume a child's value, item selection, imports/reusable helpers and continuation-carried values stay open.
+
+### Implemented
+
+- `src/core/automation.ts` — the `result` step (`{ id, kind: "result", value, audience }`, `audience` `caller`|`gm`); authoring validation on the shared bounded-scalar rule (`validScriptResultValue` renamed to `validResultValue`, since a script result and a graph return value are the same shape); the runtime action interpolates a string value with `textTemplate` and **rejects** an interpolation that outgrows 256 characters or gains a control character; `PlanCtx.results` is a `Map<graphId, AutomationResult>`, so a nested child's value is scoped to that child and `AutomationPlan.result` reports only the **root** graph's value.
+- `src/host/sync.ts` — `fireAutomation` and `fireMacroTarget` carry the plan's `result`; `handleMacroInvoke` attaches `result: value` to the invoker's own `macro.result` when the audience allows it (`caller`, or `gm` for a GM invoker). No new wire kind and no broadcast: the value reaches exactly one session.
+- UI: the zone wizard gains the **Return Value** step (value field + audience, with the “last executed wins / 256-character” note), and both caller surfaces render the value through the new shared `macroResultText` (`Fired <name> → <value>`, `Automation fired → <value>` in the chat status line).
+
+### Verification
+
+- `tests/core/automation.test.ts` — **110/110** (five new): authoring (bounded scalar, `caller`/`gm`, unknown keys / unknown audience / 257-character string / infinite number / `\n` all refused); the interpolated value and a typed literal; no action → no result, and a method-mismatched (skipped) graph → no plan at all; the last executed action winning across a `jump`/`landing` with the skipped branch's value absent from the trace; and `{{wide}}{{wide}}` (two 200-character variables) failing the whole plan with "exceeded its bound" rather than truncating.
+- `tests/host/sync.test.ts` — **219/219** (one new case): a player's invocation returns `count 1` with **no `messages` documents created** and **nothing delivered to a second player's session**; the GM's invocation returns the value under their own graph's name; after the graph's audience is switched to `gm`, the player's result has no `value` key while the GM's carries `secret <n>`.
+- Production `file://` Chromium 153: `e2e/active_zones.spec.ts:2164` authors the step in the wizard (`[data-zone-add="result"]` → the row's select is `result` → value `quarry-9`), runs it from the directory (`Fired Return bell → quarry-9`) with the value absent from the chat log, joins a real second browser context whose `/run Return bell` shows `Automation fired → quarry-9` and whose chat log also lacks the value, then switches the step's audience to `GM only` and shows the player reading exactly `Automation fired` while the GM's own run still reports the value. `active_zones.spec.ts` (33 cases) + `automation_appearance` + `movement_actions` + `action_revert` + `join.spec.ts`: **70/70 in 3.6 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,769 passed / 12 skipped** across 331 passing / 2 skipped files (**98.88 s**). `corepack pnpm typecheck` — 67 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.907 MB raw / 1.116 MB gzip** (4,096,846 / 1,170,487 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d390"></a>
+
+## D390 — One graph calls another (2026-10-03)
+
+**Scope:** the **macro-to-macro awaited call** slice of MC-02 — a plan composes another saved automation macro's graph inside its own envelope and consumes its returned value. Item selection, imports/reusable helpers and continuation-carried values stay open.
+
+### Implemented
+
+- `src/core/automation.ts` — the `callMacro` step (`{ id, kind: "callMacro", macroId, args?, capture?, onError?, propagateStop? }`); authoring validation (a saved macro id, ≤16 identifier-named bounded arguments, an unreserved capture variable, `stop`/`continue`, a boolean `propagateStop`, no loose keys); the runtime action re-resolves `macroId` on the host (automation macro → graph in this world → same scene → real anchor → `manual`), interpolates `args` with `textTemplate` in the **caller's** context, coerces them with `coerceMacroArgText` against `macroAutomationInputs` and re-validates with `validateMacroArgs` under the caller's visibility, runs the child with `planGraph(..., method: "manual")` **inside the same plan** (one envelope, one undo boundary, shared depth/invocation budget), prefixes failures `call <macroId> (graph <child>): <err>`, degrades them to a trace entry under `onError: "continue"`, and captures the child's value from `ctx.results` into a run variable (only the root graph's value is the invocation's result). A called graph's `stopped` stays inside that graph; `propagateStop` opts into returning it, mirroring `redirect`/`triggerTile`.
+- `src/host/sync.ts` — an authoring gate beside the other step gates: the named macro must exist, be an automation macro, name a target graph, pass `validateAutomation`, not be a self-call, live in the same scene, have an `automationSourceTile` anchor in it, accept `manual`, and declare every authored argument name — each refusal naming the offending field.
+- UI: the zone wizard gains the **Call Macro** step (a saved-macro select, one field per declared input, a capture variable, an error policy and a propagate-stop checkbox, with the "subroutine / same envelope / same rules as the directory" help text).
+
+### Verification
+
+- `tests/core/automation.test.ts` — **117/117** (one new suite of seven): authoring (bounds, reserved capture, bad error policy, non-boolean `propagateStop`, extra key); the child running in-plan as `manual` with `["child manual/1/vault", "parent done"]` and a `call caller-macro -> graph child-graph: 2 argument(s)` trace; refusals reading `call caller-macro: invalid rounds`, `unknown macro argument`, `missing rounds`, `is not a saved automation macro`, `its graph is unavailable`, `does not accept the manual method`, `its anchor is missing`; a child failure chaining `call caller-macro (graph child-graph): …` with `onError: "continue"` still running later steps; capture yielding `parent heard: child said 1` while `plan.result` stays **undefined**; a silent child giving `heard []` plus its own chat line; recursion refused inside the shared budget (`call self-macro (graph a1): trigger tile recursion: a1 -> a1`); and `stop` scoping — a child's `Stop` truncates the child while the caller continues, `propagateStop: true` propagates it.
+- `tests/host/sync.test.ts` — **221/221** (two new): one player `invokeMacro("parent-macro")` over a wizard-style pair (child `manual` graph with `rounds`/`label` inputs and `result "child ok {{arg.rounds}}"`; parent `callMacro` with `args: { rounds: "{{count}}", label: "vault" }` and `capture: "child"`) produced `["child saw 1/vault", "parent heard child ok 1"]`, moved the host sequence by exactly **+1** (one envelope) and was fully reverted by one `host.undo()`; the second case proves the authoring gate refuses an argument the child does not declare (`call: the called macro does not declare "stray"`) where it is authored.
+- Production `file://` Chromium 153: `e2e/active_zones.spec.ts:2268` — creates a tile, authors the child graph (`child saw {{arg.rounds}}`, a Return Value `child ok {{arg.rounds}}`, then `Stop`), publishes it as a macro, declares its required number input in the directory, authors the parent graph bound to a second published macro (`Call Macro` → the child, argument `3`, capture `child`, propagate-stop checked then unchecked, moved above the parent's own line), runs the parent once from the directory (`Fired Parent bell`) and reads in the chat log exactly one `child saw 3` **followed by** `parent heard child ok 3` — the caller continued past the child's `Stop` and still consumed its returned value — with both rows at `1 run(s)` and a single `Undo` clearing both lines. `active_zones.spec.ts` (34 cases) + `automation_appearance` + `movement_actions` + `action_revert` + `join.spec.ts`: **71/71 in 4.1 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,778 passed / 12 skipped** across 331 passing / 2 skipped files (**116.45 s**). `corepack pnpm typecheck` — 67 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.913 MB raw / 1.118 MB gzip** (4,103,475 / 1,172,139 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d391"></a>
+
+## D391 — Everybody else (2026-10-03)
+
+**Scope:** MC-04's **all-except-caller** mode — the fifth audience word, so an author can send an FX cue to the whole table except the session that ran it, at the timeline and camera-section levels (an automated `sequence` step keeps its `scene`/`gm` narrowing, which may only ask for less than the timeline allows). The run-as *identity* axis (`caller`/`gm`/`approved` for reviewed scripts) stays open.
+
+### Implemented
+
+- `src/core/fx.ts` — `FxAudience` gains `"others"`; `fxAudienceError` accepts it (and both authoring messages list it); `fxAudienceAllows` answers `viewer.id !== callerId`, the one shared rule the run level, the section level and the persistent-instance replay all already use. The doc comment now names MC-04's five modes as this vocabulary.
+- `src/host/sync.ts` — an **automation-fired** cue passes the caller it ran for (`event.caller.id`) as the cue's owner instead of the synthetic automation identity, so a graph's `others` cue excludes whoever triggered the tile/region while `scene`/`gm` cues are unaffected (they never consult the owner).
+- UI: the FX wizard's timeline audience select and the camera section's audience select both offer **Everyone else (all viewers except the caller)**; `sectionAudience` maps the word through; the section's "GM-only media" fitness check already treats any non-GM-only audience as needing player-servable media.
+- `PROTOCOL.md`: the camera-section/audience paragraph now documents `others` beside `scene`/`gm`/`caller` and the `{ players }` form.
+
+### Verification
+
+- `tests/core/fx.test.ts` — **54/54** (one new case, two updated messages): `others` validates at the timeline and section levels; the runner loses the targeted camera while another player and a GM who is not the runner keep it; a request with no live owner excludes nobody; and the authoring errors now read "…must be scene, gm, caller, others or a list of chosen players".
+- `tests/host/sync.test.ts` — **222/222** (one new case): a GM's run of an `others` timeline reaches both joined players and **not** the GM's own session, with `recipients: 2` and `skipped.audience: 1` reported in counts (no user id anywhere in the report); a player's own request is refused with `FX macro is not published for this caller` and nothing sent (D-316, unchanged); a player clicking a published tile whose graph plays the same timeline **excludes the clicking player** — the GM and the other player receive that cue, the clicker does not.
+- Production `file://` Chromium 153: `e2e/fx_sequence.spec.ts:2570` authors a text timeline, sets the run audience to **Everyone else**, joins a real second browser context through the manual WebRTC fragment dance, runs the timeline once from the wizard, polls the **player shell's own stage** (`__canvasStage.getFxLayer().count`) until it draws the cue, asserts the runner's stage (`__stage`) is still at zero for the whole run, and reads the GM's notice: `reached 1 viewer(s)` with `1 outside its audience`. `fx_sequence.spec.ts` (35 cases) + `fx_lifecycle` + `fx_item_binding` + `active_zones` (34) + `automation_appearance`: **90/90 in 7.2 min** (one worker, zero retries).
+- Full `corepack pnpm test` — **4,780 passed / 12 skipped** across 331 passing / 2 skipped files (**146 s**). `corepack pnpm typecheck` — 67 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.914 MB raw / 1.118 MB gzip** (4,103,754 / 1,172,215 bytes), within the 6 MB budget; `git diff --check` clean.
+- A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d392"></a>
+
+## D392 — A player arranges their own macro hotbar (2026-10-03)
+
+**Scope:** MC-01's player-owned hotbar bindings and private execution feedback. The GM still owns world macro documents; a local assignment grants no new execution authority. The remaining common-directory/chat/item/tile execution matrix and full A34 acceptance are not closed.
+
+### Implemented
+
+- `src/core/macroHotbar.ts` — a versioned five-binding local preference, scoped by a collision-safe `(worldId, userId)` tuple; `null` inherits the current GM slot, `""` explicitly clears it, and a bounded macro id overrides it. Storage contains ids only, not names/source/arguments/grants/graph refs; bad versions, bad values, corrupt or oversized JSON and denied reads fail safely to defaults, while denied writes return a usable visit-only arrangement with `saved: false`. No global preference singleton, world write or network fallback.
+- The existing `macroSlots` default resolver moves to the core (re-exported from `src/ui/macros/run.ts`), retaining last-wins for duplicate GM slots and ignoring non-integer/out-of-range imported slots. `hotbarMacroChoices` offers delivered chat/script/sequence/automation/composite entries; summon/FX-preset pickers remain separate. `playerMacroSlots` applies overrides to the **live projected catalog**, always using the current macro document, never a stored body. Missing assignments are inert and retained for recovery, with no unintended fallback to a different GM-default macro.
+- `MacroHotbarPrefsPanel.svelte` plus the player's **Arrange** button — five pickers in **Session & guide → Macro hotbar**, explicit empty/default choices, a **Use GM defaults** reset and truthful saved/visit-only feedback. Missing choices display **Unavailable macro (not in your catalog)** without remembering a private/stale name. Opening focuses the first picker; closing returns focus to the opener.
+- `JoinApp.svelte` — loads preferences for the actual world/player, resolves the same row for click and 1–5 keys, preserves typing/modifier guards, and shows local input errors / the caller's own host `macro.result` below the hotbar for automation/composite/script requests. Pending result ids are bounded; script/automation inputs can open the existing directory. FX delivery notices retain their existing path. The GM row and assignment UI are unchanged.
+- A delivered catalog name is **not** an execution grant: a shared automation entry whose graph is GM-only can still be selected, but its player request is refused by the existing host gate with neutral text and no commit. A GM-audience FX entry is absent from the player's catalog altogether. No new wire kind, authority policy or host execution code is introduced.
+
+### Verification
+
+- New `tests/core/macroHotbar.test.ts` — **11/11**: integer/default/last-wins rules, fresh/versioned/bounded/padded storage normalization, five supported choice kinds, override/empty/default resolution without macro mutation, live GM changes and reset, invalid assignment/index refusal, missing-id non-fallback/recovery, live-document and prototype-looking-id resolution, world/player storage isolation with collision-safe keys, corrupt/oversized/future JSON and denied read/write behavior.
+- Existing `tests/ui/macroHotbar.test.ts` — **9/9**, unchanged dispatch regressions; `tests/core/macroAutomation.test.ts` **5/5**; `tests/core/projection.test.ts` **27/27**; `tests/host/sync.test.ts` **222/222** — **274 focused tests** total. No isolated DOM tests replace browser evidence.
+- New production `file://` Chromium 153 `e2e/macro_hotbar.spec.ts:99` — **three real browser contexts** (GM + two players), wizard-authored defaults and catalog entries, actual WebRTC signaling. One player assigns/clears/restores/reset slots while the GM and the other player retain their defaults and the host sequence does not advance; the GM-only FX entry is not offered; the restricted automation's request produces only `Refused: automation macro unavailable` and no commit, with no graph ids in player markup. Click and key both use the local override, typing does not fire it, the other player runs the original default, and a **fresh page/rejoin** keeps the same identity and saved arrangement. Deleting the assigned macro immediately disables its override, even though a different GM-default macro remains valid; the missing picker choice is explicit, and selecting inherit restores the current default.
+- New `e2e/macro_hotbar.spec.ts:206` — denies **only hotbar storage writes**, sees `Changed for this visit only — browser storage is unavailable`, runs the local arrangement successfully, and reloads/rejoins back to the GM defaults. No world-write fallback or false persistence promise. New spec **2/2** alone (31.2 s).
+- Browser regression batch: `macro_hotbar` (2) + `active_zones` (34) + `fx_sequence` (35) + `join` (1) + `script_macros` (9) + `script_result_branch` (1) — **82/82 in 5.3 min** (**320.98 s** command wall time; one worker, zero retries).
+- Full `corepack pnpm test` — **4,791 passed / 12 skipped**, 332 passing / 2 skipped files (**133.23 s**). `corepack pnpm typecheck` — **68 components / 0 blocking / 1 existing advisory** (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.920 MB raw / 1.120 MB gzip** (4,109,915 / 1,174,210 bytes), within the 6 MB budget; `git diff --check` clean.
+
+### Still open
+
+No cross-device preference sync, drag-and-drop assignment or per-slot argument presets; no unified summon/FX-preset hotbar picker. Full invocation parity across the directory/chat/item/cast/tile surfaces, MC-02's selected item/context / imports / reusable helpers / continuation-carried values, MC-03's full templating, named-user run-as identity and the remaining TR/A19–A40 acceptance scenarios remain partial. A41 still requires a qualifying hardware-GPU reference-profile run. **Full A01–A41 parity is not established.**
+
+<a id="report-d393"></a>
+
+## D393 — Typed item arguments and selected-item context (2026-10-03)
+
+**Scope:** MC-02's item-reference and caller-selected PF1e item-window slice for saved automation macros and in-envelope Call Macro. No item mechanics are executed or authorized by a ref. MC-02, A34–A37 and overall parity remain partial.
+
+### Implemented
+
+- New `src/core/macroItems.ts`: a bare `itemId` names a WORLD item only; `actorId/itemId` names exactly that embedded item. Each component is 1–128 ASCII letters/digits/underscore/hyphen (qualified max 257). Malformed/object/path refs are refused; the formatter validates each component before joining, so a slash-containing world id cannot masquerade as an embedded ref. No actor-wide scan, name fallback or parent guessing. Readable choices carry only scalar refs and world/parent labels.
+- `macroItemReadable` re-reads actual-caller world-item rights, or readable parent actor **and** child read with normal inherited ownership. Both `HostSync` direct macro invocation and the core planner's nested Call Macro use it. Client selection is convenience, never authority; deleted/private refs fail live and an unreadable nested child rejects the parent's entire envelope. Player diagnostics remain neutral and do not identify the hidden item/graph.
+- `macroArgs.ts`: `item` schema/coercion/validation and optional `from:"selected"`; an item-only context carries `tokenId:null` and `actorId:null`, never inventing the item's parent as an actor selection. Named/positional/picker values precede defaults; optional absent items stay absent and required selected-item absence says `select an item for <name>`. Ordinary string, scalar-result and raw Call Macro literal bounds remain 256; a typed qualified max-257 ref can forward via `{{arg.tool}}`.
+- Both shells derive the highest-z open, non-minimized item window and re-read it after focus/store/permission changes. Macro/chat focus preserves it; a stale/unreadable top item clears context rather than selecting an older item. Closing/minimizing the top explicitly exposes the next open item. `WindowHost` → `MacrosPanel`, `ChatPanel` `/run` and both shells' shared hotbar dispatch carry this independent live ref.
+- The directory exposes `item`, a readable picker and a selected-item hint. Toggling required/selected preserves the other flag; choosing a primitive type clears `from`. Player store refresh retains the public automation tab rather than resetting it to Scripts. World items are explicit refs/picker choices; existing PF1e item windows supply embedded context. No new wire kind, item body, permission grant, world selection state or projection widening.
+
+### Verification
+
+- New `tests/core/macroItems.test.ts` — **12/12**: canonical/edge/malformed refs, world/embedded collisions, parent-plus-child inheritance, live deletion/revocation, readable labels, window focus/minimize/close and stale non-fallback, item-only context, schema/binder explicit precedence and shared hotbar scalar dispatch. Existing `tests/core/macroArgs.test.ts` — **17/17**.
+- `tests/core/automation.test.ts` — **119/119**, two new cases: nested item forwarding preserves parent identity and actual-player read rights (a public item under an unreadable parent still refuses), and a **257-character typed ref** successfully forwards through a template while oversized ordinary raw Call Macro/result literals remain invalid.
+- `tests/host/sync.test.ts` — **224/224**, two new direct/nested cases: public world and exact embedded refs run; unreadable world/parent, malformed/object/missing refs refuse neutrally without a sequence change; root deletion never falls back to an inventory with the same id; revocation/embedded deletion are rechecked live, including for the GM; refs never mutate item data. A player-triggered child cannot use a GM author's hidden item, and its failure discards staged parent chat; the GM's same call succeeds. **372 focused tests** across these four files pass.
+- New production `file://` Chromium **153.0.8010.0** `e2e/macro_item_args.spec.ts` — **2/2 alone in 17.7 s**. Real UI creates inventory items and a world item, publishes a graph, declares an item input and assigns a slot. GM case checks independent required/selected flags, primitive-type clearing, token-with-inventory non-guessing, readable picker, blank default, explicit override, focus switch, directory/chat/hotbar click/key, close and minimize. Real WebRTC player case checks private-parent omission, readable world/embedded choices, input-only callable metadata, public tab retention after committed runs, independent item-only defaults, and **ordinary GM Undo** removing the top item while an older item window stays open: hint clears, blank run commits nothing, explicit readable ref works, and explicit closing restores the older default. Authored GM-only messages never enter player chat. Existing hooks are used only for table/spell fixture setup and readbacks, not macro/schema/item-selection/invocation injection. No `tests/ui/` changes substitute for browser proof.
+- Production browser regression: `macro_item_args` (2) + `macro_hotbar` (2) + `active_zones` (34) + `fx_sequence` (35) + `fx_item_binding` (1) + `join` (1) + `script_macros` (9) + `script_result_branch` (1) — **85/85 in 5.9 min**, one worker/zero retries (**352.63 s command wall time**). npm-provisioned Chromium/al2023 fallback, container no-sandbox opt-in; no app CSP/authority gates disabled. These are functional Chromium results, not cross-browser or hardware-GPU performance acceptance.
+- Full `corepack pnpm test` — **4,807 passed / 12 skipped**, 333 passing / 2 skipped files (**116.53 s**). `corepack pnpm typecheck` — **68 components / 0 blocking / 1 existing advisory** (`src/ui/sim/ReplayPanel.svelte:29`); `pnpm lint` and `git diff --check` clean. Fresh `test:fx:prepare` ran after every source/test edit batch; app/system/available-starter preparation succeeds, optional PF1e content starter skipped because content is absent. `pnpm size` — **3.923 MB raw / 1.121 MB gzip** (4,113,784 / 1,175,470 bytes), within the 6 MB budget.
+- Final post-documentation/comment-only cleanup: **375/375** focused checks including three protocol-consistency tests, typecheck/lint/size/whitespace clean, new browser spec **2/2 in 16.9 s**. Fresh preparation produced the **byte-identical** production artifact used by the 85-case regression (`SHA-256 b875db68e1db5a7042aa0c28612ee26c9bdfd99a6eaa2a0e64e160e58da33ad3`). No behavioral source changed after the full suite.
+- Validation notes: initial browser attempts failed on fixture selectors (duplicate global Actors buttons / an exact nested Audience label) and on an incorrect assumption that a successful run keeps its input form open. The spec scopes the Sheets region, uses the existing audience label and reopens the product's intentionally collapsed form; no browser assertion was replaced by a mock or relaxed away. Final focused and complete regression batches above pass with zero retries.
+
+### Reproduction
+
+```sh
+corepack pnpm test:fx:prepare
+corepack pnpm exec vitest run tests/core/macroItems.test.ts tests/core/macroArgs.test.ts tests/core/automation.test.ts tests/host/sync.test.ts
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test --project=chromium --workers=1 --retries=0 --global-timeout=1400000 \
+  e2e/macro_item_args.spec.ts e2e/macro_hotbar.spec.ts e2e/active_zones.spec.ts e2e/fx_sequence.spec.ts \
+  e2e/fx_item_binding.spec.ts e2e/join.spec.ts e2e/script_macros.spec.ts e2e/script_result_branch.spec.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm lint
+corepack pnpm size
+git diff --check
+```
+
+The `/tmp` fallback is disposable; a standard installed Playwright Chromium can run the same specs without those environment variables. Markdown-only status/protocol edits do not require artifact preparation.
+
+### Still open
+
+Imports/reusable helpers, generalized context and continuation-carried values; full common-directory/chat/item/cast/tile execution and awaits across every macro kind; MC-03 full templating; named-user run-as identity; broader elevated-macro/editor/module/extension/compensation behavior; per-invocation targets; MATT per-percent lighting and door interaction attempts/secret doors; remaining TR/A19–A40 scenarios. Local hotbar preferences are not cross-device sync, drag-and-drop or per-slot argument presets. **A41 remains unaccepted** pending a qualifying pre-published hardware-GPU reference run. D373 remains the latest standalone report. **Full A01–A41 parity is not established.**
+
+
+<a id="report-d394"></a>
+
+## D-394 — GM-enabled player personal macros in the durable world (2026-10-03)
+
+### Delivered scope and authority
+
+GM Permissions has a per-player **Save macros in world** checkbox, disabled by default for players/trusted users; GM/assistant retain authoring authority. The player's **My world macros** tab edits original personal chat/roll macros and unapproved script drafts with typed inputs/visible scene. Documents enter the host's normal store/oplog, persistence and next GM ZIP export; this is not automatic disk overwrite and not device-hotbar layout synchronization. Saves/deletes re-read actual authenticated user opt-in, live authorship/OWNER rights and supported kind. Permission/ownership revocation keeps the editor buffer and prevents further management; execution remains its independent existing policy. Run saved chat uses the committed macro rather than that buffer.
+
+`macros.save` uses the next byte **0x51**, reliable ops channel, content-only save/delete shape and existing caller-only `macro.result`. Name/command/schema/UTF-8 limits, 64/user quota, ASCII IDs, actual caller and readable scene checks reject invalid/foreign/legacy/unsupported references before committing. The intent bucket rate-limits; 256 caller/request-ID responses provide bounded idempotent acknowledgements across reconnects. Generic macro creation remains GM-only; raw player intents cannot mutate/delete personal records or author fields, opt themselves in, or promote an imported self-owned User. User list ops now agree with its public snapshot visibility, so permission changes propagate live rather than awaiting reconnect.
+
+The host stamps private default 0 + author OWNER 3 and `playerAuthoring:{version:1,userId,draft}`. Every personal script revision resets approval/publication, grants and GM elevation. Host invocation history survives revisions and script/chat kind switches; only an existing valid GM slot is retained. GM ScriptMacroPanel review preserves the author's existing individual ownership. Original player source is an owner-only validated DTO; GM's later executable source/policy/history never enters it or another player's replica. Snapshot, create and resolved-update shapes agree, lost OWNER clears the DTO, read loss uses host visibility-boundary deletion, and resolver-less diffs conservatively blank all original-source / executable policy paths.
+
+### Final gates on the D394 artifact
+
+- `corepack pnpm test:fx:prepare`: app, system packages and available starter built; optional PF1e content-based starter skipped because content is absent.
+- Artifact SHA-256: **`32874e58d013626648ad8b87b5f5d4a9d3aa371284d4e32306878bb15d2477df`**.
+- Full Vitest: **4,887 passed / 12 skipped**, **334 passing / 2 skipped files**, **171.19 s**. Adds 51 core draft/capability/canonicalization/DTO checks, 28 host save/authority/replay/quota/history checks and one actual ZIP copy/restore persistence case.
+- Focused: **363/363 / 7 files, 10.17 s** — playerMacros 51, HostSync 252, projection 27, worldFile 9, contracts 12, frame 9, protocol 3.
+- Typecheck: **69 components / 0 blocking / 1 existing advisory**, ReplayPanel.svelte:29.
+- Full ESLint and `git diff --check`: pass.
+- Size: **3.940 MB raw / 1.126 MB gzip**, **4,131,484 / 1,180,223 bytes**, within 6 MB.
+
+### Production browser evidence (functional, not A41 qualification)
+
+Chromium **153.0.8010.0**, npm-provisioned executable plus AL2023 libraries; real `file://` production artifact, one worker and **zero retries**. Read-only shell hooks inspect committed/projected documents; authoring/permissions/review/revocation/export/restore are ordinary product UI, with real signed joins and WebRTC rather than mocked DOM/net execution.
+
+**Completed personal-save/script/archive batch: 15/15 in 6.0 min**: `player_world_macros` **3/3**, `script_macros` **9/9**, `script_result_branch` **1/1**, `worldfile` **2/2**. The new cases cover:
+
+1. Two independently joined players; one GM opt-in, private personal roll, no global slot assignment or peer document disclosure; capability revocation disables writes/deletion immediately while preserving a newer unsaved buffer; Run saved still executes the older stored roll; re-enable/save, actual downloaded `documents.json` with macro/capability, deletion, and normal GM Close/Open/Restore recovering the export point.
+2. Personal script/source/input authoring commits an unapproved, noncallable draft with no APIs; no runner is offered until GM review. GM edits private code, publishes reviewed elevation/chat grant and a slot without losing author ownership. Only the author receives their **original** draft; both players receive blank executable command, and the other player never receives original source. Saving opt-out does not stop a separately approved real Worker from running. Re-enabled player revision resets all approval/grants/elevation/publication, keeps invocation history and existing slot, and removes the other player's catalog entry.
+3. Independent GM ownership downgrade in the now-live Permissions macro editor disables personal management, clears the owner DTO and preserves unsaved text; restored ownership enables saving that same buffer.
+
+### Non-green browser regression and baseline control
+
+The combined selected **90-case** regression exceeded its **1,400 s** global budget: **75 passed, 1 failed, 14 not run**, plus suite/teardown timeout errors (**23.3 min**). It completed Active Zones 34, item binding 1, join 1, hotbar 2 and item arguments 2, most FX cases and the first new personal-save case. The missing personal/script/archive cases subsequently completed in the 15-case batch above. A full FX timeline-only rerun completed **34 passed / 1 failed in 8.2 min**, zero retries.
+
+The retained failure is `e2e/fx_sequence.spec.ts:1615`, **a viewer that cannot decode the media says so, by section**, at line 1667: expected `media not in hand for 1 of 2 viewer(s) … 1 cannot decode this format (corrected)`; actual `media not in hand for 2 of 2 viewer(s) … 1 cannot decode this format; started late for 1 (corrected)`. Unsupported-codec detection/early correction occurred, but the GM also started late in this functional fallback, invalidating that exact no-lateness expectation.
+
+To distinguish the feature from an already-present environmental failure, exported **unchanged D393 HEAD `92d0f2b`** read-only with `git archive` into an isolated temporary directory, used the same dependencies/browser, built it, and ran that one test with zero retries. It failed **identically (20.5 s)**. Its artifact SHA **`b875db68e1db5a7042aa0c28612ee26c9bdfd99a6eaa2a0e64e160e58da33ad3`** exactly matches shipped D393. No branch checkout/reset occurred; genuine edits remained intact. Thus this is a **reproduced baseline timing gap in the current fallback environment**; D394 neither introduces a claimed fix nor weakens the test/assertion/runtime timing. Across bounded runs **89/90 distinct selected cases passed**, not a green single full-browser run. Keep this regression open.
+
+### Earlier corrections and remaining scope
+
+Integration caught (and fixed) User snapshot/live-op visibility inconsistency: private ownership on public User documents had suppressed capability changes, now covered in pure projection, live host and production browser tests. The archive fixture initially tried to create a User through a generic GM intent, which the existing host correctly forbids; it now uses trusted host user allocation before authenticated peer saves. A core fixture's flag namespace shape was corrected after a TS error, then full typecheck/lint passed. Browser fixture corrections use non-exact option-containing labels, normally close the GM source window before it covers Permissions, and call the existing chat API with valid `scene` rather than invalid `all` audience. Product privacy/execution assertions were not relaxed.
+
+Other player-authored macro kinds, hotbar layout cross-device/world synchronization, generalized context/helpers/continuations, templating, full common invocation matrix, remaining trigger/action/library/environment scenarios and full MC-01/MC-02/A01–A41 stay open. **A41 remains unaccepted** without a qualifying pre-published hardware-GPU reference run. D373 remains the latest standalone report; this appended report is incremental evidence, not full parity or remote CI success.

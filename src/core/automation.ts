@@ -15,12 +15,16 @@ import { healthAmountError, resolveHealthAmount, type HealthAmount } from "./hea
 import { rotationAngleError, resolveRotationAngle, type RotationAngle } from "./rotationAngle";
 import { hexCorners, snapTokenCenter, type GridSpec } from "../canvas/grid";
 import { moveTableLocation, snapshotMoveDestination, moveDestinationPoint, type MoveDestinationSnapshot } from "./moveDestination";
-import { regionTriggerTile } from "./regionGeometry";
+import { automationSourceTile, regionTriggerTile } from "./regionGeometry";
 import { MOVABLE_COLLECTIONS, applyMovePosition, moveGeometry, type MovePlaceable } from "./movePlaceable";
 import { movementWallBlocked, movementFootprintBlocked, movementSpeedDuration } from "./movementPolicy";
 import { moveCoordinatesError, resolveMoveCoordinates, type MoveCoordinates } from "./moveCoordinates";
 import { isDoorWall } from "./documents";
 import { tileTriggerAlphaContains, tileTriggerElevationError, tileTriggerPolygonContains, tileTriggerWorldPolygon } from "./tileTriggerZone";
+import { coerceMacroArgText, macroArgValues, validateMacroArgs, type MacroArgValue } from "./macroArgs";
+import { macroItemReadable } from "./macroItems";
+import { macroAutomationGraphId, macroAutomationInputs } from "./macroAutomation";
+import { docVisibleTo } from "./projection";
 import { resolveTileImageIndex, tileImageSelectionError, type TileImageList } from "./tileImageSelection";
 import { drawFromTable, validateTable } from "./rollTable";
 import { applyDiff } from "./diff";
@@ -30,8 +34,10 @@ import type { Op } from "./ops";
 import type { PermissionUser } from "./ownership";
 import { getByTag, listTaggable, normalizeTags, tagMatcher, tagsOf, TAGGABLE_COLLECTIONS, validSceneTagRefs,
   type TagEdit, type TagMatchMode, type TagPattern, type TagSearchCollection } from "./tags";
+import { COMBAT_TRIGGER_METHODS, type CombatTriggerMethod } from "./combat";
 
-export type AutomationMethod = "enter" | "exit" | "stop" | "elevation" | "create" | "sceneChange" | "rotate" | "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut" | "manual";
+export type AutomationMethod = "enter" | "exit" | "stop" | "elevation" | "create" | "sceneChange" | "rotate" | "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut" | "doorOpen" | "doorClose" | "doorLock" | "doorUnlock" | CombatTriggerMethod | "sceneLoad" | "lightingChange" | "timeChange" | "manual";
+export type AutomationCombatMethod = CombatTriggerMethod;
 export type AutomationPointerMethod = Extract<AutomationMethod, "click" | "rightClick" | "doubleClick" | "hoverIn" | "hoverOut">;
 /** Explicitly bound event fields, never arbitrary code/field paths from a player request. */
 export type AutomationScriptBinding = "triggerToken" | "currentToken" | "method" | "user" | "scene" | "tile" | "count";
@@ -121,6 +127,18 @@ export type AutomationStep =
   | { id: string; kind: "batchFlush" }
   /** Add/remove/replace/clear the current action collection; stable ref identity, no world writes. */
   | { id: string; kind: "collection"; mode: "add" | "remove" | "replace" | "clear"; selector?: AutomationSelector }
+  /** TR-12: fire another saved graph **by name** — no tile to recreate, no anchor to
+   * discover. The child runs inside this same plan (atomic, depth/budget bounded) with
+   * the original method and source preserved (`method: "inherit"`), or as a `manual`
+   * call (`method: "manual"`). Only same-scene GM-authored graphs. */
+  /** MC-02: call another saved automation macro's graph inside this same envelope, with
+   * typed arguments, optionally capturing its returned value into a variable. A `stop`
+   * inside the called graph ends that graph only; `propagateStop` opts into letting it
+   * end this one too, the same shape `redirect`/`triggerTile` use. */
+  | { id: string; kind: "callMacro"; macroId: string; args?: Record<string, string | number | boolean>;
+      capture?: string; onError?: "stop" | "continue"; propagateStop?: boolean }
+  | { id: string; kind: "redirect"; automationId: string; tokens?: "triggering" | "current" | "inside";
+      landing?: string; propagateStop?: boolean; method?: "inherit" | "manual" }
   /** Calls manual-method graphs anchored to matching tiles as part of THIS atomic host plan. */
   | { id: string; kind: "triggerTile"; target: AutomationTileTarget;
       tokens: "triggering" | "current" | "inside"; landing?: string; propagateStop?: boolean }
@@ -177,6 +195,9 @@ export type AutomationStep =
   /** A tagged door's state, not its wall-kind/restriction axes. Locked doors reject toggle/open. */
   | { id: string; kind: "door"; mode: "open" | "close" | "lock" | "unlock" | "toggle" }
   | { id: string; kind: "chat"; content: string; audience: "scene" | "gm" }
+  /** MC-02: hand a typed value back to whoever invoked this graph. `gm` withholds it
+   * from a non-GM invoker; it is never broadcast and never becomes a chat message. */
+  | { id: string; kind: "result"; value: string | number | boolean; audience: "caller" | "gm" }
   | { id: string; kind: "sequence"; macroId: string; audience: "scene" | "gm" }
   /** Run a separate GM-reviewed, version-pinned script AFTER the graph envelope commits.
    * Its own host RPCs are independently authorized/committed; they are not part of
@@ -226,6 +247,15 @@ export interface AutomationEvent {
   /** Preserved across Trigger Tile calls; child `method` is manual. */
   originMethod?: AutomationMethod;
   originTileId?: string;
+  /** Where this event really came from: an anchor in the world (tile/region), a journal
+   * handout link, or a macro run by reference. Preserved across redirects exactly like
+   * `originMethod`, so a redirected graph can tell a region's `enter` from a tile walk-on —
+   * or from a handout's `manual`. */
+  originSource?: "tile" | "region" | "journal" | "macro";
+  /** MC-02 (D-387): declared invocation arguments from the macro that asked for this fire,
+   * already validated against the macro's schema. They surface as `{{arg.<name>}}` and can
+   * never shadow a durable variable, because a dotted name is not a legal variable name. */
+  args?: Record<string, string | number | boolean>;
   scene: SceneDocument;
   tile: TileDocument;
   /** Original triggering token is immutable even when "current" is replaced by a selector. */
@@ -286,6 +316,11 @@ export type AutomationPostAction =
   | ({ kind: "script" } & AutomationScriptCall)
   | { kind: "summon"; stepId: string; presetId: string; at: { x: number; y: number };
       summonerTokenId?: string; onError?: "stop" | "continue" };
+/** MC-02: the value a graph returns to its invoker, and who may be shown it. */
+export interface AutomationResult {
+  value: string | number | boolean;
+  audience: "caller" | "gm";
+}
 export interface AutomationPlan {
   ops: Op[];
   cues: AutomationFx[];
@@ -297,6 +332,8 @@ export interface AutomationPlan {
   continuation?: AutomationContinuation;
   trace: string[];
   state: AutomationState;
+  /** Set by the last Return Value action the graph executed (MC-02). */
+  result?: AutomationResult;
   /** Suppress later tiles for this moving token after a successful host commit. */
   stopOthers: boolean;
   /** Private per-commit policy, never a document flag or caller-controlled op field. */
@@ -309,12 +346,53 @@ export type AutomationOutcome =
   | { ok: false; error: string; trace: string[] }
   | { ok: true; skipped: string; trace: string[] };
 
-const METHODS: readonly AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual"];
+const METHODS: readonly AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "sceneLoad", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS, "sceneLoad", "lightingChange", "timeChange", "manual"];
+
+/**
+ * Events the host observes from committed world state and dispatches itself. They are valid
+ * graph methods (authorable, routable, filterable and visible in history) but are never
+ * simulated by a client request: `automation.request` and the module API refuse them, so a
+ * forged payload cannot manufacture an event the world did not produce. TR-01 lists the
+ * family; scene activation and per-viewer scene load, the four door changes, the five combat
+ * changes and the two environment changes (committed scene darkness, committed world clock)
+ * are the implemented children today.
+ */
+export const HOST_DISPATCHED_METHODS: readonly AutomationMethod[] =
+  ["sceneChange", "sceneLoad", "doorOpen", "doorClose", "doorLock", "doorUnlock",
+    ...COMBAT_TRIGGER_METHODS, "lightingChange", "timeChange"];
+export function isHostDispatchedMethod(method: AutomationMethod): boolean {
+  return HOST_DISPATCHED_METHODS.includes(method);
+}
+/** Methods a caller may ask the host to simulate directly (author/debug path). */
+export const SIMULATABLE_METHODS: readonly AutomationMethod[] =
+  METHODS.filter((method) => !isHostDispatchedMethod(method));
+
+export type AutomationDoorMethod = Extract<AutomationMethod,
+  "doorOpen" | "doorClose" | "doorLock" | "doorUnlock">;
+/**
+ * MATT models door triggers as separate change kinds ("On Open Door", "On Close Door", …),
+ * and ArenaStar keeps them as distinct methods rather than one method plus a payload: a
+ * graph subscribes to exactly the changes it wants, `routeMethod`/method filters and the
+ * `{{method}}` template need no extra fields, and each change gets its own history entry.
+ *
+ * Door state is the wall's own encoding: 0 = closed, 1 = open, 2 = locked. Only the four
+ * named changes produce an event — a same-value update, an unlock that leaves a door open
+ * (`2 → 1`) versus a plain close (`1 → 0`), or a malformed pair yields null. A transition
+ * into `2` is always a lock; any transition out of `2` is an unlock.
+ */
+export function doorTransitionMethod(before: number, after: number): AutomationDoorMethod | null {
+  if (![0, 1, 2].includes(before) || ![0, 1, 2].includes(after) || before === after) return null;
+  if (after === 2) return "doorLock";
+  if (before === 2) return "doorUnlock";
+  if (before === 0 && after === 1) return "doorOpen";
+  if (before === 1 && after === 0) return "doorClose";
+  return null;
+}
 const SCRIPT_BINDINGS: readonly AutomationScriptBinding[] = ["triggerToken", "currentToken", "method", "user", "scene", "tile", "count"];
 const IDENT = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 const INPUT_NAME = /^[a-zA-Z][a-zA-Z0-9_]{0,31}$/;
 /** Runtime bindings cannot be shadowed by durable user-defined variables. */
-const RESERVED_VARIABLES = new Set(["method", "originMethod", "originTile", "user", "count", "index",
+const RESERVED_VARIABLES = new Set(["method", "originMethod", "originTile", "originSource", "user", "count", "index",
   "currentId", "constructor", "prototype", "toString", "valueOf", "hasOwnProperty"]);
 const VARIABLE_LIMIT = 64;
 const VARIABLE_NUMBER_LIMIT = 1_000_000_000;
@@ -335,7 +413,8 @@ function validScriptResultPath(path: unknown): path is string {
   return ["ok", "error", "value"].includes(parts[0] ?? "") &&
     (parts[0] === "value" || parts.length === 1);
 }
-function validScriptResultValue(value: unknown): value is string | number | boolean {
+/** A bounded scalar: the rule a reviewed script's result and a graph's return value share. */
+function validResultValue(value: unknown): value is string | number | boolean {
   return typeof value === "boolean" || typeof value === "number" && finite(value, -1e9, 1e9) ||
     typeof value === "string" && value.length <= 256 &&
       !Array.from(value).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
@@ -538,7 +617,7 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
             typeof step.scriptStepId !== "string" || !IDENT.test(step.scriptStepId) ||
             !validScriptResultPath(step.path) ||
             !["eq", "ne", "gt", "gte", "lt", "lte"].includes(String(step.compare)) ||
-            (step.value !== null && !validScriptResultValue(step.value)) ||
+            (step.value !== null && !validResultValue(step.value)) ||
             (["gt", "gte", "lt", "lte"].includes(String(step.compare)) && typeof step.value !== "number") ||
             (step.otherwise !== undefined && (typeof step.otherwise !== "string" || !IDENT.test(step.otherwise))))
           return bad("Check Script Result needs a safe path, typed comparison and optional failure landing");
@@ -576,6 +655,16 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
           return bad(`invalid ${String(step.kind)} action`);
         const error = tileTargetError(step.target, value.sceneId as string);
         if (error) return bad(error);
+        break;
+      }
+      case "redirect": {
+        if (!keys(step, [...common, "automationId", "tokens", "landing", "propagateStop", "method"]) ||
+            typeof step.automationId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(step.automationId) ||
+            (step.tokens !== undefined && !["triggering", "current", "inside"].includes(String(step.tokens))) ||
+            (step.landing !== undefined && (typeof step.landing !== "string" || !IDENT.test(step.landing))) ||
+            (step.propagateStop !== undefined && typeof step.propagateStop !== "boolean") ||
+            (step.method !== undefined && !["inherit", "manual"].includes(String(step.method))))
+          return bad("redirect needs a named target graph and an optional token source/landing/method");
         break;
       }
       case "position":
@@ -640,6 +729,18 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
         const open = loopStack.pop();
         if (!keys(step, [...common, "startId"]) || !open || step.startId !== open.id || step.id !== open.endId)
           return bad("loop closing step does not match its opening step");
+        break;
+      }
+      case "callMacro": {
+        if (!keys(step, [...common, "macroId", "args", "capture", "onError", "propagateStop"]) || !nonEmptyId(step.macroId) ||
+            (step.args !== undefined && (!isObject(step.args) || Object.keys(step.args).length > 16 ||
+              Object.keys(step.args).some((name) => !IDENT.test(name)) ||
+              Object.values(step.args).some((value) => !validResultValue(value)))) ||
+            (step.capture !== undefined && (typeof step.capture !== "string" ||
+              !IDENT.test(step.capture) || RESERVED_VARIABLES.has(step.capture))) ||
+            (step.onError !== undefined && !["stop", "continue"].includes(String(step.onError))) ||
+            (step.propagateStop !== undefined && typeof step.propagateStop !== "boolean"))
+          return bad("Call Macro needs a saved macro id, at most 16 bounded named arguments, an optional unreserved result variable, a stop/continue error policy and a boolean stop-propagation choice");
         break;
       }
       case "set":
@@ -786,6 +887,11 @@ export function validateAutomation(value: unknown): { ok: true; definition: Auto
       case "chat":
         if (!keys(step, [...common, "content", "audience"]) || typeof step.content !== "string" ||
             step.content.length < 1 || step.content.length > 1000 || !["scene", "gm"].includes(String(step.audience))) return bad("invalid chat action");
+        break;
+      case "result":
+        if (!keys(step, [...common, "value", "audience"]) ||
+            !["caller", "gm"].includes(String(step.audience)) || !validResultValue(step.value))
+          return bad("a Return Value action needs a bounded string, number or boolean and a caller/gm audience");
         break;
       case "sequence":
         if (!keys(step, [...common, "macroId", "audience"]) || !nonEmptyId(step.macroId) ||
@@ -1154,7 +1260,9 @@ function escapeText(value: unknown): string {
     .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 function textTemplate(text: string, values: Record<string, string | number | boolean>): string {
-  return text.replace(/\{\{([a-zA-Z][\w-]{0,63})\}\}/g, (_raw, key: string) =>
+  // One optional dotted segment carries an invocation argument (`{{arg.rounds}}`);
+  // every other key is the single identifier it always was.
+  return text.replace(/\{\{([a-zA-Z][\w-]{0,63}(?:\.[a-zA-Z][\w-]{0,63})?)\}\}/g, (_raw, key: string) =>
     Object.prototype.hasOwnProperty.call(values, key) ? escapeText(values[key]) : "");
 }
 
@@ -1335,6 +1443,9 @@ interface PlanningContext {
   postActions: AutomationPostAction[];
   trace: string[];
   rootAutomationId: string;
+  /** Per-graph returned values (MC-02). Scoped by graph id so a nested child's own value
+   * cannot hijack the invoker's result — the plan reports the ROOT graph's value. */
+  results: Map<string, AutomationResult>;
   scriptResults: Map<string, AutomationScriptResult>;
   postActionCount: number;
   histories: Map<string, AutomationState>;
@@ -1497,12 +1608,16 @@ function flushBatch(ctx: PlanningContext, sceneId: string):
 export function planAutomation(
   world: Readonly<WorldCollections>, doc: AutomationDocument, event: AutomationEvent, hostUserId: string,
   resume?: AutomationContinuation,
+  /** Root invocation starts at this named landing (a journal link's `landing:` option). */
+  landing?: string,
 ): AutomationOutcome {
   const trace: string[] = [];
   const fail = (error: string): AutomationOutcome => ({ ok: false, error, trace });
   const validated = validateAutomation(doc.definition);
   if (!validated.ok) return fail(validated.error);
   if (resume) {
+    // A continuation resumes its own position; starting it at a landing is a caller bug.
+    if (landing !== undefined) return fail("a landing cannot resume a continuation");
     const source = validated.definition.steps.find((step) => step.id === resume.captureStepId);
     const sourceIndex = validated.definition.steps.findIndex((step) => step.id === resume.captureStepId);
     const budgetValues = isObject(resume.budgets) ? Object.values(resume.budgets) : [];
@@ -1553,7 +1668,7 @@ export function planAutomation(
       .map(({ ref, doc: original }) => [targetKey(ref), original])),
     ops: [], cues: [], scripts: [], postActions: [], trace, rootAutomationId: doc._id,
     scriptResults: new Map(Object.entries(resume?.scriptResults ?? {})),
-    postActionCount: resume?.postActionCount ?? 0, histories: new Map(), historyOps: new Map(),
+    postActionCount: resume?.postActionCount ?? 0, results: new Map(), histories: new Map(), historyOps: new Map(),
     definitionOps: new Map(), sceneAppearanceOps: new Map(), pendingTags: new Map(), pendingVisibility: new Map(), pendingDoors: new Map(),
     stack: [], steps: resume?.budgets.steps ?? 0, invocations: resume?.budgets.invocations ?? 0,
     attributeReads: resume?.budgets.attributeReads ?? 0, actorFilterReads: resume?.budgets.actorFilterReads ?? 0,
@@ -1562,7 +1677,7 @@ export function planAutomation(
     moveRolls: resume?.budgets.moveRolls ?? 0, gameTimeRolls: resume?.budgets.gameTimeRolls ?? 0,
     tableRolls: resume?.budgets.tableRolls ?? 0, stopOthers: false, suppressedMovement: new Set(), stoppedMovement: new Set(),
   };
-  const result = planGraph(ctx, doc, stagedEvent, hostUserId, undefined, resume);
+  const result = planGraph(ctx, doc, stagedEvent, hostUserId, landing, resume);
   if (!result.ok) return fail(result.error);
   if (result.skipped) return { ok: true, skipped: result.skipped, trace };
   const flushed = flushBatch(ctx, stagedScene._id); // implicit final batch execution
@@ -1570,9 +1685,12 @@ export function planAutomation(
   if (ctx.ops.length > 1024) return fail("automation exceeds 1024 world operations");
   const state = ctx.histories.get(doc._id);
   if (!state) return fail("root graph did not record its history");
+  // MC-02: only the root graph's value is the invocation's result — a nested child's own
+  // value stays scoped to that child.
+  const returned = ctx.results.get(ctx.rootAutomationId);
   return { ok: true, plan: { ops: ctx.ops, cues: ctx.cues, scripts: ctx.scripts,
     postActions: ctx.postActions, ...(result.continuation ? { continuation: result.continuation } : {}),
-    trace, state, stopOthers: ctx.stopOthers,
+    trace, state, ...(returned ? { result: returned } : {}), stopOthers: ctx.stopOthers,
     suppressedMovement: [...ctx.suppressedMovement], stoppedMovement: [...ctx.stoppedMovement] } };
 }
 
@@ -1642,8 +1760,9 @@ function planGraph(
   // No inherited object keys can masquerade as variables in Check Variable.
   // Event bindings always win over imported state, even on malformed worlds.
   const values: Record<string, string | number | boolean> = Object.assign(Object.create(null) as Record<string, string | number | boolean>,
-    resume?.values ?? nextState.variables ?? {}, { method: event.method,
+    resume?.values ?? nextState.variables ?? {}, macroArgValues(event.args), { method: event.method,
       originMethod: event.originMethod ?? event.method, originTile: event.originTileId ?? event.tile._id,
+      originSource: event.originSource ?? (d.sourceKind ?? "tile"),
       user: event.caller.id, count: nextState.count });
   let lastTableResult: string | null | undefined = resume?.tableResult.present ? resume.tableResult.value : undefined;
   let current: Target[] = resume ? resolveContinuationTargets(event.scene, resume.current)
@@ -2002,6 +2121,121 @@ function planGraph(
                 if (step.propagateStop && result.stopped) return { ok: true, stopped: true };
               }
             }
+          }
+          break;
+        }
+        case "callMacro": {
+          // MC-02: a named, saved macro called from inside this envelope — the host resolves
+          // the reference, applies the graph's own rules (same scene, real anchor, `manual`)
+          // and runs it with the caller's identity, its own declared-input schema enforced.
+          const called = world.macros.find((candidate) => candidate._id === step.macroId);
+          const calledGraphId = called?.kind === "automation" ? macroAutomationGraphId(called) : null;
+          if (!called || !calledGraphId)
+            return fail(`call ${step.macroId} is not a saved automation macro in this world`);
+          const child = world.automations.find((candidate) => candidate._id === calledGraphId);
+          const childChecked = child ? validateAutomation(child.definition) : null;
+          if (!child || !childChecked?.ok) return fail(`call ${step.macroId}: its graph is unavailable`);
+          const childDefinition = childChecked.definition;
+          if (childDefinition.sceneId !== event.scene._id)
+            return fail(`call ${step.macroId}: a called macro fires a graph in this scene only`);
+          if (!childDefinition.methods.includes("manual"))
+            return fail(`call ${step.macroId}: its graph does not accept the manual method`);
+          const childAnchor = automationSourceTile(event.scene, childDefinition.tileId, childDefinition.sourceKind);
+          if (!childAnchor) return fail(`call ${step.macroId}: its anchor is missing in this scene`);
+          // Arguments are interpolated in the CALLER's context, then coerced to the called
+          // macro's declared types and re-validated under the caller's own visibility — the
+          // same rule an invocation from the directory gets, so a macro cannot be handed data
+          // it would never accept from a caller directly.
+          const declaredInputs = macroAutomationInputs(called);
+          const inputByName = new Map(declaredInputs.map((field) => [field.name, field] as const));
+          const supplied: Record<string, string | number | boolean> = {};
+          for (const [name, raw] of Object.entries(step.args ?? {})) {
+            const text = typeof raw === "string" ? textTemplate(raw, values) : raw;
+            const field = inputByName.get(name);
+            if (!field || typeof text !== "string") { supplied[name] = text; continue; }
+            const coerced = coerceMacroArgText(field, text);
+            if (coerced === null) return fail(`call ${step.macroId}: invalid ${name}`);
+            supplied[name] = coerced;
+          }
+          const visible = (type: "token" | "actor" | "item", id: string): boolean => {
+            if (type === "item") return macroItemReadable(world, event.caller, id);
+            if (type === "token")
+              return event.scene.tokens.some((token) => token._id === id && docVisibleTo(event.caller, token, event.scene));
+            const actor = world.actors.find((candidate) => candidate._id === id);
+            return !!actor && docVisibleTo(event.caller, actor);
+          };
+          const checkedCallArgs = validateMacroArgs(supplied as Record<string, MacroArgValue>, declaredInputs, visible);
+          if (!checkedCallArgs.ok) return fail(`call ${step.macroId}: ${checkedCallArgs.error}`);
+          const callArgs = checkedCallArgs.args;
+          trace.push(`call ${step.macroId} -> graph ${child._id}: ${Object.keys(callArgs).length} argument(s)`);
+          const result = planGraph(ctx, child, { scene: event.scene, tile: childAnchor, caller: event.caller,
+            at: event.at, rng: event.rng, method: "manual",
+            originMethod: event.originMethod ?? event.method,
+            originTileId: event.originTileId ?? event.tile._id,
+            originSource: event.originSource ?? (d.sourceKind ?? "tile"),
+            ...(Object.keys(callArgs).length > 0 ? { args: callArgs } : {}),
+            ...(event.direction ? { direction: event.direction } : {}),
+            ...(event.movementOriginal ? { movementOriginal: event.movementOriginal } : {}),
+            ...(event.imageAssetError ? { imageAssetError: event.imageAssetError } : {}),
+            ...(event.hurtHeal ? { hurtHeal: event.hurtHeal } : {}),
+            ...(event.token ? { token: event.token } : {}) }, hostUserId);
+          if (!result.ok) {
+            // A transparent call stack: the step's macro, its graph and the child's own error.
+            const error = `call ${step.macroId} (graph ${child._id}): ${result.error}`;
+            if (step.onError === "continue") { trace.push(`${error} — continued`); break; }
+            return fail(error);
+          }
+          if (result.skipped) trace.push(`call ${step.macroId} skipped: ${result.skipped}`);
+          // The called graph is a subroutine: its own `stop` ends it, not the caller,
+          // unless the caller asks for the same opt-in `redirect` offers.
+          if (step.propagateStop && result.stopped) return { ok: true, stopped: true };
+          const returned = ctx.results.get(child._id);
+          if (step.capture) values[step.capture] = returned ? returned.value : "";
+          if (returned)
+            trace.push(`call ${step.macroId} returned ${String(returned.value).slice(0, 64)}` +
+              `${step.capture ? ` -> ${step.capture}` : ""}`);
+          if (step.capture) trace.push(`variable ${step.capture} = ${JSON.stringify(values[step.capture])}`);
+          break;
+        }
+        case "redirect": {
+          const child = world.automations.find((candidate) => candidate._id === step.automationId);
+          if (!child) return fail(`redirect target ${step.automationId} is not in this world`);
+          const checked = validateAutomation(child.definition);
+          if (!checked.ok) return fail(`redirect target ${child._id}: ${checked.error}`);
+          const target = checked.definition;
+          if (target.sceneId !== event.scene._id)
+            return fail("a redirect fires a graph in this scene only");
+          const anchor = automationSourceTile(event.scene, target.tileId, target.sourceKind);
+          if (!anchor) return fail(`redirect target ${child._id} has no anchor in this scene`);
+          // The inherited method is the one this event really is, so the target's own
+          // method filters, `routeMethod` and `{{method}}` see the truth rather than a
+          // synthetic "someone triggered me": the region behavior / Trigger Tile shape
+          // with the method preserved instead of replaced.
+          const method: AutomationMethod = step.method === "manual" ? "manual" : event.method;
+          if (!target.methods.includes(method))
+            return fail(`redirect target ${child._id} does not accept the ${method} method`);
+          const tokens: Array<TokenDocument | undefined> = step.tokens === "inside"
+            ? select(world, { ...event, tile: anchor }, { kind: "inside" }).map(({ doc }) => doc as TokenDocument)
+            : step.tokens === "current"
+              ? current.filter(({ ref }) => ref.coll === "tokens" && ref.parent?.id === event.scene._id)
+                .map(({ doc }) => doc as TokenDocument)
+              : [event.token];
+          if (tokens.length > 32) return fail("redirect token fanout exceeds 32 tokens");
+          trace.push(`redirect to graph ${child._id} as ${method} for ${tokens.length} token slot(s)`);
+          for (const token of tokens) {
+            const result = planGraph(ctx, child, { scene: event.scene, tile: anchor, caller: event.caller,
+              at: event.at, rng: event.rng, method,
+              originMethod: event.originMethod ?? event.method,
+              originTileId: event.originTileId ?? event.tile._id,
+              originSource: event.originSource ?? (d.sourceKind ?? "tile"),
+              ...(event.direction ? { direction: event.direction } : {}),
+              ...(event.movementOriginal ? { movementOriginal: event.movementOriginal } : {}),
+              ...(event.imageAssetError ? { imageAssetError: event.imageAssetError } : {}),
+              ...(event.hurtHeal ? { hurtHeal: event.hurtHeal } : {}),
+              ...(token ? { token } : {}) }, hostUserId, step.landing);
+            if (!result.ok) return result;
+            if (result.skipped) trace.push(`graph ${child._id} skipped: ${result.skipped}`);
+            if (step.propagateStop && result.stopped) return { ok: true, stopped: true };
           }
           break;
         }
@@ -2557,6 +2791,14 @@ function planGraph(
             flags: {}, system: {}, author: hostUserId, content, whisper: step.audience === "gm" ? [hostUserId] : [],
             roll: null, flavor: `Active zone: ${doc.name}`,
           } as MessageDocument });
+          break;
+        }
+        case "result": {
+          const value = typeof step.value === "string" ? textTemplate(step.value, values) : step.value;
+          if (!validResultValue(value))
+            return fail("a Return Value action exceeded its bound after interpolation");
+          ctx.results.set(doc._id, { value, audience: step.audience });
+          trace.push(`result ${step.audience}: ${String(value).slice(0, 64)}`);
           break;
         }
         case "sequence": {

@@ -27,6 +27,7 @@ import {
   type CellFeature,
   type DocRef,
   type JournalDocument,
+  type JournalPageDocument,
   type MacroDocument,
   type MessageDocument,
   type NoteDocument,
@@ -43,6 +44,9 @@ import type { Json } from "./documents";
 import { openCellKeys, projectCellForViewer } from "./hexcrawl/visibility";
 import { validateScriptMacro } from "./scriptMacros";
 import { summonMarker, validateSummon } from "./summons";
+import { maskJournalLinkTargets } from "./journalLinks";
+import { macroAutomationInputs } from "./macroAutomation";
+import { projectPlayerMacroAuthoring } from "./playerMacros";
 
 export interface ProjectedWorld {
   seq: number;
@@ -67,7 +71,6 @@ export interface ProjectionFns {
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 const SECRET_BLOCK = /<secret>[\s\S]*?<\/secret>/gi;
-const HAS_SECRET = /<secret[\s>]/i;
 
 export function stripSecretText(text: string): string {
   return text.replace(SECRET_BLOCK, "");
@@ -134,6 +137,8 @@ export function docVisibleTo(
   parent?: BaseDocument,
 ): boolean {
   if (isGm(user)) return true;
+  // D-021/D-394: User documents are the public player list in snapshots AND live ops.
+  if (doc.type === "user") return true;
   if (doc.type === "automation" || doc.type === "prefab" || doc.type === "fxInstance") return false; // host-owned definitions and instances
   // A GM-audience timeline's authored media names/hashes are also private;
   // omitting just its cue while publishing its sequence would leak assets.
@@ -287,7 +292,17 @@ function projectScene(user: PermissionUser, scene: SceneDocument): SceneDocument
     ...(cells ? { cells } : {}) };
 }
 
-function projectMacro(macro: MacroDocument): MacroDocument {
+function projectMacro(macro: MacroDocument, user: PermissionUser): MacroDocument {
+  // D-394: retain ONLY this author's original submission, never the GM's later source/policy.
+  if (macro.playerAuthoring !== undefined) {
+    const original = projectPlayerMacroAuthoring(macro, user);
+    const safe = { ...macro };
+    delete safe.playerAuthoring;
+    if (original) safe.playerAuthoring = original;
+    macro = safe;
+  }
+  // MC-02 (D-387): a caller needs the declared input schema to call the macro; see the
+  // automation branch below, where the graph id is dropped and only `inputs` survives.
   if (macro.kind === "summon") {
     const check = validateSummon(macro.summon);
     // A published preset is a safe catalog entry, not a copy of its source
@@ -302,12 +317,21 @@ function projectMacro(macro: MacroDocument): MacroDocument {
         : {}) };
     if (!check.ok || !check.definition.playerCallable) delete safe.summon;
     delete safe.script; delete safe.scriptState; delete safe.sequence;
+    delete safe.automation; delete safe.composite;
     return safe;
   }
   if (macro.kind !== "script") {
-    if (macro.scriptState === undefined && macro.summon === undefined) return macro;
+    // `automation` is a graph id: it must not reach a player replica in ANY kind,
+    // so its presence alone forces the copy (create, snapshot and update alike).
+    if (macro.scriptState === undefined && macro.summon === undefined &&
+        macro.automation === undefined && macro.composite === undefined) return macro;
     const safe = { ...macro };
-    delete safe.scriptState; delete safe.summon;
+    delete safe.scriptState; delete safe.summon; delete safe.automation; delete safe.composite;
+    // MC-02: the DECLARED INPUTS are callable metadata and ride along — without the id.
+    if (macro.kind === "automation") {
+      const inputs = macroAutomationInputs(macro);
+      if (inputs.length > 0) safe.automation = { inputs };
+    }
     return safe;
   }
   // Public macros are a CALLABLE CATALOG, never a copy of source, grants,
@@ -329,17 +353,22 @@ function projectMacro(macro: MacroDocument): MacroDocument {
   delete safe.scriptState;
   delete safe.sequence;
   delete safe.summon;
+  delete safe.automation;
   return safe;
 }
 
-function projectJournal(journal: JournalDocument): JournalDocument {
+/**
+ * Non-GM journal delivery: strip `<secret>` blocks **and** blank every `@Tile[…]` link
+ * target (D-383), so a player replica never carries the id of an anchor the player was
+ * not handed. Link order and count survive masking, which is what keeps a client's click
+ * ordinal meaningful on the host.
+ */
+export function projectJournal(journal: JournalDocument): JournalDocument {
   let changed = false;
   const pages = journal.pages.map((page) => {
-    if (typeof page.text === "string" && HAS_SECRET.test(page.text)) {
-      changed = true;
-      return { ...page, text: stripSecretText(page.text) };
-    }
-    return page;
+    const projected = projectPageText(page);
+    if (projected !== page) changed = true;
+    return projected;
   });
   return changed ? { ...journal, pages } : journal;
 }
@@ -379,7 +408,7 @@ export function projectWorld(
           break;
         }
         case "macros":
-          kept.push(projectMacro(doc as MacroDocument));
+          kept.push(projectMacro(doc as MacroDocument, user));
           break;
         case "actors":
           kept.push(stripPrefabMarker(doc));
@@ -397,18 +426,32 @@ export function projectWorld(
 
 // ─── projectEnvelope ──────────────────────────────────────────────────────────
 
-function stripSecretsFromDiff(diff: Record<string, Json | null>): Record<string, Json | null> {
-  const out: Record<string, Json | null> = {};
+/** One page as a non-GM receives it: secrets out, link targets blanked (D-383). */
+function projectPageText(page: JournalPageDocument): JournalPageDocument {
+  if (typeof page.text !== "string") return page;
+  const text = maskJournalLinkTargets(stripSecretText(page.text));
+  return text === page.text ? page : { ...page, text };
+}
+
+/**
+ * D-383: a journal diff is projected before any resolver runs — a wholesale `pages` array
+ * (the panel's save shape) and a `text` leaf both carry page text, and an envelope-only
+ * path must not forward either raw. Returns the same object when nothing changed.
+ */
+function projectJournalDiff(diff: Record<string, Json | null>): Record<string, Json | null> {
   let changed = false;
+  const out: Record<string, Json | null> = {};
   for (const [key, value] of Object.entries(diff)) {
-    const path = key.startsWith("-=") ? key.slice(2) : key;
-    if (
-      path.split(".").pop() === "text" &&
-      typeof value === "string" &&
-      HAS_SECRET.test(value)
-    ) {
-      out[key] = stripSecretText(value);
-      changed = true;
+    const leaf = (key.startsWith("-=") ? key.slice(2) : key).split(".").pop();
+    if (leaf === "text" && typeof value === "string") {
+      const text = maskJournalLinkTargets(stripSecretText(value));
+      if (text !== value) changed = true;
+      out[key] = text;
+    } else if (leaf === "pages" && Array.isArray(value)) {
+      const pages = value.map((item) =>
+        item !== null && typeof item === "object" ? projectPageText(item as unknown as JournalPageDocument) : item);
+      if (pages.some((item, index) => item !== value[index])) changed = true;
+      out[key] = pages as unknown as Json;
     } else {
       out[key] = value;
     }
@@ -416,12 +459,14 @@ function stripSecretsFromDiff(diff: Record<string, Json | null>): Record<string,
   return changed ? out : diff;
 }
 
+
 function createVisible(
   user: PermissionUser,
   op: Extract<Op, { kind: "create" }>,
   resolver?: ProjectionResolver,
 ): Op | null {
   if (op.coll === "automations" || op.coll === "actionReceipts" || op.coll === "prefabs" || op.coll === "fxInstances") return null;
+  if (op.coll === "users") return op; // keep live membership/capabilities consistent with snapshot users
   if (op.coll === "macros" && !docVisibleTo(user, op.data)) return null;
   if (op.coll === "walls" || op.coll === "lights") return projectPrefabCreate(op); // §5/D-022
   // D-019 accepts creates without common fields; DocumentStore adds private ownership
@@ -465,7 +510,7 @@ function createVisible(
     return projected === null ? null : { ...op, data: projected as BaseDocument };
   }
   if (getEffectiveOwnership(user, data, parent) >= OWNERSHIP_LEVELS.LIMITED) {
-    if (op.coll === "macros") return { ...op, data: projectMacro(data as MacroDocument) };
+    if (op.coll === "macros") return { ...op, data: projectMacro(data as MacroDocument, user) };
     if (op.coll === "scenes") return { ...op, data: projectScene(user, data as SceneDocument) };
     if (op.coll === "journals") return { ...op, data: projectJournal(data as JournalDocument) };
     return projectPrefabCreate(op);
@@ -475,15 +520,53 @@ function createVisible(
   return op.parent !== undefined && parent === undefined ? projectPrefabCreate(op) : null;
 }
 
+/**
+ * D-381: an automation macro's binding names a private graph, so a partial diff must
+ * never carry it — not even to a caller that cannot resolve the document (envelope-only
+ * mode). Blanking the key is enough for a player replica, which never held a value.
+ */
+function stripMacroBindingDiff(
+  diff: Record<string, Json | null>,
+): Record<string, Json | null> {
+  const keys = Object.keys(diff).filter((key) =>
+    ["automation", "composite"].includes(key) || key.startsWith("automation.") ||
+    key.startsWith("composite.") || /^(?:-=)?playerAuthoring(?:\.|$)/.test(key));
+  if (keys.length === 0) return diff;
+  const safe = { ...diff };
+  for (const key of keys) safe[key] = null;
+  return safe;
+}
+
 function updateVisible(
   user: PermissionUser,
   op: Extract<Op, { kind: "update" }>,
   resolver?: ProjectionResolver,
 ): Op | null {
   if (op.ref.coll === "automations" || op.ref.coll === "actionReceipts" || op.ref.coll === "prefabs" || op.ref.coll === "fxInstances") return null;
+  if (op.ref.coll === "users") return op; // D-394: opt-in/revocation must reach the actual player's UI live
   if (op.ref.coll === "walls" || op.ref.coll === "lights") return projectPrefabDiff(op);
+  if (op.ref.coll === "macros") {
+    const stripped = stripMacroBindingDiff(op.diff);
+    if (stripped !== op.diff) op = { ...op, diff: stripped };
+  }
+  if (op.ref.coll === "pages" || op.ref.coll === "journals") {
+    const projected = projectJournalDiff(op.diff);
+    if (projected !== op.diff) op = { ...op, diff: projected };
+  }
   const doc = resolver?.resolve(op.ref);
-  if (!doc) return projectPrefabDiff(op); // envelope-only mode (D-023): host always passes a resolver
+  if (!doc) {
+    // D-394: without a live macro we cannot distinguish a chat command from private
+    // executable source. Fail closed on all source/policy paths (host always resolves).
+    if (op.ref.coll === "macros") {
+      const safe = { ...op.diff };
+      let changed = false;
+      for (const key of Object.keys(safe)) if (/^(?:-=)?(?:command|script|scriptState|sequence|summon|preset|fxItem|flags|system)(?:\.|$)/.test(key)) {
+        safe[key] = null; changed = true;
+      }
+      if (changed) op = { ...op, diff: safe };
+    }
+    return projectPrefabDiff(op);
+  }
   if (op.ref.coll === "macros" && !docVisibleTo(user, doc)) return null;
   const parent = op.ref.parent !== undefined ? resolver?.resolve(op.ref.parent) : undefined;
   if (op.ref.coll === "messages") {
@@ -504,21 +587,23 @@ function updateVisible(
   if ((op.ref.coll === "tiles" || op.ref.coll === "regions") && !docVisibleTo(user, doc, parent)) return null;
   if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
   if (op.ref.coll === "scenes") return projectSceneEmbedUpdate(user, op, doc as SceneDocument);
-  if (op.ref.coll === "macros" && (["script", "summon"].includes((doc as MacroDocument).kind) ||
-      Object.keys(op.diff).some((key) => ["kind", "script", "scriptState", "summon"].includes(key)))) {
-    const safe = projectMacro(doc as MacroDocument);
-    // A kind transition can leave a previous script's code in a client's replica;
-    // replace all macro-specific fields rather than forwarding a partial diff.
+  if (op.ref.coll === "macros" && ((doc as MacroDocument).playerAuthoring !== undefined ||
+      ["script", "summon", "automation", "composite"].includes((doc as MacroDocument).kind) ||
+      Object.keys(op.diff).some((key) => ["kind", "script", "scriptState", "summon", "automation", "composite"].includes(key) ||
+        /^(?:-=)?playerAuthoring(?:\.|$)/.test(key)))) {
+    const safe = projectMacro(doc as MacroDocument, user);
+    // A kind transition can leave a previous script's code — or a graph binding — in a
+    // client's replica; replace all macro-specific fields rather than forwarding a partial diff.
     return { ...op, diff: { name: safe.name, kind: safe.kind, command: safe.command,
       script: (safe.script as unknown as Json | undefined) ?? null, scriptState: null,
       sequence: (safe.sequence as unknown as Json | undefined) ?? null,
       summon: (safe.summon as unknown as Json | undefined) ?? null,
-      flags: safe.flags, system: safe.system, ownership: safe.ownership } };
+      automation: (safe.automation as unknown as Json | undefined) ?? null,
+      composite: (safe.composite as unknown as Json | undefined) ?? null,
+      flags: safe.flags, system: safe.system, ownership: safe.ownership,
+      playerAuthoring: safe.playerAuthoring as unknown as Json ?? null } };
   }
-  if (op.ref.coll === "pages" || op.ref.coll === "journals") {
-    const diff = stripSecretsFromDiff(op.diff);
-    if (diff !== op.diff) return { ...op, diff };
-  }
+
   if (op.ref.coll === "cells") {
     // D-271: a cell that is closed, or has just been closed, leaves this session's replica —
     // the same rewrite D-256 gives a pin that is hidden again.
@@ -590,6 +675,7 @@ function deleteVisible(
   resolver?: ProjectionResolver,
 ): Op | null {
   if (op.ref.coll === "automations" || op.ref.coll === "actionReceipts" || op.ref.coll === "prefabs" || op.ref.coll === "fxInstances") return null;
+  if (op.ref.coll === "users") return op;
   if (op.ref.coll === "walls" || op.ref.coll === "lights") return op;
   const doc = resolver?.resolve(op.ref);
   if (!doc) return op;

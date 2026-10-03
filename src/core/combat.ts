@@ -24,6 +24,74 @@ export interface CombatTransition {
   expired: Array<{ combatantId: string; effectId: string }>;
 }
 
+/**
+ * MATT exposes combat triggering as five separate kinds, and ArenaStar keeps them as five
+ * methods (the same decision the door increment made): a graph subscribes to exactly the
+ * changes it wants, `routeMethod`/method filters and the `{{method}}` template need no extra
+ * fields, and each change gets its own history entry. The names live here so the automation
+ * contract can never drift from the classifier below.
+ */
+export const COMBAT_TRIGGER_METHODS = [
+  "combatStart", "combatRound", "combatTurnStart", "combatTurnEnd", "combatEnd",
+] as const;
+export type CombatTriggerMethod = typeof COMBAT_TRIGGER_METHODS[number];
+
+export interface CombatTriggerEvent {
+  method: CombatTriggerMethod;
+  /** State the event describes: the after-state except for `combatTurnEnd`/`combatEnd`, which report the state the combatant left. */
+  round: number;
+  turn: number;
+  /**
+   * Single triggering-token context. MATT hands start/round a *list* of combatant tokens and the
+   * turn kinds the current combatant; this engine's event carries one optional token, so the
+   * current combatant at the moment of the event is exposed for every kind (null when the
+   * encounter has no combatants yet). Wider token sets stay a graph's own `Select` job.
+   */
+  tokenId: string | null;
+}
+
+/**
+ * Derive the combat trigger events a committed round/turn change represents, host-side from the
+ * authoritative before/after documents — never from a client claim. Follows `startCombat`/
+ * `nextTurn`/`endCombat`/`previousTurn` plus MATT's own hook semantics:
+ *   · a started encounter appearing (round ≥ 1)      → combatStart, combatRound, combatTurnStart
+ *   · round 0 → ≥1                                   → combatStart, combatRound, combatTurnStart
+ *   · round advanced while running                   → combatTurnEnd, combatRound, combatTurnStart
+ *   · turn advanced within a round                   → combatTurnEnd, combatTurnStart
+ *   · a turn/round stepped back (previousTurn)       → combatTurnStart only
+ *   · a running encounter reset to round 0 or deleted→ combatEnd
+ * Combatant-only edits, same-value updates and unstarted (round 0) edits are not events.
+ */
+export function combatTriggerEvents(
+  before: CombatDocument | undefined,
+  after: CombatDocument | undefined,
+): CombatTriggerEvent[] {
+  const made = (combat: CombatDocument, method: CombatTriggerMethod): CombatTriggerEvent =>
+    ({ method, round: combat.round, turn: combat.turn,
+      tokenId: currentCombatant(combat)?.tokenId ?? null });
+  const turnStart = (combat: CombatDocument): CombatTriggerEvent[] =>
+    currentCombatant(combat) ? [made(combat, "combatTurnStart")] : [];
+  /** A new encounter begins: MATT fires combatstart, round and turn for round 1 / turn 0. */
+  const begun = (combat: CombatDocument): CombatTriggerEvent[] => [
+    made(combat, "combatStart"), made(combat, "combatRound"), ...turnStart(combat),
+  ];
+  // deleteCombat fires combatend — only for an encounter that had actually started.
+  if (!after) return before && before.round >= 1 ? [made(before, "combatEnd")] : [];
+  // The tracker's Start button creates the document already at round 1.
+  if (!before) return after.round >= 1 ? begun(after) : [];
+  if (before.round >= 1 && after.round === 0) return [made(before, "combatEnd")];
+  if (after.round < 1) return [];
+  if (before.round < 1) return begun(after);
+  if (after.round > before.round)
+    return [made(before, "combatTurnEnd"), made(after, "combatRound"), ...turnStart(after)];
+  // A jump back onto round 1 / turn 0 is a restart, which MATT also reports as combatstart.
+  if (after.round === 1 && after.turn === 0 && before.round > 1) return begun(after);
+  if (after.round < before.round) return turnStart(after);
+  if (after.turn === before.turn) return [];
+  return after.turn > before.turn
+    ? [made(before, "combatTurnEnd"), ...turnStart(after)] : turnStart(after);
+}
+
 /** Sort order: initiative desc (null last), defeated always last, stable. */
 export function sortCombatants(combatants: readonly CombatantDocument[]): CombatantDocument[] {
   return [...combatants].sort((a, b) => {

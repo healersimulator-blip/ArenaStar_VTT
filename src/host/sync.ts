@@ -27,13 +27,19 @@ import {
   type Role,
   type UserDocument,
 } from "../core/documents";
+import { getEffectiveOwnership } from "../core/permissions";
+import { journalLinks, visibleJournalLinks, type JournalTileLink } from "../core/journalLinks";
 import type {
   ActorDocument,
+  CombatDocument,
   DocRef,
+  JournalDocument,
+  JournalPageDocument,
   Json,
   SceneDocument,
   TileDocument,
   TokenDocument,
+  WallDocument,
 } from "../core/documents";
 import type { Op, OpEnvelope } from "../core/ops";
 import type {
@@ -48,6 +54,9 @@ import type {
   SummonPlaceMsg,
   SummonDismissMsg,
   SummonResultMsg,
+  JournalTriggerMsg,
+  MacroInvokeMsg,
+  MacroSaveMsg,
   MacroRequestMsg,
   MacroResultMsg,
   FxRequestMsg,
@@ -114,12 +123,22 @@ import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
 import { fxAudienceAllows, fxSectionsForViewer, resolveFxSequence, validateFxSequence,
   type FxAudience } from "../core/fx";
 import type { ResolvedFxSection } from "../core/fx";
-import { automationImageError, pinnedSelectorError, planAutomation, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
-  type AutomationContinuation, type AutomationEvent, type AutomationMethod, type AutomationPointerMethod, type AutomationOutcome,
+import { combatTriggerEvents } from "../core/combat";
+import { readWorldClock } from "../packages/pf1e/worldClock";
+import { automationImageError, doorTransitionMethod, pinnedSelectorError, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
+  type AutomationContinuation, type AutomationEvent, type AutomationMethod, type AutomationPointerMethod, type AutomationOutcome, type AutomationResult,
   type AutomationScriptResult } from "../core/automation";
 import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_COLLECTIONS, validatePrefab } from "../core/prefabs";
 import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
 import { fxPresetDocumentError, macroStrayPresetError } from "../core/fxPresets";
+import { MACRO_AUTOMATION_METHOD, macroAutomationDocumentError, macroAutomationGraphId,
+  macroAutomationInputs, macroStrayAutomationError } from "../core/macroAutomation";
+import { macroCompositeDocumentError, macroCompositeMacroIds,
+  macroStrayCompositeError } from "../core/macroComposite";
+import { validateMacroArgs, type MacroArgs } from "../core/macroArgs";
+import { macroItemReadable } from "../core/macroItems";
+import { buildPlayerMacro, canSaveWorldMacros, ownsPlayerMacro, playerMacroAuthoring, PLAYER_MACRO_LIMITS,
+  validatePlayerMacroDraft } from "../core/playerMacros";
 import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError } from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
@@ -161,6 +180,15 @@ import { frameMessage, deframeMessage, channelFor } from "../net/frame";
 import { verifyHello } from "../net/identity";
 import { evaluateFormula, validateFormula } from "../dice";
 import type { RngFn } from "../dice";
+
+/** MC-01 (D-386): a macro fire whose live state has already been validated. */
+export interface MacroFireTarget {
+  graph: AutomationDocument;
+  scene: SceneDocument;
+  tile: TileDocument;
+  /** MC-02: the caller's validated invocation arguments (declared keys only). */
+  args?: MacroArgs;
+}
 
 export interface SessionUser extends PermissionUser {
   name: string;
@@ -967,6 +995,15 @@ export class HostSync {
       case "macro.request":
         void this.handleMacroRequest(session, msg);
         return;
+      case "macros.invoke":
+        this.handleMacroInvoke(session, msg);
+        return;
+      case "macros.save":
+        this.handleMacroSave(session, msg);
+        return;
+      case "journal.trigger":
+        this.handleJournalTrigger(session, msg);
+        return;
       // Host→client kinds and later-milestone kinds are never accepted here:
       case "welcome":
       case "snapshot":
@@ -1168,6 +1205,19 @@ export class HostSync {
       snapshotSeq: this.catchUpSeq(session, hello),
       ...(this.simInfo !== null ? { sim: this.simInfo } : {}),
     });
+    // A viewer loading the active scene it does not already hold hears `sceneLoad` — the
+    // per-player half of MATT's scene trigger (its wiki: "triggers for each player loading
+    // in"). Fired after the snapshot so the graph's own commits arrive as later ops; a scene
+    // activation stays the separate `sceneChange` event, so the two never coincide.
+    const loaded = this.activeSceneDocument();
+    if (!loaded) {
+      this.loadedSceneByUser.delete(user.id);
+      return;
+    }
+    if (this.loadedSceneByUser.get(user.id) !== loaded._id) {
+      this.loadedSceneByUser.set(user.id, loaded._id);
+      this.fireSceneGraphs(loaded, "sceneLoad", user.id);
+    }
   }
 
   /**
@@ -1783,6 +1833,45 @@ export class HostSync {
         return `${step.id}: Move destination entity is unavailable`;
       if (step.kind === "sceneBackground" && step.targetSceneId && !sceneById(step.targetSceneId))
         return `${step.id}: Scene Background target scene is unavailable`;
+      // TR-12: a redirect names its graph, so the reference can be checked now — the
+      // target must exist, validate, share this scene and own a real anchor. The invoked
+      // method is only knowable at trigger time when it is inherited.
+      if (step.kind === "redirect") {
+        if (step.automationId === doc._id) return `${step.id}: a redirect cannot target its own graph`;
+        const target = this.store.get("automations", step.automationId) as AutomationDocument | undefined;
+        const targetChecked = target ? validateAutomation(target.definition) : null;
+        if (!target || !targetChecked?.ok)
+          return `${step.id}: redirect target is not a saved graph in this world`;
+        if (targetChecked.definition.sceneId !== checked.definition.sceneId)
+          return `${step.id}: a redirect fires a graph in this scene only`;
+        const targetScene = sceneById(targetChecked.definition.sceneId);
+        if (!targetScene || !automationSourceTile(targetScene, targetChecked.definition.tileId,
+          targetChecked.definition.sourceKind)) return `${step.id}: redirect target has no anchor in this scene`;
+        if (step.method === "manual" && !targetChecked.definition.methods.includes("manual"))
+          return `${step.id}: redirect target does not accept the manual method`;
+      }
+      // MC-02: a Call Macro step names a saved macro, so the reference is checkable where it
+      // is authored — and the called graph must already pass the same rules the plan will
+      // re-apply (this scene, a real anchor, `manual`).
+      if (step.kind === "callMacro") {
+        const macro = this.store.get("macros", step.macroId) as MacroDocument | undefined;
+        const graphId = macro?.kind === "automation" ? macroAutomationGraphId(macro) : null;
+        const target = graphId ? this.store.get("automations", graphId) as AutomationDocument | undefined : undefined;
+        const targetChecked = target ? validateAutomation(target.definition) : null;
+        if (!macro || !graphId || !target || !targetChecked?.ok)
+          return `${step.id}: called macro is not a saved automation macro in this world`;
+        if (graphId === doc._id) return `${step.id}: a called macro cannot call its own graph`;
+        if (targetChecked.definition.sceneId !== checked.definition.sceneId)
+          return `${step.id}: a called macro fires a graph in this scene only`;
+        const targetScene = sceneById(targetChecked.definition.sceneId);
+        if (!targetScene || !automationSourceTile(targetScene, targetChecked.definition.tileId,
+          targetChecked.definition.sourceKind)) return `${step.id}: called macro has no anchor in this scene`;
+        if (!targetChecked.definition.methods.includes("manual"))
+          return `${step.id}: called macro does not accept the manual method`;
+        const declared = new Set(macroAutomationInputs(macro).map((field) => field.name));
+        const stray = Object.keys(step.args ?? {}).find((name) => !declared.has(name));
+        if (stray) return `${step.id}: the called macro does not declare "${stray}"`;
+      }
       if (step.kind === "sceneBackground" || step.kind === "tileImage") {
         const images = step.kind === "tileImage" && step.images ? step.images : step.image ? [step.image] : [];
         for (const image of images) {
@@ -1933,6 +2022,26 @@ export class HostSync {
             const error = fxPresetDocumentError(op.data as MacroDocument);
             if (error) return { ok: false, reason: "invalid_schema", error };
           }
+          if (op.coll === "macros" && (op.data as MacroDocument).kind === "automation") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish automations" };
+            const error = macroAutomationDocumentError(op.data as MacroDocument) ??
+              this.macroAutomationGraphError(op.data as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
+          if (op.coll === "macros" && (op.data as MacroDocument).kind === "composite") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish composites" };
+            const error = macroCompositeDocumentError(op.data as MacroDocument) ??
+              this.macroCompositeChildrenError(op.data as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
+          const strayAutomation = op.coll === "macros"
+            ? macroStrayAutomationError(op.data as MacroDocument) : null;
+          if (strayAutomation) return { ok: false, reason: "invalid_schema", error: strayAutomation };
+          const strayComposite = op.coll === "macros"
+            ? macroStrayCompositeError(op.data as MacroDocument) : null;
+          if (strayComposite) return { ok: false, reason: "invalid_schema", error: strayComposite };
           if (op.coll === "macros" && (op.data as MacroDocument).kind === "summon") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
               return { ok: false, reason: "forbidden", error: "only GMs publish summons" };
@@ -1971,6 +2080,22 @@ export class HostSync {
               error: `update ${op.ref.coll}/${op.ref.id}`,
             };
           }
+          // D-394: a self-owned imported User cannot promote its role to bypass the GM opt-in.
+          if (op.ref.coll === "users" && user.role !== "GM" && user.role !== "ASSISTANT" &&
+              Object.keys(op.diff).some((key) => /^(?:-=)?role(?:\.|$)/.test(key)))
+            return { ok: false, reason: "forbidden", error: "user roles are GM-controlled" };
+          // D-394: permission and author metadata are not caller-editable via raw intents.
+          if (op.ref.coll === "users" && Object.keys(op.diff).some((key) =>
+              /^(?:-=)?canSaveMacros(?:\.|$)/.test(key))) {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "macro-saving permission is GM-controlled" };
+            if (op.diff.canSaveMacros !== undefined && typeof op.diff.canSaveMacros !== "boolean")
+              return { ok: false, reason: "invalid_schema", error: "macro-saving permission must be boolean" };
+          }
+          if (op.ref.coll === "macros" && user.role !== "GM" && user.role !== "ASSISTANT" &&
+              ((doc as MacroDocument).playerAuthoring !== undefined || Object.keys(op.diff).some((key) =>
+                /^(?:-=)?playerAuthoring(?:\.|$)/.test(key))))
+            return { ok: false, reason: "forbidden", error: "personal macro changes use the authorized save path" };
           if (op.ref.coll === "tiles" &&
               (Object.hasOwn(op.diff, "triggerZone") || Object.hasOwn(op.diff, "triggerElevation"))) {
             const shapeError = tileTriggerZoneError(op.diff.triggerZone) ?? tileTriggerElevationError(op.diff.triggerElevation);
@@ -2014,9 +2139,9 @@ export class HostSync {
             return { ok: false, reason: "forbidden", error: "only GMs edit active zones" };
           if (op.ref.coll === "prefabs" && user.role !== "GM" && user.role !== "ASSISTANT")
             return { ok: false, reason: "forbidden", error: "only GMs edit prefabs" };
-          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset"].includes((doc as MacroDocument).kind) &&
+          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset", "automation"].includes((doc as MacroDocument).kind) &&
               user.role !== "GM" && user.role !== "ASSISTANT") {
-            return { ok: false, reason: "forbidden", error: "only GMs edit FX/script/summon macros" };
+            return { ok: false, reason: "forbidden", error: "only GMs edit FX/script/summon/automation macros" };
           }
           if (op.ref.coll === "macros" && Object.keys(op.diff).some((key) => key === "scriptState" || key.startsWith("scriptState.")))
             return { ok: false, reason: "forbidden", error: "execution history is host-owned" };
@@ -2060,6 +2185,26 @@ export class HostSync {
             const error = fxPresetDocumentError(dry.value as MacroDocument);
             if (error) return { ok: false, reason: "invalid_schema", error };
           }
+          if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "automation") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish automations" };
+            const error = macroAutomationDocumentError(dry.value as MacroDocument) ??
+              this.macroAutomationGraphError(dry.value as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
+          if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "composite") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish composites" };
+            const error = macroCompositeDocumentError(dry.value as MacroDocument) ??
+              this.macroCompositeChildrenError(dry.value as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
+          const strayAutomationUpdate = op.ref.coll === "macros"
+            ? macroStrayAutomationError(dry.value as MacroDocument) : null;
+          if (strayAutomationUpdate) return { ok: false, reason: "invalid_schema", error: strayAutomationUpdate };
+          const strayCompositeUpdate = op.ref.coll === "macros"
+            ? macroStrayCompositeError(dry.value as MacroDocument) : null;
+          if (strayCompositeUpdate) return { ok: false, reason: "invalid_schema", error: strayCompositeUpdate };
           if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "summon") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
               return { ok: false, reason: "forbidden", error: "only GMs publish summons" };
@@ -2082,6 +2227,9 @@ export class HostSync {
               reason: "invalid_schema",
               error: `delete: target not found`,
             };
+          if (op.ref.coll === "macros" && (doc as MacroDocument).playerAuthoring !== undefined &&
+              user.role !== "GM" && user.role !== "ASSISTANT")
+            return { ok: false, reason: "forbidden", error: "personal macro deletion uses the authorized save path" };
           if (op.ref.coll === "automations" && user.role !== "GM" && user.role !== "ASSISTANT")
             return { ok: false, reason: "forbidden", error: "only GMs delete active zones" };
           if (op.ref.coll === "prefabs" && user.role !== "GM" && user.role !== "ASSISTANT")
@@ -2089,9 +2237,9 @@ export class HostSync {
           if (PREFAB_COLLECTIONS.includes(op.ref.coll as (typeof PREFAB_COLLECTIONS)[number]) &&
               doc.flags?.prefab !== undefined && user.role !== "GM" && user.role !== "ASSISTANT")
             return { ok: false, reason: "forbidden", error: "only GMs delete attached prefab parts" };
-          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset"].includes((doc as MacroDocument).kind) &&
+          if (op.ref.coll === "macros" && ["sequence", "script", "summon", "fxPreset", "automation"].includes((doc as MacroDocument).kind) &&
               user.role !== "GM" && user.role !== "ASSISTANT") {
-            return { ok: false, reason: "forbidden", error: "only GMs delete FX/script/summon macros" };
+            return { ok: false, reason: "forbidden", error: "only GMs delete FX/script/summon/automation macros" };
           }
           const parent =
             op.ref.parent !== undefined
@@ -2186,6 +2334,50 @@ export class HostSync {
           ...(before ? { before } : {}) });
       }
     }
+    // A door change is a document update on a wall, exactly like any other edit. Capture the
+    // pre-image (0 closed / 1 open / 2 locked) here so the post-commit comparison — never a
+    // client claim — decides which of the four door events actually happened.
+    const doors = new Map<string, { sceneId: string; wallId: string; before: number }>();
+    for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
+      if (ref.coll !== "walls" || ref.parent?.coll !== "scenes" ||
+          op.kind !== "update" || !Object.hasOwn(op.diff, "door")) continue;
+      const before = this.store.resolve(op.ref) as WallDocument | undefined;
+      if (!before) continue;
+      const key = `${ref.parent.id}\u0000${ref.id}`;
+      if (!doors.has(key)) doors.set(key, { sceneId: ref.parent.id, wallId: ref.id, before: before.door });
+    }
+    // Combat changes are round/turn edits on an encounter document. The tracker's push()
+    // always sends both fields, so only the committed pre-image comparison (never the
+    // presence of a diff key) can tell which of MATT's five combat kinds actually happened.
+    const combats = new Map<string, { combatId: string; before?: CombatDocument }>();
+    for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
+      if (ref.coll !== "combats") continue;
+      if (op.kind === "update" &&
+          !["round", "turn", "combatants"].some((key) => Object.hasOwn(op.diff, key))) continue;
+      const before = op.kind === "create" ? undefined : this.store.resolve(op.ref) as CombatDocument | undefined;
+      if (!before && op.kind !== "create") continue;
+      if (!combats.has(ref.id)) combats.set(ref.id, { combatId: ref.id, ...(before ? { before } : {}) });
+    }
+    // Ambient darkness is a committed scene value (Settings → Ambient darkness, or a graph's own
+    // Scene Lighting action) and the world clock is a committed settings value. Capture both
+    // pre-images here so a real change — never a client claim or a no-op write — decides.
+    const lighting = new Map<string, { sceneId: string; before: number }>();
+    for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
+      if (ref.coll !== "scenes" || op.kind !== "update" || !Object.hasOwn(op.diff, "darkness")) continue;
+      const before = this.store.resolve(op.ref) as SceneDocument | undefined;
+      if (!before || lighting.has(ref.id)) continue;
+      lighting.set(ref.id, { sceneId: ref.id, before: before.darkness });
+    }
+    const clockTouched = ops.some((op) => {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
+      if (ref.coll !== "settings") return false;
+      if (op.kind !== "update") return true;
+      return Object.keys(op.diff).some((key) => key === "system" || key.startsWith("system.clockSeconds"));
+    });
+    const clockBefore = clockTouched ? readWorldClock(this.store.getAll("settings")) : null;
     // Scene activation is a document update, not a separate protocol message. Compare the
     // authoritative active scene around this envelope so retries, snapshots and client-provided
     // trigger claims cannot synthesize scene-change events.
@@ -2230,8 +2422,75 @@ export class HostSync {
     }
     if (activeSceneBefore && sceneActivationCandidate) {
       const activeSceneAfter = this.activeSceneDocument();
-      if (activeSceneAfter && activeSceneAfter._id !== activeSceneBefore._id)
+      if (activeSceneAfter && activeSceneAfter._id !== activeSceneBefore._id) {
+        // Every connected viewer follows the activation, so record the scene they now hold:
+        // the commit itself is the `sceneChange` event, and a later reconnect must not replay
+        // `sceneLoad` for a scene they already loaded.
+        for (const session of this.sessions.values()) {
+          if (session.user) this.loadedSceneByUser.set(session.user.id, activeSceneAfter._id);
+        }
         this.fireSceneChangeAutomations(activeSceneAfter, by);
+      }
+    }
+    if (doors.size > 0 && !restoring) {
+      if (this.doorAutomationDepth < HostSync.DOOR_AUTOMATION_DEPTH) {
+        this.doorAutomationDepth++;
+        try {
+          this.fireDoorAutomations([...doors.values()], by);
+        } finally {
+          this.doorAutomationDepth--;
+        }
+      }
+    }
+    if (combats.size > 0 && !restoring) {
+      const changes = [...combats.values()].flatMap(({ combatId, before }) => {
+        const after = this.store.get("combats", combatId) as CombatDocument | undefined;
+        const events = combatTriggerEvents(before, after);
+        if (!events.length) return [];
+        const sceneId = this.sceneIdForCombat(combatId, after ?? before);
+        return sceneId ? [{ sceneId, events }] : [];
+      });
+      if (changes.length > 0 && this.combatAutomationDepth < HostSync.COMBAT_AUTOMATION_DEPTH) {
+        this.combatAutomationDepth++;
+        try {
+          for (const change of changes) {
+            const scene = this.store.get("scenes", change.sceneId) as SceneDocument | undefined;
+            if (!scene) continue;
+            for (const event of change.events)
+              this.fireSceneGraphs(scene, event.method, by, event.tokenId ?? undefined);
+          }
+        } finally {
+          this.combatAutomationDepth--;
+        }
+      }
+    }
+    // Lighting and time share MATT's scene-wide scope and one reentry budget: a graph's own Scene
+    // Lighting or Game Time action commits another environment change, whose scene graphs may do
+    // the same again.
+    const lightingChanges = [...lighting.values()].filter(({ sceneId, before }) => {
+      const scene = this.store.get("scenes", sceneId) as SceneDocument | undefined;
+      return !!scene && scene.darkness !== before;
+    });
+    if ((lightingChanges.length > 0 || clockBefore !== null) && !restoring) {
+      if (this.environmentAutomationDepth >= HostSync.ENVIRONMENT_AUTOMATION_DEPTH) {
+        // Bounded: the reentrant chain stops committing further trigger work at this depth.
+      } else {
+        this.environmentAutomationDepth++;
+        try {
+          for (const change of lightingChanges) {
+            const scene = this.store.get("scenes", change.sceneId) as SceneDocument | undefined;
+            if (scene) this.fireSceneGraphs(scene, "lightingChange", by);
+          }
+          if (clockBefore !== null && readWorldClock(this.store.getAll("settings")) !== clockBefore) {
+            // MATT's time trigger watches the scene the table is looking at; the host's
+            // equivalent is the active scene, which is also what a fresh player loads.
+            const active = this.activeSceneDocument();
+            if (active) this.fireSceneGraphs(active, "timeChange", by);
+          }
+        } finally {
+          this.environmentAutomationDepth--;
+        }
+      }
     }
     // F03: prune expired pending rolls (T+2 window) when a combat round/turn advanced
     try {
@@ -2545,6 +2804,398 @@ export class HostSync {
         this.send(session, { ...base, detail: ok ? "Script completed" : "Script failed" });
       }
     }
+  }
+
+  /**
+   * TR-12 / MC-01 (D-381): run a saved automation macro.
+   *
+   * The client names a **macro**, never a graph, so a player can hold a callable
+   * directory entry without ever holding a private graph id. The host resolves the
+   * GM-authored binding against live state and applies the same publication rules a
+   * direct trigger obeys: the definition must still validate, the graph must still
+   * subscribe to `manual`, a region anchor and the `playerRunnable` gate decide
+   * whether a player may ask, and a player must be looking at the graph's own scene.
+   * Success and refusal both answer with `macro.result`; a refusal never tells a
+   * player whether the graph exists, what it is called, or why it said no.
+   *
+   * MC-01 (D-386) adds the `composite` kind: a macro whose binding is an ordered list of
+   * automation macros. The children are resolved here, against live state, with the very
+   * same rules and under the caller's own identity — a composite is a convenience, never
+   * an authority of its own. All children are pre-flighted before the first one fires, so
+   * a caller who may not run one of them gets nothing at all.
+   */
+  /** D-394: personal authoring is one authenticated, undoable world operation, never a grant. */
+  private handleMacroSave(session: Session, msg: MacroSaveMsg): void {
+    const caller = session.user;
+    if (!caller || typeof msg.requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.macroId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.macroId)) return;
+    const base = { kind: "macro.result" as const, requestId: msg.requestId, macroId: msg.macroId, callerId: caller.id };
+    if (!session.intentBucket.tryRemove()) {
+      this.send(session, { ...base, ok: false, detail: "macro saving rate-limited" }); return;
+    }
+    const key = `${caller.id}\u0000${msg.requestId}`;
+    const prior = this.seenMacroSaves.get(key);
+    if (prior) { this.send(session, prior); return; }
+    const reply = (ok: boolean, detail: string): void => {
+      const result = { ...base, ok, detail };
+      this.seenMacroSaves.set(key, result);
+      if (this.seenMacroSaves.size > 256) {
+        const first = this.seenMacroSaves.keys().next().value;
+        if (first) this.seenMacroSaves.delete(first);
+      }
+      this.send(session, result);
+    };
+    if (!["save", "delete"].includes(msg.action) || Object.keys(msg).some((field) =>
+        !["kind", "requestId", "macroId", "action", ...(msg.action === "save" ? ["draft"] : [])].includes(field))) {
+      reply(false, "invalid personal macro request"); return;
+    }
+    if (!canSaveWorldMacros(caller, this.store.getAll("users"))) {
+      reply(false, "GM has not enabled world macro saving for you"); return;
+    }
+    const previous = this.store.get("macros", msg.macroId) as MacroDocument | undefined;
+    // Existing foreign, private, revoked and unsupported-kind refs are indistinguishable.
+    if (previous && !ownsPlayerMacro(caller, previous) || msg.action === "delete" && !previous) {
+      reply(false, "personal macro unavailable"); return;
+    }
+    let ops: Op[];
+    if (msg.action === "delete") ops = [{ kind: "delete", ref: { coll: "macros", id: msg.macroId } }];
+    else {
+      const checked = validatePlayerMacroDraft(msg.draft);
+      if (!checked.ok) { reply(false, checked.error); return; }
+      if (!previous && this.store.getAll("macros").filter((macro) =>
+          playerMacroAuthoring(macro)?.userId === caller.id).length >= PLAYER_MACRO_LIMITS.perUser) {
+        reply(false, "limit of 64 personal macros per player"); return;
+      }
+      if (checked.draft.kind === "script") {
+        const scene = this.store.get("scenes", checked.draft.sceneId);
+        if (!scene || !docVisibleTo(caller, scene)) { reply(false, "script draft scene unavailable"); return; }
+      }
+      const doc = buildPlayerMacro(msg.macroId, caller.id, checked.draft, previous);
+      if (previous) {
+        // Explicit clears prevent a kind switch from retaining reviewed source/policy/bindings.
+        ops = [{ kind: "update", ref: { coll: "macros", id: msg.macroId }, diff: {
+          kind: doc.kind, name: doc.name, command: doc.command, ownership: doc.ownership,
+          flags: doc.flags, system: doc.system, playerAuthoring: doc.playerAuthoring as unknown as Json,
+          script: doc.script as unknown as Json ?? null, scriptState: doc.scriptState as unknown as Json ?? null,
+          sequence: null, summon: null, preset: null, fxItem: null, automation: null, composite: null,
+        } }];
+      } else ops = [{ kind: "create", coll: "macros", data: doc }];
+    }
+    const committed = this.commitOps(ops, caller.id, `macro-save-${msg.requestId}`);
+    reply(committed.ok, committed.ok ? (msg.action === "delete" ? "Deleted from GM world" : "Saved in GM world — included in next world export")
+      : "world macro save failed");
+  }
+
+  private handleMacroInvoke(session: Session, msg: MacroInvokeMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "macro invocation rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.macroId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.macroId) ||
+        (msg.args !== undefined && (typeof msg.args !== "object" || msg.args === null || Array.isArray(msg.args))) ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "macroId", "args"].includes(key))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid automation macro request");
+      return;
+    }
+    const requestKey = `${caller.id}:${msg.requestId}`;
+    if (this.seenMacroInvokes.has(requestKey)) return;
+    this.seenMacroInvokes.set(requestKey, this.now());
+    if (this.seenMacroInvokes.size > 256) {
+      const first = this.seenMacroInvokes.keys().next().value;
+      if (first) this.seenMacroInvokes.delete(first);
+    }
+    const isGm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const macro = this.store.get("macros", msg.macroId) as MacroDocument | undefined;
+    // Same predicate the projection used to hand this macro out in the first place.
+    const delivered = macro ? docVisibleTo(caller, macro) : false;
+    const base = { kind: "macro.result" as const, requestId: msg.requestId,
+      macroId: msg.macroId, callerId: caller.id };
+    const refused = (detail: string): void => {
+      this.send(session, { ...base, ok: false,
+        detail: isGm ? detail : "automation macro unavailable" });
+    };
+    if (!macro || !delivered) {
+      refused("macro unavailable");
+      return;
+    }
+    // MC-01 (D-386): a composite runs its children in order. Every child is pre-flighted
+    // first, so a composite either fires all of them or none — and nothing at all when the
+    // caller may not run one of them.
+    if (macro.kind === "composite") {
+      const childIds = macroCompositeMacroIds(macro);
+      if (!childIds) {
+        refused("macro unavailable");
+        return;
+      }
+      if (msg.args && Object.keys(msg.args).length > 0) {
+        // A composite has no declared schema of its own, so it accepts no arguments —
+        // a child that wants inputs is called directly.
+        refused("a composite macro takes no arguments");
+        return;
+      }
+      const children: Array<{ macro: MacroDocument; target: MacroFireTarget }> = [];
+      for (const [index, childId] of childIds.entries()) {
+        const child = this.store.get("macros", childId) as MacroDocument | undefined;
+        const resolved = child ? this.resolveMacroFireTarget(caller, child, isGm) : null;
+        if (!resolved) {
+          refused(`composite macro ${index + 1} is not published for this caller`);
+          return;
+        }
+        children.push({ macro: child as MacroDocument, target: resolved });
+      }
+      for (const [index, child] of children.entries()) {
+        const fired = this.fireMacroTarget(caller, child.target);
+        if (!fired.ok) {
+          // Earlier children already committed; say so instead of pretending nothing ran.
+          this.send(session, { ...base, ok: false,
+            detail: isGm
+              ? `Composite stopped at macro ${index + 1} of ${children.length}: ${fired.error}`
+              : "Automation failed" });
+          return;
+        }
+      }
+      this.send(session, { ...base, ok: true,
+        detail: isGm ? `Fired ${macro.name} (${children.length} macro(s))` : "Automation fired" });
+      return;
+    }
+    const target = this.resolveMacroFireTarget(caller, macro, isGm);
+    if (!target) {
+      refused(this.macroFireTargetError(macro));
+      return;
+    }
+    // MC-02: the caller's arguments are validated against the macro's own declared schema,
+    // with the target scene's live visibility for a `token` input and the caller's own read
+    // access for an `actor` one (D-388), exact world/parent item reads (D-393) — spelled out or defaulted
+    // from the caller's selection. An undeclared key, a wrong type or an unreadable
+    // reference never reaches the graph.
+    const checkedArgs = validateMacroArgs(msg.args, macroAutomationInputs(macro),
+      (type, id) => type === "token"
+        ? this.tokenVisibleTo(caller, target.scene._id, id)
+        : type === "item" ? macroItemReadable(this.store.world, caller, id)
+        : this.referenceVisibleTo(caller, id));
+    if (!checkedArgs.ok) {
+      refused(checkedArgs.error);
+      return;
+    }
+    if (Object.keys(checkedArgs.args).length > 0) target.args = checkedArgs.args;
+    const fired = this.fireMacroTarget(caller, target);
+    if (!fired.ok) {
+      refused(fired.error);
+      return;
+    }
+    // MC-02: the value the graph returned. It is private to the invoker — never a chat
+    // message and never sent to another session — and a `gm`-audience value is withheld
+    // from a non-GM invoker entirely.
+    const returned = fired.result && (fired.result.audience === "caller" || isGm) ? fired.result : undefined;
+    // The graph's own name is GM-private (players never receive the automations
+    // collection), so the success line stays generic for a player.
+    this.send(session, { ...base, ok: true,
+      detail: isGm ? `Fired ${target.graph.name}` : "Automation fired",
+      ...(returned ? { result: returned.value } : {}) });
+  }
+
+  /**
+   * MC-01 (D-386): everything a fire needs, already validated against live state.
+   * `null` means "this caller may not run this macro here" — the caller of this helper
+   * decides how much of the reason the requester may hear.
+   */
+  private resolveMacroFireTarget(
+    caller: SessionUser, macro: MacroDocument, isGm: boolean,
+  ): MacroFireTarget | null {
+    if (macro.kind !== "automation") return null;
+    const graphId = macroAutomationGraphId(macro);
+    const graph = graphId
+      ? (this.store.get("automations", graphId) as AutomationDocument | undefined)
+      : undefined;
+    const checked = graph ? validateAutomation(graph.definition) : null;
+    const definition = checked?.ok ? checked.definition : null;
+    const scene = definition
+      ? (this.store.get("scenes", definition.sceneId) as SceneDocument | undefined)
+      : undefined;
+    const tile = scene && definition
+      ? automationSourceTile(scene, definition.tileId, definition.sourceKind)
+      : undefined;
+    if (!graph || !definition || !scene || !tile) return null;
+    if (!definition.methods.includes(MACRO_AUTOMATION_METHOD)) return null;
+    // A macro grants no authority of its own: it is a second way to ask for an
+    // already-published graph, so the click rules apply unchanged, plus the player's
+    // own loaded scene (a macro cannot reach into a scene they are not looking at).
+    const playerAllowed = definition.sourceKind !== "region" &&
+      definition.gates?.playerRunnable === true &&
+      this.loadedSceneByUser.get(caller.id) === scene._id &&
+      can(caller, "read", tile, "tiles", { parent: scene }) && docVisibleTo(caller, tile, scene);
+    if (!isGm && (!playerAllowed || !docVisibleTo(caller, macro))) return null;
+    return { graph, scene, tile };
+  }
+
+  /** The GM-facing reason an automation macro is unavailable (never sent to a player). */
+  private macroFireTargetError(macro: MacroDocument): string {
+    if (macro.kind !== "automation") return "macro unavailable";
+    const graphId = macroAutomationGraphId(macro);
+    const graph = graphId
+      ? (this.store.get("automations", graphId) as AutomationDocument | undefined)
+      : undefined;
+    const checked = graph ? validateAutomation(graph.definition) : null;
+    // A graph that is gone or no longer a valid definition reads exactly as D-381 read it.
+    if (!graph || !checked?.ok) return "macro unavailable";
+    if (!checked.definition.methods.includes(MACRO_AUTOMATION_METHOD))
+      return "macro is not published for manual invocation";
+    return "macro is not published for this caller";
+  }
+
+  /**
+   * MC-01 (D-386): the live authoring gate for a composite. Every child must be a
+   * committed automation macro in this world that could run on `manual` with a real
+   * anchor, the list has no duplicates, and a composite never contains itself or
+   * another composite (recursion is MC-02's subject).
+   */
+  private macroCompositeChildrenError(doc: MacroDocument): string | null {
+    const childIds = macroCompositeMacroIds(doc);
+    if (!childIds) return "a composite macro needs a bounded list of macro ids";
+    for (const [index, childId] of childIds.entries()) {
+      if (childId === doc._id) return "a composite macro cannot contain itself";
+      const child = this.store.get("macros", childId) as MacroDocument | undefined;
+      if (!child) return `composite macro ${index + 1} does not exist in this world`;
+      if (child.kind === "composite")
+        return "a composite macro cannot contain another composite";
+      if (child.kind !== "automation")
+        return `composite macro ${index + 1} is not an automation macro`;
+      const error = macroAutomationDocumentError(child) ?? this.macroAutomationGraphError(child);
+      if (error) return `composite macro ${index + 1} cannot run: ${error}`;
+    }
+    return null;
+  }
+
+  /**
+   * MC-02: a `token` argument is visible when the caller's **own projected view** of that
+   * scene holds the token — the same predicate the reviewed-script path uses for its inputs.
+   */
+  /** D-388: `actor` arguments are ids the caller must be able to read in their own replica. */
+  private referenceVisibleTo(caller: SessionUser, actorId: string): boolean {
+    const actor = this.store.get("actors", actorId);
+    return !!actor && docVisibleTo(caller, actor);
+  }
+
+  private tokenVisibleTo(caller: SessionUser, sceneId: string, tokenId: string): boolean {
+    const view = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
+      ?.find((item) => item._id === sceneId);
+    return !!view?.tokens.some((token) => token._id === tokenId);
+  }
+
+  /** Fire a pre-flighted macro target under the caller's identity. */
+  private fireMacroTarget(
+    caller: SessionUser, target: MacroFireTarget,
+  ): { ok: true; result?: AutomationResult } | { ok: false; error: string } {
+    const fired = this.fireAutomation(target.graph, { scene: target.scene, tile: target.tile, caller,
+      method: MACRO_AUTOMATION_METHOD, originSource: "macro", ...(target.args ? { args: target.args } : {}),
+      at: this.now(), rng: this.rng });
+    if (!fired.ok) return { ok: false, error: fired.error };
+    return { ok: true, ...(fired.result ? { result: fired.result } : {}) };
+  }
+
+  /**
+   * TR-12: a journal page's `@Tile[…]{}` link (MATT "Triggering a Tile via Journal").
+   * The client names a page and the link's ordinal in the text it received; the host
+   * re-reads the page and resolves the anchor itself, so no tile, region or graph id ever
+   * travels. A readable page is the publication surface — the GM chose to hand the reader
+   * that link — so the target anchor need not be visible or `playerRunnable`; the graphs
+   * still must be real, same-scene, `manual` and un-paused (the universal gate), and for a
+   * player the target scene must be the one that player currently has loaded.
+   */
+  private handleJournalTrigger(session: Session, msg: JournalTriggerMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.reject(session, String(msg.requestId), "rate_limited", "journal triggers rate-limited");
+      return;
+    }
+    if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
+        typeof msg.journalId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.journalId) ||
+        typeof msg.pageId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.pageId) ||
+        !Number.isSafeInteger(msg.index) || msg.index < 0 || msg.index > 255 ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "journalId", "pageId", "index"].includes(key))) {
+      this.reject(session, String(msg.requestId), "invalid_schema", "invalid journal trigger");
+      return;
+    }
+    const requestKey = `${caller.id}:${msg.requestId}`;
+    if (this.seenJournalTriggers.has(requestKey)) return;
+    this.seenJournalTriggers.set(requestKey, this.now());
+    if (this.seenJournalTriggers.size > 256) {
+      const first = this.seenJournalTriggers.keys().next().value;
+      if (first) this.seenJournalTriggers.delete(first);
+    }
+    const isGm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const journal = this.store.get("journals", msg.journalId) as JournalDocument | undefined;
+    const page: JournalPageDocument | undefined =
+      journal?.pages.find((item) => item._id === msg.pageId);
+    // The same read boundary the projection used to deliver the page in the first place.
+    const readable = journal !== undefined && page !== undefined && docVisibleTo(caller, journal) &&
+      (isGm || (can(caller, "read", journal, "journals") &&
+        getEffectiveOwnership(caller, page, journal) >= OWNERSHIP_LEVELS.LIMITED));
+    // A player's ordinal list excludes links hidden inside `<secret>` blocks; a GM may click
+    // any link on the page (their own text is the raw one).
+    const link: JournalTileLink | undefined = readable && page
+      ? (isGm ? journalLinks(page.text) : visibleJournalLinks(page.text))[msg.index]
+      : undefined;
+    if (!readable || !page || !link || link.error !== undefined || link.tileId === "") {
+      this.reject(session, msg.requestId, "forbidden", "journal link unavailable");
+      return;
+    }
+    const sceneId = link.sceneId ?? this.loadedSceneByUser.get(caller.id) ?? this.activeSceneDocument()?._id;
+    const scene = sceneId ? this.store.get("scenes", sceneId) as SceneDocument | undefined : undefined;
+    if (!scene || (!isGm && this.loadedSceneByUser.get(caller.id) !== scene._id)) {
+      this.reject(session, msg.requestId, "forbidden", "journal link unavailable");
+      return;
+    }
+    const tile = scene.tiles.find((item) => item._id === link.tileId);
+    const region = tile ? undefined : scene.regions?.find((item) => item._id === link.tileId);
+    const sourceKind = tile ? "tile" : region ? "region" : null;
+    if (!sourceKind) {
+      this.reject(session, msg.requestId, "forbidden", "journal link unavailable");
+      return;
+    }
+    const anchor = automationSourceTile(scene, link.tileId, sourceKind);
+    if (!anchor) {
+      this.reject(session, msg.requestId, "forbidden", "journal link unavailable");
+      return;
+    }
+    const graphs = this.store.getAll("automations").flatMap((doc) => {
+      const checked = validateAutomation(doc.definition);
+      return checked.ok && checked.definition.sceneId === scene._id &&
+        checked.definition.tileId === anchor._id &&
+        (checked.definition.sourceKind ?? "tile") === sourceKind &&
+        checked.definition.methods.includes(MACRO_AUTOMATION_METHOD) ? [doc] : [];
+    }).sort((a, b) => a._id.localeCompare(b._id));
+    // A link to a plain tile (or to an unpublished graph) is indistinguishable from a
+    // no-op: never answer with whether a hidden graph exists.
+    if (!graphs.length) return;
+    for (const graph of graphs) {
+      const liveScene = this.store.get("scenes", scene._id) as SceneDocument | undefined;
+      const liveAnchor = liveScene ? automationSourceTile(liveScene, link.tileId, sourceKind) : undefined;
+      if (!liveScene || !liveAnchor) break;
+      this.fireAutomation(graph, { scene: liveScene, tile: liveAnchor, caller,
+        method: MACRO_AUTOMATION_METHOD, originSource: "journal", at: this.now(), rng: this.rng },
+        false, undefined, undefined, link.landing);
+    }
+  }
+
+  /** Creation/update gate: a macro may only reference a graph that exists and can be
+   * invoked by hand. Runtime re-checks everything, because publication can change. */
+  private macroAutomationGraphError(doc: MacroDocument): string | null {
+    const graphId = macroAutomationGraphId(doc);
+    if (!graphId) return "an automation macro needs a bounded graph id";
+    const graph = this.store.get("automations", graphId) as AutomationDocument | undefined;
+    const checked = graph ? validateAutomation(graph.definition) : null;
+    if (!graph || !checked?.ok) return "an automation macro must reference a saved graph in this world";
+    if (!checked.definition.methods.includes(MACRO_AUTOMATION_METHOD))
+      return "the referenced graph does not run on the manual method";
+    const scene = this.store.get("scenes", checked.definition.sceneId);
+    if (!scene || !automationSourceTile(scene, checked.definition.tileId, checked.definition.sourceKind))
+      return "the referenced graph has no tile in its scene";
+    return null;
   }
 
   private async handleMacroRequest(session: Session, msg: MacroRequestMsg): Promise<void> {
@@ -2974,7 +3625,7 @@ export class HostSync {
       return { instanceId: placed.instanceId, rootId: placed.rootId, seq: placed.seq };
     }
     if (method === "automation.fire") {
-      if (typeof payload.automationId !== "string" || !["click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual", "enter", "exit", "stop", "elevation", "create", "rotate"].includes(String(payload.method)) ||
+      if (typeof payload.automationId !== "string" || !SIMULATABLE_METHODS.includes(payload.method as AutomationMethod) ||
           (payload.tokenId !== undefined && typeof payload.tokenId !== "string"))
         throw new Error("Invalid automation call");
       const graph = this.store.get("automations", payload.automationId) as AutomationDocument | undefined;
@@ -3275,11 +3926,50 @@ export class HostSync {
   // ─── Active-zone graphs: host events → atomic world plan → projected cues ───
 
   private readonly seenAutomationRequests = new Map<string, number>();
+  /** TR-12/MC-01: one fire per (caller, requestId) for macro-initiated graphs. */
+  private readonly seenMacroInvokes = new Map<string, number>();
+  /** D-394: bounded idempotent save replies, scoped to the authenticated author. */
+  private readonly seenMacroSaves = new Map<string, MacroResultMsg>();
+  /** TR-12: one fire per (caller, requestId) for journal-link triggers. */
+  private readonly seenJournalTriggers = new Map<string, number>();
   /** Reentry depth of movement-trigger dispatch. A graph's committed Move/Rotation
    * can land a token in another tile whose graph moves it on, so the chain is
    * bounded at the host, not by each plan's own invocation budget. */
   private movementAutomationDepth = 0;
   private static readonly MOVEMENT_AUTOMATION_DEPTH = 8;
+  /** Reentry depth of door-trigger dispatch: a graph's own door action commits another
+   * state change, whose destination graphs may operate a further door. */
+  private doorAutomationDepth = 0;
+  private static readonly DOOR_AUTOMATION_DEPTH = 8;
+  /** Reentry depth of combat-trigger dispatch: a graph's own committed work can advance the
+   * encounter (a later PF1e adapter), whose turn/round graphs then fire again. */
+  private combatAutomationDepth = 0;
+  private static readonly COMBAT_AUTOMATION_DEPTH = 8;
+  /** Reentry depth of the lighting/time family, which share one budget: a graph's own Scene
+   * Lighting or Game Time action commits another environment change. */
+  private environmentAutomationDepth = 0;
+  private static readonly ENVIRONMENT_AUTOMATION_DEPTH = 8;
+  /**
+   * MATT's scene trigger is a single `canvasready` mode that fires "for each player loading
+   * in", while this engine keeps the two moments distinguishable: `sceneChange` is the
+   * committed activation transition (once per commit) and `sceneLoad` is a viewer loading the
+   * active scene it does not already hold. This remembers what each user last loaded, so a
+   * plain reconnect never re-fires and a return to a different scene does.
+   */
+  private readonly loadedSceneByUser = new Map<UserId, string>();
+
+  /** The encounter's own scene: its `flags.core.sceneId` binding, or — for a document saved
+   * before the binding — the scene whose active encounter pointer names it. */
+  private sceneIdForCombat(combatId: string, fallback?: CombatDocument | undefined): string | null {
+    const combat = (this.store.get("combats", combatId) as CombatDocument | undefined) ?? fallback;
+    const bound = (combat?.flags as { core?: { sceneId?: unknown } } | undefined)?.core?.sceneId;
+    if (typeof bound === "string" && this.store.get("scenes", bound)) return bound;
+    for (const scene of this.store.getAll("scenes") as SceneDocument[]) {
+      const active = (scene.flags as { core?: { activeCombatId?: unknown } } | undefined)?.core?.activeCombatId;
+      if (active === combatId) return scene._id;
+    }
+    return null;
+  }
 
   /** A committed change in the active scene fires destination-scene graphs once, host-side. */
   private fireSceneChangeAutomations(scene: SceneDocument, by: UserId): void {
@@ -3321,6 +4011,127 @@ export class HostSync {
           !docVisibleTo(caller, source, liveScene)) continue;
       this.fireAutomation(liveDoc, { method: "sceneChange", scene: liveScene, tile, caller,
         at: this.now(), rng: this.rng });
+    }
+  }
+
+  /**
+   * A committed door change fires graphs anchored on the tiles/regions that cover the door,
+   * mirroring MATT's "Tiles Under Door" targeting: the door's midpoint decides which source
+   * zones own the event. Ordering is deterministic (descending Sort, then stable IDs) and
+   * nothing about the graph or its trace reaches a caller who may not run it.
+   */
+  private fireDoorAutomations(
+    changes: Array<{ sceneId: string; wallId: string; before: number }>, by: UserId,
+  ): void {
+    // A graph's own door action commits as the system identity, which has no session of its
+    // own; synthesize it exactly like the movement path does so host work still fires rules.
+    const caller = this.sessionUsers().find((user) => user.id === by) ??
+      { id: by, role: "GM" as const, name: "System" };
+    const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const hits: Array<{ docId: string; sceneId: string; tileId: string; method: AutomationMethod;
+      sort: number; at: { x: number; y: number } }> = [];
+    for (const change of changes) {
+      const scene = this.store.get("scenes", change.sceneId) as SceneDocument | undefined;
+      const wall = scene?.walls.find((candidate) => candidate._id === change.wallId);
+      if (!scene || !scene.active || !wall || !can(caller, "read", scene, "scenes")) continue;
+      const method = doorTransitionMethod(change.before, wall.door);
+      if (!method) continue;
+      const at = { x: (wall.c[0] + wall.c[2]) / 2, y: (wall.c[1] + wall.c[3]) / 2 };
+      for (const doc of this.store.getAll("automations")) {
+        const checked = validateAutomation(doc.definition);
+        if (!checked.ok || checked.definition.sceneId !== scene._id ||
+            !checked.definition.methods.includes(method) ||
+            (!gm && checked.definition.gates?.playerRunnable !== true)) continue;
+        const sourceKind = checked.definition.sourceKind ?? "tile";
+        const source = sourceKind === "region"
+          ? scene.regions?.find((region) => region._id === checked.definition.tileId)
+          : scene.tiles.find((tile) => tile._id === checked.definition.tileId);
+        const tile = automationSourceTile(scene, checked.definition.tileId, sourceKind);
+        const collection = sourceKind === "region" ? "regions" : "tiles";
+        if (!source || !tile || !can(caller, "read", source, collection, { parent: scene }) ||
+            !docVisibleTo(caller, source, scene) || !tileContainsPoint(tile, at)) continue;
+        hits.push({ docId: doc._id, sceneId: scene._id, tileId: tile._id, method, at,
+          sort: typeof tile.sort === "number" && Number.isFinite(tile.sort) ? tile.sort : 0 });
+      }
+    }
+    hits.sort((a, b) => a.sceneId.localeCompare(b.sceneId) || b.sort - a.sort ||
+      a.tileId.localeCompare(b.tileId) || a.docId.localeCompare(b.docId) ||
+      a.method.localeCompare(b.method));
+    for (const hit of hits) {
+      const liveScene = this.store.get("scenes", hit.sceneId) as SceneDocument | undefined;
+      if (!liveScene?.active || !can(caller, "read", liveScene, "scenes")) continue;
+      const liveDoc = this.store.get("automations", hit.docId) as AutomationDocument | undefined;
+      const checked = liveDoc ? validateAutomation(liveDoc.definition) : null;
+      if (!liveDoc || !checked?.ok || checked.definition.sceneId !== liveScene._id ||
+          !checked.definition.methods.includes(hit.method) ||
+          (!gm && checked.definition.gates?.playerRunnable !== true)) continue;
+      const sourceKind = checked.definition.sourceKind ?? "tile";
+      const source = sourceKind === "region"
+        ? liveScene.regions?.find((region) => region._id === checked.definition.tileId)
+        : liveScene.tiles.find((tile) => tile._id === checked.definition.tileId);
+      const tile = automationSourceTile(liveScene, checked.definition.tileId, sourceKind);
+      const collection = sourceKind === "region" ? "regions" : "tiles";
+      if (!source || !tile || !can(caller, "read", source, collection, { parent: liveScene }) ||
+          !docVisibleTo(caller, source, liveScene) || !tileContainsPoint(tile, hit.at)) continue;
+      this.fireAutomation(liveDoc, { scene: liveScene, tile, caller, method: hit.method,
+        at: this.now(), rng: this.rng });
+    }
+  }
+
+  /**
+   * MATT fires several trigger families on **every** tile of the scene — combat turns, darkness
+   * and world time — with no geometric anchor test (unlike doors, which need the midpoint).
+   * This is that dispatch: each graph anchored in the scene whose method list contains the
+   * event, one authored change at a time, ordered by descending Sort then stable IDs, with the
+   * same live re-validation before every fire that the scene-change and door paths use. The
+   * optional triggering token is the current combatant for combat kinds.
+   */
+  private fireSceneGraphs(
+    scene: SceneDocument, method: AutomationMethod, by: UserId, tokenId?: string,
+  ): void {
+    const caller = this.sessionUsers().find((user) => user.id === by) ??
+      { id: by, role: "GM" as const, name: "System" };
+    if (!can(caller, "read", scene, "scenes")) return;
+    const gm = caller.role === "GM" || caller.role === "ASSISTANT";
+    const anchors = this.store.getAll("automations").flatMap((doc) => {
+      const checked = validateAutomation(doc.definition);
+      if (!checked.ok || checked.definition.sceneId !== scene._id ||
+          !checked.definition.methods.includes(method) ||
+          (!gm && checked.definition.gates?.playerRunnable !== true)) return [];
+      const sourceKind = checked.definition.sourceKind ?? "tile";
+      const source = sourceKind === "region"
+        ? scene.regions?.find((region) => region._id === checked.definition.tileId)
+        : scene.tiles.find((tile) => tile._id === checked.definition.tileId);
+      const tile = automationSourceTile(scene, checked.definition.tileId, sourceKind);
+      const collection = sourceKind === "region" ? "regions" : "tiles";
+      if (!source || !tile || !can(caller, "read", source, collection, { parent: scene }) ||
+          !docVisibleTo(caller, source, scene)) return [];
+      return [{ docId: doc._id, tileId: tile._id,
+        sort: typeof tile.sort === "number" && Number.isFinite(tile.sort) ? tile.sort : 0 }];
+    }).sort((a, b) => b.sort - a.sort || a.tileId.localeCompare(b.tileId) ||
+      a.docId.localeCompare(b.docId));
+    for (const anchor of anchors) {
+      // Re-validate against the live documents immediately before firing; an earlier graph in
+      // this loop may have changed them.
+      const liveScene = this.store.get("scenes", scene._id) as SceneDocument | undefined;
+      if (!liveScene || !can(caller, "read", liveScene, "scenes")) break;
+      const liveDoc = this.store.get("automations", anchor.docId) as AutomationDocument | undefined;
+      const checked = liveDoc ? validateAutomation(liveDoc.definition) : null;
+      if (!liveDoc || !checked?.ok || checked.definition.sceneId !== liveScene._id ||
+          !checked.definition.methods.includes(method) ||
+          (!gm && checked.definition.gates?.playerRunnable !== true)) continue;
+      const sourceKind = checked.definition.sourceKind ?? "tile";
+      const source = sourceKind === "region"
+        ? liveScene.regions?.find((region) => region._id === checked.definition.tileId)
+        : liveScene.tiles.find((tile) => tile._id === checked.definition.tileId);
+      const tile = automationSourceTile(liveScene, checked.definition.tileId, sourceKind);
+      const collection = sourceKind === "region" ? "regions" : "tiles";
+      if (!source || !tile || !can(caller, "read", source, collection, { parent: liveScene }) ||
+          !docVisibleTo(caller, source, liveScene)) continue;
+      const token = tokenId
+        ? liveScene.tokens.find((candidate) => candidate._id === tokenId) : undefined;
+      this.fireAutomation(liveDoc, { method, scene: liveScene, tile, caller,
+        ...(token ? { token } : {}), at: this.now(), rng: this.rng });
     }
   }
 
@@ -3395,7 +4206,7 @@ export class HostSync {
     }
     if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
         typeof msg.automationId !== "string" || typeof msg.sceneId !== "string" ||
-        !["enter", "exit", "stop", "elevation", "create", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual"].includes(msg.method) ||
+        !SIMULATABLE_METHODS.includes(msg.method as AutomationMethod) ||
         (msg.tokenId !== undefined && typeof msg.tokenId !== "string") ||
         (msg.dryRun !== undefined && typeof msg.dryRun !== "boolean") ||
         Object.keys(msg).some((key) => !["kind", "requestId", "automationId", "sceneId", "method", "tokenId", "dryRun"].includes(key))) {
@@ -3488,8 +4299,10 @@ export class HostSync {
     // Path fraction determines first contact; for coincident tiles use method,
     // descending tile Sort (not elevation), then stable IDs. No player sets priority.
     const methodOrder: Record<AutomationMethod, number> = {
-      enter: 0, exit: 1, stop: 2, elevation: 3, create: 4, sceneChange: 5, rotate: 6, click: 7, rightClick: 8, doubleClick: 9,
-      hoverIn: 10, hoverOut: 11, manual: 12,
+      enter: 0, exit: 1, stop: 2, elevation: 3, create: 4, sceneChange: 5, sceneLoad: 6, rotate: 7, click: 8, rightClick: 9, doubleClick: 10,
+      hoverIn: 11, hoverOut: 12, doorOpen: 13, doorClose: 14, doorLock: 15, doorUnlock: 16,
+      combatStart: 17, combatRound: 18, combatTurnStart: 19, combatTurnEnd: 20, combatEnd: 21,
+      lightingChange: 22, timeChange: 23, manual: 24,
     };
     candidates.sort((a, b) => a.sceneId.localeCompare(b.sceneId) ||
       a.fraction - b.fraction || a.tokenId.localeCompare(b.tokenId) ||
@@ -3538,11 +4351,13 @@ export class HostSync {
 
   private fireAutomation(
     doc: AutomationDocument, event: AutomationEvent, dryRun = false, planned?: AutomationOutcome,
-    postActionRun?: AutomationPostActionRun,
-  ): { ok: true; stopOthers: boolean; completion?: Promise<void> } | { ok: false; error: string } {
+    postActionRun?: AutomationPostActionRun, landing?: string,
+  ): { ok: true; stopOthers: boolean; completion?: Promise<void>; result?: AutomationResult }
+    | { ok: false; error: string } {
     const result = planned ?? planAutomation(this.store.world, doc,
       { ...event, hurtHeal: planAutomationHealth,
-        imageAssetError: (hash) => automationImageError(hash, this.manifestSource()) }, this.systemUserId);
+        imageAssetError: (hash) => automationImageError(hash, this.manifestSource()) }, this.systemUserId,
+      undefined, landing);
     if (!result.ok) {
       this.reportAutomation(doc, event.method, "rejected", result.error, result.trace);
       return { ok: false, error: result.error };
@@ -3558,7 +4373,7 @@ export class HostSync {
         macroId: cue.macroId, sceneId: event.scene._id,
         ...(cue.sourceTokenId ? { sourceTokenId: cue.sourceTokenId } : {}),
         ...(cue.targetTokenId ? { targetTokenId: cue.targetTokenId } : {}),
-      }, cue.audience);
+      }, cue.audience, event.caller.id);
       if (!ready.ok) {
         const error = `FX preflight failed: ${ready.error}`;
         this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);
@@ -3789,7 +4604,9 @@ export class HostSync {
     } else if (postActions.length) {
       this.finishActionAudit(audit, "partial");
     }
-    return { ok: true, stopOthers: result.plan.stopOthers, ...(completion ? { completion } : {}) };
+    // MC-02: a graph may hand a value back to whoever invoked it.
+    return { ok: true, stopOthers: result.plan.stopOthers, ...(completion ? { completion } : {}),
+      ...(result.plan.result ? { result: result.plan.result } : {}) };
   }
 
   // ─── Macros / FX Wizard: approved, recipient-projected timeline ─────────────

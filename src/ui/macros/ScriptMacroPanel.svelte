@@ -97,7 +97,7 @@
       const existing = macros.find((m) => m._id === selected);
       const doc: MacroDocument = { _id: existing?._id ?? crypto.randomUUID(), type: "macro",
         name: name.trim(), command: source, kind: "script", script: policy,
-        ownership: { default: playerCallable ? 1 : 0 },
+        ownership: { ...(existing?.playerAuthoring ? existing.ownership : {}), default: playerCallable ? 1 : 0 },
         flags: { core: { playerCallable, ...(slot ? { slot } : {}) } }, system: {} };
       const checked = validateScriptMacro(doc);
       if (!checked.ok) { error = checked.error; return; }

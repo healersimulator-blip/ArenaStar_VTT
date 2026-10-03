@@ -56,6 +56,7 @@ import type { ModelPool } from "../core/strategic";
 import type { SimDelta } from "../core/sim";
 import type { DocId } from "../core/ids";
 import type { FxInstanceFilter } from "../core/fxInstances";
+import type { PlayerMacroDraft } from "../core/playerMacros";
 import type { TagRef } from "../core/tags";
 import type { SysSchema } from "../sim/pool";
 import type { RollHighlightRequest } from "./rollHighlight";
@@ -446,10 +447,43 @@ export class ClientSync {
     return this.requestAutomationTileTrigger(sceneId, tileId, point, tokenId, method);
   }
 
+  /**
+   * TR-12: a journal page's `@Tile[…]{}` link. Names the page and the link's ordinal in
+   * the text this client received — never a tile, region or graph id; the host re-reads
+   * the page and resolves the anchor for this caller.
+   */
+  requestJournalTrigger(journalId: DocId, pageId: DocId, index: number): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "journal.trigger", requestId, journalId, pageId, index });
+    return requestId;
+  }
+
   /** Execute a published, revision-pinned script by ID; no code/grants/ops cross the wire. */
   requestMacro(macroId: DocId, args: Record<string, Json> = {}): string {
     const requestId = globalThis.crypto.randomUUID();
     this.send({ kind: "macro.request", requestId, macroId, args });
+    return requestId;
+  }
+
+  /** TR-12/MC-01: run a saved automation macro. Only the macro id travels — the host
+   * resolves its private graph binding and re-validates publication. */
+  invokeMacro(macroId: DocId, args?: Record<string, Json>): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "macros.invoke", requestId, macroId,
+      ...(args && Object.keys(args).length > 0 ? { args } : {}) });
+    return requestId;
+  }
+
+  /** D-394: ask to store personal content in the host world; no grants or ownership supplied. */
+  saveWorldMacro(macroId: DocId, draft: PlayerMacroDraft): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "macros.save", requestId, macroId, action: "save", draft });
+    return requestId;
+  }
+
+  deleteWorldMacro(macroId: DocId): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "macros.save", requestId, macroId, action: "delete" });
     return requestId;
   }
 
@@ -588,6 +622,8 @@ export class ClientSync {
       case "tagger.rules":
       case "prefab.place":
       case "macro.request":
+      case "macros.invoke":
+      case "macros.save":
       case "fx.request":
       case "fx.sync":
       case "fx.stop":

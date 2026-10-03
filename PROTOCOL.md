@@ -329,9 +329,158 @@ interface MacroRequestMsg {
 }
 ```
 
+### macros.invoke (0x4f · client → host · ops)
+
+TR-12/MC-01: run a saved **automation macro** — a world macro that references one graph. The client
+sends only the macro id, never a graph id, action, scene or token, so a player can hold a callable
+directory/hotbar entry without ever learning which private graph it names (the projection strips the
+binding from every player replica, on snapshots, creates and rebinds alike). The host re-resolves the
+binding against live state: the definition must still validate, the graph must still subscribe to
+`manual`, and for a player the anchor must be a **tile** the caller can see with the `playerRunnable`
+gate and the graph's own scene must be the scene that caller currently has loaded. The macro grants no
+authority of its own — it is a second way to ask for an already-published trigger, so nothing here
+widens a graph's audience. One fire per `requestId`; the result travels as `macro.result` and never
+names the graph, its id or a refusal reason to a non-GM.
+
+**Hotbar preferences (D-392) are not a wire message.** A player may override the five
+`flags.core.slot` defaults using a browser-local `{ version: 1, slots: [...] }` record keyed
+by the `(worldId, userId)` tuple. Each binding is `null` (inherit the current GM default),
+`""` (explicitly empty), or a bounded macro id. No document/source/grant/graph reference is
+stored; nothing is submitted, projected, exported with the world or synced to another device.
+The shell resolves ids against its current delivered macro catalog, leaves a missing override
+inert without falling back to another macro, and issues only the existing caller-scoped
+requests when a slot is actually run. A catalog entry is not proof of live publication: the
+host still re-resolves and authorizes the request, and the hotbar renders the invoker's own
+`macro.result` (neutral for a refused player request) without forwarding private diagnostics.
+Denied local storage keeps the arrangement for the visit with explicit unsaved feedback;
+it never falls back to a world write.
+
+MC-02: an automation macro may also **declare inputs** (`{ name, type, required?, from? }`, at most
+16, of type string/number/boolean/token/actor/item), and a caller then supplies `args`. The declared
+schema *is* projected — it is the callable metadata a directory/hotbar needs to prompt for the
+values, and it is the one part of the binding a player receives — while `graphId` and everything
+else about the binding stay GM-only. The host validates the supplied record against the declaration
+(unknown name, missing required, wrong type, over-long string, too many keys, a token the caller
+cannot see, an actor the caller cannot read or an unreadable exact item ref all refuse; a player only reads the neutral
+"automation macro unavailable"), then exposes the values to the graph as `{{arg.<name>}}` — a dotted
+name is deliberately not a legal durable variable, so an argument can never shadow world state.
+
+`from: "selected"` is a **caller-side default** for a `token`, `actor` or `item` input. A shell that
+received no explicit value takes the canvas token (`actor` uses its linked actor), or independently
+its most recently focused open, non-minimized PF1e item window (`item`). Focusing the macro/chat
+surface does not discard that item context; no item is guessed from the selected token's inventory.
+A stale/deleted/unreadable top item clears the default rather than falling back; explicitly closing
+or minimizing it exposes the next open item window. Item-only context invents no token or actor.
+A required blank item default refuses locally with `select an item for <name>`; optional absent
+values stay absent and explicit named/positional/picker values always win.
+
+**Item refs (D-393)** are scalar strings, never document bodies: a bare `itemId` names a WORLD item
+only, and `actorId/itemId` names exactly that actor's embedded item. Each component is 1–128 ASCII
+letters/digits/underscore/hyphen (qualified maximum 257); no inventory-wide search, name fallback,
+path traversal or parent guessing. The host re-reads the world item, or both the parent actor and
+its embedded item under the **actual caller's** live read rights, with normal parent-ownership
+inheritance. The same check runs for a nested `callMacro`, not under the graph author's GM identity.
+A local picker contains only readable world and parent-qualified embedded entries. No selection,
+picker choice or ref grants mutation/cast authority, widens projection or executes item mechanics.
+The resulting ref travels in the existing `args` record with the unchanged 16-field / 8 KiB payload
+bounds. Ordinary strings, scalar returns and saved Call Macro literals keep their 256-character
+bound; a maximal typed item ref can be forwarded as `{{arg.tool}}` rather than an oversized literal.
+A composite takes no arguments.
+
+MC-02 also lets one graph **call another saved automation macro** from inside its own envelope, so a
+GM can build a named library of small graphs and compose them. The step is
+`{ id, kind: "callMacro", macroId, args?, capture?, onError?, propagateStop? }`, and it is authored
+against the **macro**, never a graph id: the host re-resolves `macroId` to the macro's graph on every
+run and applies that graph's own rules — same scene, a real anchor in that scene, and `manual` among
+its methods — exactly as if the graph were invoked directly. Caller-supplied `args` are interpolated
+in the **caller's** context, coerced to the called macro's declared types and re-validated by the same
+rule a directory invocation gets (`{{arg.<name>}}` inside the child), so a call cannot hand a child
+data that child would never accept from a caller. The child runs **inside this plan**: one envelope,
+one undo boundary, and the shared depth/invocation budget that already bounds trigger-tile chains, so
+an indirect cycle is refused at run time with a `parent -> child` stack. A failure is transparent —
+`call <macroId> (graph <graphId>): <reason>` — and `onError: "continue"` instead records the failure
+in the trace and carries on. `capture` stores the child's own Return Value in a run variable for later
+steps; only the **root** graph's value is the invocation's result. A `stop` inside the called graph
+ends *that graph* (a call is a subroutine, not a chain reaction); `propagateStop` opts into letting it
+end the caller as well, the same shape `redirect`/`triggerTile` already use. Nothing here widens a
+graph's audience: the whole call runs under the invoker's identity and visibility, and a player's
+replica never learns a graph id.
+
+```ts
+interface MacroInvokeMsg {
+  kind: "macros.invoke";
+  requestId: string;
+  macroId: DocId;
+  args?: Record<string, Json>; // named scalar values, including exact item refs (MC-02)
+}
+```
+
+### macros.save (0x51 · client → host · ops)
+
+D-394: save personal chat/roll macros or unapproved script drafts in the GM's durable world,
+only when the GM has enabled `UserDocument.canSaveMacros` for that actual caller (off by default).
+The bounded content request contains no ownership, grants, approval, bindings or execution history.
+The host stamps author/ownership (private to the author and GM), checks existing author+owner rights,
+visible script scene, per-author quota and replay ID, and commits one undoable world envelope.
+A player cannot overwrite another author's or GM's macro, grant their own saving permission,
+edit the host-owned author metadata through raw intents or assign a global hotbar slot. Each
+player revision clears script review/publication/grants; only normal GM review can enable execution.
+The original submitted draft is projected only to its author; later GM executable source/policy
+remain redacted even from that author. Replies use the existing caller-only `macro.result`.
+Saving places documents in the host world/oplog and next world export, not automatic disk overwrite.
+
+Limits: 64-character normalized names, 4,096 chat / 16,384 script characters, actual serialized
+UTF-8 draft ≤32,768 bytes, ≤16 declared script inputs, 64 personal documents per author, and
+ASCII request/macro IDs of 1–128 characters. The shared per-session intent bucket rate-limits
+requests; the host retains 256 caller-scoped save/delete replies for idempotent acknowledgements
+(including reconnects within that bounded window). Host script invocation history survives revisions
+and kind switches. Existing valid GM hotbar slots may survive, but cannot be assigned by this request.
+The GM/assistant alone changes saving permission or user roles; malformed self-owned User documents
+do not allow a player to promote themselves or opt in. Public User list ops now match snapshot
+visibility, so saving enablement/revocation reaches the UI immediately. Loss of OWNER rights clears
+the original-author DTO while the macro remains readable; loss of read visibility removes it through
+the existing host boundary-crossing mechanism. Resolver-less macro diffs conservatively blank all
+original-author and executable source/policy paths rather than forwarding unverified content.
+
+```ts
+type MacroSaveMsg = { kind: "macros.save"; requestId: string; macroId: DocId } & (
+  { action: "save"; draft: PlayerMacroDraft } | { action: "delete" }
+);
+type PlayerMacroDraft = { name: string; command: string } & (
+  { kind: "chat" } | { kind: "script"; sceneId: DocId; inputs: ScriptInput[] }
+);
+```
+
+### journal.trigger (0x50 · client → host · ops)
+
+TR-12: a journal page's MATT-style tile link (`@Tile[<anchorId> landing:<name>]{Label}`). The client
+sends the journal id, the page id and the link's **ordinal in the text it received** — never a tile,
+region, scene or graph id. The host re-reads the page, re-derives the links the caller can click (a
+player's list excludes links inside `<secret>` blocks, and player replicas have every target payload
+blanked before delivery, so an ordinal means the same link on both sides) and resolves the anchor
+itself: every same-scene graph bound to that anchor that validates and subscribes to `manual` fires
+with method `manual`, origin source `journal`, at the named landing when the link asks for one, inside
+one atomic envelope. A readable page is the publication surface — the anchor need not be visible to
+the player or carry the `playerRunnable` gate — but a player's target scene must be the scene that
+player currently has loaded, and the paused gate still applies on the host. Silent on success (the
+graph's own chat/FX is the feedback) and indistinguishable from a plain tile when no graph matches.
+One fire per `requestId`.
+
+```ts
+interface JournalTriggerMsg {
+  kind: "journal.trigger";
+  requestId: string;
+  journalId: DocId;
+  pageId: DocId;
+  index: number;
+}
+```
+
 ### macro.result (0x3b · host → caller and GMs · ops)
 
-Other GMs see bounded execution traces, errors and JSON return values. The player caller sees only a generic completed/failed status: script output and logs are never a hidden-data read channel. No recipient executes the code again; mechanical work is singular on the host. The durable invocation marker and op log support reconnect/replay diagnostics, but there is no transactional rollback across multiple script actions yet.
+Other GMs see bounded execution traces, errors and JSON return values. The player caller sees only a generic completed/failed status: script output and logs are never a hidden-data read channel.
+
+MC-02 adds one exception that is authored rather than incidental: a graph's **Return Value action** (`{ id, kind: "result", value, audience }` with `audience` `caller` or `gm`) hands a bounded scalar back to whoever invoked the macro, delivered as this message's `result` field and shown by that caller's own status line. It is never broadcast, never becomes a chat message, and is private to the invoker's session; an `audience` of `gm` withholds it from a non-GM invoker entirely (the graph's `{{…}}` interpolation is still the author's, so a value that quotes private state is a disclosure the GM chose). A string value is interpolated and must stay ≤256 characters with no control characters, or the whole invocation is rejected. No recipient executes the code again; mechanical work is singular on the host. The durable invocation marker and op log support reconnect/replay diagnostics, but there is no transactional rollback across multiple script actions yet.
 
 ```ts
 interface MacroResultMsg {
@@ -371,7 +520,7 @@ interface FxRequestMsg {
 
 ### fx.start (0x36 · host → client · ops)
 
-Recipient-projected visual/audio timeline with authoritative coordinates and asset MIME. One-shots start at least 300 ms ahead; each client uses the host-clock offset. After a graph commits a visibility-changing envelope, the host rechecks source/target visibility and asset entitlement before sending a cue. Cues do not mutate mechanics and never travel over `ephemeral`. Only explicitly persistent cues are durable: the host commits a private `FxInstanceDocument` (`fxInstances` top-level collection) and sends `fx.start` after commit. The viewer receives **only** this resolved cue, not its private instance document. Persistent image/text/audio lanes loop; recipients who re-enter a scene request `fx.sync` to recover the original host-clock phase. An explicitly `follow`ing visual carries only host-verified source/target token IDs, never author-supplied references. The canvas samples **projected, fog-visible** token centers; lost visibility hides playback locally and revokes the persistent cue on the host. Media sharing and permission to embed its bytes in a world ZIP are independent GM declarations; restricted FX media cancels export rather than silently redistributing a premium pack. A **camera section** of a one-shot cue carries its own three-word audience (`scene` — everyone receiving the run — `gm`, or `caller` — the session that requested the run); the host builds the payload **per recipient**, so a viewer outside that audience receives the run *without* the section and learns nothing about where someone else's view went. A recipient left with no sections at all receives no cue. A **positioned sound** (D-309) likewise carries host-resolved geometry — `x`/`y` and a `radiusPx` on the scene's own grid: the client measures distance (silent at the rim, full at the source, linear between) and may pan across the stereo field, and a sound with no position stays a global cue at its authored volume. Occlusion is answered **per recipient** as well: `occluded: true` is added to that recipient's copy of a `muffle` sound when the scene's own *sound* axis (with door state) puts a wall between them and the source, tested from that recipient's own token at ownership level 3 — a recipient with nothing of their own on the scene is sent no answer at all. The client is never handed the walls, only the host's answer for it, and a device without Web Audio plays the cue at its distance level and reports the reduction instead.
+Recipient-projected visual/audio timeline with authoritative coordinates and asset MIME. One-shots start at least 300 ms ahead; each client uses the host-clock offset. After a graph commits a visibility-changing envelope, the host rechecks source/target visibility and asset entitlement before sending a cue. Cues do not mutate mechanics and never travel over `ephemeral`. Only explicitly persistent cues are durable: the host commits a private `FxInstanceDocument` (`fxInstances` top-level collection) and sends `fx.start` after commit. The viewer receives **only** this resolved cue, not its private instance document. Persistent image/text/audio lanes loop; recipients who re-enter a scene request `fx.sync` to recover the original host-clock phase. An explicitly `follow`ing visual carries only host-verified source/target token IDs, never author-supplied references. The canvas samples **projected, fog-visible** token centers; lost visibility hides playback locally and revokes the persistent cue on the host. Media sharing and permission to embed its bytes in a world ZIP are independent GM declarations; restricted FX media cancels export rather than silently redistributing a premium pack. A **camera section** of a one-shot cue carries its own audience word (`scene` — everyone receiving the run — `gm`, `caller` for the session that requested the run, or `others` for everyone *except* that session; a timeline carries the same vocabulary, and `{ players: [...] }` names users instead); the host builds the payload **per recipient**, so a viewer outside that audience receives the run *without* the section and learns nothing about where someone else's view went. A recipient left with no sections at all receives no cue. A **positioned sound** (D-309) likewise carries host-resolved geometry — `x`/`y` and a `radiusPx` on the scene's own grid: the client measures distance (silent at the rim, full at the source, linear between) and may pan across the stereo field, and a sound with no position stays a global cue at its authored volume. Occlusion is answered **per recipient** as well: `occluded: true` is added to that recipient's copy of a `muffle` sound when the scene's own *sound* axis (with door state) puts a wall between them and the source, tested from that recipient's own token at ownership level 3 — a recipient with nothing of their own on the scene is sent no answer at all. The client is never handed the walls, only the host's answer for it, and a device without Web Audio plays the cue at its distance level and reports the reduction instead.
 
 ```ts
 interface FxStartMsg {

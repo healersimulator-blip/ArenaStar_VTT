@@ -5,31 +5,49 @@
   import type { AssetManifest, AutomationDocument, DocRef, Json, MacroDocument, RollTableDocument, SceneDocument,
     RegionDocument, TileDocument } from "../../core/documents";
   import { listTaggable } from "../../core/tags";
+  import { COMBAT_TRIGGER_METHODS } from "../../core/combat";
   import {
-    PINNABLE_COLLECTIONS, automationImageError, validateAutomation, type AutomationDefinition, type AutomationGates, type AutomationMethod,
+    PINNABLE_COLLECTIONS, automationImageError, isHostDispatchedMethod, validateAutomation, type AutomationDefinition, type AutomationGates, type AutomationMethod,
     type AutomationSelector, type AutomationStep, type AutomationScriptBinding, type AutomationTileTarget,
   } from "../../core/automation";
   import { tileAlphaMaskFromRgba, tileTriggerCirclePolygon, type TileTriggerZone } from "../../core/tileTriggerZone";
   import { regionGeometryError } from "../../core/regionGeometry";
+  import { macroAutomationGraphId, macroAutomationInputs } from "../../core/macroAutomation";
 
   let { client, bus, getAsset = null }: { client: ClientSync; bus: EventBus<ClientEvents>;
     getAsset?: ((hash: string) => Promise<Uint8Array | undefined>) | null } = $props();
-  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "manual"];
-  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
+  const METHODS: AutomationMethod[] = ["enter", "exit", "stop", "elevation", "create", "sceneChange", "sceneLoad", "rotate", "click", "rightClick", "doubleClick", "hoverIn", "hoverOut", "doorOpen", "doorClose", "doorLock", "doorUnlock", ...COMBAT_TRIGGER_METHODS, "lightingChange", "timeChange", "manual"];
+  const KINDS: AutomationStep["kind"][] = ["select", "filter", "checkVariable", "checkValue", "checkScriptResult", "shuffle", "position", "distance", "attributes", "checkData", "condition", "inventory", "tokenTriggerCount", "routeMethod", "routeUser", "forEach", "endEach", "resetHistory", "batchFlush", "collection", "triggerTile", "redirect", "setActive", "stopOthers", "stopMovement", "set", "gameTime", "sceneLighting", "sceneBackground", "tileImage", "hurtHeal", "random", "tags", "visibility", "door", "move", "rotate", "delete", "chat", "result", "callMacro", "sequence", "script", "summon", "rollTable", "landing", "jump", "stop"];
   const ADD_KINDS = KINDS.filter((kind) => kind !== "endEach");
   const KIND_LABEL: Record<string, string> = { stopMovement: "Stop Token Movement", checkScriptResult: "Check Script Result",
     batchFlush: "Run All Batch Actions", gameTime: "Game Time",
     sceneLighting: "Scene Lighting", sceneBackground: "Scene Background", tileImage: "Switch Tile Image",
-    hurtHeal: "Hurt / Heal", move: "Move", rotate: "Rotation", delete: "Delete Entities", rollTable: "Roll Table" };
+    hurtHeal: "Hurt / Heal", move: "Move", rotate: "Rotation", delete: "Delete Entities", rollTable: "Roll Table",
+    redirect: "Trigger Automation", triggerTile: "Trigger Tile at Anchor", result: "Return Value",
+    callMacro: "Call Macro" };
   const kindLabel = (kind: string): string => KIND_LABEL[kind] ?? kind;
   const methodLabel = (method: AutomationMethod): string => method === "rightClick" ? "right click"
     : method === "doubleClick" ? "double click" : method === "hoverIn" ? "hover in"
-      : method === "hoverOut" ? "hover out" : method === "sceneChange" ? "scene change" : method;
+      : method === "hoverOut" ? "hover out" : method === "sceneChange" ? "scene change"
+        : method === "sceneLoad" ? "scene load"
+        : method === "doorOpen" ? "door open" : method === "doorClose" ? "door close"
+          : method === "doorLock" ? "door lock" : method === "doorUnlock" ? "door unlock"
+            : method === "combatStart" ? "combat start" : method === "combatRound" ? "combat round"
+              : method === "combatTurnStart" ? "combat turn start" : method === "combatTurnEnd" ? "combat turn end"
+                : method === "combatEnd" ? "combat end"
+                  : method === "lightingChange" ? "lighting change"
+                    : method === "timeChange" ? "time change" : method;
   const firstSimulatableMethod = (methods: readonly AutomationMethod[]): AutomationMethod | undefined =>
-    methods.find((method) => method !== "sceneChange");
+    methods.find((method) => !isHostDispatchedMethod(method));
+  /** What the wizard says instead of offering a Simulate control for host-observed events. */
+  const hostEventHint = (methods: readonly AutomationMethod[]): string => {
+    const events = methods.filter(isHostDispatchedMethod).map(methodLabel);
+    return `${events.join(", ")} fire${events.length === 1 ? "s" : ""} automatically from committed world state; no manual simulation is offered.`;
+  };
   const canEdit = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
   let scenes = $state<SceneDocument[]>([]);
   let macros = $state<MacroDocument[]>([]);
+  let automationMacros = $state<MacroDocument[]>([]);
   let scripts = $state<MacroDocument[]>([]);
   let summons = $state<MacroDocument[]>([]);
   let rollTables = $state<RollTableDocument[]>([]);
@@ -76,6 +94,7 @@
     assets = { ...client.store.world.assetManifest };
     saved = [...client.store.getAll("automations")];
     macros = [...client.store.getAll("macros")].filter((m) => m.kind === "sequence");
+    automationMacros = [...client.store.getAll("macros")].filter((m) => m.kind === "automation");
     scripts = [...client.store.getAll("macros")].filter((m) => m.kind === "script");
     summons = [...client.store.getAll("macros")].filter((m) => m.kind === "summon");
     rollTables = [...client.store.getAll("rollTables")];
@@ -111,8 +130,20 @@
   function toggle(method: AutomationMethod): void {
     definition.methods = definition.methods.includes(method)
       ? definition.methods.filter((m) => m !== method) : [...definition.methods, method];
-    if (!definition.methods.includes(triggerMethod) || triggerMethod === "sceneChange")
+    if (!definition.methods.includes(triggerMethod) || isHostDispatchedMethod(triggerMethod))
       triggerMethod = firstSimulatableMethod(definition.methods) ?? "sceneChange";
+  }
+  /** MC-02: the saved macro a Call Macro step names, and its declared input schema. */
+  function calledMacro(step: Extract<AutomationStep, { kind: "callMacro" }>): MacroDocument | null {
+    return automationMacros.find((candidate) => candidate._id === step.macroId) ?? null;
+  }
+  function setCallArg(step: Extract<AutomationStep, { kind: "callMacro" }>, name: string, raw: string): void {
+    const args: Record<string, string | number | boolean> = {};
+    for (const [key, value] of Object.entries(step.args ?? {})) if (key !== name) args[key] = value;
+    const text = raw.trim();
+    if (text !== "") args[name] = text;
+    if (Object.keys(args).length > 0) step.args = args;
+    else delete step.args;
   }
   function newStep(kind: AutomationStep["kind"], id = `step-${crypto.randomUUID().slice(0, 8)}`): AutomationStep {
     switch (kind) {
@@ -140,6 +171,8 @@
       case "collection": return { id, kind, mode: "add", selector: { kind: "inside" } };
       case "triggerTile": return { id, kind, target: { kind: "id", tileId: scene?.tiles.find((t) => t._id !== tileId)?._id ?? "" },
         tokens: "triggering" };
+      case "redirect": return { id, kind, method: "inherit", tokens: "triggering",
+        automationId: saved.find((doc) => doc._id !== editing && doc.definition.sceneId === sceneId)?._id ?? "" };
       case "setActive": return { id, kind, mode: "deactivate",
         target: { kind: "id", tileId: scene?.tiles.find((t) => t._id !== tileId)?._id ?? tileId } };
       case "stopOthers": return { id, kind };
@@ -159,6 +192,8 @@
       case "delete": return { id, kind };
       case "rollTable": return { id, kind, tableId: rollTables[0]?._id ?? "", audience: "scene" };
       case "chat": return { id, kind, audience: "gm", content: "{{method}} by {{user}}" };
+      case "result": return { id, kind, audience: "caller", value: "{{count}}" };
+      case "callMacro": return { id, kind, macroId: automationMacros[0]?._id ?? "" };
       case "sequence": return { id, kind, macroId: macros[0]?._id ?? "", audience: "gm" };
       case "script": return { id, kind, macroId: scripts.find((m) => m.script?.sceneId === sceneId)?._id ?? "" };
       case "summon": return { id, kind, presetId: summons.find((m) => m.summon?.sceneId === sceneId)?._id ?? "",
@@ -652,9 +687,34 @@
       diff: { state: state as unknown as Json } }]);
     status = `Requested clearing ${doc.name}'s tile variables (history kept)`;
   }
+  /**
+   * TR-12/MC-01: publish (or refresh) a macro that runs this graph by reference.
+   * The macro stores the graph id — players receive only its name and hotbar slot,
+   * and the host re-checks publication on every run.
+   */
+  function publishMacro(doc: AutomationDocument): void {
+    error = ""; status = "";
+    const checked = validateAutomation(doc.definition);
+    if (!checked.ok) { error = checked.error; return; }
+    if (!checked.definition.methods.includes("manual")) {
+      error = "Add the manual method before publishing this graph as a macro."; return;
+    }
+    const existing = automationMacros.find((m) => macroAutomationGraphId(m) === doc._id);
+    if (existing) {
+      client.submit([{ kind: "update", ref: { coll: "macros", id: existing._id }, diff: { name: doc.name } }]);
+      status = `Refreshed automation macro "${doc.name}" — run it from the Macros window or a hotbar slot.`;
+      return;
+    }
+    const macro: MacroDocument = { _id: globalThis.crypto.randomUUID(), type: "macro",
+      name: doc.name.slice(0, 64) || "Automation", ownership: { default: 1 }, flags: {}, system: {},
+      kind: "automation", command: "", automation: { graphId: doc._id } };
+    client.submit([{ kind: "create", coll: "macros", data: macro }]);
+    status = `Published automation macro "${macro.name}" — assign a hotbar slot in the Macros window.`;
+  }
+
   function invoke(id: string, dryRun = false, method = triggerMethod): void {
     error = "";
-    if (method === "sceneChange") { error = "Scene change fires automatically when this scene becomes active"; return; }
+    if (isHostDispatchedMethod(method)) { error = hostEventHint([method]); return; }
     if (!sceneId) { error = "Choose a scene"; return; }
     client.requestAutomation(id, sceneId, method, tokenId || undefined, dryRun);
     status = dryRun ? "Host planning dry-run…" : "Requested saved graph…";
@@ -1233,6 +1293,30 @@
               </select></label>
             {/if}
             <small>Changes the host-published paused gate on all graphs bound to each matching tile (up to 32 tiles / 128 graphs). It does not hide the tile. Later Trigger Tile calls in this plan see the new gate; the entire plan is undoable. Changing this graph's own gate does not interrupt the current fire.</small>
+          {:else if step.kind === "redirect"}
+            <label>Target graph <select aria-label="Redirect target graph" value={step.automationId}
+              onchange={(e) => { if (step.kind === "redirect") step.automationId = e.currentTarget.value; }}>
+              <option value="">Choose a saved graph…</option>
+              {#each saved.filter((doc) => doc._id !== editing && doc.definition.sceneId === sceneId) as doc (doc._id)}
+                <option value={doc._id}>{doc.name}</option>
+              {/each}
+            </select></label>
+            <label>Invoke as <select aria-label="Redirect method" value={step.method ?? "inherit"}
+              onchange={(e) => { if (step.kind === "redirect") step.method = e.currentTarget.value === "manual" ? "manual" : "inherit"; }}>
+              <option value="inherit">This trigger's own method</option>
+              <option value="manual">Manual</option>
+            </select></label>
+            <label>Token <select aria-label="Redirect token source" value={step.tokens ?? "triggering"}
+              onchange={(e) => { if (step.kind === "redirect") step.tokens = e.currentTarget.value as "triggering" | "current" | "inside"; }}>
+              <option value="triggering">Triggering token</option>
+              <option value="current">Current collection</option>
+              <option value="inside">Tokens inside the target's anchor</option>
+            </select></label>
+            <label>Start at landing <input aria-label="Redirect landing" value={step.landing ?? ""}
+              onchange={(e) => { if (step.kind === "redirect") { const value = e.currentTarget.value.trim(); step.landing = value || undefined; } }} /></label>
+            <label><input type="checkbox" aria-label="Redirect propagate stop" checked={step.propagateStop ?? false}
+              onchange={(e) => { if (step.kind === "redirect") step.propagateStop = e.currentTarget.checked; }} /> Let the target's Stop also stop this tile chain</label>
+            <small>Fires a named saved graph instead of a tile anchor — the target keeps its own gates, history and landing names, and runs inside this graph's single atomic envelope. <strong>This trigger's own method</strong> hands the target the real method (a door graph redirecting on doorOpen reaches a graph subscribed to doorOpen, which is how a region fires a tile graph); it fails the whole plan when the target does not accept that method. Manual always needs the target's manual method. Only graphs in this scene are listed, the target must exist and validate when you save, and only the triggering token, the current collection or the target's own anchor contents are offered — never a client-supplied token or a cross-scene id.</small>
           {:else if step.kind === "stopOthers"}
             <small>After a successful movement-trigger commit, suppress later tiles for this moving token; already-committed tiles and other tokens are unaffected. Canvas click currently dispatches only one tile.</small>
           {:else if step.kind === "set"}
@@ -1578,6 +1662,31 @@
             <label>Text <input bind:value={step.content} placeholder={'{{user}}, {{count}}, {{method}}'} /></label>
             <label>Audience <select bind:value={step.audience}><option value="gm">GM only</option><option value="scene">Scene</option></select></label>
             <small>Scene messages intentionally publish interpolated text, including IDs of selected hidden targets. Use GM only unless that disclosure is intended.</small>
+          {:else if step.kind === "result"}
+            <label>Value <input bind:value={step.value} placeholder={'{{count}}'} /></label>
+            <label>Audience <select bind:value={step.audience}><option value="caller">Caller only</option><option value="gm">GM only</option></select></label>
+            <small>Hands a bounded string, number or boolean back to whoever invoked this graph — the caller's own status line, never a chat message. A string is interpolated; the last Return Value action the graph executes wins, and a value over 256 characters rejects the graph.</small>
+          {:else if step.kind === "callMacro"}
+            <label>Saved macro <select bind:value={step.macroId} aria-label="Called macro">
+              <option value="">Choose…</option>
+              {#each automationMacros as target (target._id)}<option value={target._id}>{target.name}</option>{/each}
+            </select></label>
+            {#each macroAutomationInputs(calledMacro(step)) as field (field.name)}
+              <label>{field.name}{field.required ? " *" : ""} ({field.type})
+                <input value={(step.args?.[field.name] ?? "") as string} aria-label={`Call argument ${field.name}`}
+                  placeholder={field.type === "string" ? "{{count}}" : field.type}
+                  onchange={(e) => setCallArg(step, field.name, e.currentTarget.value)} /></label>
+            {/each}
+            <label>Store returned value in variable (optional)
+              <input value={step.capture ?? ""} aria-label="Call result variable" placeholder="child"
+                onchange={(e) => { const value = e.currentTarget.value.trim(); if (value) step.capture = value; else delete step.capture; }} /></label>
+            <label>On error <select value={step.onError ?? "stop"} aria-label="Call error policy"
+              onchange={(e) => { step.onError = e.currentTarget.value as "stop" | "continue"; }}>
+              <option value="stop">Stop this graph</option><option value="continue">Continue</option>
+            </select></label>
+            <label><input type="checkbox" aria-label="Call propagate stop" checked={step.propagateStop ?? false}
+              onchange={(e) => { if (e.currentTarget.checked) step.propagateStop = true; else delete step.propagateStop; }} /> Let the called graph's Stop also stop this graph</label>
+            <small>Runs the named saved macro's graph inside this same envelope, as <code>manual</code>, under the invoker's identity: typed argument values are interpolated here then checked against that macro's declared inputs (the same rule the directory applies), a call stack names the failing step, and the called graph's Return Value may be captured into a variable. A macro that is not published, has no anchor in this scene or omits <code>manual</code> refuses the whole graph. By default the called graph is a subroutine: a Stop inside it ends that graph only.</small>
           {:else if step.kind === "sequence"}
             <label>Saved FX macro <select bind:value={step.macroId}><option value="">Choose…</option>{#each macros as macro (macro._id)}<option value={macro._id}>{macro.name}</option>{/each}</select></label>
             <label>Audience <select bind:value={step.audience}><option value="gm">GM only</option><option value="scene">Entitled scene viewers</option></select></label>
@@ -1672,9 +1781,9 @@
     <div class="row">
       <button type="button" data-zone-save onclick={save}>Save graph</button>
       {#if firstSimulatableMethod(definition.methods)}
-        <label>Simulate method <select bind:value={triggerMethod}>{#each definition.methods.filter((method) => method !== "sceneChange") as method (method)}<option value={method}>{methodLabel(method)}</option>{/each}</select></label>
-      {:else if definition.methods.includes("sceneChange")}
-        <small>Scene change fires automatically when this scene becomes active.</small>
+        <label>Simulate method <select bind:value={triggerMethod}>{#each definition.methods.filter((method) => !isHostDispatchedMethod(method)) as method (method)}<option value={method}>{methodLabel(method)}</option>{/each}</select></label>
+      {:else if definition.methods.some((method) => isHostDispatchedMethod(method))}
+        <small>{hostEventHint(definition.methods)}</small>
       {/if}
       {#if editing}<button type="button" data-zone-dry-run disabled={!firstSimulatableMethod(definition.methods)} onclick={() => invoke(editing, true)}>Dry-run saved</button>
         <button type="button" data-zone-run disabled={!firstSimulatableMethod(definition.methods)} onclick={() => invoke(editing)}>Fire saved manually</button>{/if}
@@ -1690,6 +1799,7 @@
       <li>{doc.name} · {checked.ok ? checked.definition.methods.join("/") : "Invalid imported graph"} · {doc.state?.count ?? 0} run(s)
         {#if checked.ok}
           <button type="button" onclick={() => pick(doc)}>Edit</button>
+          <button type="button" data-zone-macro={doc._id} onclick={() => publishMacro(doc)}>{automationMacros.some((m) => macroAutomationGraphId(m) === doc._id) ? "Refresh macro" : "Publish macro"}</button>
           <button type="button" disabled={!firstSimulatableMethod(checked.definition.methods)} onclick={() => { sceneId = checked.definition.sceneId; invoke(doc._id, true, firstSimulatableMethod(checked.definition.methods) ?? "sceneChange"); }}>Dry-run</button>
           <button type="button" disabled={!firstSimulatableMethod(checked.definition.methods)} onclick={() => { sceneId = checked.definition.sceneId; invoke(doc._id, false, firstSimulatableMethod(checked.definition.methods) ?? "sceneChange"); }}>Fire</button>
           {#if doc.state?.count}

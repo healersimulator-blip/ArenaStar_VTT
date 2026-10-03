@@ -465,13 +465,13 @@ describe("camera targeting: one run, different views (§SQ-15/SQ-18, D-300)", ()
       startMs: 0, durationMs: 500 }, camera(patch)] });
 
   test("the audience vocabulary is one vocabulary, and a section takes it only there", () => {
-    for (const audience of ["scene", "gm", "caller", { players: ["p-1"] }]) {
+    for (const audience of ["scene", "gm", "caller", "others", { players: ["p-1"] }]) {
       expect(validateFxSequence(cue({ audience })).ok, JSON.stringify(audience)).toBe(true);
     }
     const bad = validateFxSequence(cue({ audience: "party" }));
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.error)
-      .toBe("a camera section's audience must be scene, gm, caller or a list of chosen players");
+      .toBe("a camera section's audience must be scene, gm, caller, others or a list of chosen players");
     // A visual or sound section has no targeted delivery, so the field is unknown there.
     expect(validateFxSequence({ version: 1, sections: [{ kind: "image", id: "i", assetId: hash,
       at: { kind: "point", x: 1, y: 1 }, startMs: 0, durationMs: 500, audience: "gm" } as never] }).ok).toBe(false);
@@ -518,7 +518,7 @@ describe("camera targeting: one run, different views (§SQ-15/SQ-18, D-300)", ()
       { kind: "text", id: "t", text: "Now", at: { kind: "point", x: 10, y: 10 },
         startMs: 0, durationMs: 500 }] });
     // The words are unchanged, and an absent audience is still "everyone watching".
-    for (const audience of [undefined, "scene", "gm", "caller"]) {
+    for (const audience of [undefined, "scene", "gm", "caller", "others"]) {
       expect(run(audience).ok, JSON.stringify(audience)).toBe(true);
     }
     expect(run({ players: ["p-1", "p-2"] }).ok).toBe(true);
@@ -530,14 +530,35 @@ describe("camera targeting: one run, different views (§SQ-15/SQ-18, D-300)", ()
       [{ players: ["p-1", 2] }, "an FX audience's chosen players must be user ids"],
       [{ players: ["p-1"], gm: true }, "an FX audience takes only a `players` list of user ids"],
       [{ play: ["p-1"] }, "an FX audience takes only a `players` list of user ids"],
-      ["party", "an FX audience must be scene, gm, caller or a list of chosen players"],
-      [null, "an FX audience must be scene, gm, caller or a list of chosen players"],
-      [[], "an FX audience must be scene, gm, caller or a list of chosen players"],
+      ["party", "an FX audience must be scene, gm, caller, others or a list of chosen players"],
+      [null, "an FX audience must be scene, gm, caller, others or a list of chosen players"],
+      [[], "an FX audience must be scene, gm, caller, others or a list of chosen players"],
     ] as const) {
       const result = run(audience);
       expect(result.ok, JSON.stringify(audience) ?? "null").toBe(false);
       if (!result.ok) expect(result.error).toBe(message);
     }
+  });
+
+  test("others reaches every viewer except the runner, at the run level and in one section", () => {
+    const resolved = resolveFxSequence(cue({ audience: "others" }) as FxSequence, scene, source, source, () => undefined);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    // The runner loses the targeted camera; everyone else keeps it — the GM included,
+    // because "everyone else" excludes the caller rather than the non-players.
+    expect(fxSectionsForViewer(resolved.sections, { id: "p-1", isGm: false }, "p-1")).toHaveLength(1);
+    expect(fxSectionsForViewer(resolved.sections, { id: "gm-1", isGm: true }, "p-1")).toHaveLength(2);
+    expect(fxSectionsForViewer(resolved.sections, { id: "p-2", isGm: false }, "p-1")).toHaveLength(2);
+    // A request with no live owner (the host's automation context) excludes nobody.
+    expect(fxSectionsForViewer(resolved.sections, { id: "p-1", isGm: false }, "automation")).toHaveLength(2);
+    // The section-level word means the same thing for the section that carries it.
+    const sectioned = resolveFxSequence({ version: 1, sections: [{ kind: "text", id: "t", text: "Now",
+      at: { kind: "point", x: 10, y: 10 }, startMs: 0, durationMs: 500 },
+      { ...camera({ audience: "others" }), id: "look" }] } as FxSequence, scene, source, source, () => undefined);
+    expect(sectioned.ok).toBe(true);
+    if (!sectioned.ok) return;
+    expect(fxSectionsForViewer(sectioned.sections, { id: "p-1", isGm: false }, "p-1")).toHaveLength(1);
+    expect(fxSectionsForViewer(sectioned.sections, { id: "gm-1", isGm: true }, "p-1")).toHaveLength(2);
   });
 
   test("a chosen list is resolved per viewer, and a word is never read as a list (D-316)", () => {

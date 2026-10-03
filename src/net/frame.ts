@@ -53,6 +53,9 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "summon.dismiss":
     case "summon.result":
     case "macro.request":
+    case "journal.trigger":
+    case "macros.invoke":
+    case "macros.save":
     case "macro.result":
     case "fx.request":
     case "fx.start":
@@ -168,6 +171,9 @@ export function channelFor(kind: MsgName): ChannelName {
     case "summon.dismiss":
     case "summon.result":
     case "macro.request":
+    case "journal.trigger":
+    case "macros.invoke":
+    case "macros.save":
     case "macro.result":
     case "fx.request":
     case "fx.start":
