@@ -466,9 +466,10 @@ export class ClientSync {
 
   /** TR-12/MC-01: run a saved automation macro. Only the macro id travels — the host
    * resolves its private graph binding and re-validates publication. */
-  invokeMacro(macroId: DocId): string {
+  invokeMacro(macroId: DocId, args?: Record<string, Json>): string {
     const requestId = globalThis.crypto.randomUUID();
-    this.send({ kind: "macros.invoke", requestId, macroId });
+    this.send({ kind: "macros.invoke", requestId, macroId,
+      ...(args && Object.keys(args).length > 0 ? { args } : {}) });
     return requestId;
   }
 

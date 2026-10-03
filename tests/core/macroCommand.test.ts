@@ -33,22 +33,34 @@ describe("the /run chat command (MC-01/MC-03)", () => {
   });
 
   test("a name parses with its surrounding space and case-insensitive word", () => {
-    expect(parseMacroCommand("/run Courtyard bell")).toEqual({ name: "Courtyard bell" });
-    expect(parseMacroCommand("  /RUN   Courtyard bell  ")).toEqual({ name: "Courtyard bell" });
-    expect(parseMacroCommand("/macro Cure light wounds")).toEqual({ name: "Cure light wounds" });
-    expect(parseMacroCommand("/Run  spaced   name ")).toEqual({ name: "spaced   name" });
+    expect(parseMacroCommand("/run Courtyard bell")).toEqual({ name: "Courtyard bell", tail: "" });
+    expect(parseMacroCommand("  /RUN   Courtyard bell  ")).toEqual({ name: "Courtyard bell", tail: "" });
+    expect(parseMacroCommand("/macro Cure light wounds")).toEqual({ name: "Cure light wounds", tail: "" });
+    expect(parseMacroCommand("/Run  spaced   name ")).toEqual({ name: "spaced   name", tail: "" });
+  });
+
+  test("MC-02: an argument tail follows the name, named or positional", () => {
+    // A `key=value` token ends the name even without quotes.
+    expect(parseMacroCommand("/run Courtyard bell rounds=2"))
+      .toEqual({ name: "Courtyard bell", tail: "rounds=2" });
+    expect(parseMacroCommand('/run "Courtyard bell" rounds=2 label="open now"'))
+      .toEqual({ name: "Courtyard bell", tail: 'rounds=2 label="open now"' });
+    // All-positional tails keep their words; a quoted name is the only way to tell them apart.
+    expect(parseMacroCommand('/run "Courtyard bell" 2 loud')).toEqual({ name: "Courtyard bell", tail: "2 loud" });
+    expect(parseMacroCommand("/run Courtyard bell")).toEqual({ name: "Courtyard bell", tail: "" });
+    expect(parseMacroCommand("'/run'")).toBeNull();
   });
 
   test("quotes let a name carry deliberate edge spaces", () => {
-    expect(parseMacroCommand('/run "Courtyard bell"')).toEqual({ name: "Courtyard bell" });
-    expect(parseMacroCommand("/run '  padded  '")).toEqual({ name: "padded" });
+    expect(parseMacroCommand('/run "Courtyard bell"')).toEqual({ name: "Courtyard bell", tail: "" });
+    expect(parseMacroCommand("/run '  padded  '")).toEqual({ name: "padded", tail: "" });
     // A mismatched pair is not a quote pair — it stays literal text.
-    expect(parseMacroCommand('/run "Courtyard bell')).toEqual({ name: '"Courtyard bell' });
+    expect(parseMacroCommand('/run "Courtyard bell')).toEqual({ name: '"Courtyard bell', tail: "" });
   });
 
   test("a bare command parses with an empty name so the caller can print usage", () => {
-    expect(parseMacroCommand("/run")).toEqual({ name: "" });
-    expect(parseMacroCommand("/macro   ")).toEqual({ name: "" });
+    expect(parseMacroCommand("/run")).toEqual({ name: "", tail: "" });
+    expect(parseMacroCommand("/macro   ")).toEqual({ name: "", tail: "" });
   });
 
   test("everything else is not a macro command", () => {

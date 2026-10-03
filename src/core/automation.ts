@@ -21,6 +21,7 @@ import { movementWallBlocked, movementFootprintBlocked, movementSpeedDuration } 
 import { moveCoordinatesError, resolveMoveCoordinates, type MoveCoordinates } from "./moveCoordinates";
 import { isDoorWall } from "./documents";
 import { tileTriggerAlphaContains, tileTriggerElevationError, tileTriggerPolygonContains, tileTriggerWorldPolygon } from "./tileTriggerZone";
+import { macroArgValues } from "./macroArgs";
 import { resolveTileImageIndex, tileImageSelectionError, type TileImageList } from "./tileImageSelection";
 import { drawFromTable, validateTable } from "./rollTable";
 import { applyDiff } from "./diff";
@@ -239,6 +240,10 @@ export interface AutomationEvent {
    * `originMethod`, so a redirected graph can tell a region's `enter` from a tile walk-on —
    * or from a handout's `manual`. */
   originSource?: "tile" | "region" | "journal" | "macro";
+  /** MC-02 (D-387): declared invocation arguments from the macro that asked for this fire,
+   * already validated against the macro's schema. They surface as `{{arg.<name>}}` and can
+   * never shadow a durable variable, because a dotted name is not a legal variable name. */
+  args?: Record<string, string | number | boolean>;
   scene: SceneDocument;
   tile: TileDocument;
   /** Original triggering token is immutable even when "current" is replaced by a selector. */
@@ -1218,7 +1223,9 @@ function escapeText(value: unknown): string {
     .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 function textTemplate(text: string, values: Record<string, string | number | boolean>): string {
-  return text.replace(/\{\{([a-zA-Z][\w-]{0,63})\}\}/g, (_raw, key: string) =>
+  // One optional dotted segment carries an invocation argument (`{{arg.rounds}}`);
+  // every other key is the single identifier it always was.
+  return text.replace(/\{\{([a-zA-Z][\w-]{0,63}(?:\.[a-zA-Z][\w-]{0,63})?)\}\}/g, (_raw, key: string) =>
     Object.prototype.hasOwnProperty.call(values, key) ? escapeText(values[key]) : "");
 }
 
@@ -1710,7 +1717,7 @@ function planGraph(
   // No inherited object keys can masquerade as variables in Check Variable.
   // Event bindings always win over imported state, even on malformed worlds.
   const values: Record<string, string | number | boolean> = Object.assign(Object.create(null) as Record<string, string | number | boolean>,
-    resume?.values ?? nextState.variables ?? {}, { method: event.method,
+    resume?.values ?? nextState.variables ?? {}, macroArgValues(event.args), { method: event.method,
       originMethod: event.originMethod ?? event.method, originTile: event.originTileId ?? event.tile._id,
       originSource: event.originSource ?? (d.sourceKind ?? "tile"),
       user: event.caller.id, count: nextState.count });

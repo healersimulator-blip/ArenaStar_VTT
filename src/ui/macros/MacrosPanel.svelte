@@ -11,12 +11,14 @@
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { MacroDocument } from "../../core/documents";
-  import { runChatMacro } from "./run";
+  import { runChatMacro, runSavedMacro } from "./run";
   import {
     MACRO_COMPOSITE_LIMITS,
     macroCompositeDocumentError,
     macroCompositeMacroIds,
   } from "../../core/macroComposite";
+  import { macroAutomationGraphId, macroAutomationInputs } from "../../core/macroAutomation";
+  import { coerceMacroArgText, macroArgSchemaError, type MacroArgInput } from "../../core/macroArgs";
   import TaggerPanel from "./TaggerPanel.svelte";
   import FxSequencePanel from "./FxSequencePanel.svelte";
   import type { RequestCrosshairPick } from "./crosshairPicker";
@@ -79,6 +81,13 @@
   let compositeName = $state("");
   let compositeChildren = $state<string[]>([]);
   let compositeError = $state("");
+  /** MC-02: the declared-input editor (GM) and the value form a caller fills in to run. */
+  let inputEditing = $state("");
+  let inputDraft = $state<MacroArgInput[]>([]);
+  let inputError = $state("");
+  let runEditing = $state("");
+  let runValues = $state<Record<string, string>>({});
+  let runError = $state("");
   let macroStatus = $state("");
   /** Request ids whose result should surface here; the host answers each one once. */
   const pendingInvokes = new SvelteSet<string>();
@@ -185,6 +194,54 @@
     editComposite(null);
   }
 
+  /** MC-02: declare the typed inputs a caller may send (stored on the macro's binding). */
+  function editInputs(macro: MacroDocument): void {
+    inputError = "";
+    inputEditing = inputEditing === macro._id ? "" : macro._id;
+    inputDraft = macroAutomationInputs(macro).map((field) => ({ ...field }));
+  }
+
+  function saveInputs(macro: MacroDocument): void {
+    inputError = "";
+    const graphId = macroAutomationGraphId(macro);
+    if (!graphId) { inputError = "This macro has no graph binding."; return; }
+    const problem = macroArgSchemaError($state.snapshot(inputDraft));
+    if (problem) { inputError = problem; return; }
+    const inputs = $state.snapshot(inputDraft).map((field) => ({ name: field.name, type: field.type,
+      ...(field.required ? { required: true as const } : {}) }));
+    client.submit([{ kind: "update", ref: { coll: "macros", id: macro._id },
+      diff: { automation: { graphId, ...(inputs.length > 0 ? { inputs } : {}) } as never } }]);
+    macroStatus = inputs.length > 0
+      ? `Declared ${inputs.length} input(s) on ${macro.name}`
+      : `Cleared ${macro.name}'s declared inputs`;
+    inputEditing = "";
+  }
+
+  /** The caller's value form for a macro that declares inputs. */
+  function editRun(macro: MacroDocument): void {
+    runError = "";
+    if (runEditing === macro._id) { runEditing = ""; return; }
+    runEditing = macro._id;
+    runValues = Object.fromEntries(macroAutomationInputs(macro).map((field) => [field.name, ""]));
+  }
+
+  function runWithInputs(macro: MacroDocument): void {
+    runError = "";
+    const args: Record<string, string | number | boolean> = {};
+    for (const field of macroAutomationInputs(macro)) {
+      const raw = runValues[field.name] ?? "";
+      if (raw.trim() === "" && !field.required) continue;
+      const value = coerceMacroArgText(field, raw);
+      if (value === null) { runError = `invalid ${field.name}`; return; }
+      args[field.name] = value;
+    }
+    const outcome = runSavedMacro(client, macro, args);
+    if (!outcome.ok) { runError = outcome.error ?? "that macro cannot run here"; return; }
+    if (outcome.requestId) pendingInvokes.add(outcome.requestId);
+    macroStatus = `Requested ${macro.name}…`;
+    runEditing = "";
+  }
+
   function childName(id: string): string {
     return automationMacros.find((m) => m._id === id)?.name ?? "(missing macro)";
   }
@@ -196,6 +253,8 @@
 
   function runMacro(m: MacroDocument): void {
     if (m.kind !== "automation" && m.kind !== "composite") { runChatMacro(client, m); return; }
+    // A macro that declares inputs asks for them first — never a silent default.
+    if (m.kind === "automation" && macroAutomationInputs(m).length > 0) { editRun(m); return; }
     macroStatus = `Requested ${m.name}…`;
     pendingInvokes.add(client.invokeMacro(m._id));
   }
@@ -314,8 +373,58 @@
             </select>
             <button type="button" onclick={() => remove(m._id)}>✕</button>
           {/if}
+          {#if gm}
+            <button type="button" data-automation-inputs={m._id} onclick={() => editInputs(m)}>
+              Inputs{macroAutomationInputs(m).length > 0 ? ` (${macroAutomationInputs(m).length})` : ""}
+            </button>
+          {/if}
           <button data-automation-macro-run type="button" onclick={() => runMacro(m)}>Run</button>
         </li>
+        {#if inputEditing === m._id}
+          <li class="inputs-editor" data-automation-inputs-editor={m._id}>
+            {#each inputDraft as field, i (i)}
+              <input value={field.name} aria-label={`Input ${i + 1} name`} maxlength={32}
+                onchange={(e) => { inputDraft = inputDraft.map((f, at) => at === i ? { ...f, name: e.currentTarget.value } : f); }} />
+              <select value={field.type} aria-label={`Input ${i + 1} type`}
+                onchange={(e) => { inputDraft = inputDraft.map((f, at) => at === i
+                  ? { ...f, type: e.currentTarget.value as MacroArgInput["type"] } : f); }}>
+                <option value="string">string</option>
+                <option value="number">number</option>
+                <option value="boolean">boolean</option>
+                <option value="token">token</option>
+              </select>
+              <label><input type="checkbox" checked={field.required ?? false}
+                aria-label={`Input ${i + 1} required`}
+                onchange={(e) => { inputDraft = inputDraft.map((f, at) => at === i
+                  ? (e.currentTarget.checked ? { ...f, required: true } : { name: f.name, type: f.type }) : f); }} /> req</label>
+              <button type="button" aria-label={`Remove input ${i + 1}`}
+                onclick={() => { inputDraft = inputDraft.filter((_, at) => at !== i); }}>✕</button>
+            {/each}
+            <button type="button" data-automation-input-add disabled={inputDraft.length >= 16}
+              onclick={() => { inputDraft = [...inputDraft, { name: `arg${inputDraft.length + 1}`, type: "string" }]; }}>Add input</button>
+            <button type="button" data-automation-input-save onclick={() => saveInputs(m)}>Save inputs</button>
+            {#if inputError}<small data-automation-input-error role="alert">{inputError}</small>{/if}
+          </li>
+        {/if}
+        {#if runEditing === m._id}
+          <li class="inputs-editor" data-automation-run-editor={m._id}>
+            {#each macroAutomationInputs(m) as field (field.name)}
+              <label>{field.name}{field.required ? " *" : ""}
+                {#if field.type === "boolean"}
+                  <select aria-label={field.name} onchange={(e) => { runValues = { ...runValues, [field.name]: e.currentTarget.value }; }}>
+                    <option value="false">false</option>
+                    <option value="true">true</option>
+                  </select>
+                {:else}
+                  <input aria-label={field.name} placeholder={field.type}
+                    oninput={(e) => { runValues = { ...runValues, [field.name]: e.currentTarget.value }; }} />
+                {/if}
+              </label>
+            {/each}
+            <button type="button" data-automation-run-with onclick={() => runWithInputs(m)}>Run</button>
+            {#if runError}<small data-automation-run-error role="alert">{runError}</small>{/if}
+          </li>
+        {/if}
       {/each}
     </ul>
     {#if automationMacros.length === 0}
@@ -417,6 +526,12 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+  .inputs-editor {
+    flex-wrap: wrap;
+    background: #16222c;
+    padding: 4px;
+    border-radius: 3px;
   }
   .composite-editor .row {
     display: flex;

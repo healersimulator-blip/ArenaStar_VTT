@@ -40,7 +40,7 @@ describe("automation macro binding (TR-12/MC-01)", () => {
     expect(macroAutomationBindingError({ graphId: "x".repeat(129) })).toContain("bounded graph id");
     expect(macroAutomationBindingError({ graphId: "graph with spaces" })).toContain("bounded graph id");
     expect(macroAutomationBindingError({ graphId: 7 })).toContain("bounded graph id");
-    expect(macroAutomationBindingError({ graphId: "g", method: "manual" })).toContain("exactly one");
+    expect(macroAutomationBindingError({ graphId: "g", method: "manual" })).toContain("graph id and its declared inputs");
     expect(macroAutomationBindingError([])).toContain("object");
     expect(macroAutomationBindingError(undefined)).toContain("needs a graph binding");
     expect(macroAutomationGraphId({ kind: "automation", automation: { graphId: "g-1" } })).toBe("g-1");

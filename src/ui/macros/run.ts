@@ -31,11 +31,13 @@ export function runChatMacro(client: ClientSync, macro: MacroDocument): void {
 export function runSavedMacro(
   client: ClientSync,
   macro: MacroDocument,
+  args: Record<string, string | number | boolean> = {},
 ): { ok: boolean; error?: string; requestId?: string } {
   if (macro.kind === "automation" || macro.kind === "composite") {
     // The caller may track the request id to show the host's own result line. A
-    // composite resolves its children on the host — no child id travels either.
-    return { ok: true, requestId: client.invokeMacro(macro._id) };
+    // composite resolves its children on the host — no child id travels either, and
+    // it takes no arguments because it declares no schema of its own.
+    return { ok: true, requestId: client.invokeMacro(macro._id, { ...args }) };
   }
   if (macro.kind === "chat") {
     runChatMacro(client, macro);

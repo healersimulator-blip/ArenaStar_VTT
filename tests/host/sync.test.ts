@@ -8408,6 +8408,7 @@ test("a published automation macro runs its saved graph, under the invoker's ide
   const delivered = player.store.get("macros", "auto-macro");
   expect(delivered?.name).toBe("Courtyard alert");
   expect(delivered?.kind).toBe("automation");
+  // No declared inputs: the delivered entry carries no binding at all.
   expect(delivered?.automation).toBeUndefined();
   expect(player.store.getAll("automations")).toEqual([]);
 
@@ -9131,4 +9132,136 @@ test("composite authoring is gated: only real, runnable automation macros may be
   await flushMicrotasks();
   expect(h.hostStore.getAll("messages").map((message) => message.content))
     .toEqual(["manual by " + GM_ID, "second manual"]);
+});
+// ─── MC-02 (D-387): a callable macro's declared, typed invocation arguments ────────
+
+const macroGraphArgs = (over: Partial<AutomationDocument> = {}): AutomationDocument => ({
+  ...zoneDoc(), _id: "args-graph", name: "Args bell",
+  definition: { ...zoneDoc().definition, tileId: "zone", methods: ["manual"], gates: { playerRunnable: true },
+    steps: [{ id: "notice", kind: "chat", audience: "gm",
+      content: "rounds={{arg.rounds}} label={{arg.label}}" }] },
+  ...over,
+});
+
+test("a macro's declared inputs are validated by the host and interpolate as {{arg.<name>}}", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroGraphArgs() }]);
+  await flushMicrotasks();
+  // The declared schema is callable metadata: the binding itself stays GM-only.
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("args-graph", {
+    automation: { graphId: "args-graph",
+      inputs: [{ name: "rounds", type: "number", required: true }, { name: "label", type: "string" }] },
+  }) }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const delivered = player.store.get("macros", "auto-macro");
+  // The declared schema is callable metadata and is delivered; the graph id is not.
+  expect(delivered?.automation).toEqual({ inputs: [{ name: "rounds", type: "number", required: true },
+    { name: "label", type: "string" }] });
+  expect(JSON.stringify(delivered?.automation)).not.toContain("args-graph");
+  const results: ClientEvents["macroResult"][] = [];
+  playerBus.on("macroResult", (event) => results.push(event));
+
+  // A declared argument reaches the graph's interpolation.
+  player.invokeMacro("auto-macro", { rounds: 3, label: "open" });
+  await flushMicrotasks();
+  expect(messages()).toEqual(["rounds=3 label=open"]);
+  expect(results.at(-1)).toMatchObject({ ok: true, callerId: PLAYER_ID });
+  // An omitted optional input interpolates to the empty string.
+  player.invokeMacro("auto-macro", { rounds: 1 });
+  await flushMicrotasks();
+  expect(messages().at(-1)).toBe("rounds=1 label=");
+
+  const before = messages().length;
+  // Undeclared, missing-required and wrongly-typed arguments are refused, and nothing fires.
+  for (const args of [{ rounds: 1, extra: "x" }, {}, { rounds: "1" }, { rounds: 1, label: "x".repeat(257) }]) {
+    player.invokeMacro("auto-macro", args as Record<string, Json>);
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ ok: false, detail: "automation macro unavailable" });
+  }
+  expect(messages()).toHaveLength(before);
+  // The GM reads the reason; a player never does.
+  const gmResults: ClientEvents["macroResult"][] = [];
+  h.gmBus.on("macroResult", (event) => gmResults.push(event));
+  h.gm.invokeMacro("auto-macro", { rounds: "1" });
+  await flushMicrotasks();
+  expect(gmResults.at(-1)?.detail).toContain("invalid rounds");
+  h.gm.invokeMacro("auto-macro", {});
+  await flushMicrotasks();
+  expect(gmResults.at(-1)?.detail).toContain("missing rounds");
+  expect(messages()).toHaveLength(before);
+
+  // A later inputs edit reaches a live player through the update-diff path as well: the
+  // private binding is stripped from the diff, the declared schema is re-attached.
+  h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "auto-macro" },
+    diff: { automation: { graphId: "args-graph",
+      inputs: [{ name: "rounds", type: "number", required: true }] } } }]);
+  await flushMicrotasks();
+  expect(player.store.get("macros", "auto-macro")?.automation)
+    .toEqual({ inputs: [{ name: "rounds", type: "number", required: true }] });
+  // The dropped input is no longer declared, so supplying it is refused and nothing fires.
+  const afterEdit = messages().length;
+  player.invokeMacro("auto-macro", { rounds: 1, label: "open" });
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: false });
+  expect(messages()).toHaveLength(afterEdit);
+  player.invokeMacro("auto-macro", { rounds: 5 });
+  await flushMicrotasks();
+  expect(messages().at(-1)).toBe("rounds=5 label=");
+});
+
+test("a composite takes no arguments, and a declared token input must be visible to the caller", async () => {
+  const h = await setup();
+  h.gm.submit([
+    { kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() },
+    // A concealed token: the GM can name it in an argument, a player may not.
+    { kind: "create", coll: "tokens", parent: { coll: "scenes", id: "s1" },
+      data: { _id: "hidden-token", type: "token", name: "Shadow", ownership: { default: 0 }, flags: {}, system: {},
+        actorId: null, img: "", x: 300, y: 300, width: 100, height: 100, rotation: 0, hidden: true, disposition: 0,
+        elevation: 0, light: {}, vision: {} } as unknown as TokenDocument },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "automations", data: macroGraph({ _id: "macro-graph", name: "Args bell" }) },
+    { kind: "create", coll: "automations", data: macroGraphArgs({ _id: "second-graph", name: "Second bell" }) },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "macros", data: automationMacro("second-graph", { _id: "token-macro", name: "Token bell",
+      automation: { graphId: "second-graph", inputs: [{ name: "target", type: "token", required: true }] } }) },
+    { kind: "create", coll: "macros", data: automationMacro("macro-graph") },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: { _id: "combo-macro", type: "macro", name: "Combo",
+    ownership: { default: 1 }, flags: {}, system: {}, kind: "composite", command: "",
+    composite: { macroIds: ["auto-macro", "token-macro"] } } as MacroDocument }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const results: ClientEvents["macroResult"][] = [];
+  playerBus.on("macroResult", (event) => results.push(event));
+
+  // A composite declares no schema, so it accepts none.
+  player.invokeMacro("combo-macro", { rounds: 1 });
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: false, detail: "automation macro unavailable" });
+  expect(messages()).toEqual([]);
+
+  // The player cannot see the concealed token, so it is not a valid argument for them…
+  player.invokeMacro("token-macro", { target: "hidden-token" });
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: false, detail: "automation macro unavailable" });
+  expect(messages()).toEqual([]);
+  // …the GM can.
+  h.gm.invokeMacro("token-macro", { target: "hidden-token" });
+  await flushMicrotasks();
+  expect(messages()).toEqual(["rounds= label="]);
+  // An unreadable macro never even answers.
+  player.invokeMacro("missing-macro");
+  await flushMicrotasks();
+  expect(results.at(-1)).toMatchObject({ ok: false, macroId: "missing-macro" });
 });

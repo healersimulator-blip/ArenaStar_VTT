@@ -11,6 +11,8 @@
     resolveMacroByName,
   } from "../../core/macroCommand";
   import { runSavedMacro } from "../macros/run";
+  import { bindMacroArgs } from "../../core/macroArgs";
+  import { macroAutomationInputs } from "../../core/macroAutomation";
   import { SvelteSet } from "svelte/reactivity";
   import { renderMarkdown } from "../../core/markdown";
   import RollCard from "./RollCard.svelte";
@@ -252,7 +254,18 @@
       } else if (!macro) {
         commandStatus = `no macro named "${macroCommand.name}"`;
       } else {
-        const outcome = runSavedMacro(client, macro);
+        // MC-02: an automation macro may declare typed inputs; the tail is bound to that
+        // schema here, so an undeclared key or a wrong type never leaves the client.
+        const bound = macro.kind === "automation"
+          ? bindMacroArgs(macroAutomationInputs(macro), macroCommand.tail)
+          : macroCommand.tail
+            ? { ok: false as const, error: "this macro takes no arguments" }
+            : { ok: true as const, args: {} };
+        if (!bound.ok) {
+          commandStatus = bound.error;
+          return;
+        }
+        const outcome = runSavedMacro(client, macro, bound.args);
         if (!outcome.ok) commandStatus = outcome.error ?? "that macro cannot run here";
         else if (outcome.requestId) {
           pendingInvokes.add(outcome.requestId);

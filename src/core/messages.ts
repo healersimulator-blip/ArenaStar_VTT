@@ -315,6 +315,8 @@ export interface MacroRequestMsg {
  * resolves the private binding and re-validates it against live publication rules. */
 export interface MacroInvokeMsg {
   kind: "macros.invoke";
+  /** MC-02 (D-387): declared, typed invocation arguments; the host validates every key. */
+  args?: Record<string, Json>;
   requestId: string;
   macroId: DocId;
 }

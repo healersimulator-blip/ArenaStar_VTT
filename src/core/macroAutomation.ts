@@ -22,16 +22,30 @@
  * widen a graph's audience, only make an already-published one easier to reach.
  */
 import type { MacroDocument } from "./documents";
+import { macroArgInputs, macroArgSchemaError, type MacroArgInput } from "./macroArgs";
 
 /** The same bound the client uses for document ids everywhere else. */
 const DOC_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 export const MACRO_AUTOMATION_LIMITS = { name: 64 } as const;
 
+/**
+ * MC-02 (D-387): what a **player** receives in place of the binding — the declared
+ * callable inputs, and nothing else. The schema is exactly what a caller needs to call
+ * the macro correctly; the graph id beside it is the thing they must never hold.
+ */
+export interface MacroAutomationPublic {
+  inputs?: MacroArgInput[];
+}
+
 /** The versioned payload of an automation macro: one graph, by reference. */
 export interface MacroAutomationBinding {
   /** The saved graph this macro invokes. Never projected to a player. */
   graphId: string;
+  /** MC-02 (D-387): the typed inputs a caller may send. This IS callable metadata —
+   * unlike the graph id, a player needs it to call the macro correctly — so it is
+   * projected, and the host validates every argument against it. */
+  inputs?: import("./macroArgs").MacroArgInput[];
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -45,11 +59,13 @@ export function macroAutomationBindingError(binding: unknown): string | null {
   if (binding === undefined) return "an automation macro needs a graph binding";
   if (!isObject(binding)) return "an automation binding must be an object";
   const keys = Object.keys(binding);
-  if (keys.length !== 1 || keys[0] !== "graphId")
-    return "an automation binding carries exactly one graph id";
+  if (keys.length === 0 || keys.some((key) => !["graphId", "inputs"].includes(key)))
+    return "an automation binding carries a graph id and its declared inputs";
   const graphId = binding.graphId;
   if (typeof graphId !== "string" || !DOC_ID.test(graphId))
     return "an automation binding needs a bounded graph id";
+  const inputs = macroArgSchemaError(binding.inputs);
+  if (inputs) return inputs;
   return null;
 }
 
@@ -59,6 +75,17 @@ export function macroAutomationGraphId(doc: Pick<MacroDocument, "kind" | "automa
   return macroAutomationBindingError(doc.automation) === null
     ? (doc.automation as MacroAutomationBinding).graphId
     : null;
+}
+
+/** MC-02: the inputs a caller may send, or an empty list for a macro that declares none. */
+export function macroAutomationInputs(
+  doc: Pick<MacroDocument, "kind" | "automation">,
+): MacroArgInput[] {
+  // Tolerant by design: a delivered copy carries the schema without the graph id, and a
+  // malformed import declares nothing. The host still requires a full binding to fire.
+  const binding = doc.automation as { inputs?: unknown } | undefined;
+  if (!binding || typeof binding !== "object") return [];
+  return macroArgInputs((binding as { inputs?: unknown }).inputs);
 }
 
 /**

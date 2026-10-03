@@ -45,6 +45,7 @@ import { openCellKeys, projectCellForViewer } from "./hexcrawl/visibility";
 import { validateScriptMacro } from "./scriptMacros";
 import { summonMarker, validateSummon } from "./summons";
 import { maskJournalLinkTargets } from "./journalLinks";
+import { macroAutomationInputs } from "./macroAutomation";
 
 export interface ProjectedWorld {
   seq: number;
@@ -289,6 +290,8 @@ function projectScene(user: PermissionUser, scene: SceneDocument): SceneDocument
 }
 
 function projectMacro(macro: MacroDocument): MacroDocument {
+  // MC-02 (D-387): a caller needs the declared input schema to call the macro; see the
+  // automation branch below, where the graph id is dropped and only `inputs` survives.
   if (macro.kind === "summon") {
     const check = validateSummon(macro.summon);
     // A published preset is a safe catalog entry, not a copy of its source
@@ -313,6 +316,11 @@ function projectMacro(macro: MacroDocument): MacroDocument {
         macro.automation === undefined && macro.composite === undefined) return macro;
     const safe = { ...macro };
     delete safe.scriptState; delete safe.summon; delete safe.automation; delete safe.composite;
+    // MC-02: the DECLARED INPUTS are callable metadata and ride along — without the id.
+    if (macro.kind === "automation") {
+      const inputs = macroAutomationInputs(macro);
+      if (inputs.length > 0) safe.automation = { inputs };
+    }
     return safe;
   }
   // Public macros are a CALLABLE CATALOG, never a copy of source, grants,

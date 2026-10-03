@@ -1921,3 +1921,116 @@ test("a GM builds a composite from saved automation macros and runs it from the 
   await expect(zones.locator("li").filter({ hasText: "First bell" })).toContainText("2 run(s)");
   await expect(zones.locator("li").filter({ hasText: "Second bell" })).toContainText("2 run(s)");
 });
+
+test("a GM declares typed inputs on a macro and a player supplies them from the chat line and the directory", async ({ browser }: { browser: Browser }) => {
+  test.setTimeout(150_000);
+  const hostCtx = await browser.newContext();
+  const playerCtx = await browser.newContext();
+  try {
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+    await host.goto(entry + "?e2e=1");
+    await waitForSurface(host, "app");
+
+    // A published manual graph whose chat line interpolates the invocation arguments.
+    await host.locator("#gm-macros").click();
+    await host.locator("[data-macro-zones-tab]").click();
+    const zones = host.locator("[data-active-zones]");
+    const tile = zones.locator("[data-zone-tile-create]");
+    await tile.locator("summary").click();
+    await tile.getByLabel("Tile name").fill("Args plate");
+    await tile.getByLabel("X", { exact: true }).fill("350");
+    await tile.getByLabel("Y", { exact: true }).fill("400");
+    await tile.getByLabel("Width").fill("200");
+    await tile.getByLabel("Height").fill("160");
+    await tile.locator("[data-zone-create-tile]").click();
+    await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Args plate" })).toHaveCount(1);
+    await zones.locator("[data-zone-name]").fill("Args bell");
+    for (const method of ["enter", "stop"])
+      await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+        .locator("input").uncheck();
+    await zones.getByLabel("Player canvas triggers (published)").check();
+    await zones.locator('[data-zone-step="notice"]').getByLabel("Text")
+      .fill("rounds={{arg.rounds}} label={{arg.label}}");
+    await zones.locator("[data-zone-save]").click();
+    const graphRow = zones.locator("li").filter({ hasText: "Args bell" });
+    await expect(graphRow).toHaveCount(1);
+    await graphRow.locator("[data-zone-macro]").click();
+    await expect(zones.getByText(/Published automation macro "Args bell"/)).toHaveCount(1);
+    const graphId = await graphRow.locator("[data-zone-macro]").getAttribute("data-zone-macro");
+    expect(graphId).toBeTruthy();
+
+    // The GM declares two inputs in the directory: a required number and an optional string.
+    const macros = host.locator('[data-window="macros"]');
+    await macros.locator("[data-macro-automations-tab]").click();
+    const macroRow = macros.locator("[data-automation-macro]").filter({ hasText: "Args bell" });
+    await expect(macroRow).toHaveCount(1);
+    await macroRow.locator('[data-automation-inputs]').click();
+    const editor = macros.locator("[data-automation-inputs-editor]");
+    await editor.locator("[data-automation-input-add]").click();
+    await editor.getByLabel("Input 1 name").fill("rounds");
+    const numberOption = editor.getByLabel("Input 1 type").locator("option").filter({ hasText: "number" });
+    await expect(numberOption).toHaveCount(1);
+    await editor.getByLabel("Input 1 type").selectOption((await numberOption.getAttribute("value")) as string);
+    await editor.getByLabel("Input 1 required").check();
+    await editor.locator("[data-automation-input-add]").click();
+    await editor.getByLabel("Input 2 name").fill("label");
+    await editor.locator("[data-automation-input-save]").click();
+    // The declaration reached the document, and the row now shows the count.
+    await expect(macroRow.locator('[data-automation-inputs]')).toContainText("Inputs (2)");
+
+    // Run from the directory asks for the declared values first.
+    await macroRow.locator("[data-automation-macro-run]").click();
+    const runEditor = macros.locator("[data-automation-run-editor]");
+    await runEditor.getByLabel("rounds").fill("2");
+    await runEditor.getByLabel("label").fill("open now");
+    await runEditor.locator("[data-automation-run-with]").click();
+    await host.locator('[data-window="macros"] [data-window-close]').click();
+    await host.locator('[data-tab="chat"]').click();
+    await expect(host.locator("#chat-log")).toContainText("rounds=2 label=open now");
+    // A bad value is refused before anything is sent.
+    await host.locator("#chat-input").fill("/run Args bell rounds=abc");
+    await host.locator("#chat-send").click();
+    await expect(host.locator("[data-chat-command-status]")).toHaveText("invalid rounds");
+    expect((await host.locator("#chat-log").innerText()).split("rounds=").length - 1).toBe(1);
+
+    // The player calls the same macro from their own chat line, with named then positional values.
+    await host.locator("#share").click();
+    const fragment = manualFragment(await host.locator("#invite-link").inputValue());
+    await player.goto(`${entry}?e2e=1&join=1#${fragment}`);
+    await expect.poll(() => player.locator("#offer-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await host.locator("#peer-code").fill(await player.locator("#offer-out").inputValue());
+    await host.locator("#code-apply").click();
+    await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20_000 }).not.toBe("");
+    await player.locator("#answer-input").fill(await host.locator("#share-out").inputValue());
+    await player.locator("#answer-apply").click();
+    await expect.poll(() => playerCall<boolean>(player, "connected"), { timeout: 30_000 }).toBe(true);
+    await waitForSurface(player, "playerCanvas");
+    expect(await player.content()).not.toContain(graphId as string);
+
+    const status = player.locator("[data-chat-command-status]");
+    // The delivered entry carries the declared schema (a caller needs it) and never the id.
+    const playerCallable = await playerCall<string>(player, "macroCallable");
+    expect(playerCallable).toContain('"rounds"');
+    expect(playerCallable).toContain('"required":true');
+    expect(playerCallable).not.toContain(graphId as string);
+    // A missing required input is refused locally, by the same binder the host enforces.
+    await player.locator("#chat-input").fill("/run Args bell");
+    await player.locator("#chat-send").click();
+    await expect(status).toHaveText("missing rounds");
+    // Named values…
+    await player.locator("#chat-input").fill('/run Args bell rounds=5 label="the vault"');
+    await player.locator("#chat-send").click();
+    await expect(status).toHaveText("Automation fired");
+    await expect(host.locator("#chat-log")).toContainText("rounds=5 label=the vault");
+    // …and positional values for the same schema.
+    await player.locator("#chat-input").fill('/run "Args bell" 7 door');
+    await player.locator("#chat-send").click();
+    await expect(host.locator("#chat-log")).toContainText("rounds=7 label=door");
+    // The player never sees the GM-only line, and no argument text became a message of its own.
+    expect(await player.locator("#chat-log").innerText()).not.toContain("rounds=");
+  } finally {
+    await playerCtx.close();
+    await hostCtx.close();
+  }
+});

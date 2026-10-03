@@ -17,6 +17,9 @@ export const MACRO_COMMAND_USAGE = "usage: /run <macro name>";
 export interface MacroCommand {
   /** The requested macro name, unquoted; empty for a bare command. */
   name: string;
+  /** MC-02 (D-387): the argument tail as typed — named `key=value` pairs and positional
+   * words, bound to the macro's declared inputs by `bindMacroArgs`. */
+  tail: string;
 }
 
 /**
@@ -30,9 +33,17 @@ export function parseMacroCommand(input: string): MacroCommand | null {
   const word = (match[1] ?? "").toLowerCase();
   if (!(MACRO_COMMAND_WORDS as readonly string[]).includes(word)) return null;
   const rest = (match[2] ?? "").trim();
-  // Matching single or double quotes let a name keep its surrounding spaces.
-  const quoted = /^(["'])([\s\S]*)\1$/.exec(rest);
-  return { name: (quoted ? (quoted[2] ?? "") : rest).trim() };
+  // A quoted name keeps its surrounding spaces; an argument tail follows the name.
+  const quoted = /^(["'])([\s\S]*?)\1\s*([\s\S]*)$/.exec(rest);
+  if (quoted) return { name: (quoted[2] ?? "").trim(), tail: (quoted[3] ?? "").trim() };
+  // Unquoted: the name runs up to the first `key=value` token, so `Name rounds=2` works
+  // without quoting the name.
+  const firstArg = rest.search(/(?:^|\s)[A-Za-z][A-Za-z0-9_]*=/);
+  if (firstArg > 0) {
+    const name = rest.slice(0, firstArg).trim();
+    return { name, tail: rest.slice(firstArg).trim() };
+  }
+  return { name: rest, tail: "" };
 }
 
 /**

@@ -65,7 +65,7 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
     case "macro.request":
       return { kind: "macro.request", requestId: "mr-1", macroId: "m-1", args: { target: "t-1" } };
     case "macros.invoke":
-      return { kind: "macros.invoke", requestId: "mi-1", macroId: "m-2" };
+      return { kind: "macros.invoke", requestId: "mi-1", macroId: "m-2", args: { rounds: 2 } };
     case "journal.trigger":
       return { kind: "journal.trigger", requestId: "jt-1", journalId: "j-1", pageId: "p-1", index: 0 };
     case "macro.result":

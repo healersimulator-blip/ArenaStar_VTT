@@ -131,9 +131,10 @@ import { attachedDeletionOps, attachedMovementOps, planPrefabPlacement, PREFAB_C
 import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxInstanceFilter } from "../core/fxInstances";
 import { fxPresetDocumentError, macroStrayPresetError } from "../core/fxPresets";
 import { MACRO_AUTOMATION_METHOD, macroAutomationDocumentError, macroAutomationGraphId,
-  macroStrayAutomationError } from "../core/macroAutomation";
+  macroAutomationInputs, macroStrayAutomationError } from "../core/macroAutomation";
 import { macroCompositeDocumentError, macroCompositeMacroIds,
   macroStrayCompositeError } from "../core/macroComposite";
+import { validateMacroArgs, type MacroArgs } from "../core/macroArgs";
 import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError } from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
@@ -181,6 +182,8 @@ export interface MacroFireTarget {
   graph: AutomationDocument;
   scene: SceneDocument;
   tile: TileDocument;
+  /** MC-02: the caller's validated invocation arguments (declared keys only). */
+  args?: MacroArgs;
 }
 
 export interface SessionUser extends PermissionUser {
@@ -2782,7 +2785,8 @@ export class HostSync {
     }
     if (typeof msg.requestId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.requestId) ||
         typeof msg.macroId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(msg.macroId) ||
-        Object.keys(msg).some((key) => !["kind", "requestId", "macroId"].includes(key))) {
+        (msg.args !== undefined && (typeof msg.args !== "object" || msg.args === null || Array.isArray(msg.args))) ||
+        Object.keys(msg).some((key) => !["kind", "requestId", "macroId", "args"].includes(key))) {
       this.reject(session, String(msg.requestId), "invalid_schema", "invalid automation macro request");
       return;
     }
@@ -2816,6 +2820,12 @@ export class HostSync {
         refused("macro unavailable");
         return;
       }
+      if (msg.args && Object.keys(msg.args).length > 0) {
+        // A composite has no declared schema of its own, so it accepts no arguments —
+        // a child that wants inputs is called directly.
+        refused("a composite macro takes no arguments");
+        return;
+      }
       const children: Array<{ macro: MacroDocument; target: MacroFireTarget }> = [];
       for (const [index, childId] of childIds.entries()) {
         const child = this.store.get("macros", childId) as MacroDocument | undefined;
@@ -2846,6 +2856,16 @@ export class HostSync {
       refused(this.macroFireTargetError(macro));
       return;
     }
+    // MC-02: the caller's arguments are validated against the macro's own declared schema,
+    // with the target scene's live visibility for a `token` input. An undeclared key, a
+    // wrong type or an invisible token never reaches the graph.
+    const checkedArgs = validateMacroArgs(msg.args, macroAutomationInputs(macro),
+      (id) => this.tokenVisibleTo(caller, target.scene._id, id));
+    if (!checkedArgs.ok) {
+      refused(checkedArgs.error);
+      return;
+    }
+    if (Object.keys(checkedArgs.args).length > 0) target.args = checkedArgs.args;
     const fired = this.fireMacroTarget(caller, target);
     if (!fired.ok) {
       refused(fired.error);
@@ -2929,12 +2949,23 @@ export class HostSync {
     return null;
   }
 
+  /**
+   * MC-02: a `token` argument is visible when the caller's **own projected view** of that
+   * scene holds the token — the same predicate the reviewed-script path uses for its inputs.
+   */
+  private tokenVisibleTo(caller: SessionUser, sceneId: string, tokenId: string): boolean {
+    const view = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
+      ?.find((item) => item._id === sceneId);
+    return !!view?.tokens.some((token) => token._id === tokenId);
+  }
+
   /** Fire a pre-flighted macro target under the caller's identity. */
   private fireMacroTarget(
     caller: SessionUser, target: MacroFireTarget,
   ): { ok: true } | { ok: false; error: string } {
     const fired = this.fireAutomation(target.graph, { scene: target.scene, tile: target.tile, caller,
-      method: MACRO_AUTOMATION_METHOD, originSource: "macro", at: this.now(), rng: this.rng });
+      method: MACRO_AUTOMATION_METHOD, originSource: "macro", ...(target.args ? { args: target.args } : {}),
+      at: this.now(), rng: this.rng });
     return fired.ok ? { ok: true } : { ok: false, error: fired.error };
   }
 

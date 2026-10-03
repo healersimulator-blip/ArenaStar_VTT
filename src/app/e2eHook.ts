@@ -211,6 +211,8 @@ export interface AppSurface {
   seq(): number;
   /** Committed replica chat contents, for undo/projection UI regressions. */
   chatLines(): string[];
+  /** MC-02 probe: the automation macro this shell holds — id and callable metadata as JSON. */
+  macroCallable(): string;
   /** Test-only durability barrier: await the queued IDB oplog append before navigating away. */
   drainOps(): Promise<number>;
   tokenCount(): number;
@@ -1033,6 +1035,9 @@ export interface PlayerSurface {
   /** D-271: what this player knows of the hexcrawl profile. */
   hexProfile(): { revealed: string[]; sight: string; partyTokenId: string | null } | null;
   role(): string | null;
+  /** MC-02 probe: the automation macro a shell actually holds — its id and the callable
+   * metadata delivered with it, as JSON. Never contains a graph id. */
+  macroCallable(): string;
   connected(): boolean;
   /** Test-only direct manual-signaling access (atomic code exchange). */
   takeOutbox(): string[];
@@ -1608,6 +1613,10 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
         : null;
     },
     role: () => client()?.user?.role ?? null,
+    macroCallable: () => {
+      const found = client()?.store.getAll("macros").find((m) => m.kind === "automation");
+      return JSON.stringify(found ? { id: found._id, automation: found.automation ?? null } : null);
+    },
     connected: () => playerApp.session.stats.state === "connected",
     takeOutbox: () => playerApp.takeOutbox(),
     receiveCode: (code) => playerApp.receiveCode(code),
@@ -2347,6 +2356,10 @@ function appSurface(app: HostApp): AppSurface {
     worldId: () => app.worldId,
     seq: () => client.store.seq,
     chatLines: () => client.store.getAll("messages").map((message) => message.content),
+    macroCallable: () => {
+      const found = client.store.getAll("macros").find((m) => m.kind === "automation");
+      return JSON.stringify(found ? { id: found._id, automation: found.automation ?? null } : null);
+    },
     drainOps: async () => { await app.persister.drain(); return app.store.seq; },
     tokenCount: () => scene()?.tokens.length ?? 0,
     tokenPos: () => {
