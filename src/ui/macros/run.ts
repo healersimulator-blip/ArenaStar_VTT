@@ -129,13 +129,5 @@ export function macroResultText(msg: { ok: boolean; detail: string; result?: unk
   return msg.ok && msg.result !== undefined ? `${base} → ${String(msg.result)}` : base;
 }
 
-/** Macros bound to a hotbar slot (flags.core.slot, §10). */
-export function macroSlots(macros: readonly MacroDocument[]): Array<MacroDocument | null> {
-  const slots: Array<MacroDocument | null> = [null, null, null, null, null];
-  for (const m of macros) {
-    const core = (m.flags as { core?: { slot?: unknown } }).core;
-    const slot = typeof core?.slot === "number" ? core.slot : 0;
-    if (slot >= 1 && slot <= 5) slots[slot - 1] = m;
-  }
-  return slots;
-}
+/** §10 defaults plus D-392's local player bindings share the core slot resolver. */
+export { macroSlots } from "../../core/macroHotbar";

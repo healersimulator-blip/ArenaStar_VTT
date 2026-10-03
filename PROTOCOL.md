@@ -342,6 +342,19 @@ authority of its own — it is a second way to ask for an already-published trig
 widens a graph's audience. One fire per `requestId`; the result travels as `macro.result` and never
 names the graph, its id or a refusal reason to a non-GM.
 
+**Hotbar preferences (D-392) are not a wire message.** A player may override the five
+`flags.core.slot` defaults using a browser-local `{ version: 1, slots: [...] }` record keyed
+by the `(worldId, userId)` tuple. Each binding is `null` (inherit the current GM default),
+`""` (explicitly empty), or a bounded macro id. No document/source/grant/graph reference is
+stored; nothing is submitted, projected, exported with the world or synced to another device.
+The shell resolves ids against its current delivered macro catalog, leaves a missing override
+inert without falling back to another macro, and issues only the existing caller-scoped
+requests when a slot is actually run. A catalog entry is not proof of live publication: the
+host still re-resolves and authorizes the request, and the hotbar renders the invoker's own
+`macro.result` (neutral for a refused player request) without forwarding private diagnostics.
+Denied local storage keeps the arrangement for the visit with explicit unsaved feedback;
+it never falls back to a world write.
+
 MC-02: an automation macro may also **declare inputs** (`{ name, type, required?, from? }`, at most
 16, of type string/number/boolean/token/actor), and a caller then supplies `args`. The declared
 schema *is* projected — it is the callable metadata a directory/hotbar needs to prompt for the

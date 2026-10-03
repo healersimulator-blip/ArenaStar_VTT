@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-372, with the D-374 double-click, D-375 hover, D-376 scene-change, D-377 door-change, D-378 combat-change, D-379 environment-change, D-380 scene-load, D-381 automation-macro and D-382 redirect follow-ups appended below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-392, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -43,6 +43,16 @@ Consolidated historical archive through D-372, with the D-374 double-click, D-37
 - [D-380 archived verification report](#report-d380)
 - [D-381 archived verification report](#report-d381)
 - [D-382 archived verification report](#report-d382)
+- [D-383 archived verification report](#report-d383)
+- [D-384 archived verification report](#report-d384)
+- [D-385 archived verification report](#report-d385)
+- [D-386 archived verification report](#report-d386)
+- [D-387 archived verification report](#report-d387)
+- [D-388 archived verification report](#report-d388)
+- [D-389 archived verification report](#report-d389)
+- [D-390 archived verification report](#report-d390)
+- [D-391 archived verification report](#report-d391)
+- [D-392 archived verification report](#report-d392)
 
 <a id="report-d293-d319"></a>
 
@@ -4507,3 +4517,30 @@ The browser cases used npm-provisioned Chromium 153 for functional input coverag
 - Production `file://` Chromium 153: `e2e/fx_sequence.spec.ts:2570` authors a text timeline, sets the run audience to **Everyone else**, joins a real second browser context through the manual WebRTC fragment dance, runs the timeline once from the wizard, polls the **player shell's own stage** (`__canvasStage.getFxLayer().count`) until it draws the cue, asserts the runner's stage (`__stage`) is still at zero for the whole run, and reads the GM's notice: `reached 1 viewer(s)` with `1 outside its audience`. `fx_sequence.spec.ts` (35 cases) + `fx_lifecycle` + `fx_item_binding` + `active_zones` (34) + `automation_appearance`: **90/90 in 7.2 min** (one worker, zero retries).
 - Full `corepack pnpm test` — **4,780 passed / 12 skipped** across 331 passing / 2 skipped files (**146 s**). `corepack pnpm typecheck` — 67 components, 0 blocking, 1 existing advisory (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.914 MB raw / 1.118 MB gzip** (4,103,754 / 1,172,215 bytes), within the 6 MB budget; `git diff --check` clean.
 - A41 still requires the pre-published target GPU/browser/runner profile and a qualifying run meeting every budget. **Full A01–A41 parity is not established.**
+
+<a id="report-d392"></a>
+
+## D392 — A player arranges their own macro hotbar (2026-10-03)
+
+**Scope:** MC-01's player-owned hotbar bindings and private execution feedback. The GM still owns world macro documents; a local assignment grants no new execution authority. The remaining common-directory/chat/item/tile execution matrix and full A34 acceptance are not closed.
+
+### Implemented
+
+- `src/core/macroHotbar.ts` — a versioned five-binding local preference, scoped by a collision-safe `(worldId, userId)` tuple; `null` inherits the current GM slot, `""` explicitly clears it, and a bounded macro id overrides it. Storage contains ids only, not names/source/arguments/grants/graph refs; bad versions, bad values, corrupt or oversized JSON and denied reads fail safely to defaults, while denied writes return a usable visit-only arrangement with `saved: false`. No global preference singleton, world write or network fallback.
+- The existing `macroSlots` default resolver moves to the core (re-exported from `src/ui/macros/run.ts`), retaining last-wins for duplicate GM slots and ignoring non-integer/out-of-range imported slots. `hotbarMacroChoices` offers delivered chat/script/sequence/automation/composite entries; summon/FX-preset pickers remain separate. `playerMacroSlots` applies overrides to the **live projected catalog**, always using the current macro document, never a stored body. Missing assignments are inert and retained for recovery, with no unintended fallback to a different GM-default macro.
+- `MacroHotbarPrefsPanel.svelte` plus the player's **Arrange** button — five pickers in **Session & guide → Macro hotbar**, explicit empty/default choices, a **Use GM defaults** reset and truthful saved/visit-only feedback. Missing choices display **Unavailable macro (not in your catalog)** without remembering a private/stale name. Opening focuses the first picker; closing returns focus to the opener.
+- `JoinApp.svelte` — loads preferences for the actual world/player, resolves the same row for click and 1–5 keys, preserves typing/modifier guards, and shows local input errors / the caller's own host `macro.result` below the hotbar for automation/composite/script requests. Pending result ids are bounded; script/automation inputs can open the existing directory. FX delivery notices retain their existing path. The GM row and assignment UI are unchanged.
+- A delivered catalog name is **not** an execution grant: a shared automation entry whose graph is GM-only can still be selected, but its player request is refused by the existing host gate with neutral text and no commit. A GM-audience FX entry is absent from the player's catalog altogether. No new wire kind, authority policy or host execution code is introduced.
+
+### Verification
+
+- New `tests/core/macroHotbar.test.ts` — **11/11**: integer/default/last-wins rules, fresh/versioned/bounded/padded storage normalization, five supported choice kinds, override/empty/default resolution without macro mutation, live GM changes and reset, invalid assignment/index refusal, missing-id non-fallback/recovery, live-document and prototype-looking-id resolution, world/player storage isolation with collision-safe keys, corrupt/oversized/future JSON and denied read/write behavior.
+- Existing `tests/ui/macroHotbar.test.ts` — **9/9**, unchanged dispatch regressions; `tests/core/macroAutomation.test.ts` **5/5**; `tests/core/projection.test.ts` **27/27**; `tests/host/sync.test.ts` **222/222** — **274 focused tests** total. No isolated DOM tests replace browser evidence.
+- New production `file://` Chromium 153 `e2e/macro_hotbar.spec.ts:99` — **three real browser contexts** (GM + two players), wizard-authored defaults and catalog entries, actual WebRTC signaling. One player assigns/clears/restores/reset slots while the GM and the other player retain their defaults and the host sequence does not advance; the GM-only FX entry is not offered; the restricted automation's request produces only `Refused: automation macro unavailable` and no commit, with no graph ids in player markup. Click and key both use the local override, typing does not fire it, the other player runs the original default, and a **fresh page/rejoin** keeps the same identity and saved arrangement. Deleting the assigned macro immediately disables its override, even though a different GM-default macro remains valid; the missing picker choice is explicit, and selecting inherit restores the current default.
+- New `e2e/macro_hotbar.spec.ts:206` — denies **only hotbar storage writes**, sees `Changed for this visit only — browser storage is unavailable`, runs the local arrangement successfully, and reloads/rejoins back to the GM defaults. No world-write fallback or false persistence promise. New spec **2/2** alone (31.2 s).
+- Browser regression batch: `macro_hotbar` (2) + `active_zones` (34) + `fx_sequence` (35) + `join` (1) + `script_macros` (9) + `script_result_branch` (1) — **82/82 in 5.3 min** (**320.98 s** command wall time; one worker, zero retries).
+- Full `corepack pnpm test` — **4,791 passed / 12 skipped**, 332 passing / 2 skipped files (**133.23 s**). `corepack pnpm typecheck` — **68 components / 0 blocking / 1 existing advisory** (`src/ui/sim/ReplayPanel.svelte:29`); lint clean. `pnpm size` — **3.920 MB raw / 1.120 MB gzip** (4,109,915 / 1,174,210 bytes), within the 6 MB budget; `git diff --check` clean.
+
+### Still open
+
+No cross-device preference sync, drag-and-drop assignment or per-slot argument presets; no unified summon/FX-preset hotbar picker. Full invocation parity across the directory/chat/item/cast/tile surfaces, MC-02's selected item/context / imports / reusable helpers / continuation-carried values, MC-03's full templating, named-user run-as identity and the remaining TR/A19–A40 acceptance scenarios remain partial. A41 still requires a qualifying hardware-GPU reference-profile run. **Full A01–A41 parity is not established.**

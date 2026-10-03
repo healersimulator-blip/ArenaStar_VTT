@@ -54,8 +54,12 @@
   import Icon from "../ui/icons/Icon.svelte";
   import { ChatPanel } from "../ui/chat";
   import { QuickbarRow } from "../ui/quickbar";
-  import { MacroHotbar, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
-  import { SvelteMap } from "svelte/reactivity";
+  import { MacroHotbar, macroResultText, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
+  import MacroHotbarPrefsPanel from "../ui/macros/MacroHotbarPrefsPanel.svelte";
+  import { assignMacroHotbarSlot, hotbarMacroChoices, macroHotbarStorageKey, normalizeMacroHotbarPrefs,
+    playerMacroSlots, readMacroHotbarPrefs, writeMacroHotbarPrefs,
+    type MacroHotbarBinding, type MacroHotbarPrefs } from "../core/macroHotbar";
+  import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { WindowManager } from "../core/windows";
   import { WindowHost } from "../ui/windows";
   import { openPF1eSheetWindow } from "../ui/sheets/pf1eSheetWindow";
@@ -95,13 +99,20 @@
   let fxNotices = $state<string[]>([]);
   let guideFocus = $state<HTMLDivElement | null>(null);
   let guideTrigger = $state<HTMLButtonElement | null>(null);
+  let guideReturnFocus: HTMLElement | null = null;
+  let hotbarPrefsSection = $state<HTMLElement | null>(null);
   function openGuide(): void {
+    guideReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : guideTrigger;
     guideOpen = true;
     queueMicrotask(() => guideFocus?.focus());
   }
+  function openHotbarPrefs(): void {
+    openGuide();
+    queueMicrotask(() => hotbarPrefsSection?.querySelector("select")?.focus());
+  }
   function closeGuide(): void {
     guideOpen = false;
-    queueMicrotask(() => guideTrigger?.focus());
+    queueMicrotask(() => (guideReturnFocus ?? guideTrigger)?.focus());
   }
   let connState = $state("new");
   let copyStatus = $state("");
@@ -501,19 +512,73 @@
     return new Promise((resolve) => { pendingSummonPick = { options, resolve }; });
   };
 
-  /** MC-01: the macro hotbar a player sees — the same five `flags.core.slot` slots
-   * the GM assigns in the macros window. The host still decides what may fire. */
-  const playerHotbarSlots = $derived.by(() => {
+  /** MC-01/D-392: defaults are world state; a player's overrides never leave this device. */
+  let hotbarPrefs = $state<MacroHotbarPrefs>(normalizeMacroHotbarPrefs(null));
+  let hotbarLoadedKey = $state("");
+  let hotbarSaveStatus = $state("");
+  let hotbarRunStatus = $state("");
+  const pendingHotbarRuns = new SvelteSet<string>();
+  const playerHotbarScope = $derived.by(() => {
     void storeVersion;
-    return macroSlots((app?.client.store.getAll("macros") ?? []) as Parameters<typeof macroSlots>[0]);
+    const current = app;
+    const userId = current?.client?.user?.id;
+    return current && userId ? { worldId: current.roomId, userId } : null;
   });
+  const playerHotbarMacros = $derived.by(() => {
+    void storeVersion;
+    return [...(app?.client?.store.getAll("macros") ?? [])] as Parameters<typeof macroSlots>[0];
+  });
+  const playerHotbarDefaults = $derived(macroSlots(playerHotbarMacros));
+  const playerHotbarChoices = $derived(hotbarMacroChoices(playerHotbarMacros));
+  const playerHotbarSlots = $derived(playerMacroSlots(playerHotbarMacros,
+    playerHotbarScope && hotbarLoadedKey === macroHotbarStorageKey(playerHotbarScope)
+      ? hotbarPrefs : normalizeMacroHotbarPrefs(null)));
+
+  $effect(() => {
+    const scope = playerHotbarScope;
+    const key = scope ? macroHotbarStorageKey(scope) : "";
+    if (key === hotbarLoadedKey) return;
+    hotbarLoadedKey = key;
+    hotbarPrefs = scope ? readMacroHotbarPrefs(scope) : normalizeMacroHotbarPrefs(null);
+    hotbarSaveStatus = "";
+    hotbarRunStatus = "";
+    pendingHotbarRuns.clear();
+  });
+  $effect(() => {
+    const current = app;
+    if (!current) return;
+    return current.bus.on("macroResult", (msg) => {
+      if (!pendingHotbarRuns.delete(msg.requestId)) return;
+      hotbarRunStatus = macroResultText(msg);
+    });
+  });
+
+  function saveHotbarPrefs(next: MacroHotbarPrefs): void {
+    const scope = playerHotbarScope;
+    if (!scope || hotbarLoadedKey !== macroHotbarStorageKey(scope)) return;
+    const written = writeMacroHotbarPrefs(scope, next);
+    hotbarPrefs = written.prefs;
+    hotbarSaveStatus = written.saved ? "Saved in this browser for this player and world."
+      : "Changed for this visit only — browser storage is unavailable.";
+  }
+  function assignPlayerSlot(i: number, binding: MacroHotbarBinding): void {
+    saveHotbarPrefs(assignMacroHotbarSlot(hotbarPrefs, i, binding, playerHotbarMacros));
+  }
 
   function runPlayerSlot(i: number): void {
     const macro = playerHotbarSlots[i];
-    if (!macro || !app) return;
-    runMacroSlot(app.client, macro, { activeSceneId: () => activeScene()?._id ?? null,
+    const client = app?.client;
+    if (!macro || !client) return;
+    const outcome = runMacroSlot(client, macro, { activeSceneId: () => activeScene()?._id ?? null,
+      onNeedsInput: openMacros,
       // D-388: a `from: "selected"` input defaults to the player's own selected token.
-      selection: () => macroSelectionOf(app.client, selection.length === 1 ? (selection[0] ?? null) : null) });
+      selection: () => macroSelectionOf(client, selection.length === 1 ? (selection[0] ?? null) : null) });
+    hotbarRunStatus = outcome.ok ? `Requested ${macro.name}…` : `Refused: ${outcome.error}`;
+    if (outcome.requestId && ["automation", "composite", "script"].includes(macro.kind)) {
+      // A lost connection cannot grow the pending set forever. These are private result ids only.
+      if (pendingHotbarRuns.size >= 32) pendingHotbarRuns.clear();
+      pendingHotbarRuns.add(outcome.requestId);
+    }
   }
 
   function activeScene(): SceneDocument | null {
@@ -1363,13 +1428,14 @@
           {/if}
         </div>
         {#if app?.client}<div class="dock-footer">
-          <MacroHotbar slots={playerHotbarSlots} onRun={runPlayerSlot} />
+          <MacroHotbar slots={playerHotbarSlots} onRun={runPlayerSlot} onArrange={openHotbarPrefs} arranging={guideOpen} />
+          {#if hotbarRunStatus}<p class="hotbar-status" role="status" data-player-hotbar-run-status>{hotbarRunStatus}</p>{/if}
           <QuickbarRow client={app.client} actor={quickbarActor} targets={quickbarTargets} />
         </div>{/if}
       </aside>
     </section>
     {#if guideOpen}
-      <div class="player-guide" data-player-guide role="dialog" aria-modal="false" aria-labelledby="guide-title" tabindex="-1"
+      <div class="player-guide" id="player-guide" data-player-guide role="dialog" aria-modal="false" aria-labelledby="guide-title" tabindex="-1"
         bind:this={guideFocus} onkeydown={(event) => { if (event.key === "Escape") { event.stopPropagation(); closeGuide(); } }}>
         <header class="guide-heading"><div><span class="dock-eyebrow">TABLE GUIDE</span><h2 id="guide-title">Session & guide</h2></div>
           <button data-icon-button class="guide-close" type="button" aria-label="Close guide" title="Close guide" onclick={closeGuide}><Icon name="x" /></button>
@@ -1381,6 +1447,10 @@
               <OnboardingPanel steps={onboarding} storageKey="vtt-onboarding-player" title="Getting started" />
             </section>
           {/if}
+          <section class="guide-card" bind:this={hotbarPrefsSection}><h3>Macro hotbar</h3>
+            <MacroHotbarPrefsPanel prefs={hotbarPrefs} defaults={playerHotbarDefaults} choices={playerHotbarChoices}
+              onAssign={assignPlayerSlot} onReset={() => saveHotbarPrefs(normalizeMacroHotbarPrefs(null))} status={hotbarSaveStatus} />
+          </section>
           <section class="guide-card"><h3>Effects on this device</h3>
             <FxViewPrefsPanel />
           </section>
@@ -1886,6 +1956,7 @@
   .tabbody { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 13px 14px; background: #15222d; }
   .tabbody :global(.chat) { min-height: 100%; height: 100%; }
   .tabbody :global(#chat-log) { flex: 1 1 auto; max-height: none; min-height: 120px; border-color: #344957; background: #101a24; }
+  .hotbar-status { margin: 4px 0; font-size: 0.75rem; color: #cbd8e5; }
   .dock-footer { flex: 0 0 auto; max-height: 170px; overflow-y: auto; padding: 9px 12px; border-top: 1px solid #3a4b59; background: #192834; }
   .player-guide {
     position: fixed;
