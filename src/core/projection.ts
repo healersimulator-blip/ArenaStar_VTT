@@ -303,16 +303,16 @@ function projectMacro(macro: MacroDocument): MacroDocument {
         : {}) };
     if (!check.ok || !check.definition.playerCallable) delete safe.summon;
     delete safe.script; delete safe.scriptState; delete safe.sequence;
-    delete safe.automation;
+    delete safe.automation; delete safe.composite;
     return safe;
   }
   if (macro.kind !== "script") {
     // `automation` is a graph id: it must not reach a player replica in ANY kind,
     // so its presence alone forces the copy (create, snapshot and update alike).
     if (macro.scriptState === undefined && macro.summon === undefined &&
-        macro.automation === undefined) return macro;
+        macro.automation === undefined && macro.composite === undefined) return macro;
     const safe = { ...macro };
-    delete safe.scriptState; delete safe.summon; delete safe.automation;
+    delete safe.scriptState; delete safe.summon; delete safe.automation; delete safe.composite;
     return safe;
   }
   // Public macros are a CALLABLE CATALOG, never a copy of source, grants,
@@ -508,7 +508,9 @@ function createVisible(
 function stripMacroBindingDiff(
   diff: Record<string, Json | null>,
 ): Record<string, Json | null> {
-  const keys = Object.keys(diff).filter((key) => key === "automation" || key.startsWith("automation."));
+  const keys = Object.keys(diff).filter((key) =>
+    ["automation", "composite"].includes(key) || key.startsWith("automation.") ||
+    key.startsWith("composite."));
   if (keys.length === 0) return diff;
   const safe = { ...diff };
   for (const key of keys) safe[key] = null;
@@ -552,8 +554,8 @@ function updateVisible(
   if ((op.ref.coll === "tiles" || op.ref.coll === "regions") && !docVisibleTo(user, doc, parent)) return null;
   if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
   if (op.ref.coll === "scenes") return projectSceneEmbedUpdate(user, op, doc as SceneDocument);
-  if (op.ref.coll === "macros" && (["script", "summon", "automation"].includes((doc as MacroDocument).kind) ||
-      Object.keys(op.diff).some((key) => ["kind", "script", "scriptState", "summon", "automation"].includes(key)))) {
+  if (op.ref.coll === "macros" && (["script", "summon", "automation", "composite"].includes((doc as MacroDocument).kind) ||
+      Object.keys(op.diff).some((key) => ["kind", "script", "scriptState", "summon", "automation", "composite"].includes(key)))) {
     const safe = projectMacro(doc as MacroDocument);
     // A kind transition can leave a previous script's code — or a graph binding — in a
     // client's replica; replace all macro-specific fields rather than forwarding a partial diff.
@@ -562,6 +564,7 @@ function updateVisible(
       sequence: (safe.sequence as unknown as Json | undefined) ?? null,
       summon: (safe.summon as unknown as Json | undefined) ?? null,
       automation: (safe.automation as unknown as Json | undefined) ?? null,
+      composite: (safe.composite as unknown as Json | undefined) ?? null,
       flags: safe.flags, system: safe.system, ownership: safe.ownership } };
   }
 

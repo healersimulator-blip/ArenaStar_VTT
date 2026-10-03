@@ -12,6 +12,11 @@
   import type { EventBus } from "../../core/events";
   import type { MacroDocument } from "../../core/documents";
   import { runChatMacro } from "./run";
+  import {
+    MACRO_COMPOSITE_LIMITS,
+    macroCompositeDocumentError,
+    macroCompositeMacroIds,
+  } from "../../core/macroComposite";
   import TaggerPanel from "./TaggerPanel.svelte";
   import FxSequencePanel from "./FxSequencePanel.svelte";
   import type { RequestCrosshairPick } from "./crosshairPicker";
@@ -68,6 +73,12 @@
   let macros = $state<MacroDocument[]>([]);
   /** TR-12/MC-01: a macro that runs one saved graph. The binding stays with the host. */
   let automationMacros = $state<MacroDocument[]>([]);
+  /** MC-01 (D-386): macros that run several automation macros, in order. */
+  let compositeMacros = $state<MacroDocument[]>([]);
+  let compositeEditing = $state("");
+  let compositeName = $state("");
+  let compositeChildren = $state<string[]>([]);
+  let compositeError = $state("");
   let macroStatus = $state("");
   /** Request ids whose result should surface here; the host answers each one once. */
   const pendingInvokes = new SvelteSet<string>();
@@ -79,6 +90,7 @@
     if (viewerRole !== "GM" && viewerRole !== "ASSISTANT" && tab !== "summons") tab = "scripts";
     macros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "chat");
     automationMacros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "automation");
+    compositeMacros = [...(client.store.getAll("macros") as readonly MacroDocument[])].filter((m) => m.kind === "composite");
   }
 
   function create(): void {
@@ -117,13 +129,73 @@
     client.submit([{ kind: "delete", ref: { coll: "macros", id } }]);
   }
 
+  /** Start a fresh composite (or load one back into the editor for an update). */
+  function editComposite(macro: MacroDocument | null): void {
+    compositeError = "";
+    compositeEditing = macro?._id ?? "";
+    compositeName = macro?.name ?? "";
+    compositeChildren = macro ? [...(macroCompositeMacroIds(macro) ?? [])] : [];
+  }
+
+  function addCompositeChild(): void {
+    // The first child not already chosen — a composite runs each macro once.
+    const next = automationMacros.find((m) => !compositeChildren.includes(m._id));
+    if (!next) { compositeError = "Every saved automation macro is already in this composite."; return; }
+    if (compositeChildren.length >= MACRO_COMPOSITE_LIMITS.children) {
+      compositeError = `A composite runs at most ${MACRO_COMPOSITE_LIMITS.children} macros.`;
+      return;
+    }
+    compositeChildren = [...compositeChildren, next._id];
+    compositeError = "";
+  }
+
+  function setCompositeChild(index: number, id: string): void {
+    if (compositeChildren.includes(id) && compositeChildren[index] !== id) {
+      compositeError = "A composite runs each macro once.";
+      return;
+    }
+    compositeChildren = compositeChildren.map((current, i) => (i === index ? id : current));
+    compositeError = "";
+  }
+
+  function removeCompositeChild(index: number): void {
+    compositeChildren = compositeChildren.filter((_, i) => i !== index);
+    compositeError = "";
+  }
+
+  function saveComposite(): void {
+    compositeError = "";
+    const doc: MacroDocument = { _id: compositeEditing || globalThis.crypto.randomUUID(),
+      type: "macro", name: compositeName.trim(), ownership: { default: 1 }, flags: {}, system: {},
+      kind: "composite", command: "", composite: { macroIds: [...compositeChildren] } };
+    const problem = macroCompositeDocumentError(doc);
+    if (problem) { compositeError = problem; return; }
+    if (compositeChildren.some((id) => !automationMacros.some((m) => m._id === id))) {
+      compositeError = "A composite may only run saved automation macros.";
+      return;
+    }
+    if (compositeEditing) {
+      client.submit([{ kind: "update", ref: { coll: "macros", id: compositeEditing },
+        diff: { name: doc.name, composite: doc.composite as never } }]);
+      macroStatus = `Requested an update to composite "${doc.name}"`;
+    } else {
+      client.submit([{ kind: "create", coll: "macros", data: doc }]);
+      macroStatus = `Published composite "${doc.name}" — run it from this tab, a hotbar slot or /run`;
+    }
+    editComposite(null);
+  }
+
+  function childName(id: string): string {
+    return automationMacros.find((m) => m._id === id)?.name ?? "(missing macro)";
+  }
+
   function slotOf(m: MacroDocument): number {
     const core = (m.flags as { core?: { slot?: unknown } }).core;
     return typeof core?.slot === "number" ? core.slot : 0;
   }
 
   function runMacro(m: MacroDocument): void {
-    if (m.kind !== "automation") { runChatMacro(client, m); return; }
+    if (m.kind !== "automation" && m.kind !== "composite") { runChatMacro(client, m); return; }
     macroStatus = `Requested ${m.name}…`;
     pendingInvokes.add(client.invokeMacro(m._id));
   }
@@ -249,6 +321,55 @@
     {#if automationMacros.length === 0}
       <small>No automation macros yet — a GM publishes one from a saved graph in Active zones.</small>
     {/if}
+    <hr />
+    <h4>Composites</h4>
+    <ul>
+      {#each compositeMacros as m (m._id)}
+        <li data-composite-macro={m._id}>
+          <span class="name">{m.name}</span>
+          <small data-composite-children>{macroCompositeMacroIds(m)?.length ?? 0} macro(s)</small>
+          {#if gm}
+            <button type="button" data-composite-edit onclick={() => editComposite(m)}>Edit</button>
+            <button type="button" onclick={() => remove(m._id)}>✕</button>
+          {/if}
+          <button data-composite-run type="button" onclick={() => runMacro(m)}>Run</button>
+        </li>
+      {/each}
+    </ul>
+    {#if compositeMacros.length === 0}
+      <small>No composites yet — a composite runs several automation macros in order.</small>
+    {/if}
+    {#if gm}
+      <div class="composite-editor" data-composite-editor>
+        <input bind:value={compositeName} data-composite-name
+          aria-label="Composite name" placeholder="Composite name" maxlength={MACRO_COMPOSITE_LIMITS.name} />
+        <ol data-composite-children-list>
+          {#each compositeChildren as id, i (i)}
+            <li>
+              <select data-composite-child value={id} aria-label={`Macro ${i + 1}`}
+                onchange={(e) => setCompositeChild(i, e.currentTarget.value)}>
+                {#each automationMacros as child (child._id)}
+                  <option value={child._id}>{child.name}</option>
+                {/each}
+              </select>
+              <small>#{i + 1} · {childName(id)}</small>
+              <button type="button" aria-label={`Remove macro ${i + 1}`}
+                onclick={() => removeCompositeChild(i)}>✕</button>
+            </li>
+          {/each}
+        </ol>
+        <div class="row">
+          <button type="button" data-composite-add onclick={addCompositeChild}
+            disabled={compositeChildren.length >= MACRO_COMPOSITE_LIMITS.children}>Add macro</button>
+          <button type="button" data-composite-save onclick={saveComposite}>
+            {compositeEditing ? "Update composite" : "Create composite"}
+          </button>
+          {#if compositeEditing}<button type="button" onclick={() => editComposite(null)}>Cancel</button>{/if}
+        </div>
+        <small data-composite-hint>Runs {MACRO_COMPOSITE_LIMITS.minimum}–{MACRO_COMPOSITE_LIMITS.children} automation macros in order, each in its own undo step.</small>
+        {#if compositeError}<small data-composite-error role="alert">{compositeError}</small>{/if}
+      </div>
+    {/if}
     {#if macroStatus}<small data-automation-status role="status">{macroStatus}</small>{/if}
   </div>
 </div>
@@ -278,6 +399,38 @@
     gap: 3px;
   }
   li {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  h4 {
+    margin: 4px 0 0;
+    font-size: 0.875rem;
+    text-transform: uppercase;
+  }
+  hr {
+    border: 0;
+    border-top: 1px solid #344957;
+    margin: 4px 0;
+  }
+  .composite-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .composite-editor .row {
+    display: flex;
+    gap: 4px;
+  }
+  .composite-editor ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .composite-editor ol li {
     display: flex;
     align-items: center;
     gap: 4px;

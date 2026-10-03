@@ -1840,3 +1840,84 @@ test("a player's macro hotbar exposes the GM's slot assignments and answers the 
     await hostCtx.close();
   }
 });
+
+test("a GM builds a composite from saved automation macros and runs it from the directory and /run", async ({ page }) => {
+  test.setTimeout(150_000);
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-zones-tab]").click();
+  const zones = page.locator("[data-active-zones]");
+  // Two published graphs on one tile, each with its own chat line.
+  const tile = zones.locator("[data-zone-tile-create]");
+  await tile.locator("summary").click();
+  await tile.getByLabel("Tile name").fill("Composite plate");
+  await tile.getByLabel("X", { exact: true }).fill("350");
+  await tile.getByLabel("Y", { exact: true }).fill("400");
+  await tile.getByLabel("Width").fill("200");
+  await tile.getByLabel("Height").fill("160");
+  await tile.locator("[data-zone-create-tile]").click();
+  await expect(zones.locator("[data-zone-tile] option").filter({ hasText: "Composite plate" })).toHaveCount(1);
+  for (const name of ["First bell", "Second bell"]) {
+    if (name === "Second bell") await zones.getByRole("button", { name: "New" }).click();
+    await zones.locator("[data-zone-tile]").selectOption(
+      (await zones.locator("[data-zone-tile] option").filter({ hasText: "Composite plate" }).getAttribute("value")) as string,
+    );
+    await zones.locator("[data-zone-name]").fill(name);
+    for (const method of ["enter", "stop"])
+      await zones.locator(".methods label").filter({ hasText: new RegExp(`^${method}$`) })
+        .locator("input").uncheck();
+    await zones.getByLabel("Player canvas triggers (published)").check();
+    await zones.locator('[data-zone-step="notice"]').getByLabel("Text")
+      .fill(name === "First bell" ? "First {{method}} {{user}}" : "Second {{method}} {{user}}");
+    await zones.locator("[data-zone-save]").click();
+    await expect(zones.locator("li").filter({ hasText: name })).toHaveCount(1);
+    await zones.locator("li").filter({ hasText: name }).locator("[data-zone-macro]").click();
+    await expect(zones.getByText(new RegExp(`Published automation macro "${name}"`))).toHaveCount(1);
+  }
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+
+  // The directory's automation tab lists both macros and now builds composites from them.
+  await page.locator("#gm-macros").click();
+  const macros = page.locator('[data-window="macros"]');
+  await macros.locator("[data-macro-automations-tab]").click();
+  await expect(macros.locator("[data-automation-macro]")).toHaveCount(2);
+  const editor = macros.locator("[data-composite-editor]");
+  await editor.locator("[data-composite-name]").fill("Opening script");
+  await editor.locator("[data-composite-add]").click();
+  await editor.locator("[data-composite-add]").click();
+  await expect(editor.locator("[data-composite-children-list] li")).toHaveCount(2);
+  // Order is explicit: the second row is re-pointed at the other macro.
+  const firstChild = await editor.locator("[data-composite-child]").nth(0).inputValue();
+  const secondChild = await editor.locator("[data-composite-child]").nth(1).inputValue();
+  expect(firstChild).not.toBe(secondChild);
+  await editor.locator("[data-composite-save]").click();
+  const comboRow = macros.locator("[data-composite-macro]").filter({ hasText: "Opening script" });
+  await expect(comboRow).toHaveCount(1);
+  await expect(comboRow.locator("[data-composite-children]")).toHaveText("2 macro(s)");
+
+  // Run it from the directory: both graphs fire, in order, in one request.
+  const before = await hostCall<number>(page, "seq");
+  await comboRow.locator("[data-composite-run]").click();
+  const log = page.locator("#chat-log");
+  await expect(log).toContainText("First manual gm");
+  await expect(log).toContainText("Second manual gm");
+  const lines = await log.innerText();
+  expect(lines.indexOf("First manual gm")).toBeLessThan(lines.indexOf("Second manual gm"));
+  // Each child graph fires in its own envelope (and its own undo step), so the
+  // composite advances the host sequence twice — one commit per child.
+  await expect.poll(() => hostCall<number>(page, "seq"), { timeout: 20_000 }).toBe(before + 2);
+
+  // …then from the chat command, which dispatches the composite by name.
+  await page.locator('[data-tab="chat"]').click();
+  const status = page.locator("[data-chat-command-status]");
+  await page.locator("#chat-input").fill("/run Opening script");
+  await page.locator("#chat-send").click();
+  await expect(status).toHaveText("Fired Opening script (2 macro(s))");
+  const runs = (await page.locator("#chat-log").innerText()).split("First manual gm").length - 1;
+  expect(runs).toBe(2);
+  // Both children recorded two runs of their own (directory + chat command).
+  await macros.locator("[data-macro-zones-tab]").click();
+  await expect(zones.locator("li").filter({ hasText: "First bell" })).toContainText("2 run(s)");
+  await expect(zones.locator("li").filter({ hasText: "Second bell" })).toContainText("2 run(s)");
+});

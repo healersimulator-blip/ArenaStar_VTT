@@ -8975,3 +8975,160 @@ test("a handout link cannot reach a scene the viewer is not in, and an unshared 
   expect(messages().at(-1)).toBe("own scene by " + PLAYER_ID);
   expect(player.store.getAll("automations")).toEqual([]);
 });
+
+// ─── MC-01 (D-386): a composite macro runs several saved macros, in order ──────────
+
+const compositeMacro = (macroIds: string[], over: Partial<MacroDocument> = {}): MacroDocument => ({
+  _id: "combo-macro", type: "macro", name: "Opening script", ownership: { default: 1 },
+  flags: {}, system: {}, kind: "composite", command: "", composite: { macroIds }, ...over,
+});
+
+test("a composite runs its children in order, under the invoker's identity, without leaking them", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() }]);
+  await flushMicrotasks();
+  // Two published graphs on the same visible tile, plus their macros.
+  h.gm.submit([
+    { kind: "create", coll: "automations", data: macroGraph() },
+    { kind: "create", coll: "automations", data: macroGraph({ _id: "second-graph", name: "Second bell",
+      definition: { ...macroGraph().definition, steps: [{ id: "notice", kind: "chat", audience: "gm",
+        content: "second {{method}} by {{user}}" }] } }) },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "macros", data: automationMacro("macro-graph") },
+    { kind: "create", coll: "macros", data: automationMacro("second-graph", { _id: "second-macro", name: "Second bell" }) },
+  ]);
+  await flushMicrotasks();
+  // A composite may only reference children that are already committed.
+  h.gm.submit([{ kind: "create", coll: "macros", data: compositeMacro(["auto-macro", "second-macro"]) }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const delivered = player.store.get("macros", "combo-macro");
+  expect(delivered?.kind).toBe("composite");
+  expect(delivered?.composite).toBeUndefined();
+  expect(player.store.getAll("automations")).toEqual([]);
+
+  const results: ClientEvents["macroResult"][] = [];
+  playerBus.on("macroResult", (event) => results.push(event));
+  player.invokeMacro("combo-macro");
+  await flushMicrotasks();
+  // Both children fired, in the authored order, each as its own graph invocation.
+  expect(messages()).toEqual(["manual by " + PLAYER_ID, "second manual by " + PLAYER_ID]);
+  expect(h.hostStore.get("automations", "macro-graph")?.state?.recent?.map((e) => e.userId))
+    .toEqual([PLAYER_ID]);
+  expect(h.hostStore.get("automations", "second-graph")?.state?.recent?.map((e) => e.userId))
+    .toEqual([PLAYER_ID]);
+  expect(results.at(-1)).toMatchObject({ ok: true, macroId: "combo-macro", callerId: PLAYER_ID });
+  // A player never learns which macros ran or what they were called.
+  expect(results.at(-1)?.detail).toBe("Automation fired");
+  expect(player.store.getAll("messages")).toEqual([]);
+
+  // The GM reads the same run with the composite's own name.
+  const gmResults: ClientEvents["macroResult"][] = [];
+  h.gmBus.on("macroResult", (event) => gmResults.push(event));
+  h.gm.invokeMacro("combo-macro");
+  await flushMicrotasks();
+  expect(gmResults.at(-1)?.detail).toBe("Fired Opening script (2 macro(s))");
+  expect(messages()).toHaveLength(4);
+
+  // Each child keeps its own envelope: two undos remove the two children's writes.
+  expect(h.host.undo().ok).toBe(true);
+  expect(h.host.undo().ok).toBe(true);
+  expect(messages()).toEqual(["manual by " + PLAYER_ID, "second manual by " + PLAYER_ID]);
+});
+
+test("a composite pre-flights every child: one unreadable child fires nothing at all", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() }]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "automations", data: macroGraph() },
+    { kind: "create", coll: "automations", data: macroGraph({ _id: "private-graph", name: "Private graph",
+      definition: { ...macroGraph().definition, gates: {} } }) },
+  ]);
+  await flushMicrotasks();
+  h.gm.submit([
+    { kind: "create", coll: "macros", data: automationMacro("macro-graph") },
+    { kind: "create", coll: "macros", data: automationMacro("private-graph", { _id: "private-macro", name: "Private" }) },
+  ]);
+  await flushMicrotasks();
+  // The player may read both macros, but only run the published one.
+  h.gm.submit([{ kind: "create", coll: "macros", data: compositeMacro(["auto-macro", "private-macro"]) }]);
+  await flushMicrotasks();
+  const messages = () => h.hostStore.getAll("messages").map((message) => message.content);
+  const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const results: ClientEvents["macroResult"][] = [];
+  playerBus.on("macroResult", (event) => results.push(event));
+
+  player.invokeMacro("combo-macro");
+  await flushMicrotasks();
+  // Nothing fired — not even the child the player could have run on its own.
+  expect(messages()).toEqual([]);
+  expect(h.hostStore.get("automations", "macro-graph")?.state).toBeUndefined();
+  expect(results.at(-1)).toMatchObject({ ok: false, detail: "automation macro unavailable" });
+
+  // The GM's second child is unpublished for a player, so the same composite is refused…
+  expect(h.hostStore.get("automations", "private-graph")?.state?.count ?? 0).toBe(0);
+  // …while the GM's own run of it succeeds (the unpublished graph is not a player restriction).
+  h.gm.invokeMacro("combo-macro");
+  await flushMicrotasks();
+  expect(messages()).toEqual(["manual by " + GM_ID, "manual by " + GM_ID]);
+});
+
+test("composite authoring is gated: only real, runnable automation macros may be listed", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "tiles", parent: { coll: "scenes", id: "s1" }, data: visibleZoneTile() }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroGraph() }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("macro-graph") }]);
+  await flushMicrotasks();
+  // A chat macro can never be a composite child (its surface owns its own inputs).
+  h.gm.submit([{ kind: "create", coll: "macros", data: { _id: "chat-macro", type: "macro", name: "Wave",
+    ownership: { default: 1 }, flags: {}, system: {}, kind: "chat", command: "/me waves" } as MacroDocument }]);
+  await flushMicrotasks();
+  const refused = (data: MacroDocument): void => {
+    h.gm.submit([{ kind: "create", coll: "macros", data }]);
+  };
+  // Each of these is refused, and the refusal leaves no composite behind.
+  const attempts: Array<[string, MacroDocument]> = [
+    ["a nested composite", compositeMacro(["auto-macro", "combo-macro"])],
+    ["a missing child", compositeMacro(["auto-macro", "missing-macro"])],
+    ["a duplicate child", compositeMacro(["auto-macro", "auto-macro"])],
+    ["a single child", compositeMacro(["auto-macro"])],
+    ["a chat child", compositeMacro(["auto-macro", "chat-macro"])],
+    ["a self-reference", compositeMacro(["auto-macro", "combo-macro"], { _id: "combo-macro" })],
+    ["a command on a composite", compositeMacro(["auto-macro", "chat-macro"], { command: "/say hi" })],
+    ["a stray binding on a chat macro", { _id: "stray", type: "macro", name: "Stray", ownership: { default: 1 },
+      flags: {}, system: {}, kind: "chat", command: "hi", composite: { macroIds: ["auto-macro", "chat-macro"] } } as MacroDocument],
+  ];
+  for (const [label, doc] of attempts) {
+    refused(doc);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "combo-macro"), label).toBeUndefined();
+  }
+  // …and a player may not author one either.
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  player.submit([{ kind: "create", coll: "macros", data: compositeMacro(["auto-macro", "chat-macro"]) }]);
+  await flushMicrotasks();
+  expect(h.hostStore.get("macros", "combo-macro")).toBeUndefined();
+
+  // A second runnable child commits, and the valid pair finally does too.
+  h.gm.submit([{ kind: "create", coll: "automations", data: macroGraph({ _id: "second-graph", name: "Second bell",
+    definition: { ...macroGraph().definition, steps: [{ id: "notice", kind: "chat", audience: "gm",
+      content: "second {{method}}" }] } }) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: automationMacro("second-graph",
+    { _id: "second-macro", name: "Second bell" }) }]);
+  await flushMicrotasks();
+  h.gm.submit([{ kind: "create", coll: "macros", data: compositeMacro(["auto-macro", "second-macro"]) }]);
+  await flushMicrotasks();
+  expect(h.hostStore.get("macros", "combo-macro")?.kind).toBe("composite");
+  h.gm.invokeMacro("combo-macro");
+  await flushMicrotasks();
+  expect(h.hostStore.getAll("messages").map((message) => message.content))
+    .toEqual(["manual by " + GM_ID, "second manual"]);
+});

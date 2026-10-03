@@ -78,7 +78,7 @@ export function macroAutomationDocumentError(doc: MacroDocument): string | null 
   if (name.length === 0 || name.length > MACRO_AUTOMATION_LIMITS.name ||
       [...name].some((char) => char.charCodeAt(0) < 32))
     return `an automation macro needs a name of 1–${MACRO_AUTOMATION_LIMITS.name} characters`;
-  const stray = (["sequence", "script", "scriptState", "summon", "preset"] as const)
+  const stray = (["sequence", "script", "scriptState", "summon", "preset", "composite"] as const)
     .filter((key) => doc[key] !== undefined);
   if (stray.length > 0) return `an automation macro carries a graph reference, not ${stray.join("/")}`;
   return null;

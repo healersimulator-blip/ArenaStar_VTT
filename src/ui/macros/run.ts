@@ -32,8 +32,9 @@ export function runSavedMacro(
   client: ClientSync,
   macro: MacroDocument,
 ): { ok: boolean; error?: string; requestId?: string } {
-  if (macro.kind === "automation") {
-    // The caller may track the request id to show the host's own result line.
+  if (macro.kind === "automation" || macro.kind === "composite") {
+    // The caller may track the request id to show the host's own result line. A
+    // composite resolves its children on the host — no child id travels either.
     return { ok: true, requestId: client.invokeMacro(macro._id) };
   }
   if (macro.kind === "chat") {
@@ -42,9 +43,8 @@ export function runSavedMacro(
   }
   // Script/sequence/summon macros have their own surfaces (reviewed Worker,
   // FX timeline, summon picker); the command line says so instead of doing nothing.
-  const label = { script: "script", sequence: "FX sequence", summon: "summon", fxPreset: "FX preset" }[
-    macro.kind
-  ];
+  const label = { script: "script", sequence: "FX sequence", summon: "summon",
+    fxPreset: "FX preset", composite: "composite" }[macro.kind];
   return { ok: false, error: `Cannot run ${label} macros from chat yet` };
 }
 
@@ -70,7 +70,8 @@ export function runMacroSlot(
     runChatMacro(client, macro);
     return { ok: true };
   }
-  if (macro.kind === "automation") return { ok: true, requestId: client.invokeMacro(macro._id) };
+  if (macro.kind === "automation" || macro.kind === "composite")
+    return { ok: true, requestId: client.invokeMacro(macro._id) };
   if (macro.kind === "script") {
     if (macro.script?.inputs.some((field) => field.required)) {
       host.onNeedsInput?.();

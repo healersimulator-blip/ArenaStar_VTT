@@ -132,6 +132,8 @@ import { boundFxDeletionOps, fxInstanceMatches, validateFxInstance, validateFxIn
 import { fxPresetDocumentError, macroStrayPresetError } from "../core/fxPresets";
 import { MACRO_AUTOMATION_METHOD, macroAutomationDocumentError, macroAutomationGraphId,
   macroStrayAutomationError } from "../core/macroAutomation";
+import { macroCompositeDocumentError, macroCompositeMacroIds,
+  macroStrayCompositeError } from "../core/macroComposite";
 import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError } from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
@@ -173,6 +175,13 @@ import { frameMessage, deframeMessage, channelFor } from "../net/frame";
 import { verifyHello } from "../net/identity";
 import { evaluateFormula, validateFormula } from "../dice";
 import type { RngFn } from "../dice";
+
+/** MC-01 (D-386): a macro fire whose live state has already been validated. */
+export interface MacroFireTarget {
+  graph: AutomationDocument;
+  scene: SceneDocument;
+  tile: TileDocument;
+}
 
 export interface SessionUser extends PermissionUser {
   name: string;
@@ -1988,9 +1997,19 @@ export class HostSync {
               this.macroAutomationGraphError(op.data as MacroDocument);
             if (error) return { ok: false, reason: "invalid_schema", error };
           }
+          if (op.coll === "macros" && (op.data as MacroDocument).kind === "composite") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish composites" };
+            const error = macroCompositeDocumentError(op.data as MacroDocument) ??
+              this.macroCompositeChildrenError(op.data as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
           const strayAutomation = op.coll === "macros"
             ? macroStrayAutomationError(op.data as MacroDocument) : null;
           if (strayAutomation) return { ok: false, reason: "invalid_schema", error: strayAutomation };
+          const strayComposite = op.coll === "macros"
+            ? macroStrayCompositeError(op.data as MacroDocument) : null;
+          if (strayComposite) return { ok: false, reason: "invalid_schema", error: strayComposite };
           if (op.coll === "macros" && (op.data as MacroDocument).kind === "summon") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
               return { ok: false, reason: "forbidden", error: "only GMs publish summons" };
@@ -2125,9 +2144,19 @@ export class HostSync {
               this.macroAutomationGraphError(dry.value as MacroDocument);
             if (error) return { ok: false, reason: "invalid_schema", error };
           }
+          if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "composite") {
+            if (user.role !== "GM" && user.role !== "ASSISTANT")
+              return { ok: false, reason: "forbidden", error: "only GMs publish composites" };
+            const error = macroCompositeDocumentError(dry.value as MacroDocument) ??
+              this.macroCompositeChildrenError(dry.value as MacroDocument);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
           const strayAutomationUpdate = op.ref.coll === "macros"
             ? macroStrayAutomationError(dry.value as MacroDocument) : null;
           if (strayAutomationUpdate) return { ok: false, reason: "invalid_schema", error: strayAutomationUpdate };
+          const strayCompositeUpdate = op.ref.coll === "macros"
+            ? macroStrayCompositeError(dry.value as MacroDocument) : null;
+          if (strayCompositeUpdate) return { ok: false, reason: "invalid_schema", error: strayCompositeUpdate };
           if (op.ref.coll === "macros" && (dry.value as MacroDocument).kind === "summon") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
               return { ok: false, reason: "forbidden", error: "only GMs publish summons" };
@@ -2737,6 +2766,12 @@ export class HostSync {
    * whether a player may ask, and a player must be looking at the graph's own scene.
    * Success and refusal both answer with `macro.result`; a refusal never tells a
    * player whether the graph exists, what it is called, or why it said no.
+   *
+   * MC-01 (D-386) adds the `composite` kind: a macro whose binding is an ordered list of
+   * automation macros. The children are resolved here, against live state, with the very
+   * same rules and under the caller's own identity — a composite is a convenience, never
+   * an authority of its own. All children are pre-flighted before the first one fires, so
+   * a caller who may not run one of them gets nothing at all.
    */
   private handleMacroInvoke(session: Session, msg: MacroInvokeMsg): void {
     const caller = session.user;
@@ -2762,39 +2797,56 @@ export class HostSync {
     const macro = this.store.get("macros", msg.macroId) as MacroDocument | undefined;
     // Same predicate the projection used to hand this macro out in the first place.
     const delivered = macro ? docVisibleTo(caller, macro) : false;
-    const graphId = macro ? macroAutomationGraphId(macro) : null;
-    const graph = graphId ? this.store.get("automations", graphId) as AutomationDocument | undefined : undefined;
-    const checked = graph ? validateAutomation(graph.definition) : null;
-    const definition = checked?.ok ? checked.definition : null;
-    const scene = definition ? this.store.get("scenes", definition.sceneId) as SceneDocument | undefined : undefined;
-    const tile = scene && definition ? automationSourceTile(scene, definition.tileId, definition.sourceKind) : undefined;
-    // A macro grants no authority of its own: it is a second way to ask for an
-    // already-published graph, so the click rules apply unchanged, plus the player's
-    // own loaded scene (a macro cannot reach into a scene they are not looking at).
-    const playerAllowed = definition !== null && scene !== undefined && tile !== undefined &&
-      definition.sourceKind !== "region" && definition.gates?.playerRunnable === true &&
-      this.loadedSceneByUser.get(caller.id) === scene._id &&
-      can(caller, "read", tile, "tiles", { parent: scene }) && docVisibleTo(caller, tile, scene);
     const base = { kind: "macro.result" as const, requestId: msg.requestId,
       macroId: msg.macroId, callerId: caller.id };
     const refused = (detail: string): void => {
       this.send(session, { ...base, ok: false,
         detail: isGm ? detail : "automation macro unavailable" });
     };
-    if (!macro || !delivered || !graphId || !graph || !definition || !scene || !tile) {
+    if (!macro || !delivered) {
       refused("macro unavailable");
       return;
     }
-    if (!definition.methods.includes(MACRO_AUTOMATION_METHOD)) {
-      refused("macro is not published for manual invocation");
+    // MC-01 (D-386): a composite runs its children in order. Every child is pre-flighted
+    // first, so a composite either fires all of them or none — and nothing at all when the
+    // caller may not run one of them.
+    if (macro.kind === "composite") {
+      const childIds = macroCompositeMacroIds(macro);
+      if (!childIds) {
+        refused("macro unavailable");
+        return;
+      }
+      const children: Array<{ macro: MacroDocument; target: MacroFireTarget }> = [];
+      for (const [index, childId] of childIds.entries()) {
+        const child = this.store.get("macros", childId) as MacroDocument | undefined;
+        const resolved = child ? this.resolveMacroFireTarget(caller, child, isGm) : null;
+        if (!resolved) {
+          refused(`composite macro ${index + 1} is not published for this caller`);
+          return;
+        }
+        children.push({ macro: child as MacroDocument, target: resolved });
+      }
+      for (const [index, child] of children.entries()) {
+        const fired = this.fireMacroTarget(caller, child.target);
+        if (!fired.ok) {
+          // Earlier children already committed; say so instead of pretending nothing ran.
+          this.send(session, { ...base, ok: false,
+            detail: isGm
+              ? `Composite stopped at macro ${index + 1} of ${children.length}: ${fired.error}`
+              : "Automation failed" });
+          return;
+        }
+      }
+      this.send(session, { ...base, ok: true,
+        detail: isGm ? `Fired ${macro.name} (${children.length} macro(s))` : "Automation fired" });
       return;
     }
-    if (!isGm && !playerAllowed) {
-      refused("macro is not published for this caller");
+    const target = this.resolveMacroFireTarget(caller, macro, isGm);
+    if (!target) {
+      refused(this.macroFireTargetError(macro));
       return;
     }
-    const fired = this.fireAutomation(graph, { scene, tile, caller,
-      method: MACRO_AUTOMATION_METHOD, originSource: "macro", at: this.now(), rng: this.rng });
+    const fired = this.fireMacroTarget(caller, target);
     if (!fired.ok) {
       refused(fired.error);
       return;
@@ -2802,7 +2854,88 @@ export class HostSync {
     // The graph's own name is GM-private (players never receive the automations
     // collection), so the success line stays generic for a player.
     this.send(session, { ...base, ok: true,
-      detail: isGm ? `Fired ${graph.name}` : "Automation fired" });
+      detail: isGm ? `Fired ${target.graph.name}` : "Automation fired" });
+  }
+
+  /**
+   * MC-01 (D-386): everything a fire needs, already validated against live state.
+   * `null` means "this caller may not run this macro here" — the caller of this helper
+   * decides how much of the reason the requester may hear.
+   */
+  private resolveMacroFireTarget(
+    caller: SessionUser, macro: MacroDocument, isGm: boolean,
+  ): MacroFireTarget | null {
+    if (macro.kind !== "automation") return null;
+    const graphId = macroAutomationGraphId(macro);
+    const graph = graphId
+      ? (this.store.get("automations", graphId) as AutomationDocument | undefined)
+      : undefined;
+    const checked = graph ? validateAutomation(graph.definition) : null;
+    const definition = checked?.ok ? checked.definition : null;
+    const scene = definition
+      ? (this.store.get("scenes", definition.sceneId) as SceneDocument | undefined)
+      : undefined;
+    const tile = scene && definition
+      ? automationSourceTile(scene, definition.tileId, definition.sourceKind)
+      : undefined;
+    if (!graph || !definition || !scene || !tile) return null;
+    if (!definition.methods.includes(MACRO_AUTOMATION_METHOD)) return null;
+    // A macro grants no authority of its own: it is a second way to ask for an
+    // already-published graph, so the click rules apply unchanged, plus the player's
+    // own loaded scene (a macro cannot reach into a scene they are not looking at).
+    const playerAllowed = definition.sourceKind !== "region" &&
+      definition.gates?.playerRunnable === true &&
+      this.loadedSceneByUser.get(caller.id) === scene._id &&
+      can(caller, "read", tile, "tiles", { parent: scene }) && docVisibleTo(caller, tile, scene);
+    if (!isGm && (!playerAllowed || !docVisibleTo(caller, macro))) return null;
+    return { graph, scene, tile };
+  }
+
+  /** The GM-facing reason an automation macro is unavailable (never sent to a player). */
+  private macroFireTargetError(macro: MacroDocument): string {
+    if (macro.kind !== "automation") return "macro unavailable";
+    const graphId = macroAutomationGraphId(macro);
+    const graph = graphId
+      ? (this.store.get("automations", graphId) as AutomationDocument | undefined)
+      : undefined;
+    const checked = graph ? validateAutomation(graph.definition) : null;
+    // A graph that is gone or no longer a valid definition reads exactly as D-381 read it.
+    if (!graph || !checked?.ok) return "macro unavailable";
+    if (!checked.definition.methods.includes(MACRO_AUTOMATION_METHOD))
+      return "macro is not published for manual invocation";
+    return "macro is not published for this caller";
+  }
+
+  /**
+   * MC-01 (D-386): the live authoring gate for a composite. Every child must be a
+   * committed automation macro in this world that could run on `manual` with a real
+   * anchor, the list has no duplicates, and a composite never contains itself or
+   * another composite (recursion is MC-02's subject).
+   */
+  private macroCompositeChildrenError(doc: MacroDocument): string | null {
+    const childIds = macroCompositeMacroIds(doc);
+    if (!childIds) return "a composite macro needs a bounded list of macro ids";
+    for (const [index, childId] of childIds.entries()) {
+      if (childId === doc._id) return "a composite macro cannot contain itself";
+      const child = this.store.get("macros", childId) as MacroDocument | undefined;
+      if (!child) return `composite macro ${index + 1} does not exist in this world`;
+      if (child.kind === "composite")
+        return "a composite macro cannot contain another composite";
+      if (child.kind !== "automation")
+        return `composite macro ${index + 1} is not an automation macro`;
+      const error = macroAutomationDocumentError(child) ?? this.macroAutomationGraphError(child);
+      if (error) return `composite macro ${index + 1} cannot run: ${error}`;
+    }
+    return null;
+  }
+
+  /** Fire a pre-flighted macro target under the caller's identity. */
+  private fireMacroTarget(
+    caller: SessionUser, target: MacroFireTarget,
+  ): { ok: true } | { ok: false; error: string } {
+    const fired = this.fireAutomation(target.graph, { scene: target.scene, tile: target.tile, caller,
+      method: MACRO_AUTOMATION_METHOD, originSource: "macro", at: this.now(), rng: this.rng });
+    return fired.ok ? { ok: true } : { ok: false, error: fired.error };
   }
 
   /**
