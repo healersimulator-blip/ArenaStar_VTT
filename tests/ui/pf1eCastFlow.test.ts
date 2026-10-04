@@ -74,13 +74,16 @@ function combat(round: number, flags: FlagStore = {}): CombatDocument {
  */
 class FakeClient implements CastFlowClient {
   messages: MessageDocument[] = [];
+  settings: unknown[] = [];
+  scenes: unknown[] = [];
   submitted: Op[][] = [];
   formulas: string[] = [];
   script: Array<{ die?: number; total?: number }> = [];
   private seq = 0;
   readonly store = {
-    getAll: (coll: "messages"): readonly unknown[] =>
-      coll === "messages" ? this.messages : [],
+    getAll: (coll: string): readonly unknown[] =>
+      coll === "messages" ? this.messages : coll === "settings" ? this.settings
+        : coll === "scenes" ? this.scenes : [],
   };
 
   roll(formula: string): string {
@@ -218,9 +221,75 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
           (op.diff as Record<string, unknown>)["system.pf1e.hp"] === 13,
       ),
     ).toBe(true);
-    // A resolution card was posted first.
+    // The structured card and every mechanical write are one atomic submission.
+    expect(client.submitted).toHaveLength(1);
     const cardBatch = client.submitted[0];
     expect(cardBatch?.[0]?.kind).toBe("create");
+    const cardOp = cardBatch?.[0];
+    if (cardOp?.kind !== "create" || cardOp.coll !== "messages") throw new Error("missing action card");
+    expect((cardOp.data as MessageDocument).system.action).toMatchObject({
+      v: 1, id: cardOp.data._id, kind: "cast", label: "Magic Missile", state: "resolved",
+      source: { actorId: "wizard" }, targets: [{ actorId: "ogre", outcome: "failedSave",
+        check: { kind: "save", dc: 14, total: 1, passed: false },
+        evidence: { adapter: "pf1e.spellTarget.v1", payload: {
+          spellLevel: 1, severity: "half", damageFormula: "2d6", damageRollId: "r0",
+          saveRollId: "r1", critical: false,
+        } },
+        damage: { dealt: 7 } }],
+    });
+  });
+
+  test("manual player save creates one linked pending action and commits it with spell costs", async () => {
+    const client = new FakeClient();
+    client.settings = [{ _id: "world", type: "settings", system: { playerPendingRollMode: "manual" } }];
+    client.scenes = [{ _id: "forest", active: true, tokens: [
+      { _id: "caster-token", actorId: "wizard" }, { _id: "target-token", actorId: "ogre" },
+    ] }];
+    const res = await resolveCastFlow(client, owner, params());
+    expect(res).toMatchObject({ ok: true, lost: false, held: false, pending: true,
+      pendingSpell: { name: "Magic Missile", level: 1 } });
+    if (!res.ok || !res.pending) return;
+    expect(res.pendingRollId).toBeTruthy();
+    expect(client.formulas).toEqual([]); // the save is host-rolled only when its owner clicks
+    expect(client.submitted).toHaveLength(1);
+    const batch = client.submitted[0] ?? [];
+    const create = batch[0];
+    if (create?.kind !== "create" || create.coll !== "messages") throw new Error("missing pending action");
+    const message = create.data as MessageDocument;
+    expect(message._id).toBe((message.system.action as { id?: string }).id);
+    expect(message.system).toMatchObject({
+      pendingRoll: { id: res.pendingRollId, actionId: message._id, targetKey: "ogre",
+        saveType: "ref", target: { actorId: "ogre", tokenId: "target-token" } },
+      action: { id: message._id, kind: "cast", state: "pending", sceneId: "forest",
+        source: { actorId: "wizard", tokenId: "caster-token" }, targets: [{ key: "ogre",
+          tokenId: "target-token", state: "pending", outcome: "pending",
+          check: { status: "pending", pendingRollId: res.pendingRollId, dc: 14 },
+          evidence: { adapter: "pf1e.pendingSave.v1",
+            payload: { spellLevel: 1, saveType: "ref" } } }, {
+          key: `${String(res.pendingRollId)}-effect`, tokenId: "target-token", state: "pending",
+          outcome: "pending", notes: [expect.stringContaining("host-verifiable spell-effect continuation")],
+        }] },
+    });
+    expect(batch.some((op) => op.kind === "update" && op.ref.coll === "actors")).toBe(true);
+  });
+
+  test("an explicit scene never borrows inferred token ids from another visible scene", async () => {
+    const client = new FakeClient();
+    client.settings = [{ _id: "world", type: "settings", system: { playerPendingRollMode: "manual" } }];
+    client.scenes = [{ _id: "other", active: true, tokens: [
+      { _id: "other-caster", actorId: "wizard" }, { _id: "other-target", actorId: "ogre" },
+    ] }, { _id: "chosen", active: false, tokens: [
+      { _id: "chosen-caster", actorId: "wizard" }, { _id: "chosen-target", actorId: "ogre" },
+    ] }];
+    const res = await resolveCastFlow(client, owner, params({ context: { sceneId: "chosen" } }));
+    expect(res).toMatchObject({ ok: true, pending: true });
+    const create = client.submitted[0]?.[0];
+    if (create?.kind !== "create" || create.coll !== "messages") throw new Error("missing pending action");
+    expect((create.data as MessageDocument).system.action).toMatchObject({
+      sceneId: "chosen",
+      source: { tokenId: "chosen-caster" },
+      targets: [{ tokenId: "chosen-target" }, { tokenId: "chosen-target" }],
+    });
   });
 
   test("a successful Reflex-half save halves the rolled damage (round down)", async () => {

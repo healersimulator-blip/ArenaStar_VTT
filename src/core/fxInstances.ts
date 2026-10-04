@@ -6,7 +6,7 @@
  */
 import type { AssetManifest, FxInstanceDocument, SceneDocument, WorldCollections } from "./documents";
 import type { Op } from "./ops";
-import { fxAudienceError, validateFxSequence, type FxSection } from "./fx";
+import { fxAudienceError, fxSyncGroupError, validateFxSequence, type FxSection } from "./fx";
 import { tagMatcher } from "./tags";
 import { crosshairPxPerUnit } from "./crosshair";
 
@@ -57,9 +57,43 @@ export function validateFxInstance(
       !Array.isArray(doc.sections) || doc.sections.length < 1 || doc.sections.length > 16 ||
       (doc.sourceTokenId !== undefined && (!ID.test(doc.sourceTokenId) || !scene.tokens.some((t) => t._id === doc.sourceTokenId))) ||
       (doc.targetTokenId !== undefined && (!ID.test(doc.targetTokenId) || !scene.tokens.some((t) => t._id === doc.targetTokenId)))) return false;
+  // The authored names stay in this private record, keyed by resolved section ID. A
+  // recipient receives neither this array nor a name — only `syncAtHostTime` below.
+  if (doc.syncGroups !== undefined && (!Array.isArray(doc.syncGroups) ||
+      doc.syncGroups.length < 1 || doc.syncGroups.length > 16)) return false;
+  const syncBySection = new Map<string, string>();
+  for (const member of doc.syncGroups ?? []) {
+    if (!member || typeof member !== "object" ||
+        Object.keys(member).some((key) => key !== "sectionId" && key !== "group") ||
+        Object.keys(member).length !== 2 || typeof member.sectionId !== "string" ||
+        !/^[A-Za-z0-9_-]{1,64}$/.test(member.sectionId) ||
+        fxSyncGroupError(member.group) !== null || syncBySection.has(member.sectionId)) return false;
+    syncBySection.set(member.sectionId, member.group);
+  }
+  const syncOrigins = new Map<string, number>();
+  const seenSyncSections = new Set<string>();
   const sections: FxSection[] = [];
   for (const section of doc.sections) {
-    if (!section || typeof section !== "object") return false;
+    if (!section || typeof section !== "object" || Object.hasOwn(section, "randomDelay") ||
+        Object.hasOwn(section, "startAfter") || Object.hasOwn(section, "syncGroup") ||
+        Object.hasOwn(section, "launchGroup") || Object.hasOwn(section, "parallel") ||
+        Object.hasOwn(section, "playIf")) return false;
+    const group = syncBySection.get(section.id);
+    const hasOrigin = Object.hasOwn(section, "syncAtHostTime");
+    const origin = hasOrigin ? (section as { syncAtHostTime?: unknown }).syncAtHostTime : undefined;
+    if ((group === undefined) !== !hasOrigin || group !== undefined &&
+        ((section.kind !== "image" && section.kind !== "text") ||
+          typeof origin !== "number" || !Number.isFinite(origin) || origin < 0 ||
+          typeof section.startMs !== "number" || origin > doc.atHostTime + section.startMs)) return false;
+    if (group !== undefined && typeof origin === "number") {
+      const prior = syncOrigins.get(group);
+      if (prior !== undefined && prior !== origin) return false;
+      syncOrigins.set(group, origin);
+      seenSyncSections.add(section.id);
+    }
+    // Random ranges, finish dependencies, launch/conditional controls and group names
+    // are authoring state. A durable instance stores only concrete starts/origins and
+    // never rerolls, re-links or reevaluates on reconnect.
     if (section.kind === "wait") { sections.push(section); continue; }
     // A durable instance can never hold a camera cue (`validateFxSequence`
     // forbids camera sections in a persistent timeline), so fail closed rather
@@ -105,17 +139,22 @@ export function validateFxInstance(
         !validResolvedMask(section.mask)) return false;
     if (section.kind === "image") {
       const { x: _x, y: _y, toX: _toX, toY: _toY, mask: _mask,
-        followTokenId: _follow, followToTokenId: _followTo, mime, ...authored } = section;
-      void _x; void _y; void _toX; void _toY; void _mask; void _follow; void _followTo;
-      if (manifest[section.assetId]?.mime !== mime) return false;
-      sections.push({ ...authored, at, ...to });
+        followTokenId: _follow, followToTokenId: _followTo, mime,
+        syncAtHostTime: _syncAtHostTime, ...authored } = section;
+      void _x; void _y; void _toX; void _toY; void _mask; void _follow; void _followTo; void _syncAtHostTime;
+      if (manifest[section.assetId]?.mime !== mime ||
+          (section.playbackRate !== undefined || section.clipStartMs !== undefined ||
+            section.clipEndMs !== undefined) && !mime.startsWith("video/")) return false;
+      sections.push({ ...authored, ...(group === undefined ? {} : { syncGroup: group }), at, ...to });
     } else if (section.kind === "text") {
       const { x: _x, y: _y, toX: _toX, toY: _toY, mask: _mask,
-        followTokenId: _follow, followToTokenId: _followTo, ...authored } = section;
-      void _x; void _y; void _toX; void _toY; void _mask; void _follow; void _followTo;
-      sections.push({ ...authored, at, ...to });
+        followTokenId: _follow, followToTokenId: _followTo,
+        syncAtHostTime: _syncAtHostTime, ...authored } = section;
+      void _x; void _y; void _toX; void _toY; void _mask; void _follow; void _followTo; void _syncAtHostTime;
+      sections.push({ ...authored, ...(group === undefined ? {} : { syncGroup: group }), at, ...to });
     } else return false;
   }
+  if (seenSyncSections.size !== syncBySection.size) return false;
   return validateFxSequence({ version: 1, persistent: true, sections }).ok;
 }
 

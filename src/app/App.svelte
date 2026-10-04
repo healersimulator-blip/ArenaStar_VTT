@@ -47,7 +47,7 @@
   import { WindowManager } from "../ui/windows";
   import { selectedMacroItem } from "../core/macroItems";
   import { MacroHotbar, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
-  import { resolveFxSequence, type FxImportPermissions } from "../core/fx";
+  import { fxResolveSyncOrigins, resolveFxSequence, type FxImportPermissions } from "../core/fx";
 import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
@@ -2053,12 +2053,18 @@ const WALL_PICK_RADIUS = 12;
     if (!scene || scene._id !== sceneId) return { ok: false, error: "Open the timeline's scene before previewing" };
     const source = sourceTokenId ? scene.tokens.find((token) => token._id === sourceTokenId) : undefined;
     const target = targetTokenId ? scene.tokens.find((token) => token._id === targetTokenId) : undefined;
-    const resolved = resolveFxSequence({ ...sequence, persistent: false }, scene, source, target,
-      (id) => current.gm.client.store.world.assetManifest[id]?.mime);
+    // Validate the lifecycle the author actually chose: a persistent-only sync group is
+    // legal even though the local preview intentionally renders just one pass.
+    // Preview is repeatable rather than pretending to be the authoritative host draw:
+    // lower-bound random delay, every positive chance, and the first exclusive option.
+    const resolved = resolveFxSequence(sequence, scene, source, target,
+      (id) => current.gm.client.store.world.assetManifest[id]?.mime, () => 0);
     if (!resolved.ok) return { ok: false, error: resolved.error };
     const runId = `preview-${globalThis.crypto.randomUUID()}`;
-    fxPlayer.preview({ kind: "fx.start", runId, macroId: "preview", sceneId, sections: resolved.sections,
-      atHostTime: Date.now() + 120 });
+    const atHostTime = Date.now() + 120;
+    const synced = fxResolveSyncOrigins(resolved.sections, resolved.syncGroups, atHostTime);
+    fxPlayer.preview({ kind: "fx.start", runId, macroId: "preview", sceneId, sections: synced.sections,
+      atHostTime });
     return { ok: true, runId };
   }
   function stopFxPreview(): void {
@@ -2985,7 +2991,12 @@ const WALL_PICK_RADIUS = 12;
         stage = view;
         fxPlayer = new FxPlayer({
           client: current.gm.client, bus: current.gm.bus, stage: view,
-          fetchAsset: (hash) => current.gm.fetcher.request(hash, "ui"),
+          // Live FX are imminent current-scene work; do not leave their lead window behind
+          // lower-priority UI/background transfers. Draft preview keeps its separate UI lane.
+          fetchAsset: (hash) => current.gm.fetcher.request(hash, "scene"),
+          // The GM is the server in this serverless VTT: manifest assets originate in this
+          // tab's own store even though its player path deliberately fetches over loopback.
+          isAssetLocal: (hash) => current.gm.client.store.world.assetManifest[hash] !== undefined,
           sceneId: () => viewAsPlayer === null ? (activeScene()?._id ?? null) : null,
           onError: (message) => console.warn(message),
           // SQ-13/A10: a GM whose own client could not keep up hears one line about

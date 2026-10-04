@@ -74,6 +74,8 @@ export const MsgKind = {
   "journal.trigger": 0x50,
   // D-394 — permitted personal macro authoring in the GM world (not execution).
   "macros.save": 0x51,
+  // SQ-02 — private acknowledgement naming the exact host-approved run a requester may cancel.
+  "fx.run": 0x52,
   // D-250 — explored fog restore: the client asks, the host answers from its fog store
   "fog.get": 0x0e,
   // host → client
@@ -166,6 +168,8 @@ export interface RollRevealMsg {
 export interface RollPendingMsg {
   kind: "roll.pending";
   messageId: DocId;
+  /** Selects one target reaction on a multi-target action card; optional for legacy single-roll cards. */
+  pendingId?: string;
   seedClient: string;
   seedClientCommit?: string;
 }
@@ -378,9 +382,27 @@ export interface FxStartMsg {
   persistent?: boolean;
 }
 
+/**
+ * Private acknowledgement to the requesting session after a run was committed/fanned out.
+ * It contains no recipients or projection detail: a caller may cancel a run even when its
+ * saved audience deliberately excludes that caller (`others`).
+ */
+export interface FxRunMsg {
+  kind: "fx.run";
+  requestId: string;
+  runId: string;
+  macroId: DocId;
+  sceneId: DocId;
+  atHostTime: number;
+  /** Natural end of a finite run. Persistent runs omit it and require an explicit stop. */
+  endsAtHostTime?: number;
+  persistent: boolean;
+}
+
 /** Request only a recipient-projected, live-instance replay for a visible scene. */
 export interface FxSyncMsg { kind: "fx.sync"; sceneId: DocId }
-/** Stop a host-owned instance. Owner or GM; unauthorized IDs have a generic error. */
+/** Stop/cancel an exact host-approved run. Owner or GM; unauthorized IDs get one generic error.
+ * Durable runs are undoable world state; finite one-shots are presentation-only and are not. */
 export interface FxStopMsg { kind: "fx.stop"; requestId: string; instanceId: DocId }
 /** GM-only bounded scene-local bulk stop. The host re-evaluates the filter; no
  * client-supplied instance IDs or counts are trusted. All deletes share an undo. */
@@ -775,6 +797,7 @@ export type WireMessage =
   | MacroResultMsg
   | FxRequestMsg
   | FxStartMsg
+  | FxRunMsg
   | FxSyncMsg
   | FxStopMsg
   | FxStopMatchingMsg

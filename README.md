@@ -71,7 +71,8 @@ per-asset facts live in `LEGAL.md` and `tools/adopt/INVENTORY.md`.
 Exact per spec §18 — see `src/` (app, core, host, client, net/signaling/_, canvas/_,
 ui/*, dice, audio, packages, storage, workers, sim) and `systems/mass-battle-basic/`.
 Each module folder has an `index.ts` barrel. Tracking files live in the repo root:
-`PLAN.md`, `DECISIONS.md`, `DEVIATIONS.md`, `ROADMAP.md`, `PROTOCOL.md`.
+`PLAN.md`, `DECISIONS.md`, `DEVIATIONS.md`, `ROADMAP.md`, `PROTOCOL.md`, and the
+structured rules/chat/FX contract in `ACTION_SYSTEM.md`.
 
 ## World files, rulesets and content packs (§8, §12)
 

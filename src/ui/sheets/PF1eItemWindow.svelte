@@ -148,15 +148,18 @@
       if (!outcome.ok) {
         error = outcome.error;
       } else {
-        if (outcome.held) {
+        if (outcome.pending) {
+          note = `${source.spellName} from ${view.item.name} — awaiting ${outcome.pendingRollId ? "the target's save" : "completion"}`;
+        } else if (outcome.held) {
           note = `the charge is spent — the spell is held for delivery (DC ${outcome.dc})`;
+          note += fxItemCueNote(fireBoundItemCue({ client, actor: held.actor, item: held.item,
+            outcome: fxCastOutcome(outcome), targetActor: target }));
         } else {
           note = `${source.spellName} cast from ${view.item.name} — DC ${outcome.dc}, ${Math.max(0, source.charges - 1)} charge(s) left`;
+          // A pending action has no committed target outcome and deliberately fires no success cue.
+          note += fxItemCueNote(fireBoundItemCue({ client, actor: held.actor, item: held.item,
+            outcome: fxCastOutcome(outcome), targetActor: target }));
         }
-        // D-311/D-312: the cue is requested *after* the commit — the branch follows the result
-        // the host just wrote, and a use the flow refused above plays nothing at all.
-        note += fxItemCueNote(fireBoundItemCue({ client, actor: held.actor, item: held.item,
-          outcome: fxCastOutcome(outcome), targetActor: target }));
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);

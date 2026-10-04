@@ -19,6 +19,7 @@ import type {
   EphemeralKind,
   EphemeralMsg,
   FxStartMsg,
+  FxRunMsg,
   FxEndMsg,
   FxDeliveryMsg,
   FxMediaAckState,
@@ -86,7 +87,9 @@ export interface ClientEvents {
   audio: AudioCmdMsg;
   /** A host-approved timeline for this viewer only (not an ephemeral relay). */
   fx: FxStartMsg;
-  /** Only a recipient of a persistent cue receives its end/revocation. */
+  /** Private requester acknowledgement for exact-run cancellation controls. */
+  fxRun: FxRunMsg;
+  /** Only a recipient of a cue receives its end/revocation. */
   fxEnd: FxEndMsg;
   fxDelivery: FxDeliveryMsg;
   /** GM-only tile/zone execution diagnostics. */
@@ -343,7 +346,7 @@ export class ClientSync {
    * from both seeds. Falls back to a plain pending resolve when crypto is
    * unavailable — chat never blocks.
    */
-  async rollPending(messageId: DocId): Promise<string> {
+  async rollPending(messageId: DocId, pendingId?: string): Promise<string> {
     let seedClient: string;
     let commit: string;
     try {
@@ -357,6 +360,7 @@ export class ClientSync {
     this.send({
       kind: "roll.pending",
       messageId,
+      ...(pendingId !== undefined ? { pendingId } : {}),
       seedClient,
       ...(commit ? { seedClientCommit: commit } : {}),
     });
@@ -502,7 +506,7 @@ export class ClientSync {
     this.send({ kind: "fx.sync", sceneId });
   }
 
-  /** End an owned persistent instance, or any instance as GM/assistant. */
+  /** Stop an owned active run (finite or persistent), or any active run as GM/assistant. */
   requestFxStop(instanceId: DocId): string {
     const requestId = globalThis.crypto.randomUUID();
     this.send({ kind: "fx.stop", requestId, instanceId });
@@ -578,6 +582,9 @@ export class ClientSync {
         return;
       case "fx.start":
         this.bus.emit("fx", msg);
+        return;
+      case "fx.run":
+        this.bus.emit("fxRun", msg);
         return;
       case "fx.end":
         this.bus.emit("fxEnd", msg);

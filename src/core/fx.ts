@@ -628,10 +628,98 @@ export function fxEase(easing: FxEasing | undefined, progress: number): number {
   return phase;
 }
 
+export interface FxRandomDelay {
+  /** Inclusive lower bound, added to this section's fixed or finish-relative start. */
+  minMs: number;
+  /** Inclusive upper bound. The host samples once per section, launch group, or parallel fork. */
+  maxMs: number;
+}
+
+/**
+ * SQ-02's first bounded conditional-play contract. The saved definition may ask the
+ * host to include one authored section with this percentage chance. The host samples
+ * once for the section (never once per recipient or replay) and removes the condition
+ * before projection. Other predicates, especially committed roll outcomes, require a
+ * separate authoritative invocation-context contract and are deliberately not encoded
+ * as client-supplied values here.
+ */
+export interface FxPlayIfChance {
+  kind: "chance";
+  /** Integer percentage. 0 is an authored disabled section; 100 always plays. */
+  percent: number;
+}
+
+/**
+ * D404: one option in a bounded, host-sampled exclusive choice. Every section with
+ * the selected group/option plays; every other option is omitted. `weight` is relative,
+ * not a caller-supplied outcome or percentage, and is identical across one option's
+ * members. The host strips the whole discriminator before recipient projection.
+ */
+export interface FxPlayIfChoice {
+  kind: "choice";
+  group: string;
+  option: string;
+  weight: number;
+}
+
+export type FxPlayIf = FxPlayIfChance | FxPlayIfChoice;
+
+/**
+ * SQ-02: start this section relative to an earlier authored section's final playback,
+ * or relative to the **join** of an earlier explicit parallel block. Exactly one target
+ * is present. A negative offset overlaps that finish/join; a positive one leaves a gap.
+ * The host resolves this to one concrete `startMs`, so neither target nor offset travels.
+ */
+export interface FxStartAfter {
+  sectionId?: string;
+  parallelGroup?: string;
+  offsetMs: number;
+}
+
+/**
+ * SQ-02/D403: membership in one bounded explicit parallel block. Every lane starts at
+ * the block's shared host-resolved fork. Later members of the same lane start after that
+ * lane's previous member, adjusted by `offsetMs` (negative overlap, positive gap). The
+ * block joins only after its longest lane finishes. Names are authoring structure and are
+ * stripped before projection; they are not a cross-timeline namespace.
+ */
+export interface FxParallelStep {
+  group: string;
+  lane: string;
+  /** Absent on a lane's first member; defaults to zero on later members. */
+  offsetMs?: number;
+}
+
 interface FxBase {
   id: string;
+  /** Fixed timeline position. Must be zero when `startAfter` owns the position. */
   startMs: number;
   durationMs: number;
+  /** Wait for an earlier authored section's final replay, with an optional signed overlap/gap. */
+  startAfter?: FxStartAfter;
+  /**
+   * SQ-02: a host-owned random offset. Every recipient receives the same concrete
+   * `startMs`; neither the authored range nor a client-side random decision travels.
+   */
+  randomDelay?: FxRandomDelay;
+  /**
+   * SQ-02/D402: an exact author-facing group name for sections that must launch on
+   * one host-resolved schedule. Members carry matching fixed/dependent timing and
+   * random ranges; the host samples one shared delay and strips the name before emit.
+   * This is one-shot scheduling, not D399's persistent playback-phase `syncGroup`.
+   */
+  launchGroup?: string;
+  /**
+   * SQ-02/D403: this section's block/lane membership. The first member of every lane
+   * carries the same fork schedule; later members are scheduled from their own lane.
+   */
+  parallel?: FxParallelStep;
+  /**
+   * Host-sampled conditional inclusion. A chance draws per section; an exclusive choice
+   * draws once per group. Either decision governs all replays/viewers. Waits cannot carry
+   * it, and persistent timelines reject it in this bounded slice.
+   */
+  playIf?: FxPlayIf;
   /** One-shot media replays; distinct from located-section `repeats`, which
    * controls motion cycles inside a SINGLE playback window. Waits/persistent
    * loops cannot use this. Host expands into bounded clock-aligned cues. */
@@ -640,6 +728,13 @@ interface FxBase {
 }
 interface FxLocated extends FxBase {
   at: FxAnchor;
+  /**
+   * SQ-02: persistent visuals bearing the same name share one host-clock playback
+   * origin. This does not delay or launch a section; a later member joins the phase
+   * already in progress. The resolved cue never carries the name — it receives one
+   * host-selected `syncAtHostTime` instead.
+   */
+  syncGroup?: string;
   /** Local scale, not world/grid size. */
   scale?: number;
   opacity?: number;
@@ -689,6 +784,57 @@ interface FxLocated extends FxBase {
 /** The animation a located visual's transform is built from, both ends. */
 export const FX_SCALE_LIMITS = { min: 0.05, max: 10 } as const;
 export const FX_SPIN_LIMIT = 3_600;
+/** SQ-02: bounded browser media speed; 1 is native speed. */
+export const FX_PLAYBACK_RATE_LIMITS = { min: 0.25, max: 4 } as const;
+/**
+ * SQ-02: source-time clip marks may address a long ambience/music file, but remain
+ * bounded so a forged seek never asks a browser for an unbounded media timestamp.
+ */
+export const FX_MEDIA_CLIP_MAX_MS = 24 * 60 * 60 * 1_000;
+/** SQ-02: a finish-relative section may overlap or follow its dependency by at most 30 seconds. */
+export const FX_FINISH_OFFSET_MAX_MS = 30_000;
+/** SQ-02: a persistent visual's author-facing playback-phase group name is bounded. */
+export const FX_SYNC_GROUP_MAX_LENGTH = 64;
+/** Why this is not a canonical group name, or null when it is one. */
+export function fxSyncGroupError(value: unknown): string | null {
+  return typeof value !== "string" || value.length < 1 || value.length > FX_SYNC_GROUP_MAX_LENGTH ||
+    value !== value.trim() || [...value].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+    ? `FX sync groups need a trimmed 1–${FX_SYNC_GROUP_MAX_LENGTH} character name`
+    : null;
+}
+/** SQ-02/D402: a finite simultaneous-launch group name is equally bounded. */
+export const FX_LAUNCH_GROUP_MAX_LENGTH = 64;
+/** Why this is not a canonical launch-group name, or null when it is one. */
+export function fxLaunchGroupError(value: unknown): string | null {
+  return typeof value !== "string" || value.length < 1 || value.length > FX_LAUNCH_GROUP_MAX_LENGTH ||
+    value !== value.trim() || [...value].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+    ? `FX launch groups need a trimmed 1–${FX_LAUNCH_GROUP_MAX_LENGTH} character name`
+    : null;
+}
+/** SQ-02/D403: explicit one-shot parallel blocks have 2–8 independently serial lanes. */
+export const FX_PARALLEL_NAME_MAX_LENGTH = 64;
+export const FX_PARALLEL_LANES = { min: 2, max: 8 } as const;
+/** Group and lane names use one exact, bounded vocabulary. */
+export function fxParallelNameError(value: unknown, which: "block" | "lane"): string | null {
+  return typeof value !== "string" || value.length < 1 || value.length > FX_PARALLEL_NAME_MAX_LENGTH ||
+    value !== value.trim() || [...value].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+    ? `FX parallel ${which}s need a trimmed 1–${FX_PARALLEL_NAME_MAX_LENGTH} character name`
+    : null;
+}
+/** D404: bounded mutually exclusive random alternatives, sampled once by the host. */
+export const FX_CHOICE_NAME_MAX_LENGTH = 64;
+export const FX_CHOICE_GROUPS_MAX = 8;
+export const FX_CHOICE_OPTIONS = { min: 2, max: 8 } as const;
+export const FX_CHOICE_WEIGHT = { min: 1, max: 100 } as const;
+/** Choice groups/options use exact, non-control author-facing names. */
+export function fxChoiceNameError(value: unknown, which: "group" | "option"): string | null {
+  return typeof value !== "string" || value.length < 1 || value.length > FX_CHOICE_NAME_MAX_LENGTH ||
+    value !== value.trim() || [...value].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+    ? `FX choice ${which}s need a trimmed 1–${FX_CHOICE_NAME_MAX_LENGTH} character name`
+    : null;
+}
+/** SQ-02: one section may jitter by at most 30 seconds, still inside the 60-second timeline. */
+export const FX_RANDOM_DELAY_MAX_MS = 30_000;
 /**
  * A camera section claims the **viewer's own view** for its duration. It is not a
  * document change: the host resolves and authorizes the destination exactly as it
@@ -737,9 +883,21 @@ export interface FxCameraPathSection extends FxCameraBase {
 export type FxCameraSection = FxCameraPanSection | FxCameraShakeSection | FxCameraPathSection;
 
 export type FxSection =
-  | (FxLocated & { kind: "image"; assetId: string; stretch?: boolean; tint?: string }) // image/* and alpha video
+  | (FxLocated & { kind: "image"; assetId: string; stretch?: boolean; tint?: string;
+      /** Video speed multiplier; the host rejects it when this asset is a still image. */
+      playbackRate?: number;
+      /** Inclusive source-media start; 0/absence means the beginning. Video only. */
+      clipStartMs?: number;
+      /** Exclusive source-media end; absence means the decoded source's end. Video only. */
+      clipEndMs?: number }) // image/* and alpha video
   | (FxLocated & { kind: "text"; text: string; color?: string })
   | (FxBase & { kind: "sound"; assetId: string; volume?: number;
+      /** Audio speed multiplier; 1 is the browser's native speed. */
+      playbackRate?: number;
+      /** Inclusive source-media start; 0/absence means the beginning. */
+      clipStartMs?: number;
+      /** Exclusive source-media end; absence means the decoded source's end. */
+      clipEndMs?: number;
       /** Which fader this sound belongs to (viewer-local mix, D-297). */
       channel?: FxSoundChannel;
       /** Ramp 0→1 over this many ms at the start of the section. */
@@ -771,20 +929,38 @@ export interface FxSequence {
   persistent?: boolean;
 }
 
+type FxAuthoredSchedulingField =
+  | "repeatCount" | "repeatDelayMs" | "randomDelay" | "startAfter"
+  | "syncGroup" | "launchGroup" | "parallel" | "playIf";
+
+/** Host-private membership used while resolving one durable playback origin. */
+export interface FxSyncGroupMember {
+  sectionId: string;
+  group: string;
+}
+
+/**
+ * The only sync-group fact a recipient needs. It is an absolute host-clock origin,
+ * not the private authored name and not a second launch time.
+ */
+interface ResolvedFxSyncPhase {
+  syncAtHostTime?: number;
+}
+
 export type ResolvedFxSection =
-  | (Omit<Extract<FxSection, { kind: "image" }>, "at" | "to" | "mask" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; mime: string; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
-  | (Omit<Extract<FxSection, { kind: "text" }>, "at" | "to" | "mask" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
-  | (Omit<Extract<FxSection, { kind: "sound" }>, "repeatCount" | "repeatDelayMs" | "at" | "radius"> &
+  | (Omit<Extract<FxSection, { kind: "image" }>, "at" | "to" | "mask" | FxAuthoredSchedulingField> & ResolvedFxSyncPhase & { x: number; y: number; toX?: number; toY?: number; mime: string; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
+  | (Omit<Extract<FxSection, { kind: "text" }>, "at" | "to" | "mask" | FxAuthoredSchedulingField> & ResolvedFxSyncPhase & { x: number; y: number; toX?: number; toY?: number; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
+  | (Omit<Extract<FxSection, { kind: "sound" }>, FxAuthoredSchedulingField | "at" | "radius"> &
       { mime: string; x?: number; y?: number; radiusPx?: number;
         /** Host-computed per recipient (D-309): a sound-blocking wall stands between
          * that viewer's own listener and this source. */
         occluded?: boolean })
   /** A pan carries its **host-resolved** destination; a shake carries no anchor at all. */
-  | (Omit<FxCameraPanSection, "to" | "repeatCount" | "repeatDelayMs"> & { toX: number; toY: number })
+  | (Omit<FxCameraPanSection, "to" | FxAuthoredSchedulingField> & { toX: number; toY: number })
   /** A path carries its **host-resolved** waypoints, in order. */
-  | (Omit<FxCameraPathSection, "points" | "repeatCount" | "repeatDelayMs"> & { points: Array<{ x: number; y: number }> })
-  | Omit<FxCameraShakeSection, "repeatCount" | "repeatDelayMs">
-  | Omit<Extract<FxSection, { kind: "wait" }>, "repeatCount" | "repeatDelayMs">;
+  | (Omit<FxCameraPathSection, "points" | FxAuthoredSchedulingField> & { points: Array<{ x: number; y: number }> })
+  | Omit<FxCameraShakeSection, FxAuthoredSchedulingField>
+  | Omit<Extract<FxSection, { kind: "wait" }>, FxAuthoredSchedulingField>;
 
 const MAX_SECTIONS = 48;
 /** A timeline that moved the view eight times would be a slideshow, not an effect. */
@@ -806,6 +982,251 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 function inRange(value: unknown, min: number, max: number): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+}
+function mediaClipError(value: Record<string, unknown>): string | null {
+  const start = value.clipStartMs;
+  const end = value.clipEndMs;
+  if (start === undefined && end === undefined) return null;
+  if (start !== undefined && (!Number.isSafeInteger(start) || !inRange(start, 0, FX_MEDIA_CLIP_MAX_MS)) ||
+      end !== undefined && (!Number.isSafeInteger(end) || !inRange(end, 1, FX_MEDIA_CLIP_MAX_MS)) ||
+      end !== undefined && (start === undefined ? 0 : typeof start === "number" ? start : 0) >= end) {
+    return `FX media clip needs integer source times within 0–${FX_MEDIA_CLIP_MAX_MS} ms and end after start`;
+  }
+  return null;
+}
+
+/** One validated lane and block, derived from the flat authoring document. */
+interface FxParallelLanePlan {
+  name: string;
+  members: Array<{ section: FxSection; index: number }>;
+}
+interface FxParallelBlockPlan {
+  group: string;
+  startIndex: number;
+  endIndex: number;
+  lanes: FxParallelLanePlan[];
+}
+
+/** Exact target identity for matching fork schedules and launch schedules. */
+function fxStartAfterKey(value: FxStartAfter | undefined): string | undefined {
+  if (value?.sectionId !== undefined) return `section:${value.sectionId}`;
+  if (value?.parallelGroup !== undefined) return `parallel:${value.parallelGroup}`;
+  return undefined;
+}
+
+/**
+ * Validate and index the explicit-lane structure. A block is a contiguous slice of the
+ * flat section array (so copy/delete/edit cannot silently capture an unrelated section),
+ * has 2–8 lanes, and every lane does real work. The first member of every lane carries
+ * one matching fork schedule; later members carry only their lane-relative overlap/gap.
+ */
+function fxParallelPlans(sections: readonly FxSection[]):
+  { ok: true; plans: FxParallelBlockPlan[] } | { ok: false; error: string } {
+  const grouped = new Map<string, Array<{ section: FxSection; index: number }>>();
+  const sectionIndex = new Map(sections.map((section, index) => [section.id, index]));
+  for (const [index, section] of sections.entries()) {
+    const group = section.parallel?.group;
+    if (group === undefined) continue;
+    const members = grouped.get(group) ?? [];
+    members.push({ section, index });
+    grouped.set(group, members);
+  }
+  const plans: FxParallelBlockPlan[] = [];
+  for (const [group, members] of grouped) {
+    const startIndex = members[0]?.index ?? -1;
+    const endIndex = members[members.length - 1]?.index ?? -1;
+    if (startIndex < 0 || members.length !== endIndex - startIndex + 1)
+      return { ok: false, error: `FX parallel block "${group}" must be one contiguous section range` };
+    const lanesByName = new Map<string, FxParallelLanePlan>();
+    for (const member of members) {
+      const laneName = member.section.parallel?.lane;
+      if (laneName === undefined) continue; // defensive: the field validator owns this
+      const lane = lanesByName.get(laneName) ?? { name: laneName, members: [] };
+      lane.members.push(member);
+      lanesByName.set(laneName, lane);
+      if (member.section.launchGroup !== undefined)
+        return { ok: false, error: "an FX section belongs to a parallel block or a simultaneous launch group, not both" };
+    }
+    const lanes = [...lanesByName.values()];
+    if (lanes.length < FX_PARALLEL_LANES.min || lanes.length > FX_PARALLEL_LANES.max)
+      return { ok: false, error:
+        `FX parallel block "${group}" needs ${FX_PARALLEL_LANES.min}–${FX_PARALLEL_LANES.max} lanes` };
+    let forkSchedule: string | undefined;
+    for (const lane of lanes) {
+      if (!lane.members.some((member) => member.section.kind !== "wait"))
+        return { ok: false, error: `FX parallel lane "${lane.name}" needs a media or camera section` };
+      for (const [position, member] of lane.members.entries()) {
+        const step = member.section.parallel;
+        if (!step) continue;
+        if (position === 0) {
+          if (step.offsetMs !== undefined)
+            return { ok: false, error: "the first section in an FX parallel lane has no lane offset" };
+          const dependency = member.section.startAfter;
+          const schedule = JSON.stringify([member.section.startMs, fxStartAfterKey(dependency),
+            dependency?.offsetMs, member.section.randomDelay?.minMs,
+            member.section.randomDelay?.maxMs]);
+          if (forkSchedule !== undefined && schedule !== forkSchedule)
+            return { ok: false, error:
+              "FX parallel lanes need the same absolute or finish-relative fork and random-delay range" };
+          forkSchedule = schedule;
+        } else if (member.section.startMs !== 0 || member.section.startAfter !== undefined ||
+            member.section.randomDelay !== undefined) {
+          return { ok: false, error:
+            "later FX parallel-lane sections use only their lane overlap/gap, not another start or random delay" };
+        }
+      }
+    }
+    plans.push({ group, startIndex, endIndex, lanes });
+  }
+  plans.sort((left, right) => left.startIndex - right.startIndex);
+  const byGroup = new Map(plans.map((plan) => [plan.group, plan]));
+  // A join target is useful only after the complete block, never from inside that block
+  // or before its lanes exist. A fork's ordinary section target is likewise external.
+  for (const [index, section] of sections.entries()) {
+    const dependency = section.startAfter;
+    if (dependency?.parallelGroup !== undefined) {
+      const target = byGroup.get(dependency.parallelGroup);
+      if (!target || target.endIndex >= index)
+        return { ok: false, error: "FX finish-relative timing must reference an earlier parallel block" };
+    }
+  }
+  for (const plan of plans) {
+    for (const lane of plan.lanes) {
+      const first = lane.members[0]?.section;
+      const targetIndex = first?.startAfter?.sectionId === undefined
+        ? undefined : sectionIndex.get(first.startAfter.sectionId);
+      if (targetIndex !== undefined && targetIndex >= plan.startIndex)
+        return { ok: false, error: "an FX parallel fork must depend on content before its block" };
+      const targetGroup = first?.startAfter?.parallelGroup;
+      if (targetGroup !== undefined && (byGroup.get(targetGroup)?.endIndex ?? Infinity) >= plan.startIndex)
+        return { ok: false, error: "an FX parallel fork must depend on a block that already joined" };
+    }
+  }
+  return { ok: true, plans };
+}
+
+/** One D404 exclusive-choice option and its relative host weight. */
+interface FxChoiceOptionPlan {
+  name: string;
+  weight: number;
+}
+interface FxChoiceGroupPlan {
+  group: string;
+  options: FxChoiceOptionPlan[];
+}
+
+/**
+ * Validate exact option membership after every section field is known. Options may span
+ * several non-contiguous sections because this metadata controls inclusion, not timing.
+ * One group has 2–8 options; all members of an option carry one matching relative weight.
+ */
+function fxChoicePlans(sections: readonly FxSection[]):
+  { ok: true; plans: FxChoiceGroupPlan[] } | { ok: false; error: string } {
+  const groups = new Map<string, Map<string, number>>();
+  for (const section of sections) {
+    const choice = section.playIf?.kind === "choice" ? section.playIf : undefined;
+    if (!choice) continue;
+    const options = groups.get(choice.group) ?? new Map<string, number>();
+    const prior = options.get(choice.option);
+    if (prior !== undefined && prior !== choice.weight)
+      return { ok: false, error: `FX choice option "${choice.option}" needs one matching weight` };
+    options.set(choice.option, prior ?? choice.weight);
+    groups.set(choice.group, options);
+  }
+  if (groups.size > FX_CHOICE_GROUPS_MAX)
+    return { ok: false, error: `an FX timeline has at most ${FX_CHOICE_GROUPS_MAX} choice groups` };
+  const plans: FxChoiceGroupPlan[] = [];
+  for (const [group, optionMap] of groups) {
+    if (optionMap.size < FX_CHOICE_OPTIONS.min || optionMap.size > FX_CHOICE_OPTIONS.max)
+      return { ok: false, error:
+        `FX choice group "${group}" needs ${FX_CHOICE_OPTIONS.min}–${FX_CHOICE_OPTIONS.max} options` };
+    plans.push({ group, options: [...optionMap].map(([name, weight]) => ({ name, weight })) });
+  }
+  return { ok: true, plans };
+}
+
+interface FxScheduleEnd { min: number; max: number; span: number }
+const fxPlaybackSpan = (section: FxSection): number => {
+  const count = section.kind === "wait" || section.kind === "camera" ? 1 : section.repeatCount ?? 1;
+  return count * section.durationMs + (count - 1) * (section.repeatDelayMs ?? 0);
+};
+
+/**
+ * Prove every possible host draw remains on the bounded timeline. A dependency waits for
+ * the referenced section's FINAL replay or an explicit block's longest lane. Tracking both
+ * ends of each random range makes a negative overlap safe for every possible schedule.
+ */
+function fxScheduleError(sections: readonly FxSection[], plans: readonly FxParallelBlockPlan[]): string | null {
+  const ends = new Map<string, FxScheduleEnd>();
+  const parallelEnds = new Map<string, FxScheduleEnd>();
+  const planAt = new Map(plans.map((plan) => [plan.startIndex, plan]));
+  const inParallel = new Set(plans.flatMap((plan) =>
+    plan.lanes.flatMap((lane) => lane.members.map((member) => member.index))));
+  const priorFor = (dependency: FxStartAfter | undefined): FxScheduleEnd | undefined =>
+    dependency?.sectionId !== undefined ? ends.get(dependency.sectionId)
+      : dependency?.parallelGroup !== undefined ? parallelEnds.get(dependency.parallelGroup) : undefined;
+  const baseRange = (section: FxSection): { min: number; max: number } | null => {
+    const dependency = section.startAfter;
+    const prior = priorFor(dependency);
+    if (dependency !== undefined && prior === undefined) return null;
+    if (dependency !== undefined && prior !== undefined &&
+        prior.span + dependency.offsetMs + (section.randomDelay?.minMs ?? 0) < 0) return { min: NaN, max: NaN };
+    return prior === undefined ? { min: section.startMs, max: section.startMs }
+      : { min: prior.min + (dependency?.offsetMs ?? 0),
+          max: prior.max + (dependency?.offsetMs ?? 0) };
+  };
+  for (let index = 0; index < sections.length; index += 1) {
+    const plan = planAt.get(index);
+    if (plan) {
+      const first = plan.lanes[0]?.members[0]?.section;
+      if (!first) return "FX parallel block lost its fork";
+      const base = baseRange(first);
+      if (base === null) return "FX finish-relative timing must reference an earlier section or parallel block";
+      if (!Number.isFinite(base.min) || !Number.isFinite(base.max))
+        return "FX finish-relative overlap cannot begin before its referenced section starts";
+      const blockStartMin = base.min + (first.randomDelay?.minMs ?? 0);
+      const blockStartMax = base.max + (first.randomDelay?.maxMs ?? 0);
+      let joinMin = -Infinity;
+      let joinMax = -Infinity;
+      for (const lane of plan.lanes) {
+        let previous: FxScheduleEnd | undefined;
+        for (const [position, member] of lane.members.entries()) {
+          const span = fxPlaybackSpan(member.section);
+          const offset = position === 0 ? 0 : member.section.parallel?.offsetMs ?? 0;
+          if (previous !== undefined && previous.span + offset < 0)
+            return "FX parallel-lane overlap cannot begin before its previous section starts";
+          const startMin = previous === undefined ? blockStartMin : previous.min + offset;
+          const startMax = previous === undefined ? blockStartMax : previous.max + offset;
+          if (startMin < 0 || startMax + span > MAX_TIMELINE_MS)
+            return "FX parallel timing, random delay and replays must stay within the 60-second timeline";
+          previous = { min: startMin + span, max: startMax + span, span };
+          ends.set(member.section.id, previous);
+        }
+        if (previous) {
+          joinMin = Math.max(joinMin, previous.min);
+          joinMax = Math.max(joinMax, previous.max);
+        }
+      }
+      const span = joinMin - blockStartMin;
+      parallelEnds.set(plan.group, { min: joinMin, max: joinMax, span });
+      index = plan.endIndex;
+      continue;
+    }
+    if (inParallel.has(index)) continue;
+    const section = sections[index];
+    if (!section) continue;
+    const base = baseRange(section);
+    if (base === null) return "FX finish-relative timing must reference an earlier section or parallel block";
+    if (!Number.isFinite(base.min) || !Number.isFinite(base.max))
+      return "FX finish-relative overlap cannot begin before its referenced section starts";
+    const span = fxPlaybackSpan(section);
+    const startMin = base.min + (section.randomDelay?.minMs ?? 0);
+    const startMax = base.max + (section.randomDelay?.maxMs ?? 0);
+    if (startMin < 0 || startMax + span > MAX_TIMELINE_MS)
+      return "FX finish-relative timing, random delay and replays must stay within the 60-second timeline";
+    ends.set(section.id, { min: startMin + span, max: startMax + span, span });
+  }
+  return null;
 }
 function validAnchor(at: unknown): at is FxAnchor {
   return isObject(at) && (
@@ -833,27 +1254,129 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     return { ok: false, error: "persistent FX needs a media section of at least 250 ms and at most 16 sections" };
   }
   const ids = new Set<string>();
+  type LaunchSchedule = readonly [number, string | undefined, number | undefined,
+    number | undefined, number | undefined];
+  const launchSchedules = new Map<string, LaunchSchedule>();
   let playbackCount = 0;
   let cameraCount = 0;
   for (const section of value.sections as unknown[]) {
     if (!isObject(section) || typeof section.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(section.id) || ids.has(section.id) ||
-      !inRange(section.startMs, 0, MAX_TIMELINE_MS) || !inRange(section.durationMs, 0, MAX_SECTION_MS) ||
-      section.startMs + section.durationMs > MAX_TIMELINE_MS) {
+      !inRange(section.startMs, 0, MAX_TIMELINE_MS) || !inRange(section.durationMs, 0, MAX_SECTION_MS)) {
       return { ok: false, error: "FX section IDs, start and duration must be unique and bounded" };
     }
+    const startAfter = section.startAfter;
+    const startAfterKeys = isObject(startAfter) ? Object.keys(startAfter) : [];
+    const startAfterSection = isObject(startAfter) ? startAfter.sectionId : undefined;
+    const startAfterParallel = isObject(startAfter) ? startAfter.parallelGroup : undefined;
+    if (startAfter !== undefined && (!isObject(startAfter) || startAfterKeys.length !== 2 ||
+        !startAfterKeys.every((key) => key === "sectionId" || key === "parallelGroup" || key === "offsetMs") ||
+        (startAfterSection === undefined) === (startAfterParallel === undefined) ||
+        (startAfterSection !== undefined && (typeof startAfterSection !== "string" || !ids.has(startAfterSection))) ||
+        (startAfterParallel !== undefined && fxParallelNameError(startAfterParallel, "block") !== null) ||
+        !Number.isSafeInteger(startAfter.offsetMs) ||
+        !inRange(startAfter.offsetMs, -FX_FINISH_OFFSET_MAX_MS, FX_FINISH_OFFSET_MAX_MS) ||
+        section.startMs !== 0 || value.persistent === true)) {
+      return { ok: false, error: `FX finish-relative timing needs an earlier section or parallel block, zero start and an integer offset within ±${FX_FINISH_OFFSET_MAX_MS} ms (one-shot only)` };
+    }
     ids.add(section.id);
+    // Random timing is an authored range, never an invitation for each recipient to
+    // roll independently. Integer milliseconds make the host's sampled start exact.
+    const random = section.randomDelay;
+    if (random !== undefined && (!isObject(random) ||
+        Object.keys(random).length !== 2 || !Object.keys(random).every((key) => key === "minMs" || key === "maxMs") ||
+        !Number.isSafeInteger(random.minMs) || !Number.isSafeInteger(random.maxMs) ||
+        !inRange(random.minMs, 0, FX_RANDOM_DELAY_MAX_MS) ||
+        !inRange(random.maxMs, 1, FX_RANDOM_DELAY_MAX_MS) || random.minMs > random.maxMs)) {
+      return { ok: false, error: `FX random delay needs integer min/max milliseconds (0–${FX_RANDOM_DELAY_MAX_MS}) with max above zero` };
+    }
+    const randomDelayMax = random === undefined ? 0 : random.maxMs as number;
+    if (section.startMs + randomDelayMax + section.durationMs > MAX_TIMELINE_MS) {
+      return { ok: false, error: "FX section IDs, start and duration must be unique and bounded" };
+    }
+    // Conditional inclusion is host-owned. Chance samples one section; D404 choice
+    // samples one weighted option for every member of that group. Neither accepts a
+    // client-supplied hit/miss/value claim.
+    const playIf = section.playIf;
+    const chanceInvalid = isObject(playIf) && playIf.kind === "chance" && (
+      Object.keys(playIf).length !== 2 ||
+      !Object.keys(playIf).every((key) => key === "kind" || key === "percent") ||
+      !Number.isSafeInteger(playIf.percent) || !inRange(playIf.percent, 0, 100));
+    const choiceInvalid = isObject(playIf) && playIf.kind === "choice" && (
+      Object.keys(playIf).length !== 4 ||
+      !Object.keys(playIf).every((key) =>
+        key === "kind" || key === "group" || key === "option" || key === "weight") ||
+      fxChoiceNameError(playIf.group, "group") !== null ||
+      fxChoiceNameError(playIf.option, "option") !== null ||
+      !Number.isSafeInteger(playIf.weight) ||
+      !inRange(playIf.weight, FX_CHOICE_WEIGHT.min, FX_CHOICE_WEIGHT.max));
+    if (playIf !== undefined && (!isObject(playIf) ||
+        (playIf.kind !== "chance" && playIf.kind !== "choice") || chanceInvalid || choiceInvalid ||
+        section.kind === "wait" || value.persistent === true)) {
+      return { ok: false, error:
+        "FX conditional play needs one host chance (0–100) or bounded weighted choice on a non-wait one-shot section" };
+    }
+    // A parallel block is first-class scheduling, not a label painted over absolute
+    // overlap. Structure (fork agreement, serial lane order and longest-lane join) is
+    // checked after every member is known; this pass closes the field itself.
+    const parallel = section.parallel;
+    if (parallel !== undefined && (!isObject(parallel) ||
+        Object.keys(parallel).some((key) => key !== "group" && key !== "lane" && key !== "offsetMs") ||
+        Object.keys(parallel).length < 2 || Object.keys(parallel).length > 3 ||
+        fxParallelNameError(parallel.group, "block") !== null ||
+        fxParallelNameError(parallel.lane, "lane") !== null ||
+        (parallel.offsetMs !== undefined && (!Number.isSafeInteger(parallel.offsetMs) ||
+          !inRange(parallel.offsetMs, -FX_FINISH_OFFSET_MAX_MS, FX_FINISH_OFFSET_MAX_MS))) ||
+        value.persistent === true)) {
+      return { ok: false, error:
+        `FX parallel membership needs exact block/lane names and an optional integer overlap/gap within ±${FX_FINISH_OFFSET_MAX_MS} ms (one-shot only)` };
+    }
+    // A launch group is an exact shared schedule, not a client-side promise to
+    // approximate simultaneous playback. Every member authors the same timing shape;
+    // only duration, rendering and replay/condition controls remain independent.
+    const launchGroup = section.launchGroup;
+    if (launchGroup !== undefined && (fxLaunchGroupError(launchGroup) !== null ||
+        section.kind === "wait" || value.persistent === true)) {
+      return { ok: false, error:
+        `FX launch groups need a trimmed 1–${FX_LAUNCH_GROUP_MAX_LENGTH} character name on non-wait one-shot sections` };
+    }
+    if (typeof launchGroup === "string") {
+      const after = isObject(startAfter) ? startAfter as unknown as FxStartAfter : undefined;
+      const delay = isObject(random) ? random : undefined;
+      const schedule: LaunchSchedule = [section.startMs as number,
+        fxStartAfterKey(after), typeof after?.offsetMs === "number" ? after.offsetMs : undefined,
+        typeof delay?.minMs === "number" ? delay.minMs : undefined,
+        typeof delay?.maxMs === "number" ? delay.maxMs : undefined];
+      const prior = launchSchedules.get(launchGroup);
+      if (prior && schedule.some((part, index) => part !== prior[index])) {
+        return { ok: false, error:
+          "FX launch-group members need the same absolute or finish-relative start and random-delay range" };
+      }
+      launchSchedules.set(launchGroup, prior ?? schedule);
+    }
     // A camera cue is not media: it has no replays (a view claim that repeated
     // itself would be a stuck frame), so its repeat fields are unknown fields.
     const repeatFields = section.kind === "wait" || section.kind === "camera"
       ? [] : ["repeatCount", "repeatDelayMs"];
     const fields = section.kind === "sound"
-      ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs", "at", "radius", "pan", "muffle"] :
-      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg"] :
-      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg"] :
+      ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs", "at", "radius", "pan", "muffle",
+          "playbackRate", "clipStartMs", "clipEndMs"] :
+      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg", "playbackRate", "clipStartMs", "clipEndMs", "syncGroup"] :
+      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg", "syncGroup"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
-    if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
+    if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", "startAfter",
+      "randomDelay", "launchGroup", "parallel", "playIf", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
       return { ok: false, error: "unknown FX section field or zero-duration media" };
+    }
+    if (section.syncGroup !== undefined &&
+        (value.persistent !== true || (section.kind !== "image" && section.kind !== "text") ||
+          fxSyncGroupError(section.syncGroup) !== null)) {
+      return { ok: false, error:
+        `FX sync groups need a trimmed 1–${FX_SYNC_GROUP_MAX_LENGTH} character name on persistent image/text sections` };
+    }
+    if (section.kind === "image" || section.kind === "sound") {
+      const clipError = mediaClipError(section);
+      if (clipError) return { ok: false, error: clipError };
     }
     if (section.kind === "camera") {
       if (value.persistent)
@@ -893,7 +1416,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         (section.repeatDelayMs !== undefined && (section.repeatCount === undefined ||
           !Number.isSafeInteger(section.repeatDelayMs) || !inRange(section.repeatDelayMs, 0, 30_000))) ||
         (value.persistent && section.repeatCount !== undefined) ||
-        section.startMs + repeatCount * section.durationMs +
+        section.startMs + randomDelayMax + repeatCount * section.durationMs +
           (repeatCount - 1) * (typeof section.repeatDelayMs === "number" ? section.repeatDelayMs : 0) > MAX_TIMELINE_MS ||
         (playbackCount += repeatCount) > MAX_PLAYBACKS) {
       return { ok: false, error: "FX replays require 2–8 one-shot plays, bounded pause and at most 64 total cues within 60 s" };
@@ -903,6 +1426,9 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         (section.volume !== undefined && !inRange(section.volume, 0, 1))) {
         return { ok: false, error: "FX sound needs an imported hash and volume 0–1" };
       }
+      if (section.playbackRate !== undefined &&
+          !inRange(section.playbackRate, FX_PLAYBACK_RATE_LIMITS.min, FX_PLAYBACK_RATE_LIMITS.max))
+        return { ok: false, error: `FX playback rate must be ${FX_PLAYBACK_RATE_LIMITS.min}–${FX_PLAYBACK_RATE_LIMITS.max}` };
       // A channel is a closed set, not a free-text field: an unknown one would be
       // silently treated as an effect everywhere and mix wrongly by accident.
       if (section.channel !== undefined && !isSoundChannel(section.channel))
@@ -930,6 +1456,9 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       }
       continue;
     }
+    if (section.kind === "image" && section.playbackRate !== undefined &&
+        !inRange(section.playbackRate, FX_PLAYBACK_RATE_LIMITS.min, FX_PLAYBACK_RATE_LIMITS.max))
+      return { ok: false, error: `FX playback rate must be ${FX_PLAYBACK_RATE_LIMITS.min}–${FX_PLAYBACK_RATE_LIMITS.max}` };
     if ((section.kind !== "image" && section.kind !== "text") || !validAnchor(section.at) ||
       (section.to !== undefined && !validAnchor(section.to)) ||
       (section.easing !== undefined && !isEasing(section.easing)) ||
@@ -1006,7 +1535,14 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       (section.color !== undefined && (typeof section.color !== "string" || !HEX_COLOR.test(section.color)))
     )) return { ok: false, error: "FX text needs 1–256 characters and an optional hex color" };
   }
-  return { ok: true, sequence: value as unknown as FxSequence };
+  const sequence = value as unknown as FxSequence;
+  const parallel = fxParallelPlans(sequence.sections);
+  if (!parallel.ok) return parallel;
+  const choices = fxChoicePlans(sequence.sections);
+  if (!choices.ok) return choices;
+  const scheduleError = fxScheduleError(sequence.sections, parallel.plans);
+  if (scheduleError) return { ok: false, error: scheduleError };
+  return { ok: true, sequence };
 }
 
 export interface FxViewer {
@@ -1040,6 +1576,50 @@ export function fxSectionsForViewer(
   return sections.every(allowed) ? sections : sections.filter(allowed);
 }
 
+/**
+ * Resolve authored group membership to one absolute host-clock phase origin per group.
+ *
+ * A later section still waits for its own `startMs`; once it appears, its visual/media
+ * age is measured from this shared origin. An active durable instance may contribute an
+ * older origin, which is how a second run joins the phase already in progress. A future
+ * or malformed candidate is ignored, so phase age can never begin negative.
+ *
+ * The membership list remains host-private. The returned sections carry only
+ * `syncAtHostTime`, and the input arrays are never mutated.
+ */
+export function fxResolveSyncOrigins(
+  sections: readonly ResolvedFxSection[],
+  members: readonly FxSyncGroupMember[] | undefined,
+  atHostTime: number,
+  activeOrigins: ReadonlyMap<string, number> = new Map(),
+): { sections: ResolvedFxSection[]; origins: ReadonlyMap<string, number> } {
+  if (!members?.length) return { sections: [...sections], origins: new Map() };
+  const byId = new Map(sections.map((section) => [section.id, section]));
+  const earliest = new Map<string, number>();
+  const groupBySection = new Map<string, string>();
+  for (const member of members) {
+    const section = byId.get(member.sectionId);
+    if (!section || (section.kind !== "image" && section.kind !== "text")) continue;
+    groupBySection.set(member.sectionId, member.group);
+    earliest.set(member.group, Math.min(earliest.get(member.group) ?? Infinity, section.startMs));
+  }
+  const origins = new Map<string, number>();
+  for (const [group, startMs] of earliest) {
+    const firstStart = atHostTime + startMs;
+    const active = activeOrigins.get(group);
+    origins.set(group, typeof active === "number" && Number.isFinite(active) && active >= 0 && active <= firstStart
+      ? active : firstStart);
+  }
+  return {
+    sections: sections.map((section) => {
+      const group = groupBySection.get(section.id);
+      const syncAtHostTime = group === undefined ? undefined : origins.get(group);
+      return syncAtHostTime === undefined ? section : { ...section, syncAtHostTime };
+    }),
+    origins,
+  };
+}
+
 /** Resolve all anchors ON THE HOST using its committed scene state. */
 export function resolveFxSequence(
   sequence: FxSequence,
@@ -1047,15 +1627,25 @@ export function resolveFxSequence(
   source: TokenDocument | undefined,
   target: TokenDocument | undefined,
   mimeOf: (assetId: string) => string | undefined,
-): { ok: true; sections: ResolvedFxSection[] } | { ok: false; error: string } {
+  /** Host entropy. Omitted callers deterministically preview the lower bound. */
+  rng: () => number = () => 0,
+): { ok: true; sections: ResolvedFxSection[]; syncGroups?: FxSyncGroupMember[] } |
+   { ok: false; error: string } {
   const validated = validateFxSequence(sequence);
   if (!validated.ok) return validated;
   const sections: ResolvedFxSection[] = [];
   for (const section of sequence.sections) {
-    if (section.kind === "wait") { sections.push(section); continue; }
+    if (section.kind === "wait") {
+      const { repeatCount: _count, repeatDelayMs: _gap, randomDelay: _random,
+        startAfter: _after, launchGroup: _launchGroup, parallel: _parallel, playIf: _playIf, ...projected } = section;
+      void _count; void _gap; void _random; void _after; void _launchGroup; void _parallel; void _playIf;
+      sections.push(projected);
+      continue;
+    }
     if (section.kind === "camera" && section.mode === "shake") {
-      const { repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-      void _count; void _gap;
+      const { repeatCount: _count, repeatDelayMs: _gap, randomDelay: _random,
+        startAfter: _after, launchGroup: _launchGroup, parallel: _parallel, playIf: _playIf, ...projected } = section;
+      void _count; void _gap; void _random; void _after; void _launchGroup; void _parallel; void _playIf;
       sections.push(projected);
       continue;
     }
@@ -1077,8 +1667,10 @@ export function resolveFxSequence(
     if (section.kind === "sound") {
       const mime = mimeOf(section.assetId);
       if (!mime || !AUDIO_MIME.has(mime)) return { ok: false, error: `missing/unsupported sound: ${section.assetId}` };
-      const { repeatCount: _count, repeatDelayMs: _gap, at: _at, radius, ...projected } = section;
-      void _count; void _gap; void _at;
+      const { repeatCount: _count, repeatDelayMs: _gap, randomDelay: _random,
+        startAfter: _after, launchGroup: _launchGroup, parallel: _parallel, playIf: _playIf,
+        at: _at, radius, ...projected } = section;
+      void _count; void _gap; void _random; void _after; void _launchGroup; void _parallel; void _playIf; void _at;
       // The radius travels in **pixels**, like every other distance a client measures
       // against its own view: the host owns the scene's grid metric, and a client that
       // had to re-derive "60 ft" could disagree with the host that validated it.
@@ -1106,15 +1698,21 @@ export function resolveFxSequence(
         }
         if (points.every((point) => point.x === points[0]?.x && point.y === points[0]?.y))
           return { ok: false, error: "a camera path needs two different waypoints" };
-        const { points: _points, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-        void _points; void _count; void _gap;
+        const { points: _points, repeatCount: _count, repeatDelayMs: _gap,
+          randomDelay: _random, startAfter: _after, launchGroup: _launchGroup,
+          parallel: _parallel, playIf: _playIf, ...projected } = section;
+        void _points; void _count; void _gap; void _random; void _after;
+        void _launchGroup; void _parallel; void _playIf;
         sections.push({ ...projected, points });
         continue;
       }
       const destination = anchor(section.to);
       if (!destination.ok) return destination;
-      const { to: _to, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-      void _to; void _count; void _gap;
+      const { to: _to, repeatCount: _count, repeatDelayMs: _gap,
+        randomDelay: _random, startAfter: _after, launchGroup: _launchGroup,
+        parallel: _parallel, playIf: _playIf, ...projected } = section;
+      void _to; void _count; void _gap; void _random; void _after;
+      void _launchGroup; void _parallel; void _playIf;
       sections.push({ ...projected, toX: destination.x, toY: destination.y });
       continue;
     }
@@ -1226,30 +1824,181 @@ export function resolveFxSequence(
     if (section.kind === "text") {
       // The authored `mask` is dropped here and replaced by the resolved one: what
       // travels is a polygon, never the author's scene-unit numbers.
-      const { at: _anchor, to: _to, mask: _mask, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-      void _anchor; void _to; void _mask; void _count; void _gap;
+      const { at: _anchor, to: _to, mask: _mask, repeatCount: _count,
+        repeatDelayMs: _gap, randomDelay: _random, startAfter: _after,
+        launchGroup: _launchGroup, parallel: _parallel, playIf: _playIf, syncGroup: _syncGroup, ...projected } = section;
+      void _anchor; void _to; void _mask; void _count; void _gap; void _random; void _after;
+      void _launchGroup; void _parallel; void _playIf; void _syncGroup;
       sections.push({ ...projected, ...coords, ...(mask.mask ? { mask: mask.mask } : {}) });
       continue;
     }
     const mime = mimeOf(section.assetId);
     if (!mime || !VISUAL_MIME.has(mime))
       return { ok: false, error: `missing/unsupported visual: ${section.assetId}` };
-    const { at: _anchor, to: _to, mask: _mask, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-    void _anchor; void _to; void _mask; void _count; void _gap;
+    // `image` is the visual section discriminator and includes alpha video. A playback
+    // speed on a still would be a valid-looking control that does nothing, so refuse it.
+    if (section.playbackRate !== undefined && !mime.startsWith("video/"))
+      return { ok: false, error: "FX playback rate is only available for video and sound" };
+    if ((section.clipStartMs !== undefined || section.clipEndMs !== undefined) && !mime.startsWith("video/"))
+      return { ok: false, error: "FX media clips are only available for video and sound" };
+    const { at: _anchor, to: _to, mask: _mask, repeatCount: _count,
+      repeatDelayMs: _gap, randomDelay: _random, startAfter: _after,
+      launchGroup: _launchGroup, parallel: _parallel, playIf: _playIf, syncGroup: _syncGroup, ...projected } = section;
+    void _anchor; void _to; void _mask; void _count; void _gap; void _random; void _after;
+    void _launchGroup; void _parallel; void _playIf; void _syncGroup;
     sections.push({ ...projected, ...coords, ...(mask.mask ? { mask: mask.mask } : {}), mime });
   }
   // All authored anchors and media are preflighted before any playback cue is
   // exposed. IDs with '@' cannot collide with an authored section ID (the
   // validator permits only alphanumerics, hyphens and underscores).
-  const expanded: ResolvedFxSection[] = [];
-  for (const [index, prepared] of sections.entries()) {
+  //
+  // Resolve the complete schedule before sampling conditional inclusion. This keeps
+  // finish dependencies deterministic: if an optional section is skipped, a later
+  // `startAfter` section still starts after the optional section's host-resolved
+  // would-be final playback instead of collapsing differently on different viewers.
+  const scheduled: Array<{ original: FxSection; concrete: ResolvedFxSection;
+    count: number; gap: number }> = [];
+  const finalEnds = new Map<string, number>();
+  const parallelFinalEnds = new Map<string, number>();
+  const preparedById = new Map(sections.map((section) => [section.id, section]));
+  const concreteById = new Map<string, ResolvedFxSection>();
+  const parallel = fxParallelPlans(sequence.sections);
+  if (!parallel.ok) return parallel;
+  const planAt = new Map(parallel.plans.map((plan) => [plan.startIndex, plan]));
+  const inParallel = new Set(parallel.plans.flatMap((plan) =>
+    plan.lanes.flatMap((lane) => lane.members.map((member) => member.index))));
+  const dependencyEndOf = (dependency: FxStartAfter | undefined): number | undefined =>
+    dependency?.sectionId !== undefined ? finalEnds.get(dependency.sectionId)
+      : dependency?.parallelGroup !== undefined ? parallelFinalEnds.get(dependency.parallelGroup) : undefined;
+  const sampleUnit = (): number => {
+    const draw = rng();
+    // An injected RNG is still untrusted input: NaN means the lower bound, while
+    // values outside [0, 1] clamp rather than escaping the validated timeline.
+    return Number.isFinite(draw) ? Math.min(1, Math.max(0, draw)) : 0;
+  };
+  const sampledDelay = (range: FxRandomDelay | undefined, unit: number): number =>
+    range === undefined ? 0 : Math.min(range.maxMs,
+      range.minMs + Math.floor(unit * (range.maxMs - range.minMs + 1)));
+  // D402: the first authored launch-group member samples its jitter once. D403 blocks
+  // use the same authority rule, but their one draw belongs to the fork and all lanes.
+  const launchRandomUnits = new Map<string, number>();
+  for (let index = 0; index < sequence.sections.length; index += 1) {
+    const plan = planAt.get(index);
+    if (plan) {
+      const first = plan.lanes[0]?.members[0]?.section;
+      if (!first) return { ok: false, error: "FX parallel block lost its fork during preflight" };
+      const dependencyEnd = dependencyEndOf(first.startAfter);
+      if (first.startAfter !== undefined && dependencyEnd === undefined)
+        return { ok: false, error: "FX parallel fork lost its dependency during preflight" };
+      const range = first.randomDelay;
+      const blockStart = (dependencyEnd === undefined ? first.startMs
+        : dependencyEnd + (first.startAfter?.offsetMs ?? 0)) +
+        sampledDelay(range, range === undefined ? 0 : sampleUnit());
+      let join = -Infinity;
+      for (const lane of plan.lanes) {
+        let previousEnd: number | undefined;
+        for (const [position, member] of lane.members.entries()) {
+          const original = member.section;
+          const prepared = preparedById.get(original.id);
+          if (!prepared) return { ok: false, error: "FX parallel section lost during preflight" };
+          const startMs = previousEnd === undefined ? blockStart
+            : previousEnd + (position === 0 ? 0 : original.parallel?.offsetMs ?? 0);
+          const concrete: ResolvedFxSection = { ...prepared, startMs };
+          const count = original.kind === "wait" || original.kind === "camera"
+            ? 1 : original.repeatCount ?? 1;
+          const gap = original.repeatDelayMs ?? 0;
+          previousEnd = startMs + count * concrete.durationMs + (count - 1) * gap;
+          finalEnds.set(original.id, previousEnd);
+          concreteById.set(original.id, concrete);
+        }
+        if (previousEnd !== undefined) join = Math.max(join, previousEnd);
+      }
+      parallelFinalEnds.set(plan.group, join);
+      index = plan.endIndex;
+      continue;
+    }
+    if (inParallel.has(index)) continue;
     const original = sequence.sections[index];
     if (!original) return { ok: false, error: "FX section lost during preflight" };
-    const count = original.repeatCount ?? 1;
+    const prepared = preparedById.get(original.id);
+    if (!prepared) return { ok: false, error: "FX section lost during preflight" };
+    const dependencyEnd = dependencyEndOf(original.startAfter);
+    if (original.startAfter !== undefined && dependencyEnd === undefined)
+      return { ok: false, error: "FX finish-relative timing lost its dependency during preflight" };
+    const range = original.randomDelay;
+    let unit = 0;
+    if (range !== undefined) {
+      const cached = original.launchGroup === undefined
+        ? undefined : launchRandomUnits.get(original.launchGroup);
+      if (cached !== undefined) unit = cached;
+      else {
+        unit = sampleUnit();
+        if (original.launchGroup !== undefined) launchRandomUnits.set(original.launchGroup, unit);
+      }
+    }
+    const baseStart = dependencyEnd === undefined ? prepared.startMs
+      : dependencyEnd + (original.startAfter?.offsetMs ?? 0);
+    const concrete: ResolvedFxSection = { ...prepared,
+      startMs: baseStart + sampledDelay(range, unit) };
+    const count = original.kind === "wait" || original.kind === "camera"
+      ? 1 : original.repeatCount ?? 1;
+    const gap = original.repeatDelayMs ?? 0;
+    concreteById.set(original.id, concrete);
+    // A dependent starts after the final replay even when this authored section is later
+    // skipped, so schedule shape never becomes a recipient-visible condition oracle.
+    finalEnds.set(original.id,
+      concrete.startMs + count * concrete.durationMs + (count - 1) * gap);
+  }
+  // Conditions and replay expansion stay section-local and retain authored order even
+  // though lane scheduling above was evaluated as a real fork/join structure.
+  for (const original of sequence.sections) {
+    const concrete = concreteById.get(original.id);
+    if (!concrete) return { ok: false, error: "FX section lost from its concrete schedule" };
+    scheduled.push({ original, concrete,
+      count: original.kind === "wait" || original.kind === "camera" ? 1 : original.repeatCount ?? 1,
+      gap: original.repeatDelayMs ?? 0 });
+  }
+
+  const choices = fxChoicePlans(sequence.sections);
+  if (!choices.ok) return choices;
+  const choiceByGroup = new Map(choices.plans.map((plan) => [plan.group, plan]));
+  const selectedChoices = new Map<string, string>();
+  const expanded: ResolvedFxSection[] = [];
+  const syncGroups: FxSyncGroupMember[] = [];
+  for (const { original, concrete, count, gap } of scheduled) {
+    const playIf = original.playIf;
+    let included = true;
+    if (playIf?.kind === "chance") {
+      const percent = playIf.percent;
+      // Deterministic edges consume no entropy. A genuine chance consumes exactly one
+      // host draw for the authored section; every replay and recipient shares it.
+      included = percent >= 100 ? true : percent <= 0 ? false : sampleUnit() < percent / 100;
+    } else if (playIf?.kind === "choice") {
+      let selected = selectedChoices.get(playIf.group);
+      if (selected === undefined) {
+        const plan = choiceByGroup.get(playIf.group);
+        if (!plan) return { ok: false, error: "FX choice group lost during preflight" };
+        const total = plan.options.reduce((sum, option) => sum + option.weight, 0);
+        let ticket = Math.min(total - 1, Math.floor(sampleUnit() * total));
+        selected = plan.options[plan.options.length - 1]?.name;
+        for (const option of plan.options) {
+          if (ticket < option.weight) { selected = option.name; break; }
+          ticket -= option.weight;
+        }
+        if (selected === undefined) return { ok: false, error: "FX choice option lost during preflight" };
+        selectedChoices.set(playIf.group, selected);
+      }
+      included = playIf.option === selected;
+    }
+    if (!included) continue;
     for (let play = 0; play < count; play++) {
-      expanded.push(play === 0 ? prepared : { ...prepared, id: `${prepared.id}@${play + 1}`,
-        startMs: prepared.startMs + play * (prepared.durationMs + (original.repeatDelayMs ?? 0)) });
+      const playback = play === 0 ? concrete : { ...concrete, id: `${concrete.id}@${play + 1}`,
+        startMs: concrete.startMs + play * (concrete.durationMs + gap) };
+      expanded.push(playback);
+      if ((original.kind === "image" || original.kind === "text") && original.syncGroup !== undefined)
+        syncGroups.push({ sectionId: playback.id, group: original.syncGroup });
     }
   }
-  return { ok: true, sections: expanded };
+  return { ok: true, sections: expanded,
+    ...(syncGroups.length > 0 ? { syncGroups } : {}) };
 }

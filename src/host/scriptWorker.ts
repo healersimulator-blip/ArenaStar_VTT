@@ -7,6 +7,7 @@
  * individually checked host RPCs; the host terminates the worker on timeout.
  */
 import type { Json } from "../core/documents";
+import { FX_FINISH_OFFSET_MAX_MS } from "../core/fx";
 import { boundedJson, type ScriptArgs } from "../core/scriptMacros";
 
 export interface ScriptContext {
@@ -41,15 +42,27 @@ const rpc = (method, payload) => new Promise((resolve, reject) => {
 // the only authority for FX grants, recipients, assets and nested macro calls.
 // Waiting means the host-clock cue window ended, NOT every client's decode or
 // playback succeeded. Earlier actions are not rolled back if a later one fails.
-const fxPlay = (macroId, sourceTokenId, targetTokenId, waitForEnd = false) =>
-  rpc("fx.play", { macroId,
+const fxFinishOffset = (value = 0) => {
+  if (!Number.isInteger(value) || Math.abs(value) > ${FX_FINISH_OFFSET_MAX_MS})
+    throw new Error("FX finish offset must be an integer within ±${FX_FINISH_OFFSET_MAX_MS} ms");
+  return value;
+};
+const fxPlay = (macroId, sourceTokenId, targetTokenId, waitForEnd = false, finishOffsetMs = 0) => {
+  const offset = fxFinishOffset(finishOffsetMs);
+  return rpc("fx.play", { macroId,
     ...(sourceTokenId !== undefined ? { sourceTokenId } : {}),
     ...(targetTokenId !== undefined ? { targetTokenId } : {}),
-    ...(waitForEnd ? { waitForEnd: true } : {}) });
-const fxWait = async (cue) => {
-  if (!cue || cue.persistent !== false || !Number.isFinite(cue.endsAtHostTime))
+    ...(waitForEnd ? { waitForEnd: true } : {}),
+    ...(waitForEnd && offset !== 0 ? { finishOffsetMs: offset } : {}) });
+};
+const fxWait = async (cue, finishOffsetMs = 0) => {
+  const offset = fxFinishOffset(finishOffsetMs);
+  if (!cue || cue.persistent !== false || !Number.isFinite(cue.atHostTime) ||
+      !Number.isFinite(cue.endsAtHostTime))
     throw new Error("Only a finite, nonpersistent FX cue can be awaited");
-  const remaining = Math.max(0, Math.ceil(cue.endsAtHostTime - Date.now()));
+  if (cue.endsAtHostTime + offset < cue.atHostTime)
+    throw new Error("FX finish overlap cannot begin before the cue starts");
+  const remaining = Math.max(0, Math.ceil(cue.endsAtHostTime + offset - Date.now()));
   if (remaining > 7000) throw new Error("FX cue cannot finish within the Worker deadline");
   if (remaining) await new Promise((resolve) => setTimeout(resolve, remaining));
   return cue;
@@ -65,8 +78,9 @@ const fxSequence = () => {
   const chain = Object.freeze({
     play: (macroId, sourceTokenId, targetTokenId) =>
       add({ kind: "play", macroId, sourceTokenId, targetTokenId, awaitEnd: false }),
-    playAndWait: (macroId, sourceTokenId, targetTokenId) =>
-      add({ kind: "play", macroId, sourceTokenId, targetTokenId, awaitEnd: true }),
+    playAndWait: (macroId, sourceTokenId, targetTokenId, finishOffsetMs = 0) =>
+      add({ kind: "play", macroId, sourceTokenId, targetTokenId, awaitEnd: true,
+        finishOffsetMs: fxFinishOffset(finishOffsetMs) }),
     wait: (ms) => {
       if (!Number.isInteger(ms) || ms < 0 || ms > 5000) throw new Error("FX wait must be 0–5000 ms");
       return add({ kind: "wait", ms });
@@ -89,8 +103,9 @@ const fxSequence = () => {
       for (const step of steps) {
         let result = null;
         if (step.kind === "play") {
-          const cue = await fxPlay(step.macroId, step.sourceTokenId, step.targetTokenId, step.awaitEnd);
-          result = step.awaitEnd ? await fxWait(cue) : cue;
+          const cue = await fxPlay(step.macroId, step.sourceTokenId, step.targetTokenId, step.awaitEnd,
+            step.finishOffsetMs ?? 0);
+          result = step.awaitEnd ? await fxWait(cue, step.finishOffsetMs ?? 0) : cue;
         } else if (step.kind === "wait") {
           waited += step.ms;
           if (waited > 7000) throw new Error("FX chain exceeds its wait budget");
@@ -133,8 +148,8 @@ const api = Object.freeze({
   }),
   fx: Object.freeze({
     play: (macroId, sourceTokenId, targetTokenId) => fxPlay(macroId, sourceTokenId, targetTokenId),
-    playAndWait: async (macroId, sourceTokenId, targetTokenId) =>
-      fxWait(await fxPlay(macroId, sourceTokenId, targetTokenId, true)),
+    playAndWait: async (macroId, sourceTokenId, targetTokenId, finishOffsetMs = 0) =>
+      fxWait(await fxPlay(macroId, sourceTokenId, targetTokenId, true, finishOffsetMs), finishOffsetMs),
     sequence: fxSequence,
     stop: (runId) => rpc("fx.stop", { runId }),
     list: (filter = {}) => rpc("fx.list", { filter }),

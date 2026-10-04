@@ -78,6 +78,9 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
     case "fx.start":
       return { kind: "fx.start", runId: "run-1", macroId: "fx-1", sceneId: "s1", atHostTime: 1000,
         sections: [{ kind: "text", id: "title", text: "Flash", x: 40, y: 50, startMs: 0, durationMs: 500 }] };
+    case "fx.run":
+      return { kind: "fx.run", requestId: "req-1", runId: "run-1", macroId: "fx-1",
+        sceneId: "s1", atHostTime: 1000, endsAtHostTime: 1500, persistent: false };
     case "fx.sync":
       return { kind: "fx.sync", sceneId: "s1" };
     case "fx.stop":

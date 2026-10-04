@@ -5,8 +5,11 @@ import type { Op } from "../../src/core/ops";
 import { emptyWorld } from "../net/fixtures";
 
 const hash = "a".repeat(64);
-const manifest: AssetManifest = { [hash]: { name: "owned.png", mime: "image/png", size: 5,
-  chunks: 1, visibility: "referenced" } };
+const videoHash = "c".repeat(64);
+const manifest: AssetManifest = {
+  [hash]: { name: "owned.png", mime: "image/png", size: 5, chunks: 1, visibility: "referenced" },
+  [videoHash]: { name: "owned.webm", mime: "video/webm", size: 5, chunks: 1, visibility: "referenced" },
+};
 const scene: SceneDocument = { _id: "scene-a", type: "scene", name: "Scene", flags: {}, system: {},
   ownership: { default: 2 }, active: true, img: null, width: 1000, height: 1000, darkness: 0,
   grid: { type: "square", size: 100, distance: 5, units: "ft", diagonals: "555", hexLayout: "oddQ" },
@@ -55,6 +58,34 @@ describe("private durable FX records", () => {
     void _missingY;
     expect(validateFxInstance({ ...instance, sections: [missingY] }, scene, manifest)).toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, durationMs: 1 }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual, assetId: videoHash,
+      mime: "video/webm", playbackRate: 2, clipStartMs: 400, clipEndMs: 1_400 }] }, scene, manifest))
+      .toBe(true);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual, playbackRate: 2 }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      clipStartMs: 100, clipEndMs: 500 }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual, assetId: videoHash,
+      mime: "video/webm", playbackRate: 4.01 }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual, assetId: videoHash,
+      mime: "video/webm", clipStartMs: 500, clipEndMs: 500 }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      randomDelay: { minMs: 100, maxMs: 300 } } as typeof instance.sections[number]] }, scene, manifest))
+      .toBe(false); // durable cues keep the sampled start, never an authored reroll range
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      startAfter: { sectionId: "earlier", offsetMs: -100 } } as typeof instance.sections[number]] },
+    scene, manifest)).toBe(false); // reconnect keeps the host-resolved start, never a live dependency
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      playIf: { kind: "chance", percent: 50 } } as typeof instance.sections[number]] }, scene, manifest))
+      .toBe(false); // a concrete durable cue never reevaluates an authored predicate
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      playIf: { kind: "choice", group: "secret", option: "red", weight: 2 } } as typeof
+        instance.sections[number]] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      launchGroup: "forged burst" } as typeof instance.sections[number]] }, scene, manifest))
+      .toBe(false); // a concrete durable cue never keeps an authored launch name
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      parallel: { group: "forged block", lane: "forged lane" } } as typeof instance.sections[number]] },
+    scene, manifest)).toBe(false); // reconnect receives concrete starts, never lane structure
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, evil: "op" } as typeof instance.sections[number]] }, scene, manifest))
       .toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, follow: true, followTokenId: "source" }] }, scene, manifest))
@@ -71,6 +102,40 @@ describe("private durable FX records", () => {
       .toBe(false);
     expect(validateFxInstance(instance, undefined, manifest)).toBe(false);
     expect(instance.sections[0]).toHaveProperty("x", 100); // pure; host records aren't rewritten
+  });
+
+  test("validates durable host-resolved sync origins and keeps authored names in private membership", () => {
+    const [image, text] = instance.sections;
+    if (!image || image.kind !== "image" || !text || text.kind !== "text")
+      throw new Error("Missing visual fixtures");
+    const synced: FxInstanceDocument = { ...instance,
+      syncGroups: [
+        { sectionId: image.id, group: "shared pulse" },
+        { sectionId: text.id, group: "shared pulse" },
+      ],
+      sections: [{ ...image, syncAtHostTime: 900 }, { ...text, syncAtHostTime: 900 }],
+    };
+    expect(validateFxInstance(synced, scene, manifest)).toBe(true);
+    const { syncGroups: _groups, ...missingMembership } = synced;
+    void _groups;
+    expect(validateFxInstance(missingMembership as FxInstanceDocument, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...synced, sections: [image, { ...text, syncAtHostTime: 900 }] },
+      scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...synced,
+      sections: [{ ...image, syncAtHostTime: 900 }, { ...text, syncAtHostTime: 901 }] },
+    scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...synced,
+      sections: [{ ...image, syncAtHostTime: 1_001 }, { ...text, syncAtHostTime: 1_001 }] },
+    scene, manifest)).toBe(false); // a group's origin cannot be after its first member starts
+    expect(validateFxInstance({ ...synced,
+      syncGroups: [{ sectionId: image.id, group: "shared pulse" },
+        { sectionId: "missing", group: "shared pulse" }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...synced,
+      syncGroups: [{ sectionId: image.id, group: "shared pulse" },
+        { sectionId: image.id, group: "shared pulse" }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...synced,
+      sections: [{ ...image, syncAtHostTime: 900, syncGroup: "shared pulse" } as typeof image,
+        { ...text, syncAtHostTime: 900 }] }, scene, manifest)).toBe(false);
   });
 
   test("a stored cue's resolved mask is checked as a polygon, not as authored scene units", () => {

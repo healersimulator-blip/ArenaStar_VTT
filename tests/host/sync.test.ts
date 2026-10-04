@@ -55,6 +55,7 @@ import type {
 } from "../../src/core/documents";
 import { frameMessage, channelFor } from "../../src/net/frame";
 import { tagEditOps } from "../../src/core/tags";
+import type { ActionCard, ActionFxContext } from "../../src/core/action";
 import { planDuplicateSceneOps } from "../../src/core/sceneCopy";
 
 const meta: StoreMeta = {
@@ -1604,10 +1605,320 @@ describe("Macros / FX host authority and audience", () => {
         { kind: "brightness", strength: 1.1 }]);
   });
 
-  test("multi-step timeline reaches entitled peers exactly once; forge is ignored", async () => {
+  test("random and finish-relative section timing resolve once on the host into shared concrete times", async () => {
+    let draws = 0;
+    const hostNow = 1_000_000;
     const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
-      chunks: 1, visibility: "referenced" } });
-    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") }]);
+      chunks: 1, visibility: "referenced" } }, undefined, () => { draws += 1; return 0.5; },
+    () => hostNow);
+    const jittered = fxMacro("shared-jitter");
+    const firstSection = jittered.sequence?.sections[0];
+    const secondSection = jittered.sequence?.sections[1];
+    if (!jittered.sequence || !firstSection || !secondSection)
+      throw new Error("missing fixture sequence");
+    jittered.sequence.sections[0] = { ...firstSection,
+      randomDelay: { minMs: 100, maxMs: 300 } };
+    jittered.sequence.sections[1] = { ...secondSection, startMs: 0,
+      startAfter: { sectionId: firstSection.id, offsetMs: -200 },
+      randomDelay: { minMs: 400, maxMs: 600 } };
+    h.gm.submit([{ kind: "create", coll: "macros", data: jittered }]);
+    await flushMicrotasks();
+    const first = await h.addPlayer(PLAYER_ID, "Rex");
+    const other = await h.addPlayer(OTHER_ID, "Ivy");
+    const received: ClientEvents["fx"][][] = [[], [], []];
+    h.gmBus.on("fx", (cue) => received[0]?.push(cue));
+    first.bus.on("fx", (cue) => received[1]?.push(cue));
+    other.bus.on("fx", (cue) => received[2]?.push(cue));
+
+    const before = draws;
+    h.gm.requestSequence("shared-jitter", "s1");
+    await flushMicrotasks();
+    expect(draws - before).toBe(2); // sections, not sessions
+    for (const cues of received) {
+      expect(cues).toHaveLength(1);
+      const cue = cues[0];
+      expect(cue?.kind).toBe("fx.start");
+      expect(cue?.sections.map((section) => section.startMs)).toEqual([200, 1_300]);
+      expect(cue?.sections.every((section) => !Object.hasOwn(section, "randomDelay") &&
+        !Object.hasOwn(section, "startAfter"))).toBe(true);
+      expect(cue?.atHostTime).toBe(hostNow + 750);
+    }
+    expect(received[1]?.[0]?.sections).toEqual(received[2]?.[0]?.sections);
+  });
+
+  test("simultaneous launch groups sample once on the host and send every viewer one concrete start", async () => {
+    let draws = 0;
+    const hostNow = 1_000_000;
+    const h = await setup({}, undefined, () => { draws += 1; return 0.5; }, () => hostNow);
+    const grouped = fxMacro("shared-launch");
+    if (!grouped.sequence) throw new Error("missing launch-group fixture sequence");
+    grouped.sequence.sections = [
+      { kind: "text", id: "flash", text: "Flash", at: { kind: "point", x: 150, y: 150 },
+        startMs: 100, durationMs: 200, randomDelay: { minMs: 100, maxMs: 200 },
+        launchGroup: "impact burst", repeatCount: 2, repeatDelayMs: 50 },
+      { kind: "text", id: "label", text: "Boom", at: { kind: "point", x: 180, y: 150 },
+        startMs: 100, durationMs: 700, randomDelay: { minMs: 100, maxMs: 200 },
+        launchGroup: "impact burst" },
+    ];
+    const forged = fxMacro("mismatched-launch");
+    if (!forged.sequence) throw new Error("missing forged launch-group fixture sequence");
+    forged.sequence.sections = grouped.sequence.sections.map((section, index) =>
+      index === 1 ? { ...section, startMs: 101 } : { ...section });
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+    h.gm.submit([{ kind: "create", coll: "macros", data: grouped }]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "macros", data: forged }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", grouped._id)).toBeDefined();
+    expect(h.hostStore.get("macros", forged._id)).toBeUndefined();
+    expect(refused.some((detail) => detail.includes("launch-group members"))).toBe(true);
+
+    const first = await h.addPlayer(PLAYER_ID, "Rex");
+    const other = await h.addPlayer(OTHER_ID, "Ivy");
+    const received: ClientEvents["fx"][][] = [[], [], []];
+    const runs: ClientEvents["fxRun"][] = [];
+    h.gmBus.on("fx", (cue) => received[0]?.push(cue));
+    first.bus.on("fx", (cue) => received[1]?.push(cue));
+    other.bus.on("fx", (cue) => received[2]?.push(cue));
+    h.gmBus.on("fxRun", (run) => runs.push(run));
+
+    const requestId = h.gm.requestSequence(grouped._id, "s1");
+    await flushMicrotasks();
+    expect(draws).toBe(1); // group, not sections or recipients
+    for (const cues of received) {
+      expect(cues).toHaveLength(1);
+      expect(cues[0]?.sections.map((section) => [section.id, section.startMs])).toEqual([
+        ["flash", 250], ["flash@2", 500], ["label", 250],
+      ]);
+      expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "launchGroup") &&
+        !Object.hasOwn(section, "randomDelay"))).toBe(true);
+      expect(cues[0]?.atHostTime).toBe(hostNow + 300);
+    }
+    expect(received[0]?.[0]?.sections).toEqual(received[1]?.[0]?.sections);
+    expect(received[1]?.[0]?.sections).toEqual(received[2]?.[0]?.sections);
+    expect(runs.find((run) => run.requestId === requestId)).toMatchObject({
+      macroId: grouped._id, persistent: false, atHostTime: hostNow + 300,
+      endsAtHostTime: hostNow + 1_250,
+    });
+    expect((h.hostStore.get("macros", grouped._id) as MacroDocument | undefined)
+      ?.sequence?.sections.every((section) => section.launchGroup === "impact burst")).toBe(true);
+  });
+
+  test("explicit parallel lanes fork once, join their longest lane and project only concrete starts", async () => {
+    let draws = 0;
+    const hostNow = 1_000_000;
+    const h = await setup({}, undefined, () => { draws += 1; return 0.5; }, () => hostNow);
+    const parallel = fxMacro("parallel-lanes");
+    if (!parallel.sequence) throw new Error("missing parallel-lane fixture sequence");
+    parallel.sequence.sections = [
+      { kind: "text", id: "left-one", text: "Left one", at: { kind: "point", x: 150, y: 150 },
+        startMs: 100, durationMs: 500, randomDelay: { minMs: 100, maxMs: 200 },
+        parallel: { group: "volley", lane: "left" } },
+      { kind: "text", id: "right-one", text: "Right one", at: { kind: "point", x: 180, y: 150 },
+        startMs: 100, durationMs: 300, randomDelay: { minMs: 100, maxMs: 200 },
+        parallel: { group: "volley", lane: "right" } },
+      { kind: "text", id: "left-two", text: "Left two", at: { kind: "point", x: 150, y: 180 },
+        startMs: 0, durationMs: 300,
+        parallel: { group: "volley", lane: "left", offsetMs: -100 } },
+      { kind: "wait", id: "right-pause", startMs: 0, durationMs: 200,
+        parallel: { group: "volley", lane: "right", offsetMs: 50 } },
+      { kind: "text", id: "right-two", text: "Right two", at: { kind: "point", x: 180, y: 180 },
+        startMs: 0, durationMs: 100, parallel: { group: "volley", lane: "right" } },
+      { kind: "text", id: "joined", text: "Joined", at: { kind: "point", x: 165, y: 210 },
+        startMs: 0, durationMs: 100, startAfter: { parallelGroup: "volley", offsetMs: -50 } },
+    ];
+    const forged = fxMacro("parallel-mismatch");
+    if (!forged.sequence) throw new Error("missing forged parallel fixture sequence");
+    forged.sequence.sections = parallel.sequence.sections.map((section, index) =>
+      index === 1 ? { ...section, startMs: 101 } : { ...section });
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+    h.gm.submit([{ kind: "create", coll: "macros", data: parallel }]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "macros", data: forged }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", parallel._id)).toBeDefined();
+    expect(h.hostStore.get("macros", forged._id)).toBeUndefined();
+    expect(refused.some((detail) => detail.includes("parallel lanes"))).toBe(true);
+
+    const first = await h.addPlayer(PLAYER_ID, "Rex");
+    const other = await h.addPlayer(OTHER_ID, "Ivy");
+    const received: ClientEvents["fx"][][] = [[], [], []];
+    const runs: ClientEvents["fxRun"][] = [];
+    h.gmBus.on("fx", (cue) => received[0]?.push(cue));
+    first.bus.on("fx", (cue) => received[1]?.push(cue));
+    other.bus.on("fx", (cue) => received[2]?.push(cue));
+    h.gmBus.on("fxRun", (run) => runs.push(run));
+
+    const requestId = h.gm.requestSequence(parallel._id, "s1");
+    await flushMicrotasks();
+    expect(draws).toBe(1); // one fork draw, not one per lane or recipient
+    for (const cues of received) {
+      expect(cues).toHaveLength(1);
+      expect(cues[0]?.sections.map((section) => [section.id, section.startMs])).toEqual([
+        ["left-one", 250], ["right-one", 250], ["left-two", 650],
+        ["right-pause", 600], ["right-two", 800], ["joined", 900],
+      ]);
+      expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "parallel") &&
+        !Object.hasOwn(section, "randomDelay") && !Object.hasOwn(section, "startAfter"))).toBe(true);
+      expect(cues[0]?.atHostTime).toBe(hostNow + 300);
+    }
+    expect(received[0]?.[0]?.sections).toEqual(received[1]?.[0]?.sections);
+    expect(received[1]?.[0]?.sections).toEqual(received[2]?.[0]?.sections);
+    expect(runs.find((run) => run.requestId === requestId)).toMatchObject({
+      macroId: parallel._id, persistent: false, atHostTime: hostNow + 300,
+      endsAtHostTime: hostNow + 1_300,
+    });
+    expect((h.hostStore.get("macros", parallel._id) as MacroDocument | undefined)
+      ?.sequence?.sections.slice(0, 5).every((section) => section.parallel?.group === "volley")).toBe(true);
+  });
+
+  test("conditional sections are sampled once on the host, shared by viewers and absent from recipient payloads", async () => {
+    const entropy = [0.2, 0.8];
+    let draws = 0;
+    const hostNow = 1_000_000;
+    const h = await setup({}, undefined, () => { draws += 1; return entropy.shift() ?? 0.5; },
+      () => hostNow);
+    const conditional = fxMacro("conditional-play");
+    if (!conditional.sequence) throw new Error("missing conditional fixture sequence");
+    conditional.sequence.sections = [
+      { kind: "text", id: "base", text: "Base", at: { kind: "point", x: 150, y: 150 },
+        startMs: 0, durationMs: 800 },
+      { kind: "text", id: "selected", text: "Selected", at: { kind: "point", x: 150, y: 150 },
+        startMs: 0, durationMs: 200, repeatCount: 2,
+        playIf: { kind: "chance", percent: 50 } },
+      { kind: "text", id: "omitted", text: "Omitted", at: { kind: "point", x: 150, y: 150 },
+        startMs: 0, durationMs: 200, playIf: { kind: "chance", percent: 50 } },
+      { kind: "text", id: "disabled", text: "Disabled", at: { kind: "point", x: 150, y: 150 },
+        startMs: 0, durationMs: 200, playIf: { kind: "chance", percent: 0 } },
+      { kind: "text", id: "certain", text: "Certain", at: { kind: "point", x: 150, y: 150 },
+        startMs: 0, durationMs: 200, playIf: { kind: "chance", percent: 100 } },
+    ];
+    const none = fxMacro("conditional-none");
+    if (!none.sequence) throw new Error("missing no-op conditional fixture sequence");
+    none.sequence.sections = [{ kind: "text", id: "none", text: "None",
+      at: { kind: "point", x: 150, y: 150 }, startMs: 0, durationMs: 800,
+      playIf: { kind: "chance", percent: 0 } }];
+    h.gm.submit([{ kind: "create", coll: "macros", data: conditional },
+      { kind: "create", coll: "macros", data: none }]);
+    await flushMicrotasks();
+    const first = await h.addPlayer(PLAYER_ID, "Rex");
+    const other = await h.addPlayer(OTHER_ID, "Ivy");
+    const received: ClientEvents["fx"][][] = [[], [], []];
+    const runs: ClientEvents["fxRun"][] = [];
+    const delivery: ClientEvents["fxDelivery"][] = [];
+    h.gmBus.on("fx", (cue) => received[0]?.push(cue));
+    first.bus.on("fx", (cue) => received[1]?.push(cue));
+    other.bus.on("fx", (cue) => received[2]?.push(cue));
+    h.gmBus.on("fxRun", (run) => runs.push(run));
+    h.gmBus.on("fxDelivery", (report) => delivery.push(report));
+
+    const selectedRequest = h.gm.requestSequence(conditional._id, "s1");
+    await flushMicrotasks();
+    expect(draws).toBe(2); // genuine conditions, not recipients, 0/100 edges or replays
+    for (const cues of received) {
+      expect(cues).toHaveLength(1);
+      expect(cues[0]?.sections.map((section) => section.id))
+        .toEqual(["base", "selected", "selected@2", "certain"]);
+      expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "playIf"))).toBe(true);
+      expect(cues[0]?.atHostTime).toBe(hostNow + 300);
+    }
+    expect(received[0]?.[0]?.sections).toEqual(received[1]?.[0]?.sections);
+    expect(received[1]?.[0]?.sections).toEqual(received[2]?.[0]?.sections);
+    expect(runs.find((run) => run.requestId === selectedRequest)).toMatchObject({
+      macroId: conditional._id, persistent: false, atHostTime: hostNow + 300,
+      endsAtHostTime: hostNow + 1_100,
+    });
+
+    const beforeCues = received.map((cues) => cues.length);
+    const beforeReports = delivery.length;
+    const noOpRequest = h.gm.requestSequence(none._id, "s1");
+    await flushMicrotasks();
+    expect(draws).toBe(2); // 0% is deterministic
+    expect(received.map((cues) => cues.length)).toEqual(beforeCues); // no empty fx.start leaks
+    expect(delivery).toHaveLength(beforeReports); // not misreported as camera targeting
+    expect(runs.find((run) => run.requestId === noOpRequest)).toMatchObject({
+      macroId: none._id, persistent: false, atHostTime: hostNow + 300,
+      endsAtHostTime: hostNow + 300,
+    });
+  });
+
+  test("exclusive choices use one host draw and project one identical option without author metadata", async () => {
+    let draws = 0;
+    const hostNow = 1_000_000;
+    const h = await setup({}, undefined, () => { draws += 1; return 0.7; }, () => hostNow);
+    const choice = fxMacro("exclusive-choice");
+    if (!choice.sequence) throw new Error("missing exclusive-choice fixture sequence");
+    choice.sequence.sections = [
+      { kind: "text", id: "arm-a-one", text: "One", at: { kind: "point", x: 150, y: 150 },
+        startMs: 0, durationMs: 500,
+        playIf: { kind: "choice", group: "private-choice", option: "private-red", weight: 1 } },
+      { kind: "text", id: "arm-b", text: "Two", at: { kind: "point", x: 180, y: 150 },
+        startMs: 100, durationMs: 200, repeatCount: 2,
+        playIf: { kind: "choice", group: "private-choice", option: "private-blue", weight: 3 } },
+      { kind: "text", id: "arm-a-two", text: "Three", at: { kind: "point", x: 150, y: 180 },
+        startMs: 300, durationMs: 100,
+        playIf: { kind: "choice", group: "private-choice", option: "private-red", weight: 1 } },
+      { kind: "text", id: "after", text: "After", at: { kind: "point", x: 165, y: 210 },
+        startMs: 0, durationMs: 100, startAfter: { sectionId: "arm-a-one", offsetMs: 50 } },
+    ];
+    const forged = fxMacro("one-option-choice");
+    if (!forged.sequence) throw new Error("missing forged choice fixture sequence");
+    forged.sequence.sections = [choice.sequence.sections[0] as NonNullable<typeof choice.sequence>["sections"][number]];
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+    h.gm.submit([{ kind: "create", coll: "macros", data: choice }]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "macros", data: forged }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", choice._id)).toBeDefined();
+    expect(h.hostStore.get("macros", forged._id)).toBeUndefined();
+    expect(refused.some((detail) => detail.includes("needs 2–8 options"))).toBe(true);
+
+    const first = await h.addPlayer(PLAYER_ID, "Rex");
+    const other = await h.addPlayer(OTHER_ID, "Ivy");
+    const received: ClientEvents["fx"][][] = [[], [], []];
+    const runs: ClientEvents["fxRun"][] = [];
+    h.gmBus.on("fx", (cue) => received[0]?.push(cue));
+    first.bus.on("fx", (cue) => received[1]?.push(cue));
+    other.bus.on("fx", (cue) => received[2]?.push(cue));
+    h.gmBus.on("fxRun", (run) => runs.push(run));
+
+    const requestId = h.gm.requestSequence(choice._id, "s1");
+    await flushMicrotasks();
+    expect(draws).toBe(1); // group, not option members, replays or recipients
+    for (const cues of received) {
+      expect(cues).toHaveLength(1);
+      expect(cues[0]?.sections.map((section) => [section.id, section.startMs])).toEqual([
+        ["arm-b", 100], ["arm-b@2", 300], ["after", 550],
+      ]);
+      const projected = JSON.stringify(cues[0]);
+      expect(projected).not.toContain("playIf");
+      expect(projected).not.toContain("private-choice");
+      expect(projected).not.toContain("private-blue");
+      expect(cues[0]?.atHostTime).toBe(hostNow + 300);
+    }
+    expect(received[0]?.[0]?.sections).toEqual(received[1]?.[0]?.sections);
+    expect(received[1]?.[0]?.sections).toEqual(received[2]?.[0]?.sections);
+    expect(runs.find((run) => run.requestId === requestId)).toMatchObject({
+      macroId: choice._id, persistent: false, atHostTime: hostNow + 300,
+      endsAtHostTime: hostNow + 950,
+    });
+    expect((h.hostStore.get("macros", choice._id) as MacroDocument | undefined)
+      ?.sequence?.sections.slice(0, 3).every((section) => section.playIf?.kind === "choice")).toBe(true);
+  });
+
+  test("multi-step timeline reaches entitled peers exactly once; forge is ignored", async () => {
+    const hostNow = 1_000_000;
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } }, undefined, undefined, () => hostNow);
+    const clockOnly = fxMacro("clock-only");
+    if (!clockOnly.sequence) throw new Error("missing fixture sequence");
+    clockOnly.sequence = { ...clockOnly.sequence,
+      sections: clockOnly.sequence.sections.filter((section) => section.kind === "text") };
+    h.gm.submit([{ kind: "create", coll: "macros", data: fxMacro("pulse") },
+      { kind: "create", coll: "macros", data: clockOnly }]);
     await flushMicrotasks();
     const first = await h.addPlayer(PLAYER_ID, "Rex");
     const other = await h.addPlayer(OTHER_ID, "Ivy");
@@ -1626,7 +1937,9 @@ describe("Macros / FX host authority and audience", () => {
     expect(g).toHaveLength(1);
     expect(a[0]?.sections.map((s) => s.kind)).toEqual(["text", "image"]);
     expect(a[0]?.sections[1]).toMatchObject({ kind: "image", mime: "image/png", x: 150, y: 150, startMs: 300 });
-    expect(a[0]?.atHostTime).toBeGreaterThan(Date.now() - 1000);
+    // Media gets enough transport/decode lead to be useful; scheduler-only cues retain the
+    // shorter base lead. This remains a fixed bound, not a readiness claim.
+    expect((a[0]?.atHostTime ?? 0) - hostNow).toBe(750);
     expect(h.hostStore.seq).toBe(seq); // audiovisual cues never run mechanical ops
 
     const duplicate = { kind: "fx.request" as const, requestId: "replay", macroId: "pulse", sceneId: "s1" };
@@ -1639,6 +1952,98 @@ describe("Macros / FX host authority and audience", () => {
     first.pair.b.send("ops", frameMessage({ ...observed, runId: "forged" }));
     await flushMicrotasks();
     expect(b).toHaveLength(2); // no forged rebroadcast
+
+    h.gm.requestSequence("clock-only", "s1");
+    await flushMicrotasks();
+    const clockCue = g.at(-1);
+    expect(clockCue?.macroId).toBe("clock-only");
+    expect((clockCue?.atHostTime ?? 0) - hostNow).toBe(300);
+  });
+
+  test("finite FX runs acknowledge only their requester and exact cancellation ends every prior recipient without world state", async () => {
+    let clock = 1_000_000;
+    const h = await setup({}, undefined, undefined, () => clock);
+    const finite = fxMacro("finite-run");
+    if (!finite.sequence) throw new Error("missing finite FX fixture");
+    finite.sequence = { ...finite.sequence, audience: "others", sections: [{ kind: "text", id: "visible",
+      text: "Cancellable", at: { kind: "point", x: 150, y: 150 },
+      startMs: 0, durationMs: 2_000 }] };
+    h.gm.submit([{ kind: "create", coll: "macros", data: finite }]);
+    await flushMicrotasks();
+    const first = await h.addPlayer(PLAYER_ID, "Rex");
+    const other = await h.addPlayer(OTHER_ID, "Ivy");
+    const requesterRuns: ClientEvents["fxRun"][] = [], firstRuns: ClientEvents["fxRun"][] = [],
+      otherRuns: ClientEvents["fxRun"][] = [];
+    const requesterStarts: ClientEvents["fx"][] = [], firstStarts: ClientEvents["fx"][] = [],
+      otherStarts: ClientEvents["fx"][] = [];
+    const requesterEnds: ClientEvents["fxEnd"][] = [], firstEnds: ClientEvents["fxEnd"][] = [],
+      otherEnds: ClientEvents["fxEnd"][] = [];
+    const requesterRejected: ClientEvents["rejected"][] = [], firstRejected: ClientEvents["rejected"][] = [];
+    h.gmBus.on("fxRun", (msg) => requesterRuns.push(msg));
+    first.bus.on("fxRun", (msg) => firstRuns.push(msg));
+    other.bus.on("fxRun", (msg) => otherRuns.push(msg));
+    h.gmBus.on("fx", (msg) => requesterStarts.push(msg));
+    first.bus.on("fx", (msg) => firstStarts.push(msg));
+    other.bus.on("fx", (msg) => otherStarts.push(msg));
+    h.gmBus.on("fxEnd", (msg) => requesterEnds.push(msg));
+    first.bus.on("fxEnd", (msg) => firstEnds.push(msg));
+    other.bus.on("fxEnd", (msg) => otherEnds.push(msg));
+    h.gmBus.on("rejected", (msg) => requesterRejected.push(msg));
+    first.bus.on("rejected", (msg) => firstRejected.push(msg));
+
+    const seq = h.hostStore.seq;
+    const requestId = h.gm.requestSequence(finite._id, "s1");
+    await flushMicrotasks();
+    expect(requesterStarts).toHaveLength(0); // `others`: requester controls a run it must not receive
+    expect(firstStarts).toHaveLength(1);
+    expect(otherStarts).toHaveLength(1);
+    expect(firstRuns).toEqual([]);
+    expect(otherRuns).toEqual([]);
+    expect(requesterRuns).toHaveLength(1);
+    const run = requesterRuns[0];
+    expect(run).toMatchObject({ kind: "fx.run", requestId, macroId: finite._id,
+      sceneId: "s1", atHostTime: clock + 300, endsAtHostTime: clock + 2_300,
+      persistent: false, runId: firstStarts[0]?.runId });
+    if (!run) throw new Error("host did not acknowledge finite run");
+    expect(h.hostStore.seq).toBe(seq); // start and finite cancellation are presentation only
+    expect(h.hostStore.getAll("fxInstances")).toEqual([]);
+    const retry = { kind: "fx.request" as const, requestId, macroId: finite._id, sceneId: "s1" };
+    h.gmPair.b.send(channelFor(retry.kind), frameMessage(retry));
+    await flushMicrotasks();
+    expect(requesterRuns.map((entry) => entry.runId)).toEqual([run.runId, run.runId]);
+    expect(requesterStarts).toHaveLength(0);
+    expect(firstStarts).toHaveLength(1); // same request acknowledges, never clones playback
+
+    first.client.requestFxStop(run.runId);
+    await flushMicrotasks();
+    expect(firstRejected.at(-1)?.detail).toBe("FX run unavailable");
+    expect(requesterEnds).toEqual([]);
+    expect(firstEnds).toEqual([]);
+    expect(otherEnds).toEqual([]);
+
+    h.gm.requestFxStop(run.runId);
+    await flushMicrotasks();
+    expect(requesterEnds).toEqual([]); // never a playback recipient, so receives no playback end
+    expect(firstEnds.map((msg) => msg.runId)).toEqual([run.runId]);
+    expect(otherEnds.map((msg) => msg.runId)).toEqual([run.runId]);
+    expect(h.hostStore.seq).toBe(seq);
+    h.gm.requestFxStop(run.runId);
+    await flushMicrotasks();
+    expect(requesterRejected.at(-1)?.detail).toBe("FX run unavailable");
+
+    // Natural completion retires the host handle without emitting an artificial stop.
+    const secondRequest = h.gm.requestSequence(finite._id, "s1");
+    await flushMicrotasks();
+    const second = requesterRuns.find((entry) => entry.requestId === secondRequest);
+    if (!second?.endsAtHostTime) throw new Error("second finite run was not acknowledged");
+    clock = second.endsAtHostTime;
+    h.gm.requestFxStop(second.runId);
+    await flushMicrotasks();
+    expect(requesterRejected.at(-1)?.detail).toBe("FX run unavailable");
+    expect(firstEnds.map((msg) => msg.runId)).toEqual([run.runId]);
+    expect(otherEnds.map((msg) => msg.runId)).toEqual([run.runId]);
+    expect(h.hostStore.seq).toBe(seq);
+    h.host.dispose();
   });
 
   /** Run the fixture's `pulse` as the GM and hand back the cue its own session received:
@@ -2580,7 +2985,7 @@ player.client.requestFxSync("s1");
     const committed = h.hostStore.seq;
     second.client.requestFxStop(instance._id);
     await flushMicrotasks();
-    expect(rejected).toContain("FX instance unavailable");
+    expect(rejected).toContain("FX run unavailable");
     second.client.submit([{ kind: "delete", ref: { coll: "fxInstances", id: instance._id } }]);
     h.gm.submit([{ kind: "create", coll: "fxInstances", data: instance }]);
     await flushMicrotasks();
@@ -2612,6 +3017,93 @@ player.client.requestFxSync("s1");
     await flushMicrotasks();
     expect(received.at(-1)?.runId).toBe(instance._id);
     expect(received.filter((cue) => cue.runId === instance._id)).toHaveLength(3);
+  });
+
+  test("persistent visual sync groups share one durable host origin across active runs", async () => {
+    let now = 10_000;
+    const h = await setup({}, undefined, undefined, () => now);
+    const macro = fxMacro("phase-loop");
+    macro.sequence = { version: 1, persistent: true, audience: "scene", sections: [
+      { kind: "text", id: "first", text: "First", at: { kind: "point", x: 100, y: 100 },
+        startMs: 100, durationMs: 1_000, syncGroup: "shared pulse" },
+      { kind: "text", id: "late", text: "Late", at: { kind: "point", x: 130, y: 100 },
+        startMs: 600, durationMs: 1_000, syncGroup: "shared pulse" },
+      { kind: "text", id: "plain", text: "Plain", at: { kind: "point", x: 160, y: 100 },
+        startMs: 300, durationMs: 1_000 },
+    ] };
+    const other: MacroDocument = { ...macro, _id: "other-phase-loop", name: "other-phase-loop",
+      sequence: { ...macro.sequence, sections: macro.sequence.sections.map((section) => ({ ...section })) } };
+    h.gm.submit([{ kind: "create", coll: "macros", data: macro },
+      { kind: "create", coll: "macros", data: other }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (cue) => cues.push(cue));
+    const phase = (cue: ClientEvents["fx"] | undefined, id: string): number | undefined => {
+      const section = cue?.sections.find((entry) => entry.id === id);
+      return section && (section.kind === "image" || section.kind === "text")
+        ? section.syncAtHostTime : undefined;
+    };
+
+    h.gm.requestSequence("phase-loop", "s1");
+    await flushMicrotasks();
+    const firstCue = cues.at(-1);
+    const firstOrigin = phase(firstCue, "first");
+    expect(firstOrigin).toBe(firstCue?.atHostTime === undefined ? undefined : firstCue.atHostTime + 100);
+    expect(phase(firstCue, "late")).toBe(firstOrigin);
+    expect(phase(firstCue, "plain")).toBeUndefined();
+    expect(firstCue?.sections.every((section) => !Object.hasOwn(section, "syncGroup"))).toBe(true);
+    expect(JSON.stringify(firstCue)).not.toContain("shared pulse");
+    const firstDoc = h.hostStore.getAll("fxInstances").find((doc) => doc._id === firstCue?.runId);
+    expect(firstDoc?.syncGroups).toEqual([
+      { sectionId: "first", group: "shared pulse" },
+      { sectionId: "late", group: "shared pulse" },
+    ]);
+    expect(firstDoc?.sections.map((section) => [section.id,
+      section.kind === "image" || section.kind === "text" ? section.syncAtHostTime : undefined]))
+      .toEqual([["first", firstOrigin], ["late", firstOrigin], ["plain", undefined]]);
+
+    now += 900;
+    h.gm.requestSequence("phase-loop", "s1");
+    await flushMicrotasks();
+    const secondCue = cues.at(-1);
+    expect(phase(secondCue, "first")).toBe(firstOrigin); // joins the active phase, not a new delay
+
+    // An otherwise identical invocation bound to a token has a separate privacy scope.
+    now += 900;
+    h.gm.requestSequence("phase-loop", "s1", "t-pl");
+    await flushMicrotasks();
+    const anchoredCue = cues.at(-1);
+    expect(phase(anchoredCue, "first")).toBe((anchoredCue?.atHostTime ?? 0) + 100);
+    expect(phase(anchoredCue, "first")).not.toBe(firstOrigin);
+
+    // The same author-facing name in another saved timeline is deliberately a separate
+    // privacy scope: its phase cannot reveal an active run the other macro did not expose.
+    now += 900;
+    h.gm.requestSequence("other-phase-loop", "s1");
+    await flushMicrotasks();
+    const otherCue = cues.at(-1);
+    expect(phase(otherCue, "first")).toBe((otherCue?.atHostTime ?? 0) + 100);
+    expect(phase(otherCue, "first")).not.toBe(firstOrigin);
+
+    // Ending the first member does not erase the group while the second run remains.
+    if (firstCue) h.gm.requestFxStop(firstCue.runId);
+    await flushMicrotasks();
+    now += 900;
+    h.gm.requestSequence("phase-loop", "s1");
+    await flushMicrotasks();
+    const thirdCue = cues.at(-1);
+    expect(phase(thirdCue, "first")).toBe(firstOrigin);
+
+    // Once every run in this timeline/owner/audience scope ends, the next one starts at
+    // phase zero and becomes the new durable origin.
+    for (const cue of [secondCue, thirdCue]) if (cue) h.gm.requestFxStop(cue.runId);
+    await flushMicrotasks();
+    now += 900;
+    h.gm.requestSequence("phase-loop", "s1");
+    await flushMicrotasks();
+    const restarted = cues.at(-1);
+    expect(phase(restarted, "first")).toBe((restarted?.atHostTime ?? 0) + 100);
+    expect(phase(restarted, "first")).not.toBe(firstOrigin);
   });
 
   test("hidden sources revoke live FX per viewer; reveal, source deletion and undo restore it", async () => {
@@ -5471,6 +5963,127 @@ describe("Active-zone host evaluation and graph secrecy", () => {
     expect(player.store.world.assetManifest[image]).toBeUndefined();
   });
 
+  test("automation sequence steps reuse one prepared host conditional decision after graph commit", async () => {
+    let draws = 0;
+    const h = await setup({}, undefined, () => { draws += 1; return 0.75; });
+    await seedZone(h);
+    const macro = h.hostStore.get("macros", "fx-plate") as MacroDocument;
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: macro._id }, diff: {
+      sequence: { version: 1, audience: "scene", sections: [
+        { kind: "text", id: "base", text: "Base", at: { kind: "source" },
+          startMs: 0, durationMs: 300 },
+        { kind: "text", id: "chance", text: "Chance", at: { kind: "source" },
+          startMs: 0, durationMs: 300, playIf: { kind: "chance", percent: 50 } },
+      ] },
+    } }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (cue) => cues.push(cue));
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl");
+    await flushMicrotasks();
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(1);
+    expect(draws).toBe(1); // preflight result is emitted after commit, never rerolled
+    expect(cues).toHaveLength(1);
+    expect(cues[0]?.sections.map((section) => section.id)).toEqual(["base"]);
+    expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "playIf"))).toBe(true);
+  });
+
+  test("automation sequence steps cache one launch-group draw through graph commit and emission", async () => {
+    let draws = 0;
+    const h = await setup({}, undefined, () => { draws += 1; return 0.5; });
+    await seedZone(h);
+    const macro = h.hostStore.get("macros", "fx-plate") as MacroDocument;
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: macro._id }, diff: {
+      sequence: { version: 1, audience: "scene", sections: [
+        { kind: "text", id: "flash", text: "Flash", at: { kind: "source" },
+          startMs: 100, durationMs: 300, randomDelay: { minMs: 100, maxMs: 200 },
+          launchGroup: "graph burst" },
+        { kind: "text", id: "label", text: "Label", at: { kind: "source" },
+          startMs: 100, durationMs: 500, randomDelay: { minMs: 100, maxMs: 200 },
+          launchGroup: "graph burst" },
+      ] },
+    } }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (cue) => cues.push(cue));
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl");
+    await flushMicrotasks();
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(1);
+    expect(draws).toBe(1); // graph preflight samples; post-commit emission does not reroll
+    expect(cues).toHaveLength(1);
+    expect(cues[0]?.sections.map((section) => [section.id, section.startMs]))
+      .toEqual([["flash", 250], ["label", 250]]);
+    expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "launchGroup") &&
+      !Object.hasOwn(section, "randomDelay"))).toBe(true);
+  });
+
+  test("automation sequence steps preserve one explicit parallel fork/join through graph commit", async () => {
+    let draws = 0;
+    const h = await setup({}, undefined, () => { draws += 1; return 0.5; });
+    await seedZone(h);
+    const macro = h.hostStore.get("macros", "fx-plate") as MacroDocument;
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: macro._id }, diff: {
+      sequence: { version: 1, audience: "scene", sections: [
+        { kind: "text", id: "left-one", text: "Left", at: { kind: "source" },
+          startMs: 100, durationMs: 300, randomDelay: { minMs: 100, maxMs: 200 },
+          parallel: { group: "graph volley", lane: "left" } },
+        { kind: "text", id: "right-one", text: "Right", at: { kind: "source" },
+          startMs: 100, durationMs: 500, randomDelay: { minMs: 100, maxMs: 200 },
+          parallel: { group: "graph volley", lane: "right" } },
+        { kind: "text", id: "left-two", text: "Again", at: { kind: "source" },
+          startMs: 0, durationMs: 100,
+          parallel: { group: "graph volley", lane: "left", offsetMs: -50 } },
+        { kind: "text", id: "joined", text: "Done", at: { kind: "source" },
+          startMs: 0, durationMs: 100,
+          startAfter: { parallelGroup: "graph volley", offsetMs: 0 } },
+      ] },
+    } }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (cue) => cues.push(cue));
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl");
+    await flushMicrotasks();
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(1);
+    expect(draws).toBe(1); // graph preflight owns the fork; emission does not reroll
+    expect(cues).toHaveLength(1);
+    expect(cues[0]?.sections.map((section) => [section.id, section.startMs])).toEqual([
+      ["left-one", 250], ["right-one", 250], ["left-two", 500], ["joined", 750],
+    ]);
+    expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "parallel") &&
+      !Object.hasOwn(section, "randomDelay") && !Object.hasOwn(section, "startAfter"))).toBe(true);
+  });
+
+  test("automation sequence preflight samples one exclusive choice before graph commit", async () => {
+    let draws = 0;
+    const h = await setup({}, undefined, () => { draws += 1; return 0.75; });
+    await seedZone(h);
+    const macro = h.hostStore.get("macros", "fx-plate") as MacroDocument;
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: macro._id }, diff: {
+      sequence: { version: 1, audience: "scene", sections: [
+        { kind: "text", id: "one", text: "One", at: { kind: "source" },
+          startMs: 100, durationMs: 300,
+          playIf: { kind: "choice", group: "graph choice", option: "one", weight: 1 } },
+        { kind: "text", id: "two", text: "Two", at: { kind: "source" },
+          startMs: 200, durationMs: 500,
+          playIf: { kind: "choice", group: "graph choice", option: "two", weight: 3 } },
+        { kind: "text", id: "after", text: "After", at: { kind: "source" },
+          startMs: 0, durationMs: 100, startAfter: { sectionId: "one", offsetMs: 50 } },
+      ] },
+    } }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (cue) => cues.push(cue));
+    h.gm.requestAutomation("zone-graph", "s1", "manual", "t-pl");
+    await flushMicrotasks();
+    expect((h.hostStore.get("automations", "zone-graph") as AutomationDocument).state?.count).toBe(1);
+    expect(draws).toBe(1); // graph preflight samples; committed emission cannot reroll
+    expect(cues).toHaveLength(1);
+    expect(cues[0]?.sections.map((section) => [section.id, section.startMs]))
+      .toEqual([["two", 200], ["after", 450]]);
+    expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "playIf") &&
+      !Object.hasOwn(section, "startAfter"))).toBe(true);
+  });
+
   test("FX recipients are rechecked after the graph hides its target in the same committed envelope", async () => {
     const h = await setup();
     await seedZone(h);
@@ -7043,6 +7656,151 @@ describe("GM-reviewed scripted macros: authority, projection, persistence", () =
       .toBeUndefined();
   });
 
+  test("reviewed fx.play uses the same host-sampled conditional timeline as direct Wizard runs", async () => {
+    let draws = 0;
+    const h = await setup({}, async (_source, _args, context, action) => {
+      expect(context.callerId).toBe(PLAYER_ID);
+      return action("fx.play", { macroId: "script-conditional" }, () => true);
+    }, () => { draws += 1; return 0.75; });
+    const conditional: MacroDocument = { _id: "script-conditional", type: "macro",
+      name: "Script conditional", ownership: { default: 1 },
+      flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "scene", sections: [
+        { kind: "text", id: "base", text: "Base", at: { kind: "point", x: 150, y: 150 },
+          startMs: 0, durationMs: 300 },
+        { kind: "text", id: "chance", text: "Chance", at: { kind: "point", x: 150, y: 150 },
+          startMs: 0, durationMs: 300, playIf: { kind: "chance", percent: 50 } },
+      ] } };
+    const script = await reviewedScript({ grants: ["fx"], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: conditional },
+      { kind: "create", coll: "macros", data: script }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const cues: ClientEvents["fx"][] = [];
+    bus.on("fx", (cue) => cues.push(cue));
+    const requestId = player.requestMacro(script._id, {});
+    expect((await awaitMacroResult(bus, requestId)).ok).toBe(true);
+    await flushMicrotasks();
+    expect(draws).toBe(1);
+    expect(cues).toHaveLength(1);
+    expect(cues[0]?.sections.map((section) => section.id)).toEqual(["base"]);
+    expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "playIf"))).toBe(true);
+  });
+
+  test("reviewed fx.play resolves simultaneous launch groups through the same host scheduler", async () => {
+    let draws = 0;
+    const h = await setup({}, async (_source, _args, context, action) => {
+      expect(context.callerId).toBe(PLAYER_ID);
+      return action("fx.play", { macroId: "script-launch" }, () => true);
+    }, () => { draws += 1; return 0.5; });
+    const grouped: MacroDocument = { _id: "script-launch", type: "macro",
+      name: "Script launch", ownership: { default: 1 },
+      flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "scene", sections: [
+        { kind: "text", id: "flash", text: "Flash", at: { kind: "point", x: 150, y: 150 },
+          startMs: 100, durationMs: 300, randomDelay: { minMs: 100, maxMs: 200 },
+          launchGroup: "script burst" },
+        { kind: "text", id: "label", text: "Label", at: { kind: "point", x: 180, y: 150 },
+          startMs: 100, durationMs: 500, randomDelay: { minMs: 100, maxMs: 200 },
+          launchGroup: "script burst" },
+      ] } };
+    const script = await reviewedScript({ grants: ["fx"], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: grouped },
+      { kind: "create", coll: "macros", data: script }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const cues: ClientEvents["fx"][] = [];
+    bus.on("fx", (cue) => cues.push(cue));
+    const requestId = player.requestMacro(script._id, {});
+    expect((await awaitMacroResult(bus, requestId)).ok).toBe(true);
+    await flushMicrotasks();
+    expect(draws).toBe(1);
+    expect(cues).toHaveLength(1);
+    expect(cues[0]?.sections.map((section) => [section.id, section.startMs]))
+      .toEqual([["flash", 250], ["label", 250]]);
+    expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "launchGroup") &&
+      !Object.hasOwn(section, "randomDelay"))).toBe(true);
+  });
+
+  test("reviewed fx.play resolves explicit parallel fork/join through the same host scheduler", async () => {
+    let draws = 0;
+    const h = await setup({}, async (_source, _args, context, action) => {
+      expect(context.callerId).toBe(PLAYER_ID);
+      return action("fx.play", { macroId: "script-parallel" }, () => true);
+    }, () => { draws += 1; return 0.5; });
+    const parallel: MacroDocument = { _id: "script-parallel", type: "macro",
+      name: "Script parallel", ownership: { default: 1 },
+      flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "scene", sections: [
+        { kind: "text", id: "left", text: "Left", at: { kind: "point", x: 150, y: 150 },
+          startMs: 100, durationMs: 300, randomDelay: { minMs: 100, maxMs: 200 },
+          parallel: { group: "script volley", lane: "left" } },
+        { kind: "text", id: "right", text: "Right", at: { kind: "point", x: 180, y: 150 },
+          startMs: 100, durationMs: 500, randomDelay: { minMs: 100, maxMs: 200 },
+          parallel: { group: "script volley", lane: "right" } },
+        { kind: "text", id: "left-again", text: "Again", at: { kind: "point", x: 150, y: 180 },
+          startMs: 0, durationMs: 100,
+          parallel: { group: "script volley", lane: "left", offsetMs: -50 } },
+        { kind: "text", id: "joined", text: "Done", at: { kind: "point", x: 165, y: 210 },
+          startMs: 0, durationMs: 100,
+          startAfter: { parallelGroup: "script volley", offsetMs: 0 } },
+      ] } };
+    const script = await reviewedScript({ grants: ["fx"], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: parallel },
+      { kind: "create", coll: "macros", data: script }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const cues: ClientEvents["fx"][] = [];
+    bus.on("fx", (cue) => cues.push(cue));
+    const requestId = player.requestMacro(script._id, {});
+    expect((await awaitMacroResult(bus, requestId)).ok).toBe(true);
+    await flushMicrotasks();
+    expect(draws).toBe(1);
+    expect(cues).toHaveLength(1);
+    expect(cues[0]?.sections.map((section) => [section.id, section.startMs])).toEqual([
+      ["left", 250], ["right", 250], ["left-again", 500], ["joined", 750],
+    ]);
+    expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "parallel") &&
+      !Object.hasOwn(section, "randomDelay") && !Object.hasOwn(section, "startAfter"))).toBe(true);
+  });
+
+  test("reviewed fx.play resolves one exclusive host choice through the same scheduler", async () => {
+    let draws = 0;
+    const h = await setup({}, async (_source, _args, context, action) => {
+      expect(context.callerId).toBe(PLAYER_ID);
+      return action("fx.play", { macroId: "script-choice" }, () => true);
+    }, () => { draws += 1; return 0.9; });
+    const choice: MacroDocument = { _id: "script-choice", type: "macro",
+      name: "Script choice", ownership: { default: 1 },
+      flags: { core: { playerCallable: true } }, system: {}, kind: "sequence", command: "",
+      sequence: { version: 1, audience: "scene", sections: [
+        { kind: "text", id: "one", text: "One", at: { kind: "point", x: 150, y: 150 },
+          startMs: 100, durationMs: 300,
+          playIf: { kind: "choice", group: "script choice", option: "one", weight: 1 } },
+        { kind: "text", id: "two", text: "Two", at: { kind: "point", x: 180, y: 150 },
+          startMs: 200, durationMs: 500,
+          playIf: { kind: "choice", group: "script choice", option: "two", weight: 3 } },
+        { kind: "text", id: "after", text: "After", at: { kind: "point", x: 165, y: 210 },
+          startMs: 0, durationMs: 100, startAfter: { sectionId: "one", offsetMs: 50 } },
+      ] } };
+    const script = await reviewedScript({ grants: ["fx"], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: choice },
+      { kind: "create", coll: "macros", data: script }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const cues: ClientEvents["fx"][] = [];
+    bus.on("fx", (cue) => cues.push(cue));
+    const requestId = player.requestMacro(script._id, {});
+    expect((await awaitMacroResult(bus, requestId)).ok).toBe(true);
+    await flushMicrotasks();
+    expect(draws).toBe(1);
+    expect(cues).toHaveLength(1);
+    expect(cues[0]?.sections.map((section) => [section.id, section.startMs]))
+      .toEqual([["two", 200], ["after", 450]]);
+    expect(cues[0]?.sections.every((section) => !Object.hasOwn(section, "playIf") &&
+      !Object.hasOwn(section, "startAfter"))).toBe(true);
+  });
+
   test("host preflights awaitable Sequencer cues before emitting, returns a finite schedule to reviewed scripts", async () => {
     const h = await setup({}, async (_source, _args, context, action) => {
       expect(context.callerId).toBe(PLAYER_ID);
@@ -7053,13 +7811,26 @@ describe("GM-reviewed scripted macros: authority, projection, persistence", () =
         .rejects.toThrow(/nonpersistent/);
       await expect(action("fx.play", { macroId: "short-fx", waitForEnd: false }, () => true))
         .rejects.toThrow(/Invalid FX call/);
+      await expect(action("fx.play", { macroId: "short-fx", finishOffsetMs: -100 }, () => true))
+        .rejects.toThrow(/Invalid FX call/);
+      await expect(action("fx.play", { macroId: "short-fx", waitForEnd: true,
+        finishOffsetMs: 30_001 }, () => true)).rejects.toThrow(/Invalid FX call/);
+      await expect(action("fx.play", { macroId: "short-fx", waitForEnd: true,
+        finishOffsetMs: -451 }, () => true)).rejects.toThrow(/before the cue starts/);
       expect(h.hostStore.seq).toBe(before);
-      const played = await action("fx.play", { macroId: "short-fx", waitForEnd: true }, () => true) as {
+      const played = await action("fx.play", { macroId: "short-fx", waitForEnd: true,
+        finishOffsetMs: -100 }, () => true) as {
         runId: string; atHostTime: number; endsAtHostTime: number; persistent: boolean;
       };
       expect(played).toMatchObject({ persistent: false, runId: expect.any(String) });
       expect(played.endsAtHostTime - played.atHostTime).toBe(450); // latest end across overlapping sections
-      return { played: true };
+      const beforeCancel = h.hostStore.seq;
+      expect(await action("fx.stop", { runId: played.runId }, () => true))
+        .toEqual({ stopped: true, persistent: false });
+      expect(h.hostStore.seq).toBe(beforeCancel); // finite cancellation is not a world transaction
+      await expect(action("fx.stop", { runId: played.runId }, () => true))
+        .rejects.toThrow(/run unavailable/); // exact run handles are single-use
+      return { played: true, cancelled: true };
     });
     const sequence = (id: string, durationMs: number, persistent = false): MacroDocument => ({
       _id: id, type: "macro", name: id, kind: "sequence", command: "", flags: { core: { playerCallable: true } },
@@ -7074,11 +7845,14 @@ describe("GM-reviewed scripted macros: authority, projection, persistence", () =
     await flushMicrotasks();
     const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
     const cues: ClientEvents["fx"][] = [];
+    const ends: ClientEvents["fxEnd"][] = [];
     bus.on("fx", (cue) => cues.push(cue));
+    bus.on("fxEnd", (end) => ends.push(end));
     const requestId = player.requestMacro("script-reviewed", {});
     expect((await awaitMacroResult(bus, requestId)).ok).toBe(true);
     await flushMicrotasks();
     expect(cues.map((cue) => cue.macroId)).toEqual(["short-fx"]);
+    expect(ends.map((end) => end.runId)).toEqual([cues[0]?.runId]);
     expect(h.hostStore.getAll("fxInstances")).toHaveLength(0);
   });
 
@@ -10055,5 +10829,731 @@ describe("D-394 GM-enabled player macro saves", () => {
     p.pair.b.send("ops", frameMessage({ kind: "macro.request", requestId: invocationId, macroId: "personal", args: {} }));
     expect((await replay).ok).toBe(false);
     expect(runs).toBe(2); // script → chat → script did not erase invocation replay protection
+  });
+});
+
+
+describe("structured action cards and pending resolution", () => {
+  function pendingActionMessage(id = "action-card", multi = false): MessageDocument {
+    const targets = ["one", ...(multi ? ["two"] : [])].map((key) => ({
+      key,
+      name: `Target ${key}`,
+      actorId: "action-target",
+      state: "pending" as const,
+      outcome: "pending" as const,
+      check: { kind: "save" as const, status: "pending" as const, formula: "1d20+5",
+        dc: 17, total: null, saveType: "ref" as const, pendingRollId: `roll-${key}` },
+      evidence: { adapter: "pf1e.pendingSave.v1", payload: { spellLevel: 1, saveType: "ref" } },
+    }));
+    const rolls = targets.map((target) => ({
+      id: target.check.pendingRollId,
+      actionId: id,
+      targetKey: target.key,
+      saveType: "ref" as const,
+      kind: "save" as const,
+      initiator: { actorId: "action-source", tokenId: null, name: "Druid", actionLabel: "Entangle" },
+      target: { actorId: "action-target", tokenId: null, name: target.name },
+      formula: "1d20+5",
+      dc: 17,
+      modifiers: [{ label: "REF", value: 5, reason: "save" }],
+      v: 1 as const,
+      rollMode: "roll" as const,
+      turnNumber: 1,
+      expiresTurn: 3,
+      resolved: false,
+    }));
+    const system: Record<string, Json> = {
+      action: {
+        v: 1, id, revision: 0, kind: "cast", label: "Entangle", state: "pending",
+        source: { name: "Druid", actorId: "action-source" },
+        sceneId: "s1", area: { sceneId: "s1", shape: "spread", origin: { x: 100, y: 200 },
+          radius: 40, units: "ft" }, targets, notes: [], createdAt: 1, updatedAt: 1,
+      },
+    };
+    if (multi) system.pendingRolls = rolls;
+    else if (rolls[0]) system.pendingRoll = rolls[0];
+    return {
+      _id: id, type: "message", name: "Entangle", ownership: { default: 1 }, flags: {},
+      author: "", content: "Entangle save pending", whisper: [], roll: null, flavor: "cast resolution",
+      system,
+    };
+  }
+
+  test("host stamps a valid action and resolves the selected save and card target atomically", async () => {
+    let now = 10_000;
+    const h = await setup({}, undefined, undefined, () => now);
+    const actionEvents: ActionFxContext[] = [];
+    h.hostBus.on("action:committed", (event) => actionEvents.push(event));
+    h.gm.submit([{ kind: "create", coll: "settings",
+      data: worldSettingsDoc({ playerPendingRollMode: "manual" }) },
+    { kind: "create", coll: "actors", data: {
+      _id: "action-source", type: "actor", name: "Druid", ownership: { default: 0, [GM_ID]: 3 },
+      flags: {}, system: { pf1e: { abilities: { wis: 22 }, spells: {
+        keyAbility: "wis", mode: "prepared", casterLevel: 5, slotsPerDay: { 1: 2 }, prepared: [],
+      } } }, items: [], effects: [],
+    } as ActorDocument }, { kind: "create", coll: "actors", data: {
+      _id: "action-target", type: "actor", name: "Target", ownership: { default: 0, [PLAYER_ID]: 3 },
+      flags: {}, system: { pf1e: { saves: { fort: 0, ref: 5, will: 0 } } }, items: [], effects: [],
+    } as ActorDocument }]);
+    await flushMicrotasks();
+    const submitted = pendingActionMessage();
+    (submitted.system.action as { source: { name: string }; targets: Array<{ name: string; label?: string }> }).source.name = "Forged source";
+    const submittedTarget = (submitted.system.action as { targets: Array<{ name: string; label?: string }> }).targets[0];
+    if (!submittedTarget) throw new Error("pending action fixture needs a target");
+    submittedTarget.name = "Forged target";
+    submittedTarget.label = "Reflex save";
+    h.gm.submit([{ kind: "create", coll: "messages", data: submitted }]);
+    await flushMicrotasks();
+    const created = h.hostStore.get("messages", "action-card") as MessageDocument | undefined;
+    expect(created?.system.action).toMatchObject({ id: "action-card", revision: 0,
+      createdAt: 10_000, updatedAt: 10_000, state: "pending",
+      source: { name: "Druid" }, targets: [{ name: "Target", label: "Reflex save",
+        provenance: "host" }] });
+    expect(created?.system.pendingRoll).toMatchObject({ turnNumber: 0, expiresTurn: 2,
+      initiator: { name: "Druid" }, target: { name: "Target" } });
+    expect(actionEvents).toMatchObject([{ actionId: "action-card", revision: 0, state: "pending",
+      at: 10_000, sceneId: "s1", targets: [{ key: "one", outcome: "pending" }] }]);
+
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const rejections: ClientEvents["rejected"][] = [];
+    bus.on("rejected", (event) => rejections.push(event));
+    now = 11_000;
+    await player.rollPending("action-card", "roll-one");
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(rejections).toEqual([]);
+    const resolved = h.hostStore.get("messages", "action-card") as MessageDocument | undefined;
+    const pending = (resolved?.system as { pendingRoll?: { resolved?: boolean; total?: number } })?.pendingRoll;
+    const action = (resolved?.system as { action?: { revision?: number; updatedAt?: number; state?: string;
+      targets?: Array<{ state?: string; outcome?: string; check?: { total?: number; passed?: boolean } }> } })?.action;
+    expect(pending).toMatchObject({ resolved: true });
+    expect(action).toMatchObject({ revision: 1, updatedAt: 11_000, state: "resolved",
+      targets: [{ state: "resolved", check: { total: pending?.total } }] });
+    expect(action?.targets?.[0]?.outcome).toBe((pending?.total ?? 0) >= 17 ? "saved" : "failedSave");
+    expect(action?.targets?.[0]?.check?.passed).toBe((pending?.total ?? 0) >= 17);
+    expect(actionEvents).toHaveLength(2);
+    expect(actionEvents[1]).toMatchObject({ actionId: "action-card", revision: 1,
+      state: "resolved", at: 11_000, targets: [{ outcome: action?.targets?.[0]?.outcome,
+        check: { total: pending?.total } }] });
+    expect(JSON.stringify(actionEvents[1])).not.toContain("pendingRollId");
+    const committed = h.hostLog.at(h.hostStore.seq)?.env.ops;
+    expect(committed?.[0]).toMatchObject({ kind: "update", ref: { coll: "messages", id: "action-card" } });
+    expect((committed?.[0] as Extract<Op, { kind: "update" }>).diff).toHaveProperty("system.action");
+
+    h.gm.submit([{ kind: "update", ref: { coll: "messages", id: "action-card" },
+      diff: { content: "Narrative follow-up only" } }]);
+    await flushMicrotasks();
+    expect(actionEvents).toHaveLength(2); // an unchanged action revision never re-emits FX facts
+  });
+
+  test("PF1e immediate save/damage evidence is rederived from immutable host rolls and HP Op", async () => {
+    const h = await setup();
+    const actionEvents: ActionFxContext[] = [];
+    const rejected: ClientEvents["rejected"][] = [];
+    h.hostBus.on("action:committed", (event) => actionEvents.push(event));
+    h.gmBus.on("rejected", (event) => rejected.push(event));
+    h.gm.submit([{ kind: "create", coll: "actors", data: {
+      _id: "evidence-source", type: "actor", name: "Wizard",
+      ownership: { default: 0, [GM_ID]: 3, [PLAYER_ID]: 3 },
+      flags: {}, system: { pf1e: { abilities: { int: 16 }, spells: {
+        keyAbility: "int", mode: "prepared", casterLevel: 5,
+        slotsPerDay: { 0: 4, 1: 4 }, prepared: [],
+      } } }, items: [], effects: [],
+    } as ActorDocument }, { kind: "create", coll: "actors", data: {
+      _id: "evidence-target", type: "actor", name: "Ogre",
+      ownership: { default: 0, [GM_ID]: 3, [PLAYER_ID]: 3 },
+      flags: {}, system: { pf1e: { abilities: { con: 14 }, hp: 20, hpMax: 20,
+        saves: { fort: 2, ref: 0, will: 1 } } }, items: [], effects: [],
+    } as ActorDocument }]);
+    await flushMicrotasks();
+    const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const playerRejected: ClientEvents["rejected"][] = [];
+    playerBus.on("rejected", (event) => playerRejected.push(event));
+    const damageRollId = player.roll("2d6", "roll", undefined, "Burning Hands damage");
+    const saveRollId = player.roll("1d20", "roll", undefined, "Ogre Reflex save");
+    await flushMicrotasks();
+    const rollMessage = h.hostStore.getAll("messages").find((message) =>
+      (message.flags.core as { rollId?: unknown }).rollId === damageRollId);
+    if (!rollMessage) throw new Error("host roll evidence message missing");
+    expect(rollMessage.roll?.total).toBe(4);
+    expect(rollMessage.system.rollEvidence).toEqual({ v: 1, rollId: damageRollId });
+    h.gm.submit([{ kind: "update", ref: { coll: "messages", id: rollMessage._id },
+      diff: { "roll.total": 999 } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.detail).toMatch(/roll evidence is immutable/);
+    expect((h.hostStore.get("messages", rollMessage._id) as MessageDocument).roll?.total).toBe(4);
+    h.gm.submit([{ kind: "delete", ref: { coll: "messages", id: rollMessage._id } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.detail).toMatch(/roll evidence is immutable/);
+    expect(h.hostStore.get("messages", rollMessage._id)).toBeDefined();
+
+    const message: MessageDocument = {
+      _id: "verified-immediate", type: "message", name: "Burning Hands", ownership: { default: 1 },
+      flags: {}, author: "", content: "Burning Hands scorches Ogre", whisper: [], roll: null,
+      flavor: "cast resolution", system: { action: {
+        v: 1, id: "verified-immediate", revision: 0, kind: "cast", label: "Burning Hands", state: "resolved",
+        source: { name: "forged wizard", actorId: "evidence-source" },
+        targets: [{ key: "ogre", name: "forged ogre", actorId: "evidence-target",
+          state: "resolved", outcome: "failedSave", provenance: "host",
+          check: { kind: "save", status: "resolved", formula: "1d20", dc: 14, total: 6,
+            saveType: "ref", passed: false, automatic: null },
+          evidence: { adapter: "pf1e.spellTarget.v1", payload: {
+            spellLevel: 1, saveType: "ref", severity: "half", damageFormula: "2d6",
+            critical: false, damageRollId, saveRollId,
+          } },
+          damage: { dealt: 4, prevented: 0 } }],
+        notes: [], createdAt: 1, updatedAt: 1,
+      } },
+    };
+    player.submit([{ kind: "create", coll: "messages", data: message },
+      { kind: "update", ref: { coll: "actors", id: "evidence-target" },
+        diff: { "system.pf1e.hp": 16 } }]);
+    await flushMicrotasks();
+    const committed = h.hostStore.get("messages", "verified-immediate") as MessageDocument | undefined;
+    expect(committed, playerRejected.at(-1)?.detail).toBeDefined();
+    expect(playerRejected).toEqual([]);
+    expect(committed?.system.action).toMatchObject({ source: { name: "Wizard" }, targets: [{
+      name: "Ogre", provenance: "host", outcome: "failedSave",
+      check: { dc: 14, total: 6, passed: false }, damage: { dealt: 4 },
+    }] });
+    expect((h.hostStore.get("messages", rollMessage._id) as MessageDocument).system.rollEvidence)
+      .toEqual({ v: 1, rollId: damageRollId, claimedBy: "verified-immediate" });
+    const saveRollMessage = h.hostStore.getAll("messages").find((candidate) =>
+      (candidate.system.rollEvidence as { rollId?: unknown } | undefined)?.rollId === saveRollId);
+    expect(saveRollMessage?.system.rollEvidence)
+      .toEqual({ v: 1, rollId: saveRollId, claimedBy: "verified-immediate" });
+    h.gm.submit([{ kind: "update", ref: { coll: "messages", id: rollMessage._id },
+      diff: { "system.rollEvidence.claimedBy": "forged-action" } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.detail).toMatch(/roll evidence is immutable/);
+    expect((h.hostStore.get("messages", rollMessage._id) as MessageDocument).system.rollEvidence)
+      .toMatchObject({ claimedBy: "verified-immediate" });
+    expect(actionEvents.at(-1)).toMatchObject({ actionId: "verified-immediate", verified: true,
+      state: "resolved", targets: [{ name: "Ogre", verified: true, outcome: "failedSave",
+        check: { dc: 14, total: 6, passed: false }, damage: { dealt: 4 } }] });
+
+    // Chat lifecycle pruning may remove the action card, but its roll-side claim remains durable.
+    expect(h.host.commitSystem([
+      { kind: "delete", ref: { coll: "messages", id: "verified-immediate" } },
+    ], false).ok).toBe(true);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", "verified-immediate")).toBeUndefined();
+
+    const replay = structuredClone(message);
+    replay._id = "replayed-evidence";
+    (replay.system.action as { id: string }).id = replay._id;
+    player.submit([{ kind: "create", coll: "messages", data: replay }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", replay._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "reported" }] });
+    expect(actionEvents.at(-1)).toMatchObject({ actionId: replay._id, verified: false,
+      targets: [{ verified: false }] });
+    expect(actionEvents.at(-1)).not.toHaveProperty("state");
+    expect(actionEvents.at(-1)?.targets[0]).not.toHaveProperty("state");
+    expect(actionEvents.at(-1)?.targets[0]).not.toHaveProperty("outcome");
+
+    const immediateMessage = (id: string, payload: Record<string, Json>, dealt?: number): MessageDocument => {
+      const next = structuredClone(message);
+      next._id = id;
+      const action = next.system.action as unknown as { id: string; label: string; targets: Array<{
+        outcome: string; check?: unknown; evidence: { adapter: string; payload: Record<string, Json> };
+        damage?: { dealt: number; prevented: number } }> };
+      action.id = id;
+      action.label = id;
+      const target = action.targets[0];
+      if (!target) throw new Error("immediate evidence fixture needs a target");
+      target.outcome = "affected";
+      delete target.check;
+      target.evidence = { adapter: "pf1e.spellTarget.v1", payload };
+      if (dealt === undefined) delete target.damage;
+      else target.damage = { dealt, prevented: 0 };
+      return next;
+    };
+
+    const rollTotal = (rollId: string): number => {
+      const found = h.hostStore.getAll("messages").find((candidate) =>
+        (candidate.flags.core as { rollId?: unknown } | undefined)?.rollId === rollId)?.roll?.total;
+      if (typeof found !== "number") throw new Error(`missing roll total for ${rollId}`);
+      return found;
+    };
+    let targetHp = 16;
+
+    // Reusing the textual roll id cannot evade the durable claim even if a fresh host roll exists.
+    h.gmPair.b.send(channelFor("roll"), frameMessage({
+      kind: "roll", rollId: damageRollId, formula: "2d6", mode: "roll",
+    }));
+    await flushMicrotasks();
+    expect(h.hostStore.getAll("messages").filter((candidate) =>
+      (candidate.system.rollEvidence as { rollId?: unknown } | undefined)?.rollId === damageRollId))
+      .toHaveLength(2);
+    const reusedRollId = immediateMessage("reused-roll-id", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "2d6", critical: false,
+      damageRollId,
+    }, 4);
+    targetHp -= 4;
+    h.gm.submit([{ kind: "create", coll: "messages", data: reusedRollId },
+      { kind: "update", ref: { coll: "actors", id: "evidence-target" },
+        diff: { "system.pf1e.hp": targetHp } }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", reusedRollId._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "reported" }] });
+
+    const overwrittenRoll = h.gm.roll("1d2", "roll", undefined, "Overwrite evidence");
+    await flushMicrotasks();
+    const overwrittenDamage = rollTotal(overwrittenRoll);
+    const overwritten = immediateMessage("overwritten-hp", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "1d2", critical: false,
+      damageRollId: overwrittenRoll,
+    }, overwrittenDamage);
+    const expectedHp = targetHp - overwrittenDamage;
+    targetHp = expectedHp - 1;
+    h.gm.submit([{ kind: "create", coll: "messages", data: overwritten },
+      { kind: "update", ref: { coll: "actors", id: "evidence-target" },
+        diff: { "system.pf1e.hp": expectedHp } },
+      { kind: "update", ref: { coll: "actors", id: "evidence-target" },
+        diff: { "system.pf1e.hp": targetHp } }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", overwritten._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "reported" }] });
+
+    const firstUse = immediateMessage("same-request-first", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "1d2", critical: false,
+      damageRollId: overwrittenRoll,
+    }, overwrittenDamage);
+    const secondUse = immediateMessage("same-request-second", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "1d2", critical: false,
+      damageRollId: overwrittenRoll,
+    }, overwrittenDamage);
+    targetHp -= overwrittenDamage;
+    h.gm.submit([{ kind: "create", coll: "messages", data: firstUse },
+      { kind: "create", coll: "messages", data: secondUse },
+      { kind: "update", ref: { coll: "actors", id: "evidence-target" },
+        diff: { "system.pf1e.hp": targetHp } }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", firstUse._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "host" }] });
+    expect((h.hostStore.get("messages", secondUse._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "reported" }] });
+
+    const touchRoll = h.gm.roll("1d2", "roll", undefined, "Unsupported touch evidence");
+    await flushMicrotasks();
+    const touchDamage = rollTotal(touchRoll);
+    const touch = immediateMessage("unsupported-touch", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "1d2", critical: false,
+      damageRollId: touchRoll, delivery: "touch",
+    }, touchDamage);
+    targetHp -= touchDamage;
+    h.gm.submit([{ kind: "create", coll: "messages", data: touch },
+      { kind: "update", ref: { coll: "actors", id: "evidence-target" },
+        diff: { "system.pf1e.hp": targetHp } }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", touch._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "reported" }] });
+
+    const conditionRoll = h.gm.roll("1d2", "roll", undefined, "Unverified condition evidence");
+    await flushMicrotasks();
+    const conditionDamage = rollTotal(conditionRoll);
+    const condition = immediateMessage("unverified-condition", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "1d2", critical: false,
+      damageRollId: conditionRoll,
+    }, conditionDamage);
+    const conditionTarget = (condition.system.action as unknown as { targets: Array<{
+      conditions?: { applied: string[] } }> }).targets[0];
+    if (!conditionTarget) throw new Error("condition evidence fixture needs a target");
+    conditionTarget.conditions = { applied: ["invented"] };
+    targetHp -= conditionDamage;
+    h.gm.submit([{ kind: "create", coll: "messages", data: condition },
+      { kind: "update", ref: { coll: "actors", id: "evidence-target" },
+        diff: { "system.pf1e.hp": targetHp } }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", condition._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "reported" }] });
+
+    const changedSourceRoll = h.gm.roll("1d2", "roll", undefined, "Changed source evidence");
+    await flushMicrotasks();
+    const changedSourceDamage = rollTotal(changedSourceRoll);
+    const changedSource = immediateMessage("changed-source-input", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "1d2", critical: false,
+      damageRollId: changedSourceRoll,
+    }, changedSourceDamage);
+    targetHp -= changedSourceDamage;
+    h.gm.submit([{ kind: "create", coll: "messages", data: changedSource },
+      { kind: "update", ref: { coll: "actors", id: "evidence-source" },
+        diff: { "system.pf1e.abilities.int": 18 } },
+      { kind: "update", ref: { coll: "actors", id: "evidence-target" },
+        diff: { "system.pf1e.hp": targetHp } }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", changedSource._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "reported" }] });
+
+    h.gm.submit([{ kind: "update", ref: { coll: "actors", id: "evidence-target" },
+      diff: { "system.pf1e.sr": 1 } }, { kind: "create", coll: "combats", data: {
+        _id: "evidence-combat", type: "combat", name: "Evidence combat", ownership: { default: 3 },
+        flags: { pf1e: { srOvercome: {} } }, system: {}, round: 1, turn: 0, combatants: [],
+      } as CombatDocument }]);
+    await flushMicrotasks();
+    const srRoll = h.gm.roll("1d20", "roll", undefined, "Spell resistance evidence");
+    await flushMicrotasks();
+    const missingLedger = immediateMessage("missing-sr-ledger", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "", critical: false,
+      srRollId: srRoll, combatId: "evidence-combat",
+    }, 0);
+    h.gm.submit([{ kind: "create", coll: "messages", data: missingLedger }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", missingLedger._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "reported" }] });
+    const overwrittenLedger = immediateMessage("overwritten-sr-ledger", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "", critical: false,
+      srRollId: srRoll, combatId: "evidence-combat",
+    }, 0);
+    h.gm.submit([{ kind: "create", coll: "messages", data: overwrittenLedger },
+      { kind: "update", ref: { coll: "combats", id: "evidence-combat" },
+        diff: { "flags.pf1e.srOvercome.evidence-source:evidence-target": 1 } },
+      { kind: "update", ref: { coll: "combats", id: "evidence-combat" },
+        diff: { "flags.pf1e.srOvercome.evidence-source:evidence-target": 2 } }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", overwrittenLedger._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "reported" }] });
+    const withLedger = immediateMessage("matching-sr-ledger", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "", critical: false,
+      srRollId: srRoll, combatId: "evidence-combat",
+    }, 0);
+    h.gm.submit([{ kind: "create", coll: "messages", data: withLedger },
+      { kind: "update", ref: { coll: "combats", id: "evidence-combat" },
+        diff: { "flags.pf1e.srOvercome.evidence-source:evidence-target": 1 } }]);
+    await flushMicrotasks();
+    const ledgerMessage = h.hostStore.get("messages", withLedger._id) as MessageDocument | undefined;
+    expect(ledgerMessage, rejected.at(-1)?.detail).toBeDefined();
+    expect(ledgerMessage?.system.action).toMatchObject({ targets: [{ provenance: "host" }] });
+
+    const reusedSr = immediateMessage("reused-sr-ledger", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "", critical: false,
+      combatId: "evidence-combat",
+    }, 0);
+    h.gm.submit([{ kind: "create", coll: "messages", data: reusedSr }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", reusedSr._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "host" }] });
+
+    const rerolledSrId = h.gm.roll("1d20", "roll", undefined, "Invalid repeated SR check");
+    await flushMicrotasks();
+    const rerolledSr = immediateMessage("rerolled-sr", {
+      spellLevel: 1, saveType: "ref", severity: "none", damageFormula: "", critical: false,
+      srRollId: rerolledSrId, combatId: "evidence-combat",
+    }, 0);
+    h.gm.submit([{ kind: "create", coll: "messages", data: rerolledSr }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", rerolledSr._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ provenance: "reported" }] });
+  });
+
+  test("pendingId resolves only one member of a multi-target action", async () => {
+    const h = await setup();
+    h.gm.submit([{ kind: "create", coll: "settings",
+      data: worldSettingsDoc({ playerPendingRollMode: "manual" }) },
+    { kind: "create", coll: "actors", data: {
+      _id: "action-source", type: "actor", name: "Druid", ownership: { default: 0, [GM_ID]: 3 },
+      flags: {}, system: { pf1e: { abilities: { wis: 22 }, spells: {
+        keyAbility: "wis", mode: "prepared", casterLevel: 5, slotsPerDay: { 1: 2 }, prepared: [],
+      } } }, items: [], effects: [],
+    } as ActorDocument }, { kind: "create", coll: "actors", data: {
+      _id: "action-target", type: "actor", name: "Target", ownership: { default: 0, [PLAYER_ID]: 3 },
+      flags: {}, system: { pf1e: { saves: { fort: 0, ref: 5, will: 0 } } }, items: [], effects: [],
+    } as ActorDocument }]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "messages", data: pendingActionMessage("multi-card", true) }]);
+    await flushMicrotasks();
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const rejections: ClientEvents["rejected"][] = [];
+    bus.on("rejected", (event) => rejections.push(event));
+    await player.rollPending("multi-card", "roll-two");
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(rejections).toEqual([]);
+    const card = h.hostStore.get("messages", "multi-card") as MessageDocument | undefined;
+    const system = card?.system as { pendingRolls?: Array<{ id?: string; resolved?: boolean }>;
+      action?: { state?: string; revision?: number; targets?: Array<{ key?: string; state?: string }> } };
+    expect(system.pendingRolls).toEqual([
+      expect.objectContaining({ id: "roll-one", resolved: false }),
+      expect.objectContaining({ id: "roll-two", resolved: true }),
+    ]);
+    expect(system.action).toMatchObject({ state: "pending", revision: 1, targets: [
+      { key: "one", state: "pending" }, { key: "two", state: "resolved" },
+    ] });
+
+    // The target belongs to the player, but a GM uses the same selected-roll host path as an override.
+    await h.gm.rollPending("multi-card", "roll-one");
+    await flushMicrotasks();
+    await flushMicrotasks();
+    const gmResolved = h.hostStore.get("messages", "multi-card") as MessageDocument;
+    expect(gmResolved.system.action).toMatchObject({ state: "resolved", revision: 2, targets: [
+      { key: "one", state: "resolved", provenance: "host" },
+      { key: "two", state: "resolved", provenance: "host" },
+    ] });
+    const evidenceIds = h.hostStore.getAll("messages").flatMap((message) => {
+      const evidence = message.system.rollEvidence as { rollId?: unknown } | undefined;
+      return typeof evidence?.rollId === "string" && evidence.rollId.startsWith("roll-")
+        ? [evidence.rollId] : [];
+    });
+    expect(evidenceIds.sort()).toEqual(["roll-one", "roll-two"]);
+    const pendingClaims = h.hostStore.getAll("messages").flatMap((message) => {
+      const evidence = message.system.rollEvidence as { rollId?: unknown; claimedBy?: unknown } | undefined;
+      return typeof evidence?.rollId === "string" && evidence.rollId.startsWith("roll-")
+        ? [{ rollId: evidence.rollId, claimedBy: evidence.claimedBy }] : [];
+    });
+    expect(pendingClaims.sort((a, b) => a.rollId.localeCompare(b.rollId))).toEqual([
+      { rollId: "roll-one", claimedBy: "multi-card" },
+      { rollId: "roll-two", claimedBy: "multi-card" },
+    ]);
+
+    // Two in-flight checks must rebase on the live action revision rather than letting the
+    // slower completion overwrite the other target with its stale creation-time card.
+    const racing = pendingActionMessage("racing-card", true);
+    const racingAction = racing.system.action as unknown as ActionCard;
+    const racingRolls = racing.system.pendingRolls as unknown as Array<{ id: string }>;
+    racingAction.targets.forEach((target, index) => {
+      const id = `racing-${index + 1}`;
+      if (!target.check || !racingRolls[index]) throw new Error("racing fixture linkage missing");
+      target.check.pendingRollId = id;
+      racingRolls[index].id = id;
+    });
+    h.gm.submit([{ kind: "create", coll: "messages", data: racing }]);
+    await flushMicrotasks();
+    await Promise.all([
+      h.gm.rollPending(racing._id, "racing-1"),
+      h.gm.rollPending(racing._id, "racing-2"),
+    ]);
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", racing._id) as MessageDocument).system.action)
+      .toMatchObject({ revision: 2, state: "resolved", targets: [
+        { key: "one", state: "resolved" }, { key: "two", state: "resolved" },
+      ] });
+  });
+
+  test("combat-window expiry commits one explicit expired revision and emits its FX facts", async () => {
+    let now = 20_000;
+    const h = await setup({}, undefined, undefined, () => now);
+    const actionEvents: ActionFxContext[] = [];
+    h.hostBus.on("action:committed", (event) => actionEvents.push(event));
+    h.gm.submit([{ kind: "create", coll: "actors", data: {
+      _id: "action-source", type: "actor", name: "Druid", ownership: { default: 0, [GM_ID]: 3 },
+      flags: {}, system: { pf1e: { abilities: { wis: 22 }, spells: {
+        keyAbility: "wis", mode: "prepared", casterLevel: 5, slotsPerDay: { 1: 2 }, prepared: [],
+      } } }, items: [], effects: [],
+    } as ActorDocument }, { kind: "create", coll: "actors", data: {
+      _id: "action-target", type: "actor", name: "Target", ownership: { default: 0, [PLAYER_ID]: 3 },
+      flags: {}, system: { pf1e: { saves: { fort: 0, ref: 5, will: 0 } } }, items: [], effects: [],
+    } as ActorDocument }]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "messages", data: pendingActionMessage("expiring-card") }]);
+    await flushMicrotasks();
+
+    now = 25_000;
+    const fight: CombatDocument = {
+      _id: "expiry-fight", type: "combat", name: "Expiry", ownership: { default: 3 },
+      flags: { core: { sceneId: "s1" } }, system: {}, round: 4, turn: 0, combatants: [],
+    };
+    h.gm.submit([{ kind: "create", coll: "combats", data: fight }]);
+    await flushMicrotasks();
+
+    const card = h.hostStore.get("messages", "expiring-card") as MessageDocument;
+    expect(card.system.pendingRoll).toBeNull();
+    expect(card.system.action).toMatchObject({ revision: 1, state: "expired", updatedAt: 25_000,
+      targets: [{ key: "one", state: "expired", outcome: "expired", check: { status: "expired" } }] });
+    expect(actionEvents).toMatchObject([
+      { actionId: "expiring-card", revision: 0, state: "pending", at: 20_000 },
+      { actionId: "expiring-card", revision: 1, state: "expired", at: 25_000,
+        targets: [{ key: "one", state: "expired", outcome: "expired" }] },
+    ]);
+  });
+
+  test("malformed actions and inconsistent pending links reject the whole message, ordinary chat remains valid", async () => {
+    const h = await setup();
+    h.gm.submit([{ kind: "create", coll: "actors", data: {
+      _id: "action-source", type: "actor", name: "Druid", ownership: { default: 0, [GM_ID]: 3 },
+      flags: {}, system: { pf1e: { abilities: { wis: 22 }, spells: {
+        keyAbility: "wis", mode: "prepared", casterLevel: 5, slotsPerDay: { 1: 2 }, prepared: [],
+      } } }, items: [], effects: [],
+    } as ActorDocument }, { kind: "create", coll: "actors", data: {
+      _id: "action-target", type: "actor", name: "Target", ownership: { default: 0, [PLAYER_ID]: 3 },
+      flags: {}, system: { pf1e: { saves: { fort: 0, ref: 5, will: 0 } } }, items: [], effects: [],
+    } as ActorDocument }, { kind: "create", coll: "actors", data: {
+      _id: "secret-action-target", type: "actor", name: "Secret Target", ownership: { default: 0, [GM_ID]: 3 },
+      flags: {}, system: { pf1e: { saves: { fort: 0, ref: 5, will: 0 } } }, items: [], effects: [],
+    } as ActorDocument }]);
+    await flushMicrotasks();
+    const rejected: ClientEvents["rejected"][] = [];
+    h.gmBus.on("rejected", (event) => rejected.push(event));
+    const malformed = pendingActionMessage("bad-state");
+    (malformed.system.action as { state: string }).state = "resolved";
+    h.gm.submit([{ kind: "create", coll: "messages", data: malformed }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", "bad-state")).toBeUndefined();
+    expect(rejected.at(-1)?.detail).toMatch(/disagrees with its targets/);
+
+    const badLink = pendingActionMessage("bad-link");
+    (badLink.system.pendingRoll as { targetKey: string }).targetKey = "someone-else";
+    h.gm.submit([{ kind: "create", coll: "messages", data: badLink }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", "bad-link")).toBeUndefined();
+    expect(rejected.at(-1)?.detail).toMatch(/linkage is invalid/);
+
+    const duplicateLinks = pendingActionMessage("duplicate-links", true);
+    const duplicateRolls = duplicateLinks.system.pendingRolls as unknown as Array<{
+      id: string; targetKey: string }>;
+    const firstDuplicateRoll = duplicateRolls[0];
+    const secondDuplicateRoll = duplicateRolls[1];
+    if (!firstDuplicateRoll || !secondDuplicateRoll) throw new Error("duplicate-link fixture needs two rolls");
+    secondDuplicateRoll.id = firstDuplicateRoll.id;
+    secondDuplicateRoll.targetKey = firstDuplicateRoll.targetKey;
+    h.gm.submit([{ kind: "create", coll: "messages", data: duplicateLinks }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", duplicateLinks._id)).toBeUndefined();
+    expect(rejected.at(-1)?.detail).toMatch(/linkage is invalid/);
+
+    const orphanItem = pendingActionMessage("orphan-item");
+    const orphanSource = (orphanItem.system.action as { source: { actorId?: string; itemId?: string } }).source;
+    delete orphanSource.actorId;
+    orphanSource.itemId = "missing-item";
+    h.gm.submit([{ kind: "create", coll: "messages", data: orphanItem }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", orphanItem._id)).toBeUndefined();
+    expect(rejected.at(-1)?.detail).toMatch(/source item does not belong to its actor/);
+
+    const crossSceneArea = pendingActionMessage("cross-scene-area");
+    (crossSceneArea.system.action as unknown as ActionCard).area = {
+      sceneId: "somewhere-else", shape: "burst", origin: { x: 100, y: 100 }, radius: 30, units: "ft",
+    };
+    h.gm.submit([{ kind: "create", coll: "messages", data: crossSceneArea }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", crossSceneArea._id)).toBeUndefined();
+    expect(rejected.at(-1)?.detail).toMatch(/area.*action scene/);
+
+    const badPending = pendingActionMessage("bad-pending");
+    (badPending.system.pendingRoll as Record<string, Json>).executable = "never";
+    h.gm.submit([{ kind: "create", coll: "messages", data: badPending }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", "bad-pending")).toBeUndefined();
+    expect(rejected.at(-1)?.detail).toMatch(/storage is invalid/);
+
+    const transient = pendingActionMessage("transient-action");
+    h.gm.submit([{ kind: "create", coll: "messages", data: transient },
+      { kind: "delete", ref: { coll: "messages", id: transient._id } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", transient._id)).toBeUndefined();
+    expect(rejected.at(-1)?.detail).toMatch(/creation envelope/);
+
+    const reported = pendingActionMessage("reported-result");
+    delete reported.system.pendingRoll;
+    const reportedAction = reported.system.action as { state: string; targets: Array<{
+      state: string; outcome: string; provenance?: string; check: Record<string, unknown> }> };
+    reportedAction.state = "resolved";
+    const reportedTarget = reportedAction.targets[0];
+    if (!reportedTarget) throw new Error("reported action fixture needs a target");
+    reportedTarget.state = "resolved";
+    reportedTarget.outcome = "saved";
+    reportedTarget.provenance = "host"; // a caller cannot grant this authority
+    reportedTarget.check = { kind: "save", status: "resolved", formula: "1d20+5",
+      dc: 17, total: 99, saveType: "ref", passed: true };
+    h.gm.submit([{ kind: "create", coll: "messages", data: reported }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", "reported-result") as MessageDocument).system.action)
+      .toMatchObject({ state: "resolved", targets: [{ provenance: "reported", outcome: "saved" }] });
+
+    const unverifiedPending = pendingActionMessage("unverified-pending");
+    const unverifiedEvidence = (unverifiedPending.system.action as unknown as { targets: Array<{
+      evidence: { payload: { spellLevel: number } } }> }).targets[0]?.evidence;
+    if (!unverifiedEvidence) throw new Error("unverified pending fixture needs evidence");
+    unverifiedEvidence.payload.spellLevel = 2;
+    h.gm.submit([{ kind: "create", coll: "messages", data: unverifiedPending }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", unverifiedPending._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ state: "pending", provenance: "reported" }] });
+    await h.gm.rollPending(unverifiedPending._id, "roll-one");
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", unverifiedPending._id) as MessageDocument).system.action)
+      .toMatchObject({ targets: [{ state: "resolved", provenance: "reported" }] });
+
+    const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const playerRejected: ClientEvents["rejected"][] = [];
+    bus.on("rejected", (event) => playerRejected.push(event));
+    player.submit([{ kind: "create", coll: "messages", data: pendingActionMessage("forged-source") }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", "forged-source")).toBeUndefined();
+    expect(playerRejected.at(-1)?.detail).toMatch(/source actor is not owned/);
+
+    h.gm.submit([{ kind: "update", ref: { coll: "actors", id: "action-source" },
+      diff: { ownership: { default: 0, [GM_ID]: 3, [PLAYER_ID]: 3 } } }]);
+    await flushMicrotasks();
+    const privateTarget = pendingActionMessage("private-target");
+    const privateActionTarget = (privateTarget.system.action as unknown as ActionCard).targets[0];
+    const privatePending = privateTarget.system.pendingRoll as unknown as { target: { actorId: string } };
+    if (!privateActionTarget) throw new Error("private target fixture needs a target");
+    privateActionTarget.actorId = "secret-action-target";
+    privatePending.target.actorId = "secret-action-target";
+    player.submit([{ kind: "create", coll: "messages", data: privateTarget }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", privateTarget._id)).toBeUndefined();
+    expect(playerRejected.at(-1)?.detail).toMatch(/target one is unavailable/);
+
+    h.gm.submit([{ kind: "create", coll: "messages", data: pendingActionMessage("locked-action") }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", "locked-action")).toBeDefined();
+    h.gm.submit([{ kind: "update", ref: { coll: "messages", id: "locked-action" },
+      diff: { "system.action.label": "forged revision" } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.detail).toMatch(/change only through host resolution/);
+    expect((h.hostStore.get("messages", "locked-action") as MessageDocument).system.action)
+      .toMatchObject({ label: "Entangle", revision: 0 });
+
+    h.gm.submit([{ kind: "update", ref: { coll: "messages", id: "locked-action" },
+      diff: { "system.pendingRoll.formula": "1d20+999" } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.detail).toMatch(/change only through host resolution/);
+    expect((h.hostStore.get("messages", "locked-action") as MessageDocument).system.pendingRoll)
+      .toMatchObject({ formula: "1d20+5", resolved: false });
+
+    h.gm.submit([{ kind: "update", ref: { coll: "messages", id: "locked-action" },
+      diff: { "system.-=pendingRoll": null } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.detail).toMatch(/change only through host resolution/);
+    expect((h.hostStore.get("messages", "locked-action") as MessageDocument).system.pendingRoll)
+      .toMatchObject({ id: "roll-one", resolved: false });
+
+    await h.gm.rollPending("locked-action", "roll-one");
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.detail).toMatch(/identity was already used/);
+    expect((h.hostStore.get("messages", "locked-action") as MessageDocument).system.pendingRoll)
+      .toMatchObject({ id: "roll-one", resolved: false });
+
+    h.gm.submit([{ kind: "delete", ref: { coll: "messages", id: "locked-action" } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.detail).toMatch(/host lifecycle/);
+    expect(h.hostStore.get("messages", "locked-action")).toBeDefined();
+
+    const plain = pendingActionMessage("plain-chat");
+    plain.system = {};
+    h.gm.submit([{ kind: "create", coll: "messages", data: plain }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("messages", "plain-chat")).toMatchObject({ content: "Entangle save pending" });
+
+    // Benign legacy system replacement remains compatible, but it cannot smuggle in an action.
+    h.gm.submit([{ kind: "update", ref: { coll: "messages", id: "plain-chat" },
+      diff: { system: { legacy: "kept" } } }]);
+    await flushMicrotasks();
+    expect((h.hostStore.get("messages", "plain-chat") as MessageDocument).system).toEqual({ legacy: "kept" });
+    const forgedSystem = pendingActionMessage("forged-root").system;
+    h.gm.submit([{ kind: "update", ref: { coll: "messages", id: "plain-chat" },
+      diff: { system: forgedSystem } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.detail).toMatch(/change only through host resolution/);
+    expect((h.hostStore.get("messages", "plain-chat") as MessageDocument).system).toEqual({ legacy: "kept" });
   });
 });

@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-394, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-404, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -55,6 +55,16 @@ Consolidated historical archive through D-394, including the incremental trigger
 - [D-392 archived verification report](#report-d392)
 - [D-393 archived verification report](#report-d393)
 - [D-394 archived verification report](#report-d394)
+- [D-395 archived verification report](#report-d395)
+- [D-396 archived verification report](#report-d396)
+- [D-397 archived verification report](#report-d397)
+- [D-398 archived verification report](#report-d398)
+- [D-399 archived verification report](#report-d399)
+- [D-400 archived verification report](#report-d400)
+- [D-401 archived verification report](#report-d401)
+- [D-402 archived verification report](#report-d402)
+- [D-403 archived verification report](#report-d403)
+- [D-404 archived verification report](#report-d404)
 
 <a id="report-d293-d319"></a>
 
@@ -4642,3 +4652,843 @@ To distinguish the feature from an already-present environmental failure, export
 Integration caught (and fixed) User snapshot/live-op visibility inconsistency: private ownership on public User documents had suppressed capability changes, now covered in pure projection, live host and production browser tests. The archive fixture initially tried to create a User through a generic GM intent, which the existing host correctly forbids; it now uses trusted host user allocation before authenticated peer saves. A core fixture's flag namespace shape was corrected after a TS error, then full typecheck/lint passed. Browser fixture corrections use non-exact option-containing labels, normally close the GM source window before it covers Permissions, and call the existing chat API with valid `scene` rather than invalid `all` audience. Product privacy/execution assertions were not relaxed.
 
 Other player-authored macro kinds, hotbar layout cross-device/world synchronization, generalized context/helpers/continuations, templating, full common invocation matrix, remaining trigger/action/library/environment scenarios and full MC-01/MC-02/A01–A41 stay open. **A41 remains unaccepted** without a qualifying pre-published hardware-GPU reference run. D373 remains the latest standalone report; this appended report is incremental evidence, not full parity or remote CI success.
+
+<a id="report-d395"></a>
+
+## D-395 — Playback speed and honest usable-media readiness (2026-10-03)
+
+### Scope and audit findings
+
+This increment audits the FX delivery path for defects analogous to D394's scheduler/media attribution gap, then advances one bounded SQ-02 control. It does not redefine SQ-02/SQ-13 or claim complete Sequencer parity. The audit found real lifecycle/readiness defects: byte arrival could settle a cue before browser decode/startup; strict-sync audio could become audible before startup lateness was judged; one stopped run cleared an asset record shared with another run; failed records were permanent; late async work could report into a reused run id; and warmed static images were decoded again at cue time. The retained fixes keep D-308's `ready` acknowledgement byte-scoped, but allow a later decoder/startup outcome to correct it.
+
+Static images now begin one asset-scoped decode during their preload lead and reuse that decoded browser source across runs, with a distinct uncached Pixi texture per playback. Small images (≤512 KiB) synchronously become a data image so decoding starts in the current browser task; larger images, nonbrowser tests and data-image refusal use the Blob-URL fallback. Scene/reconnect teardown releases retained sources/URLs; stopping one run does not. Fetch/decode failure is retryable and generation/run-epoch checks suppress stale completion. The accounting separates genuine media tail from event-loop scheduling: an unfinished fetch/decode/startup counts only after the cue callback and prerequisite bytes are available; a source already decoded when the callback runs incurs no new media lateness from synchronous texture setup. Genuine tails still produce `late`, requester correction and strict-sync suppression; decoder refusal/failure remains visible.
+
+Audio/video now wait for real startup before success. Pending audio is registered silently so device-local stop can cancel it, but gain is applied only after `play()` resolves and late policy keeps the cue; strict sync therefore emits no rejected blip. Expiry, stop and startup rejection each settle once. Live FX transfers use the current-scene lane. Runtime evidence showed that a real joined viewer's tiny asset request plus decode could exceed the old 300 ms transport lead even when all accounting was correct. Media-bearing table runs therefore receive a fixed 750 ms lead; scheduler-only runs remain at 300 ms. This is a bounded scheduling window, not a success declaration: synthetic slow-fetch/decode/startup cases still report or skip honestly beyond it. Awaited script FX use the cue's actual lead in their seven-second safety gate.
+
+SQ-02 gains optional `playbackRate` for sound and video, range **0.25–4×**. Authoring shows **Playback speed** only where it has meaning, stores 1× as absence and clears it when video changes to a still. Host validation, resolution and durable instance reconstruction reject out-of-range or still-image rates; presets preserve valid values. Real audio/video elements receive the rate and restored/late seeking multiplies media phase by it, while section duration, fades, repeats and scheduling remain on the shared host clock.
+
+### Regression integrity and browser investigation
+
+The original two-viewer browser assertion could pass on the first “media in hand” line and close both contexts before a later corrective receipt. It was strengthened to observe through the cue and require **zero** `media not in hand` correction; no tolerance or delivery assertion was relaxed. That stronger form initially failed **8/8**, proving the earlier nominal passes were not sufficient. Trace instrumentation then distinguished callback, byte, decode and texture times. Direct `createImageBitmap(blob)` and asynchronous FileReader conversion did not help under traced Chromium; synchronous bounded data conversion removed task-dispatch loss, while the longer media-only host lead covered the separately observed real transport/decode budget. Temporary logs/traces were removed. Animation browser tests retain every existing endpoint/easing assertion; only their observation windows include the intentional extra media lead.
+
+### Final verification
+
+- Focused `tests/client/fxDeliveryFlow.test.ts`, `tests/core/fx.test.ts`, `tests/core/fxInstances.test.ts`, `tests/core/fxPresets.test.ts`: **114/114**. With `tests/host/sync.test.ts`: **366/366**. Coverage includes shared-run answers and teardown, retry/cancellation, data-image/no-second-URL behavior, warmed decoder reuse, scheduler-delay exclusion, honest fetch/decode/startup lateness, strict suppression, expiry, playback failure, pending-audio stop, audio/video rate propagation, still-MIME refusal and preset/durable preservation.
+- Full `corepack pnpm test`: **4,904 passed / 12 skipped**, **334 passing / 2 skipped files**, **119.26 s**. Typecheck: **69 components / 0 blocking / 1 existing ReplayPanel advisory**. ESLint and `git diff --check` pass.
+- Final production preparation succeeded (optional PF1e content starter absent). `dist/index.html`: **4,135,329 raw / 1,181,179 gzip bytes**, within 6 MB; SHA-256 **`1c0aa8f002b7fe35cbc829c9b259d5c0b079fde79f3584ff3252b7111dfdcc8b`**.
+- Production `file://` Chromium **153.0.8010.0**, one worker, zero retries: strengthened `e2e/fx_sequence.spec.ts` **35/35 in 8.4 min** on that artifact. The corrected two-viewer readiness case then passed **10/10 repeated exact-artifact runs in 3.2 min**. The preset scenario drives the real Playback speed controls, persists a sound rate, switches a video to a still and proves the hidden rate is removed.
+
+### Remaining scope
+
+This closes the audited readiness/ownership/cancellation defects and one bounded SQ-02 field only. It does not complete random/group timing, clip windows, conditional lanes, generalized cancellation, cache quota/eviction, cross-browser codec/transparency evidence or the rest of SQ-02/SQ-13. Remaining MC/TR/A19–A40 work is unchanged. A41 still requires the pre-published hardware-GPU profile and a qualifying run; functional fallback Chromium evidence is not that acceptance. **Full A01–A41 parity is not established.**
+
+<a id="report-d396"></a>
+
+## D-396 — Host-resolved random section delay (2026-10-04)
+
+### Delivered scheduler contract
+
+This bounded SQ-02 increment adds one optional `randomDelay: { minMs, maxMs }` to every section kind. It is an inclusive integer-millisecond range, added to the section's fixed `startMs`; each bound is limited to 0–30,000 ms and a zero maximum is rejected as a no-op. Validation uses the maximum possible offset when checking the existing 60-second timeline. For replayed one-shot media, that worst-case check includes every duration and inter-play pause. The range therefore cannot turn a valid authored sequence into a concrete schedule outside the host's established bounds.
+
+The host is the sole random authority. `resolveFxSequence` completes anchor/media/schema preflight before drawing, then draws exactly once for each authored section carrying a range. It clamps malformed injected entropy to the lower bound and out-of-unit values to the range. Replay expansion happens after that draw, so all plays of one authored section share its offset. Per-viewer audience projection happens after resolution, so the GM and every entitled player receive the same concrete `startMs`; a client never rerolls. The authoring range is removed with replay/anchor controls and is absent from `ResolvedFxSection`, the network cue and durable state.
+
+That last boundary is separately defended on restore. A persistent run stores the sampled starts. `validateFxInstance` now fails closed if an imported/historical instance contains `randomDelay`, rather than accepting authoring state that could leak or be mistaken for a reconnect-time reroll. Script- and directory-fired timelines continue through the same host resolver, so there is no second random-timing implementation.
+
+### Authoring behavior
+
+The FX Wizard shows **Random delay min ms** and **Random delay max ms** on text, image/video, sound, camera and wait sections. Entering either side creates a valid atomic pair; clearing or setting the maximum to zero removes the field rather than storing a hidden no-op. Values are rounded/clamped to the core contract. Changing a section kind or camera mode keeps the range because this is section timing, not media/text behavior. New-section placement accounts for an existing section's maximum random offset, and presets retain the range with the rest of the authored section. Local on-canvas preview supplies local entropy to the same resolver; actual Save/Run still samples on the host.
+
+### Verification
+
+- Focused core/instance/preset/host batch: **318/318** (`fx` 56, `fxInstances` 4, `fxPresets` 5, HostSync 253). It pins inclusive/lower/upper/clamped draws, malformed and out-of-budget ranges, replay alignment, source immutability, author-field stripping, durable refusal, preset retention, one draw per section instead of per recipient, identical GM/two-player schedules and unchanged 750 ms media lead.
+- Full `corepack pnpm test`: **4,906 passed / 12 skipped**, **334 passing / 2 skipped files**, 124.97 seconds.
+- `corepack pnpm typecheck`: **69 components / 0 blocking issues / 1 existing ReplayPanel advisory**. ESLint and `git diff --check` pass.
+- Production preparation succeeded; the optional PF1e content-based starter remains absent and is skipped normally. `dist/index.html` is **4,137,597 raw / 1,181,976 gzip bytes**, below 6 MB; SHA-256 **`8ce68a1c8ea8459382944934a24d596aab883700f5c063823851da0c73b81ead`**.
+- Production `file://` Chromium **153.0.8010.0**, one worker, zero retries: `e2e/fx_sequence.spec.ts` **36/36 in 8.6 minutes** on that exact artifact. The new case drives the real controls, switches Text → Wait → Text without losing the range, saves/reloads, runs, and intercepts the real Pixi spawn boundary. It asserts an integer concrete start inside 250–450 ms and asserts the received section has no `randomDelay` property. The other 35 strengthened FX cases remain green, including two-viewer usable-media reporting.
+
+Commands used for the final evidence:
+
+```sh
+corepack pnpm exec vitest run tests/core/fx.test.ts tests/core/fxPresets.test.ts \
+  tests/core/fxInstances.test.ts tests/host/sync.test.ts
+corepack pnpm typecheck
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test --project=chromium --workers=1 --retries=0 \
+  --global-timeout=1200000 e2e/fx_sequence.spec.ts
+git diff --check
+```
+
+The Chromium executable and AL2023 libraries were npm-provisioned outside the repository because the standard Playwright browser is unavailable in this sandbox. This is functional production-artifact evidence, not cross-browser or A41 hardware-GPU acceptance.
+
+### Remaining scope
+
+D396 closes only per-section random delay. It does not implement group delay, clip windows, wait-until-finished negative overlap, conditional lanes, generalized cancellation or the rest of SQ-02. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**
+
+<a id="report-d397"></a>
+
+## D-397 — Source-media clip windows for sound and video (2026-10-04)
+
+### Authored and host-validated contract
+
+This bounded SQ-02 increment adds `clipStartMs` and `clipEndMs` to sound and video-backed image sections. The values are source-media timestamps, not timeline offsets: start is inclusive, end is exclusive, absent/zero start means source beginning, and absent end means the browser-decoded source end. Each present value must be a safe integer no greater than **86,400,000 ms**; end must be positive and strictly after start. The core schema rejects malformed, fractional, non-finite, reversed and over-budget values. Host media resolution rejects either mark on a still image, and durable-instance reconstruction independently rejects forged clip/rate state on non-video images.
+
+Clip marks do not alter the host schedule, section duration, fades, replay expansion, D396 random-delay sampling or recipient projection. `playbackRate` controls traversal through the selected source span, so late/restored media phase is `clipStart + elapsed × playbackRate`; the authored marks themselves never scale. The Wizard exposes paired **Clip start ms / Clip end ms** controls for sound and selected video media, canonicalizes blank/zero bounds, preserves valid marks through timeline and preset storage, and removes both marks plus video-only rate state when a video is changed to a still.
+
+### Decoded playback and lifecycle
+
+Actual browser duration is resolved at playback. An authored end beyond it clamps to the decoded end; a start at or beyond it is a local playback/decode failure, not an unsupported-codec refusal. Audio begins at zero gain until startup and the established late-media policy have both completed. A clipped one-shot that has already elapsed stays silent; otherwise it stops at the exclusive endpoint. Persistent clipped audio disables native whole-file looping and wraps explicitly inside the selected span, including restored runs. Video-backed images likewise disable native looping only when clipped and wrap inside the selected span for their visual lifetime. Unclipped behavior remains unchanged.
+
+Every clip-specific timeout, interval, `timeupdate` handler and `ended` handler is tied into the existing stop/release lifecycle: device stop, host stop, run replacement, scene teardown, Pixi-layer completion and disposal remove the new resources. Controlled tests also exposed a readiness race: cue-time clip validation could report a genuine decode failure before an older byte-preload continuation emitted `ready`. Prefetch now snapshots the run's prior acknowledgement and emits its byte result only if no newer cue-time outcome won while it waited. Fetch-failure recovery and D395's later corrective acknowledgements remain intact.
+
+### Verification
+
+- Focused `tests/client/fxDeliveryFlow.test.ts`, `tests/core/fx.test.ts`, `tests/core/fxInstances.test.ts`, `tests/core/fxPresets.test.ts` and `tests/host/sync.test.ts`: **373/373** (54 + 57 + 4 + 5 + 253). Coverage pins schema bounds/order, still-image refusal, preset and durable preservation, decoded-end clamping, playback-rate phase, late one-shot exhaustion, restored persistent wrapping, one-shot endpoints, invalid source bounds/failure correction, video wrapping and cleanup.
+- Full `corepack pnpm test`: **4,911 passed / 12 skipped**, **334 passing / 2 skipped files**, **118.44 s**. Typecheck: **69 components / 0 blocking issues / 1 existing ReplayPanel advisory**. Full ESLint and `git diff --check` pass.
+- Production preparation succeeded; the optional PF1e content-based starter remains absent and is skipped normally. `dist/index.html`: **4,141,340 raw / 1,183,115 gzip bytes**, below 6 MB; SHA-256 **`f55285e6665b4d1912b2bcdcd7fea3f055f6f5e67cef1bd42052b448bedafd0a`**.
+- Production `file://` Chromium **153.0.8010.0**, one worker, zero retries: `e2e/fx_sequence.spec.ts` **36/36 in 8.8 minutes** on that exact artifact. The real sound scenario saves/reloads a 2–10 second clip and observes the detached native `Audio` element seek into that window without replacing fetch, decode, `play()`, fade or channel-mix behavior. The preset scenario preserves sound clip marks, authors clip/rate state on video, changes it to a still, proves the controls disappear, then saves/loads/runs the draft successfully—pinning hidden-field removal at the host boundary.
+
+Commands used for the final evidence:
+
+```sh
+corepack pnpm exec vitest run tests/client/fxDeliveryFlow.test.ts tests/core/fx.test.ts \
+  tests/core/fxInstances.test.ts tests/core/fxPresets.test.ts tests/host/sync.test.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm eslint .
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test --project=chromium --workers=1 --retries=0 \
+  --global-timeout=900000 e2e/fx_sequence.spec.ts
+git diff --check
+```
+
+The Chromium executable and AL2023 libraries were npm-provisioned outside the repository because the standard Playwright browser remains unavailable in this sandbox. This is functional production-artifact evidence, not cross-browser or A41 hardware-GPU acceptance.
+
+### Remaining scope
+
+D397 closes only source-media clip windows. It does not implement group timing, wait-until-finished negative overlap, conditional lanes, generalized cancellation or the rest of SQ-02. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**
+
+<a id="report-d398"></a>
+
+## D-398 — Host-resolved finish-relative section timing (2026-10-04)
+
+### Authored schedule and authoritative resolution
+
+This bounded SQ-02 scheduler increment adds `startAfter: { sectionId, offsetMs }` to an authored section. The target must be an earlier section in the same sequence; dependency mode requires `startMs: 0`, exact nested keys and a safe-integer offset from **−30,000 to +30,000 ms**. A negative offset overlaps the target's finish and a positive offset leaves a gap. The target finishes only after its **final replay**, including every replay duration and inter-play pause. The dependent section's own D396 random delay is then sampled and added once. Forward/self/missing references, loose keys, fractional or out-of-range offsets and every dependency on a persistent timeline fail validation.
+
+Validation recursively tracks each section's minimum and maximum finish over all possible random draws. It proves that a negative overlap cannot precede the referenced section's own start and that every chained start/replay finish remains inside the established 0–60 second timeline. Resolution still preflights the entire sequence's anchors and media first. The host then walks authored order, samples each section once, derives a dependency from the target's concrete final-play end, expands replays, and retains the final end under the authored ID for later dependencies. Entitled viewers receive only absolute `startMs` values. `startAfter` and `randomDelay` are both excluded from `ResolvedFxSection`, recipient cues and durable instance state.
+
+Durability and reuse fail closed at the same boundary. `validateFxInstance` rejects imported/reconnected records carrying unresolved finish or random authoring state. FX preset loading now uses a two-pass ID mint: all section IDs are chosen first, then every cloned `startAfter.sectionId` is remapped to the corresponding fresh ID. The stored preset and nested reference are not mutated, including when an ID supplier repeats candidates.
+
+### Wizard and reviewed-script parity
+
+The Wizard's **Start timing** control offers absolute time or an earlier section's finish; dependency mode exposes a signed **Finish offset ms** field and explains final-replay/overlap behavior. Timing survives text/image/sound/wait/camera discriminator changes. New-section placement follows the draft's worst-case dependency/random/replay end. Removing a referenced section resets its direct dependents to a valid absolute zero start. A draft with finish dependencies cannot enable persistence, while a persistent draft disables new relative choices; malformed imported state can still be switched back to absolute.
+
+Reviewed scripts expose the same signed concept as the optional fourth argument to direct and builder `playAndWait`: `playAndWait(macroId, sourceTokenId?, targetTokenId?, finishOffsetMs?)`. The Worker validates the bound and waits until `endsAtHostTime + finishOffsetMs`. Its `fx.play` RPC carries the offset only with `waitForEnd: true`. The authoritative host independently accepts exact known keys, a safe integer in range and an awaited cue only; it refuses persistent cues, an offset point before the cue begins, and a point beyond the existing seven-second finite-await budget **before cue emission**. Positive gaps and negative live-cue overlap therefore have one host-clock meaning rather than a client timer approximation.
+
+### Verification
+
+- Focused `tests/core/fx.test.ts`, `tests/core/fxInstances.test.ts`, `tests/core/fxPresets.test.ts`, `tests/host/scriptWorker.test.ts` and `tests/host/sync.test.ts`: **334/334** (58 + 4 + 5 + 14 + 253). Coverage pins final-replay math, dependency/random ordering, immutable authoring input, concrete-field stripping, malformed/forward/persistent/timeline refusals, durable rejection, preset remapping, shared host schedules, Worker overlap timing and forged host RPC rejection/preflight.
+- Full `corepack pnpm test`: **4,912 passed / 12 skipped**, **334 passing / 2 skipped files**, **127.65 s**. Typecheck: **69 components / 0 blocking issues / 1 existing ReplayPanel advisory**. Full ESLint and `git diff --check` pass.
+- Production preparation succeeded; the optional PF1e content-based starter remains absent and is skipped normally. `dist/index.html`: **4,147,142 raw / 1,184,766 gzip bytes**, below 6 MB; SHA-256 **`e0d59b2305bde55eb1da98b796736c41e9626924f109a3da3e58dcd6a91b002b`**.
+- Production `file://` Chromium **153.0.8010.0**, one worker, zero retries: `e2e/fx_sequence.spec.ts` (37) plus `e2e/script_macros.spec.ts` (9) — **46/46 in 10.8 minutes** on that exact artifact. The new Wizard scenario authors a fixed-random repeated predecessor and a random dependent with a −150 ms overlap, retains the relation through Text → Wait → Text, saves/reloads it and observes concrete starts `[100, 500, 700]` with no `startAfter` at the Pixi boundary. The existing preset scenario now proves fresh-ID relationship remapping; a persistent scenario proves relative choices disable. The reviewed Worker scenario uses −600 ms and observes its callback/chat while the cue is still active, then observes normal cleanup.
+
+Commands used for the final evidence:
+
+```sh
+corepack pnpm exec vitest run tests/core/fx.test.ts tests/core/fxInstances.test.ts \
+  tests/core/fxPresets.test.ts tests/host/scriptWorker.test.ts tests/host/sync.test.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm lint
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test --project=chromium --workers=1 --retries=0 \
+  --global-timeout=1200000 e2e/fx_sequence.spec.ts e2e/script_macros.spec.ts
+git diff --check
+```
+
+The Chromium executable and AL2023 libraries were npm-provisioned outside the repository because the standard Playwright browser remains unavailable in this sandbox. This is functional production-artifact evidence, not cross-browser or A41 hardware-GPU acceptance.
+
+### Remaining scope
+
+D398 closes only finish-relative timing with bounded signed offsets and its reviewed-script wait parity. Group controls, conditional lanes, generalized cancellation and the remaining shared scheduler/effect-manager surface remain open. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**
+
+<a id="report-d399"></a>
+
+## D-399 — Host-resolved persistent visual playback-phase sync groups (2026-10-04)
+
+### Audited meaning and bounded authored contract
+
+Upstream Sequencer's `.syncGroup(name)` was audited before choosing this increment. It does not schedule grouped effects to launch simultaneously and is not a shared random delay. Its first active scene/group member supplies a creation timestamp; a later member uses that timestamp as playback origin and joins the phase already in progress. The group vanishes after its final active member is destroyed. ArenaStar therefore models a shared **host-clock phase origin**, not another start dependency.
+
+A persistent image/video/text section may now author `syncGroup`, an exact trimmed name of 1–64 characters without controls. Sound, wait and camera sections, one-shot timelines, empty/padded/control-bearing/oversized names and imported unresolved fields fail closed. A section keeps its own concrete `startMs`, duration and playback rate. The earliest member in one run establishes the fresh origin; every grouped member gets the same absolute `syncAtHostTime`, so a section starting later launches on schedule but derives transform/filter/mask/fade/video source age from the phase already in progress. Different durations/rates remain different local timelines measured from one origin, matching creation-time rather than forced-frame semantics.
+
+### Host authority, durability and privacy scope
+
+`resolveFxSequence` strips every authored group name from resolved sections and returns bounded section→group preparation metadata separately. `HostSync` chooses origins before recipient projection. It may reuse an active durable origin only for an exact scene, saved macro, owner, effective audience and source/target invocation binding; same-name groups in a different macro or anchor scope start independently. That conservative scope preserves useful overlapping runs without making phase an oracle for a different caller, GM-only audience or hidden invocation. Multiple copies prepared in one atomic automation graph see earlier prepared siblings even before their durable commits. When every matching durable instance is stopped/deleted, no separate registry survives and the next run establishes phase zero again.
+
+A private `FxInstanceDocument.syncGroups` stores section membership while each resolved visual stores its absolute origin. Durable validation requires 1–16 exact unique memberships, a matching visual and origin in both directions, one identical finite origin per name, and an origin no later than each member's own scheduled start. Recipient `fx.start` payloads and reconnect cues contain only `syncAtHostTime`; they never contain membership or the authored name. Current rights, macro, scene, anchor and media checks still run before every replay. `FxPlayer` separates schedule/lifetime elapsed time from visual phase elapsed time, so timers, expiry and media-readiness accounting retain their established semantics while Pixi visuals and videos catch up from the durable host origin.
+
+### Wizard, preset and programmable-path integration
+
+The Wizard shows **Playback sync group** for image/text sections, disabled until Persist is enabled. Existing exact names are suggested but not imposed. Text ↔ Image conversion retains membership; conversion to a nonvisual step clears it. A grouped draft cannot turn persistence off until all names are cleared. Save/edit and local one-pass preview preserve the contract. Presets may retain group names while section IDs are reminted, but the complete bundle must be valid under one lifecycle; loading grouped look metadata into a one-shot draft is refused with an instruction to enable Persist.
+
+No parallel client or Worker implementation was added. Wizard Run, item/automation triggers and reviewed `api.fx.play` all reach the existing common `prepareFx` scheduler, so a saved grouped timeline has one host-owned meaning on every invocation path.
+
+### Verification
+
+- Focused `tests/core/fx.test.ts`, `tests/core/fxInstances.test.ts`, `tests/core/fxPresets.test.ts`, `tests/client/fxDeliveryFlow.test.ts` and `tests/host/sync.test.ts`: **379/379** (59 + 5 + 6 + 55 + 254). Coverage pins schema bounds/lifecycle, stripped names, fresh and active origins, future-origin rejection, durable membership equality, preset lifecycle/remint behavior, client schedule-vs-phase elapsed time, cross-run reuse, final-member reset and macro/anchor privacy scoping.
+- Full `corepack pnpm test`: **4,917 passed / 12 skipped**, **334 passing / 2 skipped files**, **135.00 s**. Typecheck: **69 components / 0 blocking issues / 1 existing ReplayPanel advisory**. Full ESLint and `git diff --check` pass.
+- Production preparation succeeded; the optional PF1e content-based starter remains absent and is skipped normally. `dist/index.html`: **4,152,923 raw / 1,186,411 gzip bytes**, below 6 MB; SHA-256 **`31ae05b5206cd1a97b6d48abe716a406c7aaa597d80e57e660b32090bd493d2b`**.
+- Production `file://` Chromium **153.0.8010.0**, one worker, zero retries: `e2e/fx_sequence.spec.ts` (38) plus `e2e/script_macros.spec.ts` (9) — **47/47 in 11.3 minutes** on that exact artifact. The new real-browser Wizard case authors two persistent growing text visuals 500 ms apart, saves/reopens the names, observes one equal `syncAtHostTime`, no `syncGroup` at the Pixi boundary and more than 400 ms of phase age on the later spawn. It reads both live drawn scales as aligned, crosses the IDB durability barrier, reloads the whole app and reads both restored scales as aligned again.
+
+Commands used for the final evidence:
+
+```sh
+corepack pnpm vitest run tests/core/fx.test.ts tests/core/fxInstances.test.ts \
+  tests/core/fxPresets.test.ts tests/client/fxDeliveryFlow.test.ts tests/host/sync.test.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm lint
+git diff --check
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm playwright test e2e/fx_sequence.spec.ts e2e/script_macros.spec.ts \
+  --project=chromium --workers=1
+```
+
+The Chromium executable and AL2023 libraries were npm-provisioned outside the repository because the standard Playwright browser remains unavailable in this sandbox. This is functional production-artifact evidence, not cross-browser or A41 hardware-GPU acceptance.
+
+### Remaining scope
+
+D399 closes only persistent visual host-clock phase groups inside one saved-timeline invocation scope. It does not add simultaneous-launch groups, shared group delay, one-shot/audio groups, cross-timeline group namespaces, seekable browser-native GIF frame control, conditional lanes, generalized cancellation or the remaining shared scheduler/effect-manager surface. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**
+
+<a id="report-d400"></a>
+
+## D-400 — Exact host-authoritative cancellation for active finite and persistent FX runs (2026-10-04)
+
+### Selection against the parity target
+
+The remaining SQ-02 scheduler controls were compared before implementation. Conditional play has greater breadth, but it cannot be completed honestly without first defining one event/outcome context across Wizard runs, item/cast outcomes, active-zone graphs and reviewed scripts. Explicit parallel lanes are lower risk because existing absolute starts already express overlap. Exact cancellation is the most complex coherent bounded gap available now: finite runs previously had no durable document, the initiating owner may be outside the playback audience, teardown must reach only prior recipients, authorization must reveal no handle existence, and Stop may race scheduled sections, shared fetch/decode, sound startup, camera claims and media reporting. That combination made it the feature most likely to be implemented incorrectly despite a small-looking button.
+
+This increment therefore implements exact live-run cancellation end to end while retaining §11's host-authoritative playback ordering. It does not reinterpret cancellation as document deletion on the client, a local visual hide, or a wildcard scan over transient recipient state.
+
+### Host handle, authority and recipient privacy
+
+A new requester-private `fx.run` message (`0x52`) acknowledges every accepted direct `fx.request` with `requestId`, exact `runId`, macro and scene IDs, authoritative `atHostTime`, optional `endsAtHostTime`, and `persistent`. It carries no sections, assets, anchors, audience or recipient facts. Successful request-ID replay sends that same acknowledgement only and does not fan out another `fx.start`.
+
+Persistent runs continue to be represented by private `FxInstanceDocument`s. A finite cue is registered only after successful recipient fan-out in a separate host-memory registry containing its owner, scene, authoritative end and the exact sessions that received it. The registry is capped at 256 entries; one timer retires entries at their resolved end, and finite sequence validation still limits the entire timeline to 60 seconds. This gives a finite cue a cancellable live handle without making it durable, replayable on reconnect or visible in a world projection.
+
+`fx.stop` now addresses an exact active finite or persistent run. A player can stop only a run they initiated; a GM/assistant can stop any active run. Unknown, expired, already-stopped and unauthorized handles all produce the same `FX run unavailable`. Finite cancellation removes the host handle and sends opaque `fx.end` only to the sessions that received that run—including the case where its requester was excluded by `others`. It creates no world operation, sequence increment or Undo entry. Persistent cancellation retains the established authoritative instance deletion and Undo restoration. `fx.list` and `fx.stopMatching` remain durable-instance APIs and expose no finite-run recipient index.
+
+### Visual and programmable surfaces, plus cancellation races
+
+The Wizard correlates pending request IDs with private acknowledgements, retains a bounded list of active runs, exposes **Cancel run** for finite and persistent entries and removes finite entries naturally at the host end. The reviewed Worker path uses the same semantics: `api.fx.play` returns the host run ID and `api.fx.stop(runId)` can stop either lifecycle exactly once. Worker-side and host-side validation both remain in place; direct and scripted stops converge on HostSync authority.
+
+Recipients process `fx.end` through `FxPlayer.stopRun()`. The run epoch advances before clearing delayed section/preload/camera timers, live Pixi objects, sounds and camera ownership. Fetch, image decode, media-element startup and report continuations all recheck scene generation and run epoch before spawning or speaking. Controlled coverage stops an active visual while image/sound fetches and a camera section are pending, then resolves all bytes and waits past every due time: no delayed visual, audio, camera write or media acknowledgement escapes.
+
+The first rebuilt visual regression found one additional shared-cache race rather than being classified away: `fx_lifecycle` stopped a persistent image while its first decode was held, restored it through Undo, and found the replacement waiting on the canceled run's asset-scoped decoder. Prefetch records now count current in-flight run waiters. Stopping one of several overlapping consumers preserves the shared record; stopping the final waiter abandons only unfinished work and removes it from the cache so the replacement starts a native decoder. Successfully decoded scene-cache entries still survive an ordinary run stop. A new controlled unit case and the unchanged image/sound lifecycle browser cases cover both sides.
+
+### Verification
+
+- Focused cancellation/protocol batch: `contracts` 12 + protocol document 3 + frame routing 9 + reviewed Worker 14 + HostSync 255 + client delivery/player 57 = **350/350** across six files (**17.48 s**). Coverage includes the 64-kind registry/direction map, `ops` routing/round-trip fixture, private/idempotent acknowledgement, an owner outside its own audience, unauthorized/generic refusal, prior-recipient-only end, natural expiry/no world state, reviewed finite stop, full local async-resource fencing, shared-overlap preservation and final-waiter replacement.
+- Full `corepack pnpm test`: **4,920 passed / 12 skipped**, **334 passing / 2 skipped files**, **117.77 s**. An earlier full run was **4,918 passed / 1 failed / 12 skipped** only because the strengthened `others` fixture expected a GM recipient while invoking as a player whom D-316 correctly forbids from firing a cue that excludes itself. The fixture was corrected to use the GM as excluded owner and two players as recipients; no product authorization or assertion was weakened.
+- `corepack pnpm typecheck`: **69 components / 0 blocking / 1 existing `ReplayPanel.svelte:29` advisory**. Full ESLint and `git diff --check` pass.
+- Production app/system/available-starter preparation succeeds; the optional PF1e content tester remains absent and is skipped normally. `dist/index.html`: **4,158,382 raw / 1,187,917 gzip bytes**, below 6 MB; SHA-256 **`23d6b1fd1f99a4c1e571eacd5c949146c72b2c60d138f2ef2ab223aa8bc3c6f1`**.
+
+### Production browser evidence and exact non-green wrapper history
+
+Chromium **153.0.8010.0**, npm-provisioned executable plus AL2023 libraries, production `file://` artifact, one worker and zero retries:
+
+- Final visual batch (`fx_sequence` 39 + `fx_lifecycle` 2): **41/41 in 10.2 min**. The new Wizard case runs a two-section finite cue, receives the exact private handle, cancels it, observes the active visual disappear and the delayed visual never start, and proves the world sequence does not advance. Both unchanged stop/Undo decoder-startup lifecycle cases pass after the shared-waiter fix.
+- Integrations batch: **21/21 in 5.4 min**, including all nine existing reviewed-script browser cases, with no regression. Exact finite reviewed-script cancellation is established by the focused real HostSync/Worker RPC integration—not mislabelled as browser coverage: it stops the ID returned by `api.fx.play`, observes recipient teardown, no world transaction and generic refusal when reusing the consumed handle.
+- Automation contains **70 distinct tests**. Its existing one-command 900-second cap expired after **48 passed / 22 not run**, with no failed test. `active_zones` 34 and `action_revert` 4 had already completed; a bounded follow-up of Automation Appearance 18 + Movement Actions 14 passed **32/32 in 10.5 min**. Thus every distinct automation case passed, but the wrapper invocation itself is not called green.
+- Canvas wrapper completed **24/25** before the known `fog.spec.ts` settings-checkbox actionability step reached its 30-second test limit; that unchanged case passed standalone **1/1 in 19.6 s**. Consequently every one of the **157 distinct** cases across visual (41), automation (70), integrations (21) and canvas (25) passed in bounded execution, but the evidence is not misreported as four clean wrapper runs.
+
+The first pre-fix visual attempt was **40/41**, with only the image lifecycle replacement failing; after the product fix the lifecycle file passed **2/2 standalone** and the complete visual batch passed. The canvas timeout is the same load-sensitive case historically recorded in D323 and passed unchanged immediately afterward. No retry count, product assertion or individual timeout was relaxed.
+
+Commands used for final evidence:
+
+```sh
+corepack pnpm vitest run tests/core/contracts.test.ts tests/core/protocol-doc.test.ts \
+  tests/net/frame.test.ts tests/host/scriptWorker.test.ts tests/host/sync.test.ts \
+  tests/client/fxDeliveryFlow.test.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm lint
+git diff --check
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 corepack pnpm test:fx:visual
+# The same environment was used for test:fx:automation, test:fx:integrations,
+# test:fx:canvas and the bounded follow-ups described above.
+```
+
+### Remaining scope
+
+D400 closes exact cancellation of a currently live finite or persistent run through the Wizard and reviewed API. Finite handles deliberately disappear at natural completion and host restart, are absent from reconnect sync and cannot be listed/stopped by wildcard; their presentation-only cancellation is not Undo state. Conditional lanes, generic simultaneous-launch/shared-delay groups, generalized cancellation propagation, transaction-wide script rollback and the rest of the scheduler/effect-manager surface remain open. Cross-browser codec/transparency evidence, cache quota/eviction, remaining MC/TR/A19–A40 capabilities and the pre-published hardware-GPU A41 qualification remain open. **Full A01–A41 parity is not established.**
+
+<a id="report-d401"></a>
+
+# D-401 — Host-sampled conditional section play (bounded SQ-02 slice)
+
+## Selection and contract
+
+D400 deliberately did not accept client-supplied hit/miss or branch outcomes: direct Wizard,
+PF1e item/cast, automation and reviewed-script invocations do not yet share one truthful
+host-issued outcome context. D401 keeps that trust boundary and implements only the conditional
+predicate the scheduler can own end to end now. A non-wait one-shot section accepts the strict
+shape `playIf: { kind: "chance", percent }`, with an integer percentage from 0 through 100.
+Persistent timelines and conditional waits fail validation. Zero is an authored disabled section;
+100 always plays (the Wizard canonicalizes it to no field); 1–99 consumes one host RNG draw.
+This is not a hit/miss/save/value branch and does not claim full SQ-02/A01 acceptance.
+
+The host validates and resolves every anchor/media reference and every concrete schedule position
+before condition sampling. Random-delay draws remain first in section order; genuine conditions
+are then sampled once each in authored order. The one decision includes or omits every replay of
+that authored section for every recipient. A finish-relative dependent keeps the skipped section's
+would-be concrete final-replay time, rather than collapsing its schedule per recipient. Malformed
+injected entropy clamps through the existing unit-interval rule. Deterministic 0/100 edges consume
+no entropy.
+
+`playIf` is stripped while resolving, is absent from `ResolvedFxSection`, and is explicitly refused
+in imported durable instance state. An all-skipped run is a successful private no-op: `fx.run`
+reports `atHostTime === endsAtHostTime`, while no empty `fx.start`, recipient projection, media
+receipt or targeting/audience delivery line is emitted. Existing direct-request idempotency means
+a duplicate request ID receives the original acknowledgement without rerolling or replaying.
+
+## Visual and programmable surfaces
+
+The Wizard exposes **Play chance %** on non-wait sections, blocks Persist while a condition remains,
+preserves the condition across compatible section/camera discriminators and presets, and drops it
+when changing to Wait. Its help distinguishes deterministic local Preview (all positive-chance
+eligible sections) from host-sampled Run and states that finish dependents retain the would-be
+schedule. Conditional presets may load only into one-shot drafts. The same saved definition is
+used by direct Run, automation sequence actions and reviewed `api.fx.play`; there is no client,
+Worker or graph-specific condition evaluator and no new outcome field on `fx.request`.
+
+The normative SQ-02 row now carries a bounded partial annotation without changing its target:
+committed-outcome branches, explicit parallel lanes, scheduled launch groups and the rest of
+A01–A03/A10 remain open.
+
+## Unit/integration verification
+
+- `tests/core/fx.test.ts` + `tests/core/fxPresets.test.ts`: **66/66**. Coverage pins exact
+  percentage schema/bounds, one draw per genuine condition, 0/100 no-draw edges, all-or-none replay
+  expansion, predicate stripping, immutable authored state, an all-skipped resolved array,
+  finish-relative schedule retention, persistent/wait refusal and preset retention.
+- `tests/host/sync.test.ts`: **258/258**. A GM and two joined players receive byte-equal selected
+  sections while the RNG is called by authored condition—not recipient or replay. Zero/100 edges,
+  stripped payloads, requester-private all-skipped acknowledgement with no empty cue/report, an
+  automation sequence step whose prepared decision survives graph commit without rerolling, and a
+  reviewed-script `fx.play` invocation through the authoritative HostSync RPC are exercised.
+- Durable instance + contracts + reviewed Worker focused group: **31/31**. A forged durable
+  `playIf` fails closed; existing message/Worker contracts remain green.
+- Full `corepack pnpm test`: **4,924 passed / 12 skipped**, **334 passing / 2 skipped files**,
+  **130.29 s**. This is four new behavioral tests over D400's final 4,920 baseline. The successful
+  run emitted one Node `MaxListenersExceededWarning` on a test-runner socket; no file or assertion
+  failed, and no listener limit was changed.
+- `corepack pnpm typecheck`: **69 components / 0 blocking / 1 existing
+  `ReplayPanel.svelte:29` advisory**. Full ESLint and `git diff --check` pass.
+
+## Production browser evidence
+
+Chromium **153.0.8010.0**, production single-file `file://` build, one worker and zero retries:
+
+- Complete `e2e/fx_sequence.spec.ts`: **40/40 in 9.3 min**. The new real UI case authors an
+  unconditional text section and a 50% section, saves the timeline, opens New then Edit and reads
+  50% back. It overrides only HostSync's one-word crypto RNG shape to 75%, runs through the real
+  host, and sees only the unconditional Pixi spawn. It then changes the saved field to 90%, submits
+  the actual update and runs again; both sections spawn. Every intercepted recipient section lacks
+  `playIf`. Thus both condition outcomes cross edit → publish → HostSync → player/Pixi, rather than
+  stopping at a type or editor assertion.
+- Complete unchanged `e2e/script_macros.spec.ts`: **9/9 in 1.7 min**, preserving production Worker,
+  sequencing, replay/await and Tagger integration behavior. Conditional script semantics are pinned
+  directly by the focused HostSync RPC case above; this browser file is reported as regression
+  evidence, not mislabeled as a new scripted-condition browser scenario.
+- The focused new Chromium case passed **1/1** on two runs (9.7 s and 10.0 s test bodies). The first
+  unscoped Playwright command also attempted Firefox and WebKit; Chromium passed, while those two
+  projects could not launch because their executables were not installed. A Chromium-scoped rerun
+  passed. No cross-browser behavior is claimed and no product assertion or timeout was weakened.
+
+Production preparation built app/system/available starter artifacts successfully; the optional
+PF1e content tester remained absent and skipped normally. `dist/index.html` is **4,161,122 raw /
+1,188,661 gzip bytes**, below 6 MB; SHA-256
+**`82df42301878aaf56597afb0e6299a14d334d994d7af7d44bbf2d88dbe7b0b77`**.
+
+Commands used for final evidence:
+
+```sh
+corepack pnpm vitest run tests/core/fx.test.ts tests/core/fxPresets.test.ts
+corepack pnpm vitest run tests/host/sync.test.ts
+corepack pnpm vitest run tests/core/fxInstances.test.ts tests/core/contracts.test.ts \
+  tests/host/scriptWorker.test.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm lint
+git diff --check
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test e2e/fx_sequence.spec.ts \
+    --project=chromium --workers=1 --retries=0
+# Same environment/options for e2e/script_macros.spec.ts.
+```
+
+## Remaining scope
+
+D401 closes only finite per-section **host chance inclusion**. It does not define a committed PF1e
+result context, hit/miss/save/value predicates, `if/else` branches, conditional waits/persistent
+sections, nested visual sequences, explicit parallel-lane authoring, generic simultaneous-launch
+or shared-delay groups, cancellation propagation or transaction-wide Worker rollback. D395–D400
+media/timing/privacy/persistence/cancellation invariants remain intact. Cross-browser codec and
+transparency evidence, cache quota/eviction, remaining MC/TR/A19–A40 capabilities and qualifying
+pre-published hardware-GPU A41 evidence remain open. **Full A01–A41 parity is not established.**
+
+<a id="report-d402"></a>
+
+# D-402 — Bounded host-sampled simultaneous-launch groups (SQ-02 slice)
+
+## Selection and contract
+
+D402 follows the §11 ordering without treating every remaining SQ-02 phrase as the same feature.
+Existing overlapping `startMs` values already provide parallel playback but not an authored group
+invariant, so adding cosmetic lane labels would not close group scheduling. Extending D401 to
+hit/miss/save/value would require a truthful host-committed outcome context shared by direct, PF1e,
+automation and reviewed-script invocation; a caller-supplied result remains rejected. The coherent
+slice available now is a saved one-shot schedule group.
+
+A non-wait one-shot section accepts an exact, trimmed `launchGroup` name of 1–64 characters. One
+member is valid. Every same-name member must carry the identical absolute `startMs`, or the exact
+same earlier `startAfter.sectionId` and signed offset with `startMs: 0`, plus the same optional
+random-delay min/max range. Text, image/video, sound and camera sections may participate. Duration,
+rendering/media controls, replay count/gap and D401 `playIf` remain per section; waits and all
+persistent timelines reject membership.
+
+This field is deliberately not D399 `syncGroup`. A launch group gives finite members one concrete
+schedule time. A persistent visual playback group keeps each member's own start/lifetime and gives
+it an older host-clock phase when it appears. The two lifecycle modes cannot be combined, and D402
+does not rename playback-phase synchronization into simultaneous launch.
+
+## Host resolution, ordering and recipient safety
+
+Core validation records the first authored schedule shape for each exact name and refuses any later
+mismatch. Resolution still preflights the complete sequence before exposing a cue. When a grouped
+range exists, the first authored member samples one bounded RNG unit and later peers reuse it;
+matching fixed/dependent bases therefore resolve to exactly the same `startMs`. Ungrouped ranges
+retain one draw per section. Schedule concretization still precedes D401 condition sampling, so a
+member may be independently included or skipped without changing peer/dependent time, and all of a
+selected member's replays remain local to that section.
+
+Every projection path strips `launchGroup`, `randomDelay` and `startAfter`; recipients receive only
+concrete cues. An imported durable instance carrying a launch name fails closed, just as an authored
+range/dependency/predicate does. A persistent instance consequently cannot establish or reveal a
+one-shot launch namespace and reconnect cannot reroll one. The existing direct request-ID replay
+returns the original private run acknowledgement without rerunning resolution. Direct Wizard,
+automation sequence-step and reviewed `api.fx.play` tests all pass through HostSync's same resolver;
+there is no graph/Worker/client-side grouping implementation.
+
+## Wizard and preset behavior
+
+The Wizard exposes **Simultaneous launch group** for every non-wait section, with existing exact
+names as suggestions. Joining a later member adopts the first member's complete schedule. If an
+earlier section is assigned an existing name, it becomes the first authored member and aligns the
+later peers to its safe schedule. Editing absolute Start, Finish offset or either random bound on
+one member rewrites every peer atomically; a grouped finish selector offers only dependencies that
+precede the earliest member. Duration, replay and chance controls remain independent. Switching to
+Wait removes membership; compatible section/camera discriminator changes preserve it.
+
+Persist is disabled while a launch name remains, and an existing invalid/imported field can still
+be cleared. Playback-sync controls remain persistent-visual-only and the help describes their phase
+semantics separately. Presets validate the whole matching group, preserve names/ranges when minting
+fresh section IDs, and refuse loading a launch/finish/condition preset into a persistent draft.
+Local Preview follows the deterministic resolver default; published Run exercises host entropy.
+
+## Unit and integration verification
+
+- Core/preset/durable/HostSync final focused batch: **334/334** across four files in **7.27 s**.
+  Core coverage includes one-member validity, strict names, absolute and finish-relative shape
+  matching, mismatch refusal for either offset/range edge, mixed non-wait kinds, one shared draw,
+  independent durations/replays/conditions, output stripping and immutable authored state. Presets
+  preserve a matching group through reminting and refuse a mismatched one; durable validation
+  rejects a forged authored name.
+- HostSync: **261/261**. The direct case saves a valid group and refuses an invalid schedule, then a
+  GM and two joined players receive byte-equal `[250, 500, 250]` concrete starts while one grouped
+  random range consumes one draw—not one per member, replay or recipient—and no authored metadata
+  reaches any cue. Dedicated automation coverage proves graph preflight samples once and
+  post-commit emission does not reroll. Dedicated reviewed-script coverage invokes `fx.play` over
+  the same saved definition and receives the same shared concrete start.
+- The first focused HostSync attempt failed only because the test put the valid and intentionally
+  forged macro creations in one atomic operation envelope; the host correctly rejected the whole
+  envelope. Splitting those two fixture submissions retained the atomicity assertion and passed.
+  No product rule or assertion was weakened.
+- Full `corepack pnpm test`: **4,929 passed / 12 skipped**, **334 passing / 2 skipped files**, in
+  **126.03 s**. This is five new behavioral tests over D401's 4,924 baseline. The expected optional
+  missing-content-directory notice appeared; no test failed.
+- `corepack pnpm typecheck`: **69 components / 0 blocking / 1 existing
+  `ReplayPanel.svelte:29` advisory**. Full ESLint, protocol consistency and `git diff --check` pass.
+
+## Production browser evidence
+
+Chromium **153.0.8010.0**, production single-file `file://` artifact, one worker and zero retries:
+
+- Complete `e2e/fx_sequence.spec.ts`: **41/41 in 10.1 min**. The new real UI case authors an
+  ungrouped 200 ms opening and two finish-relative group members. Joining the second reads back the
+  first member's dependency, +100 ms offset and 300–400 ms range. Editing the second to −50 ms and
+  a 350 ms minimum updates the first immediately while their 300/700 ms durations stay distinct.
+  Save → New → Edit reads both exact group names and shared controls back.
+- The case overrides only HostSync's one-word `Uint32Array(1)` entropy shape to 75%, publishes and
+  runs the saved timeline, then observes the actual Pixi spawn boundary. Exactly one entropy draw
+  occurs. Both grouped cues carry the same concrete start inside 500–550 ms, their native spawn
+  calls are less than 50 ms apart, their independent durations remain 300/700 ms, and no
+  `launchGroup`, `randomDelay` or `startAfter` property reaches playback. The focused case passed
+  **1/1 in 12.6 s** before the complete run.
+- Complete unchanged `e2e/script_macros.spec.ts`: **9/9 in 1.9 min**. Equal reviewed-script launch
+  semantics are asserted directly by the focused real HostSync/Worker RPC integration; the browser
+  file is regression evidence and is not mislabeled as a new scripted-group browser case.
+
+Production app/system/available-starter preparation succeeds; the optional PF1e content tester is
+absent and skips normally. `dist/index.html` is **4,165,183 raw / 1,189,546 gzip bytes**, below
+6 MB; SHA-256 **`dc7f0c1a824305930f74964cb521cc8937b535c50beb3faefe8e68dc1d308cd5`**.
+
+Commands used for final evidence:
+
+```sh
+corepack pnpm vitest run tests/core/fx.test.ts tests/core/fxPresets.test.ts \
+  tests/core/fxInstances.test.ts tests/host/sync.test.ts
+corepack pnpm vitest run tests/core/protocol-doc.test.ts tests/core/contracts.test.ts \
+  tests/host/scriptWorker.test.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm lint
+git diff --check
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test e2e/fx_sequence.spec.ts \
+    --project=chromium --workers=1 --retries=0
+# Same environment/options for e2e/script_macros.spec.ts.
+```
+
+## Remaining scope
+
+D402 closes only **matching-schedule simultaneous launch within one finite saved timeline**. It is
+not full parallel-lane authoring: there are no lane objects, lane-level durations/conditions,
+nested visual sequences, cross-timeline launch namespaces or generic group cancellation. It does
+not add committed PF1e outcome context, hit/miss/save/value predicates, conditional persistence,
+conditional waits, transaction-wide Worker rollback or the rest of SQ-02/A01–A03/A10. D395–D401
+media/timing/privacy/persistence/cancellation/condition invariants remain intact. Cross-browser
+codec/transparency evidence, cache quota/eviction, remaining MC/TR/A19–A40 capabilities and
+qualifying pre-published hardware-GPU A41 evidence remain open. **Full SQ-02 and A01–A41 parity are
+not established.**
+
+<a id="report-d403"></a>
+
+# D-403 — Bounded explicit parallel fork/lane/longest-join scheduling
+
+## Selected capability and bounded contract
+
+D402 gave finite sections a shared launch schedule, but did not represent two serial streams after
+that launch or a barrier that waits for the stream that truly ends last. D403 implements that next
+coherent SQ-02 slice. A finite section may carry author-only
+`parallel: { group, lane, offsetMs? }`. One exact group is a contiguous block with **2–8 exact
+lanes**. Every lane's first member authors the same fork schedule (absolute or an earlier section's
+finish, with the same optional random range); subsequent members follow the prior member's final
+replay in their own lane plus a signed overlap/gap. A negative offset may reach, but not precede,
+the predecessor's start. The block may contain interleaved lane members, but cannot reopen after an
+unrelated section.
+
+An outside section authored after the complete block may use
+`startAfter: { parallelGroup, offsetMs }` instead of `sectionId`. It starts from the maximum final
+replay end across all lanes, plus the bounded signed offset. A group join is therefore not an alias
+for the last member in author order. Exact-one target validation, 60-second maximum duration, 64
+resolved-cue cap, and replay-aware end calculations remain in force. Cosmetic one-lane blocks,
+more than eight lanes, fork schedule/range mismatches, later members carrying independent schedule
+state, wait-only lanes, persistent timelines, `launchGroup` combinations, discontinuous groups, negative-time
+overlap and current/future/unknown joins fail closed.
+
+This is a bounded finite block, not arbitrary or nested lane graphs, persistent lane state,
+cross-timeline namespaces, branch-local topology, or a committed PF1e hit/miss/save/value branch.
+SQ-02 and A01–A03/A10 remain partial.
+
+## Host resolution, privacy and lifecycle
+
+`fxParallelPlans` derives and validates each structural block before the ordinary schedule proof.
+At resolution, a block's optional fork range consumes **one** host RNG unit and every lane-first
+member reuses it. Later starts are derived lane-locally; the group's end is the longest final replay.
+D401 chance decisions remain section-local and happen after schedule concretization. A skipped
+member keeps its would-be end for lane progress and joins, so projection/condition differences
+cannot collapse time or create a recipient oracle.
+
+The resolver removes `parallel`, `randomDelay` and `startAfter` before projection. Direct HostSync
+evidence sends byte-equal concrete schedules to the GM and two joined players, consumes one fork
+draw, and computes the finite run end from the true longest path. Imported durable instances with
+forged `parallel` state are refused. Preset loads clone lane metadata, mint all section IDs first,
+remap direct section dependencies and intentionally retain group-join names. Existing finite run
+handles, cancellation fencing, media/anchor preflight, recipient filtering, replay/idempotency and
+persistent-instance boundaries are unchanged.
+
+Automation sequence steps prepare the lane schedule before the graph commit and do not reroll while
+emitting. Reviewed `api.fx.play` reaches the same HostSync path. Neither the graph planner, Worker,
+client nor renderer owns a second lane scheduler.
+
+## Constructive Wizard behavior
+
+The Wizard exposes **Parallel block** and **Parallel lane** with bounded datalist suggestions and
+safe generated names. Joining a group propagates the canonical fork's Start, finish offset and
+random range to every lane-first member. A later lane member has no editable independent Start or
+random range; it receives **Lane overlap / gap ms** relative to its own predecessor. Outside a
+complete earlier block, Start timing offers **After parallel block … finishes (longest lane)**.
+The worst-case duration readout runs the same lane/join model.
+
+Membership must remain contiguous. Leaving is edge-only; lane reassignment, deletion and departure
+normalize the block and repair dependencies. If only one lane remains, the Wizard dissolves the
+block to ordinary finish-relative relationships rather than saving decorative metadata. Persistence,
+D402 launch groups, incompatible preset loading and persistent grouped preset state are interlocked.
+Save → New → Edit retains the complete lane/group/join structure.
+
+## Unit and integration verification
+
+- Core/preset/durable suites: **76/76 passed**. Core cases cover a shared fork, lane-local serial
+  progress, signed overlap, one RNG sample, final-replay joins, conditional would-be timing,
+  immutability, stripping and malformed structural shapes. Presets preserve/remint lanes and block
+  joins without aliasing nested lane objects; durable instances reject forged authoring metadata.
+- Three focused HostSync paths passed: direct request, automation preflight and reviewed Worker RPC.
+  The direct fixture resolves starts `[250, 250, 650, 600, 800, 900]`, uses one entropy draw,
+  projects the same stripped schedule to three recipients and reports
+  `endsAtHostTime = atHostTime + 1,300`. Automation and reviewed-script fixtures each resolve
+  `[250, 250, 500, 750]` with one preflight draw and no lane/range/dependency metadata.
+- Full `corepack pnpm test`: **4,935 passed / 12 skipped**, **334 passing / 2 skipped files**, in
+  **141.78 s**. This is six passing tests above D402's 4,929 baseline.
+- TypeScript and Svelte checks pass; Svelte reports **69 components / 0 blocking / 1 existing
+  `ReplayPanel.svelte:29` advisory**. Full ESLint, protocol consistency and `git diff --check` pass.
+
+## Production browser evidence
+
+Chromium **153.0.8010.0**, production single-file `file://` artifact, one worker, zero retries:
+
+- Complete `e2e/fx_sequence.spec.ts`: **42/42 in 10.1 min**. The new case authors two two-step lanes
+  and a longest-lane join through the actual Wizard, saves, selects New, reopens Edit and verifies
+  every block/lane/offset/join field.
+- The case fixes only HostSync's one-word random source to 75%, publishes and runs the timeline, and
+  intercepts the real Pixi boundary. Exactly one fork draw produces exact concrete starts
+  **`[475, 475, 875, 825, 1025]`**. Lane two's second member begins 50 ms before its predecessor's
+  final end; lane one's second member ends at 1,025 ms and therefore controls the outside join even
+  though lane two is the final authored block member. No `parallel`, `randomDelay` or `startAfter`
+  field reaches playback.
+- Complete unchanged `e2e/script_macros.spec.ts`: **9/9 in 1.8 min**. The dedicated HostSync/Worker
+  fixture is the new reviewed-lane semantic proof; this browser file is regression evidence, not a
+  mislabeled scripted-lane browser scenario.
+
+The first browser launch lacked the extracted runtime library path and failed before opening a page;
+adding `/tmp/al2023/lib` restored the documented local Chromium setup. The first real focused run
+then found a test selector ambiguity because Playwright's non-exact **Parallel block** label also
+matched an option inside Start timing; using the control's exact accessible name corrected the test.
+A D402 regression rerun found that the new generic **Finish / join offset** label had broken the
+established **Finish offset ms** contract; the product now retains that label for direct dependencies
+and uses **Join offset ms** only for a block join. One equal-start D402 rerun observed the two timer
+callbacks in reverse order. The assertion now checks the exact `Flash → 300 ms` and
+`Impact → 700 ms` mapping without inventing a callback-order guarantee for simultaneous cues; equal
+concrete start, sub-50-ms launch, metadata stripping and one draw remain asserted. No timeout,
+retry, product bound or behavior claim was relaxed.
+
+Production app/system/available-starter preparation succeeds; the optional PF1e content tester is
+absent and skips normally. `dist/index.html` is **4,181,066 raw / 1,193,941 gzip bytes**, below
+6 MB; SHA-256 **`5d3f5183a8998a9b4873df379629bdce26f2604b2135653fd74bdffd45e66d7b`**.
+
+Commands used for final evidence:
+
+```sh
+corepack pnpm exec vitest run tests/core/fx.test.ts tests/core/fxPresets.test.ts \
+  tests/core/fxInstances.test.ts
+corepack pnpm exec vitest run tests/host/sync.test.ts -t "explicit parallel|parallel fork"
+corepack pnpm test
+corepack pnpm check:svelte
+corepack pnpm exec tsc --noEmit
+corepack pnpm lint
+corepack pnpm exec vitest run tests/core/protocol-doc.test.ts tests/core/contracts.test.ts
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+git diff --check
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test e2e/fx_sequence.spec.ts \
+    --project=chromium --workers=1 --retries=0
+# Same environment/options for e2e/script_macros.spec.ts.
+```
+
+## Remaining scope
+
+D403 closes only a bounded **finite, contiguous, explicit fork/lane/longest-join block**. It does
+not close arbitrary/nested or persistent lanes, reusable nested visual sequences, branch-local lane
+topology, cross-timeline group namespaces, committed-outcome conditions, generic cancellation
+propagation, transaction-wide Worker rollback or the rest of SQ-02/A01–A03/A10. D395–D402 timing,
+authority, media, privacy, lifecycle and recipient-projection contracts remain intact.
+Cross-browser codec/transparency execution, cache quota/eviction, remaining MC/TR/A19–A40 work and
+a qualifying pre-published hardware-GPU A41 run remain open. **Full SQ-02 and A01–A41 parity are
+not established.**
+
+<a id="report-d404"></a>
+
+# D-404 — Bounded host-sampled mutually exclusive choice groups
+
+## Selected capability and bounded contract
+
+D401's independent chance predicates can produce none, one or several alternatives; they cannot
+state “choose exactly one.” D404 implements the next coherent conditional-scheduler subset that the
+host can own without accepting an untrusted event result. A finite non-wait section may carry
+`playIf: { kind: "choice", group, option, weight }`. Group and option are exact trimmed 1–64
+character names. Weight is an integer 1–100. One timeline has at most eight groups; every group has
+2–8 distinct options. An option may contain several sections, which play together, and every member
+of that exact group/option repeats one matching relative weight.
+
+Validation rejects loose keys, malformed names/weights, mismatched weights, one or nine options,
+more than eight groups, Wait membership and persistence. This remains inside the established
+48-section, 64-resolved-cue and 60-second timeline bounds. It is not an arbitrary/nested branch
+graph, branch-local topology, reusable nested sequence or committed PF1e outcome branch.
+
+## Host resolution, timing, privacy and invocation paths
+
+The resolver first validates every anchor/media reference and computes the complete would-be
+schedule. When it reaches the first authored member of each choice group, it consumes one host RNG
+unit and selects one option by relative weight. All members and replays in that option are included
+for every recipient; every other option is omitted. A later member of the same group never consumes
+a second draw.
+
+Excluded options retain their would-be schedule. A finish-relative dependent can therefore wait on
+an excluded member; the same rule preserves serial parallel-lane progression and longest-lane joins.
+The selected result cannot move later cues differently by viewer or expose itself through schedule
+collapse. Resolution removes the complete `playIf` object before recipient projection. Choice group,
+option and weight never reach Pixi/audio/camera playback or a durable instance; imported durable
+records carrying the author field fail closed. Presets retain a cloned author object while minting
+fresh section IDs.
+
+Direct Wizard requests, automation sequence-step preflight and reviewed Worker `api.fx.play` all use
+the same `prepareFx`/HostSync resolver. Dedicated integration cases prove one draw before graph
+commit with no emission reroll and the same one-draw behavior through the reviewed RPC. D404 adds no
+caller-supplied outcome or request field.
+
+## Constructive Wizard behavior
+
+Every non-wait one-shot section exposes **Random choice group**. Once named, **Choice option** and
+**Choice weight** appear with bounded suggestions. Joining creates a safe initial option; renaming
+can join existing members, and changing a weight propagates to every section in that option. The
+Wizard retains groups across compatible section/camera changes and Save → New → Edit. Persistence
+is disabled while any choice remains.
+
+A structural edit cannot leave a decorative one-option group. Clearing/deleting the final member of
+one arm, or changing it to Wait, turns the remaining members unconditional when fewer than two
+options survive. Local Preview uses deterministic zero entropy: lower-bound random delays, every
+positive chance and the first authored choice option. Host Run alone exercises random selection.
+
+## Unit, integration and static verification
+
+- `tests/core/fx.test.ts`, `fxPresets.test.ts` and `fxInstances.test.ts`: **79/79 passed**. Coverage
+  pins both weighted edges, one draw per group rather than member/replay, multi-section options,
+  stable excluded-option dependency timing, immutability, stripping, strict bounds, preset cloning
+  and durable refusal.
+- Three new HostSync paths passed: direct request, automation preflight and reviewed Worker RPC. The
+  direct fixture sends the same selected option to the GM and two joined players, strips names and
+  reports the natural end from an excluded arm's would-be dependent schedule. Automation and
+  reviewed paths each resolve `[["two", 200], ["after", 450]]` with one draw and no predicate or
+  dependency metadata.
+- Full `corepack pnpm test`: **4,941 passed / 12 skipped**, **334 passing / 2 skipped files**, in
+  **128.28 s**—six tests above D403's baseline.
+- `corepack pnpm typecheck`: **69 components / 0 blocking / 1 existing
+  `ReplayPanel.svelte:29` advisory**. Full ESLint, protocol/contracts **15/15** and
+  `git diff --check` pass.
+
+## Production browser evidence
+
+Chromium **153.0.8010.0**, production single-file `file://` artifact, one worker and zero retries:
+
+- Complete `e2e/fx_sequence.spec.ts`: **43/43 in 10.4 min**. The new case authors a red option with
+  two sections, a blue option with one section, relative weights 2:3, and a finale depending on the
+  red arm. It proves same-option weight propagation, persistence interlock, save, New, Edit and full
+  field recovery.
+- The intercepted local Preview deterministically emits red at **100/300 ms** and the finale at
+  **650 ms**, consuming zero HostSync entropy. The test then fixes only HostSync's one-word random
+  source to 75%. Run consumes exactly one draw, emits only blue at **200 ms**, and keeps the finale
+  at **650 ms** from the excluded red member's would-be finish. No `playIf` or `startAfter` reaches
+  the real Pixi spawn boundary.
+- Clearing blue from the two-option group clears every surviving one-option membership. Finish
+  timing independently keeps persistence disabled until it too is reset; with both interlocks gone,
+  persistence enables. Reopening Edit restores the still-saved choice.
+- Complete unchanged `e2e/script_macros.spec.ts`: **9/9 in 1.9 min**. The reviewed choice behavior is
+  proved by the dedicated HostSync/Worker RPC case; the browser file is regression evidence rather
+  than a mislabeled scripted-choice UI case.
+
+The first focused browser run reached every save/reopen/playback assertion and failed only because
+the test expected persistence to enable immediately after choice repair while its authored
+finish-relative dependency still correctly interlocked persistence. The test now asserts that
+independent interlock, clears the dependency and then observes enablement. The strengthened focused
+case passed **1/1**, and the complete file passed. No product behavior, timeout or retry was relaxed.
+
+Production app/system/available-starter preparation succeeds; the optional PF1e content tester is
+absent and skips normally. `dist/index.html` is **4,187,519 raw / 1,195,259 gzip bytes**, below
+6 MB; SHA-256 **`ce541f749182907e5dd9c5551a9f0d6eead2da0cb162327308ccdc37783ddd8d`**.
+
+Commands used for final evidence:
+
+```sh
+corepack pnpm exec vitest run tests/core/fx.test.ts tests/core/fxPresets.test.ts \
+  tests/core/fxInstances.test.ts
+corepack pnpm exec vitest run tests/host/sync.test.ts -t "exclusive choice|exclusive choices"
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm lint
+corepack pnpm exec vitest run tests/core/protocol-doc.test.ts tests/core/contracts.test.ts
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+git diff --check
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test e2e/fx_sequence.spec.ts \
+    --project=chromium --workers=1 --retries=0 --global-timeout=900000
+# Same environment/options for e2e/script_macros.spec.ts.
+```
+
+## Remaining scope
+
+D404 closes only bounded, weighted, mutually exclusive **host-random alternatives** inside one
+finite saved timeline. It does not add a trusted outcome context, committed hit/miss/save/value
+branching, arbitrary/nested branch or lane graphs, branch-local lane topology, persistent choices,
+reusable nested visual timelines, event markers, callback/return-value choreography or full
+SQ-02/A01–A03/A10. Existing item cue selection is not evidence for a host-issued result contract,
+and no client outcome is trusted. D395–D403 timing, authority, privacy, lifecycle and recipient
+projection remain intact. Cross-browser execution, cache quota/eviction, remaining MC/TR/A19–A40
+work and a qualifying pre-published hardware-GPU A41 run remain open. **Full SQ-02 and A01–A41
+parity are not established.**

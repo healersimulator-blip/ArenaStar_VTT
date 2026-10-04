@@ -61,6 +61,7 @@ import type {
   MacroResultMsg,
   FxRequestMsg,
   FxStartMsg,
+  FxRunMsg,
   FxStopMsg,
   FxStopMatchingMsg,
   HelloMsg,
@@ -88,8 +89,13 @@ import { pf1eMovePlan } from "../packages/pf1e/movement";
 import {
   isPendingExpired,
   pendingPruneOps,
+  pendingRollOfSystem,
+  pendingRollsOfSystem,
+  pendingRollUpdateDiff,
   shouldDeferToPlayer,
   resolvePendingRoll as resolvePendingRollDoc,
+  validatePendingRoll,
+  PENDING_ROLL_MAX,
 } from "../packages/pf1e/pendingRoll";
 import type { PendingRoll } from "../packages/pf1e/pendingRoll";
 import {
@@ -106,6 +112,11 @@ import {
 } from "../packages/pf1e/rollLedger";
 import type { RollLedger, RollLedgerRoll } from "../packages/pf1e/rollLedger";
 import { deriveFromActorDocument } from "../packages/pf1e/actor";
+import { PF1E_SAVE_SEVERITIES, resolveSpellTarget, spellResistanceCheck, type PF1eSaveSeverity,
+  type PF1eSaveType } from "../packages/pf1e/casting";
+import { PF1E_ENERGY_TYPES, type PF1eEnergyType } from "../packages/pf1e/healthState";
+import { hasPF1eFeat } from "../packages/pf1e/feats";
+import { srAlreadyOvercome, srOvercomeBlobFromFlags, srOvercomeDiff } from "../packages/pf1e/srLedger";
 import { planAutomationHealth } from "../packages/pf1e/automationHealth";
 import {
   appliedWith,
@@ -116,13 +127,15 @@ import type { DocId, PeerId, TxId, UserId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { actionOpRef, actionStaleReason, extendActionReceipt, missingActionMessageDeletes,
   type ActionAudit } from "../core/actionRevert";
+import { actionAsJson, actionCardOf, actionFxContext, normalizeNewActionCard, resolveActionPendingTarget,
+  validateActionCard, type ActionCard, type ActionFxContext, type ActionTarget } from "../core/action";
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
-import { fxAudienceAllows, fxSectionsForViewer, resolveFxSequence, validateFxSequence,
-  type FxAudience } from "../core/fx";
-import type { ResolvedFxSection } from "../core/fx";
+import { FX_FINISH_OFFSET_MAX_MS, fxAudienceAllows, fxResolveSyncOrigins, fxSectionsForViewer,
+  resolveFxSequence, validateFxSequence, type FxAudience } from "../core/fx";
+import type { FxSyncGroupMember, ResolvedFxSection } from "../core/fx";
 import { combatTriggerEvents } from "../core/combat";
 import { readWorldClock } from "../packages/pf1e/worldClock";
 import { automationImageError, doorTransitionMethod, pinnedSelectorError, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
@@ -204,6 +217,8 @@ export interface HostEvents {
   "join:approved": { peerId: PeerId; userId: UserId; known: boolean };
   "join:denied": { peerId: PeerId; reason: string };
   "peer:closed": { peerId: PeerId; reason: string };
+  /** Durable, bounded facts from a newly committed action revision. FX may observe; never mutate. */
+  "action:committed": ActionFxContext;
 }
 
 /** §5A sim/turn handlers (TurnChannel); wired via `attachSim` (unit: sim channel). */
@@ -257,6 +272,14 @@ export interface FogStore {
   get(userId: UserId, sceneId: DocId): Promise<Uint8Array | null>;
 }
 
+interface ActiveTransientFx {
+  sceneId: string;
+  ownerId: string;
+  /** Only sessions that received `fx.start` may receive its opaque `fx.end`. */
+  peers: Set<PeerId>;
+  endsAtHostTime: number;
+}
+
 interface PreparedFx {
   cue: FxStartMsg;
   recipients: Session[];
@@ -270,6 +293,8 @@ interface PreparedFx {
   /** The run's effective audience: the narrowing if one was asked for, else the macro's. */
   audience: FxAudience;
   checkedAtSeq: number;
+  /** Private authored memberships stored only with a durable instance. */
+  syncGroups?: FxSyncGroupMember[];
   sourceTokenId?: string;
   targetTokenId?: string;
 }
@@ -698,6 +723,9 @@ export class HostSync {
   /** D-308: the media-acknowledgment window (one timer for the earliest deadline). */
   private fxMediaTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly fxMediaReceipts = new Map<string, FxMediaReceipt>();
+  /** One scheduler for all finite, cancellable presentation runs; no run creates its own timer. */
+  private fxTransientTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly fxTransientRuns = new Map<string, ActiveTransientFx>();
   private disposed = false;
   /** §8/§9 fog readbacks: `${sceneId}:${userId}` → latest PNG bytes (write-through cache). */
   readonly fogPngs = new Map<string, Uint8Array>();
@@ -1011,6 +1039,7 @@ export class HostSync {
       case "rejected":
       case "asset.chunk":
       case "fx.start":
+      case "fx.run":
       case "fx.end":
       case "asset.manifest":
       case "automation.trace":
@@ -1305,13 +1334,14 @@ export class HostSync {
     }
     const prepared = this.precommitStopMovement(normalized.ops, session.user.id, txId);
     if (!prepared.ok) { this.reject(session, txId, "invariant", prepared.error); return; }
-    // User ops were permission-checked above; the only host-generated addition is
-    // a token-boundary correction for the same already-authorized moving token.
+    // User ops were permission-checked above. Token-boundary corrections remain scoped to the
+    // already-authorized mover; immutable roll-claim writes are generated separately below.
     const finalValidation = this.validateOps(session.user, prepared.ops);
     if (!finalValidation.ok) {
       this.reject(session, txId, finalValidation.reason, finalValidation.error); return;
     }
-    const commitOps = prepared.paths.size ? prepared.ops : normalized.ops;
+    const userOps = prepared.paths.size ? prepared.ops : normalized.ops;
+    const commitOps = [...userOps, ...normalized.hostOps];
     const committed = this.commitOps(commitOps, session.user.id, txId, true, undefined, undefined,
       false, prepared.paths, prepared.triggers, prepared.at);
     if (!committed.ok) this.reject(session, txId, "invariant", committed.error);
@@ -1780,20 +1810,515 @@ export class HostSync {
       }]]), triggers, at: plannedAt };
   }
 
+  /** Validate every identity-bearing action reference against host state and caller authority. */
+  private actionReferenceError(action: ActionCard, by: UserId): string | null {
+    const author = this.store.get("users", by) as UserDocument | undefined;
+    const privileged = author?.role === "GM" || author?.role === "ASSISTANT";
+    const viewer = author ? { id: by, role: author.role } : null;
+    const sourceActor = action.source.actorId
+      ? this.store.get("actors", action.source.actorId) as ActorDocument | undefined : undefined;
+    if (!privileged) {
+      if (!sourceActor || !author ||
+          getEffectiveOwnership({ id: by, role: author.role }, sourceActor) < OWNERSHIP_LEVELS.OWNER)
+        return "the action source actor is not owned or unavailable to its author";
+    } else if (action.source.actorId && !sourceActor) return "the action source actor does not exist";
+    if (action.source.itemId &&
+        (!sourceActor || !sourceActor.items.some((item) => item._id === action.source.itemId)))
+      return "the action source item does not belong to its actor";
+
+    const scene = action.sceneId
+      ? this.store.get("scenes", action.sceneId) as SceneDocument | undefined : undefined;
+    if (action.sceneId && !scene) return "the action scene does not exist";
+    if (!privileged && scene && (!viewer || !docVisibleTo(viewer, scene)))
+      return "the action scene is not visible to its author";
+    if (action.area && action.area.sceneId !== action.sceneId)
+      return "the action area must belong to the action scene";
+    const token = (id: string): TokenDocument | undefined => scene
+      ? this.store.resolve({ coll: "tokens", id, parent: { coll: "scenes", id: scene._id } }) as TokenDocument | undefined
+      : undefined;
+    if (action.source.tokenId) {
+      const sourceToken = token(action.source.tokenId);
+      if (!sourceToken) return "the action source token is not in its scene";
+      if (!privileged && (!viewer || !scene || !docVisibleTo(viewer, sourceToken, scene)))
+        return "the action source token is not visible to its author";
+      if (action.source.actorId && sourceToken.actorId !== action.source.actorId)
+        return "the action source token and actor disagree";
+    }
+    for (const target of action.targets) {
+      const targetActor = target.actorId
+        ? this.store.get("actors", target.actorId) as ActorDocument | undefined : undefined;
+      if (target.actorId && !targetActor)
+        return privileged ? `action target ${target.key} actor does not exist`
+          : `action target ${target.key} is unavailable to its author`;
+      const targetToken = target.tokenId ? token(target.tokenId) : undefined;
+      if (target.tokenId) {
+        if (!targetToken) return privileged ? `action target ${target.key} token is not in its scene`
+          : `action target ${target.key} is unavailable to its author`;
+        if (!privileged && (!viewer || !scene || !docVisibleTo(viewer, targetToken, scene)))
+          return `action target ${target.key} is unavailable to its author`;
+        if (target.actorId && targetToken.actorId !== target.actorId)
+          return `action target ${target.key} token and actor disagree`;
+      }
+      // A visible token may be named as a token-only target, but it must not turn its private
+      // actor into a stats/evidence oracle merely because the caller copied the token's actorId.
+      if (!privileged && targetActor && (!viewer || !docVisibleTo(viewer, targetActor)))
+        return `action target ${target.key} is unavailable to its author`;
+    }
+    if (action.area?.ref) {
+      const area = this.store.resolve({ coll: action.area.ref.kind === "region" ? "regions" : "templates",
+        id: action.area.ref.id, parent: { coll: "scenes", id: action.area.sceneId } });
+      if (!area) return "the action area reference does not exist";
+      if (!privileged && (!viewer || !scene || !docVisibleTo(viewer, area, scene)))
+        return "the action area reference is not visible to its author";
+    }
+    return null;
+  }
+
+  private hostRollEvidenceIdExists(rollId: string): boolean {
+    return this.store.getAll("messages").some((message) => {
+      const marker = message.system.rollEvidence;
+      return isRecord(marker) && marker.v === 1 && marker.rollId === rollId;
+    });
+  }
+
+  private actionEvidenceRollAlreadyUsed(rollId: string): boolean {
+    return this.store.getAll("messages").some((message) => {
+      const marker = message.system.rollEvidence;
+      if (isRecord(marker) && marker.v === 1 && marker.rollId === rollId &&
+          typeof marker.claimedBy === "string") return true;
+      return actionCardOf(message)?.targets.some((target) => {
+        if (target.provenance !== "host" || !isRecord(target.evidence?.payload)) return false;
+        return [target.evidence.payload.damageRollId, target.evidence.payload.srRollId,
+          target.evidence.payload.saveRollId].includes(rollId);
+      }) === true;
+    });
+  }
+
+  private claimableHostRollEvidenceMessage(rollId: string, author: UserId): MessageDocument | null {
+    const matches = this.store.getAll("messages").filter((message) => {
+      const evidence = message.system.rollEvidence;
+      return isRecord(evidence) && Object.keys(evidence).length === 2 && evidence.v === 1 &&
+        evidence.rollId === rollId && message.author === author && message.flags.core?.rollId === rollId &&
+        message.roll !== null && typeof message.roll?.formula === "string" &&
+        typeof message.roll.total === "number" && Number.isFinite(message.roll.total);
+    });
+    return matches.length === 1 ? matches[0] ?? null : null;
+  }
+
+  /** A durable roll fact can only be minted by handleRoll/handleRollReveal and claimed once. */
+  private hostRollEvidence(
+    rollId: string, author: UserId, reserved: ReadonlySet<string>,
+  ): MessageDocument | null {
+    if (reserved.has(rollId) || this.actionEvidenceRollAlreadyUsed(rollId)) return null;
+    return this.claimableHostRollEvidenceMessage(rollId, author);
+  }
+
+  private pf1eEvidenceSourceStable(source: ActorDocument, ops: readonly Op[]): boolean {
+    for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, parent: op.parent } : op.ref;
+      if (ref.parent?.coll === "actors" && ref.parent.id === source._id &&
+          (ref.coll === "items" || ref.coll === "effects")) return false;
+      if ((op.kind === "create" && op.coll === "actors" && op.data._id === source._id) ||
+          (op.kind === "delete" && op.ref.coll === "actors" && op.ref.id === source._id)) return false;
+      if (op.kind !== "update" || op.ref.coll !== "actors" || op.ref.id !== source._id) continue;
+      const unsafe = Object.keys(op.diff).some((key) => {
+        if (key === "items" || key.startsWith("items.") || key === "effects" || key.startsWith("effects."))
+          return true;
+        if (!key.startsWith("system.pf1e")) return key === "system";
+        return !key.startsWith("system.pf1e.spells.slotsUsed") &&
+          !key.startsWith("system.pf1e.spells.prepared") &&
+          key !== "system.pf1e.heldCharge" && key !== "system.pf1e.-=heldCharge";
+      });
+      if (unsafe) return false;
+    }
+    return true;
+  }
+
+  /** Versioned PF1e adapter: rederive a normal spell target from immutable host roll facts/state. */
+  private pf1eSpellTargetEvidenceVerified(
+    action: ActionCard, target: ActionTarget, ops: readonly Op[], by: UserId,
+    reserved: ReadonlySet<string>,
+  ): boolean {
+    const evidence = target.evidence;
+    if (evidence?.adapter !== "pf1e.spellTarget.v1" || !isRecord(evidence.payload) ||
+        action.kind !== "cast" || action.targets.length !== 1 || !action.source.actorId ||
+        action.source.itemId !== undefined || !target.actorId || target.state !== "resolved" ||
+        target.healing !== undefined || target.conditions !== undefined)
+      return false;
+    const payload = evidence.payload;
+    const allowed = ["spellLevel", "saveType", "severity", "damageFormula", "energyType", "critical",
+      "damageRollId", "srRollId", "saveRollId", "combatId"];
+    if (Object.keys(payload).some((key) => !allowed.includes(key)) ||
+        !Number.isSafeInteger(payload.spellLevel) || (payload.spellLevel as number) < 0 ||
+        (payload.spellLevel as number) > 9 || !["fort", "ref", "will"].includes(String(payload.saveType)) ||
+        !(PF1E_SAVE_SEVERITIES as readonly unknown[]).includes(payload.severity) ||
+        typeof payload.damageFormula !== "string" || payload.critical !== false ||
+        (payload.energyType !== undefined && !(PF1E_ENERGY_TYPES as readonly unknown[]).includes(payload.energyType)) ||
+        [payload.damageRollId, payload.srRollId, payload.saveRollId, payload.combatId]
+          .some((id) => id !== undefined && (typeof id !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(id))))
+      return false;
+
+    const suppliedRollIds = [payload.damageRollId, payload.srRollId, payload.saveRollId]
+      .filter((id): id is string => typeof id === "string");
+    if (new Set(suppliedRollIds).size !== suppliedRollIds.length) return false;
+    if (payload.damageFormula !== "") {
+      const damageMatch = /^(\d+)[dD](\d+)$/.exec(payload.damageFormula.trim());
+      if (!damageMatch || Number(damageMatch[1]) < 1 || Number(damageMatch[1]) > 100 ||
+          Number(damageMatch[2]) < 2 || Number(damageMatch[2]) > 1_000) return false;
+    }
+    const source = this.store.get("actors", action.source.actorId) as ActorDocument | undefined;
+    const defender = this.store.get("actors", target.actorId) as ActorDocument | undefined;
+    if (!source || !defender) return false;
+    const caster = deriveFromActorDocument(source);
+    const defended = deriveFromActorDocument(defender);
+    if (!this.pf1eEvidenceSourceStable(source, ops)) return false;
+    const roll = (id: unknown, formula: string): number | null => {
+      if (typeof id !== "string") return null;
+      const message = this.hostRollEvidence(id, by, reserved);
+      if (!message?.roll || message.roll.formula !== formula || !Number.isSafeInteger(message.roll.total)) return null;
+      return message.roll.total;
+    };
+
+    let damage = 0;
+    if (payload.damageFormula === "") {
+      if (payload.damageRollId !== undefined) return false;
+    } else {
+      const total = roll(payload.damageRollId, payload.damageFormula);
+      if (total === null) return false;
+      damage = Math.max(0, Math.trunc(total));
+    }
+
+    const evidenceCombat = typeof payload.combatId === "string"
+      ? this.store.get("combats", payload.combatId) as CombatDocument | undefined : undefined;
+    if (payload.combatId !== undefined && !evidenceCombat) return false;
+    const spellResistance = defended.spellResistance;
+    const srBlob = evidenceCombat ? srOvercomeBlobFromFlags(evidenceCombat.flags) : null;
+    const alreadyOvercome = !!evidenceCombat && evidenceCombat.round >= 1 && !!srBlob &&
+      srAlreadyOvercome(srBlob, source._id, defender._id, evidenceCombat.round);
+    let sr = { resisted: false, total: null, reused: false, issues: [] } as ReturnType<typeof spellResistanceCheck>;
+    if (spellResistance > 0) {
+      if (alreadyOvercome) {
+        if (payload.srRollId !== undefined) return false;
+        sr = { resisted: false, total: null, reused: true, issues: [] };
+      } else if (typeof payload.srRollId === "string") {
+        const die = roll(payload.srRollId, "1d20");
+        if (die === null || die < 1 || die > 20) return false;
+        sr = spellResistanceCheck({ die, casterLevel: caster.spellCasterLevel, spellResistance });
+        if (sr.issues.length > 0) return false;
+      } else return false;
+    } else if (payload.srRollId !== undefined) return false;
+
+    const freshSrSuccess = !sr.resisted && !sr.reused && sr.total !== null;
+    if (freshSrSuccess && (!evidenceCombat || evidenceCombat.round < 1)) return false;
+    const expectedLedger = freshSrSuccess && evidenceCombat
+      ? srOvercomeDiff(source._id, defender._id, evidenceCombat.round) : null;
+    if (evidenceCombat) {
+      for (const op of ops) {
+        if ((op.kind === "create" && op.coll === "combats" && op.data._id === evidenceCombat._id) ||
+            (op.kind === "delete" && op.ref.coll === "combats" && op.ref.id === evidenceCombat._id))
+          return false;
+        if (op.kind !== "update" || op.ref.coll !== "combats" || op.ref.id !== evidenceCombat._id) continue;
+        if (!expectedLedger || Object.entries(op.diff).some(([key, value]) =>
+          !Object.hasOwn(expectedLedger, key) || expectedLedger[key] !== value)) return false;
+      }
+    }
+    if (expectedLedger && !ops.some((op) => op.kind === "update" && op.ref.coll === "combats" &&
+        op.ref.id === evidenceCombat?._id && Object.entries(expectedLedger)
+          .every(([key, value]) => op.diff[key] === value))) return false;
+
+    const severity = payload.severity as PF1eSaveSeverity;
+    const saveType = payload.saveType as PF1eSaveType;
+    const spellLevel = payload.spellLevel as number;
+    const allowsSave = severity !== "none" && !sr.resisted;
+    const saveBonus = saveType === "fort" ? defended.saves.fort
+      : saveType === "ref" ? defended.saves.ref : defended.saves.will;
+    const dc = caster.spellSaveDc[spellLevel] ?? null;
+    let saveDie: number | undefined;
+    if (allowsSave) {
+      if (dc === null) return false;
+      const die = roll(payload.saveRollId, "1d20");
+      if (die === null || die < 1 || die > 20) return false;
+      saveDie = die;
+    } else if (payload.saveRollId !== undefined) return false;
+
+    const energyResistance = Object.fromEntries(Object.entries(defended.energyResistance)
+      .filter(([, value]) => value > 0));
+    const result = resolveSpellTarget({
+      damage,
+      ...(payload.energyType !== undefined ? { energyType: payload.energyType as PF1eEnergyType } : {}),
+      severity,
+      saveType,
+      dc: dc ?? 0,
+      saveBonus,
+      ...(saveDie !== undefined ? { saveDie } : {}),
+      evasion: hasPF1eFeat(defender.items.map((item) => item.name), "Evasion"),
+      improvedEvasion: hasPF1eFeat(defender.items.map((item) => item.name), "Improved Evasion"),
+      defender: Object.keys(energyResistance).length > 0 ? { energyResistance } : {},
+      ...(spellResistance > 0 ? { sr } : {}),
+    });
+    if (!result.ok) return false;
+    const expectedOutcome = result.resisted ? "resisted"
+      : allowsSave ? result.passed ? "saved" : "failedSave" : "affected";
+    const prevented = result.saveReduced + Object.values(result.erApplied)
+      .reduce((sum, value) => sum + (value ?? 0), 0);
+    if (target.outcome !== expectedOutcome || (target.damage?.dealt ?? 0) !== result.dealt ||
+        (target.damage?.prevented ?? 0) !== prevented) return false;
+
+    if (allowsSave) {
+      const expectedFormula = `1d20${saveBonus === 0 ? "" : saveBonus > 0 ? `+${saveBonus}` : String(saveBonus)}`;
+      if (!target.check || target.check.kind !== "save" || target.check.status !== "resolved" ||
+          target.check.formula !== expectedFormula || target.check.dc !== dc ||
+          target.check.total !== (saveDie as number) + saveBonus || target.check.saveType !== saveType ||
+          target.check.passed !== result.passed || (target.check.automatic ?? null) !== result.automatic)
+        return false;
+    } else if (target.check !== undefined) return false;
+
+    const expectedHp = defended.hp - result.dealt;
+    let stagedHp = defended.hp;
+    let hpTouched = false;
+    for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, parent: op.parent } : op.ref;
+      if (ref.parent?.coll === "actors" && ref.parent.id === defender._id &&
+          (ref.coll === "items" || ref.coll === "effects")) return false;
+      if ((op.kind === "create" && op.coll === "actors" && op.data._id === defender._id) ||
+          (op.kind === "delete" && op.ref.coll === "actors" && op.ref.id === defender._id)) return false;
+      if (op.kind !== "update" || op.ref.coll !== "actors" || op.ref.id !== defender._id) continue;
+      const keys = Object.keys(op.diff);
+      if (keys.some((key) => key === "system" || key === "system.pf1e" ||
+          key === "system.pf1e.-=hp" || key.startsWith("system.pf1e.hp.") ||
+          key.startsWith("system.pf1e.") && key !== "system.pf1e.hp" ||
+          key === "items" || key.startsWith("items.") || key === "effects" || key.startsWith("effects.")))
+        return false;
+      if (Object.hasOwn(op.diff, "system.pf1e.hp")) {
+        const hp = op.diff["system.pf1e.hp"];
+        if (!Number.isSafeInteger(hp)) return false;
+        stagedHp = hp as number;
+        hpTouched = true;
+      }
+    }
+    if (stagedHp !== expectedHp || result.dealt > 0 && !hpTouched) return false;
+    return true;
+  }
+
+  private pf1ePendingSaveEvidenceVerified(
+    action: ActionCard, target: ActionTarget, ops: readonly Op[],
+  ): boolean {
+    const evidence = target.evidence;
+    if (evidence?.adapter !== "pf1e.pendingSave.v1" || !isRecord(evidence.payload) ||
+        Object.keys(evidence.payload).some((key) => !["spellLevel", "saveType"].includes(key)) ||
+        !Number.isSafeInteger(evidence.payload.spellLevel) || (evidence.payload.spellLevel as number) < 0 ||
+        (evidence.payload.spellLevel as number) > 9 ||
+        !["fort", "ref", "will"].includes(String(evidence.payload.saveType)) || action.kind !== "cast" ||
+        !action.source.actorId || action.source.itemId !== undefined || !target.actorId ||
+        target.state !== "pending" || target.outcome !== "pending" || target.check?.kind !== "save" ||
+        target.check.status !== "pending" || target.damage !== undefined || target.healing !== undefined ||
+        target.conditions !== undefined) return false;
+    const source = this.store.get("actors", action.source.actorId) as ActorDocument | undefined;
+    const defender = this.store.get("actors", target.actorId) as ActorDocument | undefined;
+    if (!source || !defender || !this.pf1eEvidenceSourceStable(source, ops)) return false;
+    if (defender._id !== source._id) {
+      for (const op of ops) {
+        const ref = op.kind === "create" ? { coll: op.coll, parent: op.parent } : op.ref;
+        if (ref.parent?.coll === "actors" && ref.parent.id === defender._id &&
+            (ref.coll === "items" || ref.coll === "effects")) return false;
+        if ((op.kind === "create" && op.coll === "actors" && op.data._id === defender._id) ||
+            (op.kind === "delete" && op.ref.coll === "actors" && op.ref.id === defender._id)) return false;
+        if (op.kind === "update" && op.ref.coll === "actors" && op.ref.id === defender._id &&
+            Object.keys(op.diff).some((key) => key === "system" || key.startsWith("system.pf1e") ||
+              key === "items" || key.startsWith("items.") || key === "effects" || key.startsWith("effects.")))
+          return false;
+      }
+    }
+    const caster = deriveFromActorDocument(source);
+    const defended = deriveFromActorDocument(defender);
+    const spellLevel = evidence.payload.spellLevel as number;
+    const saveType = evidence.payload.saveType as PF1eSaveType;
+    const dc = caster.spellSaveDc[spellLevel] ?? null;
+    const bonus = saveType === "fort" ? defended.saves.fort
+      : saveType === "ref" ? defended.saves.ref : defended.saves.will;
+    const formula = `1d20${bonus === 0 ? "" : bonus > 0 ? `+${bonus}` : String(bonus)}`;
+    return dc !== null && target.check.dc === dc && target.check.saveType === saveType &&
+      target.check.formula === formula && target.check.total === null &&
+      typeof target.check.pendingRollId === "string";
+  }
+
+  private actionTargetEvidenceVerified(
+    action: ActionCard, target: ActionTarget, ops: readonly Op[], by: UserId,
+    reserved: ReadonlySet<string>,
+  ): boolean {
+    try {
+      if (target.evidence?.adapter === "pf1e.pendingSave.v1")
+        return this.pf1ePendingSaveEvidenceVerified(action, target, ops);
+      return this.pf1eSpellTargetEvidenceVerified(action, target, ops, by, reserved);
+    } catch {
+      // Evidence can upgrade presentation authority only; malformed/unsupported state fails closed.
+      return false;
+    }
+  }
+
+  /** Replace client-authored identity labels with names from the referenced host documents. */
+  private canonicalActionNames(
+    action: ActionCard, ops: readonly Op[], by: UserId, reserved: ReadonlySet<string>,
+  ): ActionCard {
+    const scene = action.sceneId
+      ? this.store.get("scenes", action.sceneId) as SceneDocument | undefined : undefined;
+    const token = (id: string | undefined): TokenDocument | undefined => id && scene
+      ? this.store.resolve({ coll: "tokens", id, parent: { coll: "scenes", id: scene._id } }) as TokenDocument | undefined
+      : undefined;
+    const sourceActor = action.source.actorId
+      ? this.store.get("actors", action.source.actorId) as ActorDocument | undefined : undefined;
+    const sourceItem = action.source.itemId
+      ? sourceActor?.items.find((item) => item._id === action.source.itemId) : undefined;
+    const sourceName = sourceItem?.name ?? token(action.source.tokenId)?.name ?? sourceActor?.name ?? action.source.name;
+    return {
+      ...action,
+      source: { ...action.source, name: sourceName },
+      targets: action.targets.map((target) => {
+        const actor = target.actorId
+          ? this.store.get("actors", target.actorId) as ActorDocument | undefined : undefined;
+        const name = token(target.tokenId)?.name ?? actor?.name ?? target.name;
+        // A non-mechanical pending stage is a host-normalized lifecycle fact. Pending check inputs
+        // and terminal mechanics become host facts only when a versioned adapter rederives them.
+        const provenance = (target.state === "pending" && target.check === undefined) ||
+          this.actionTargetEvidenceVerified(action, target, ops, by, reserved)
+          ? "host" as const : "reported" as const;
+        return { ...target, name, provenance };
+      }),
+    };
+  }
+
   /** Host-side normalization: chat messages carry the caller's identity (§4);
    * inline `[[formula]]` rolls are resolved HERE (§11: rolls execute on the
    * host) and embedded as `[[total|formula]]` chips in the committed content. */
   private normalizeOps(
     by: UserId,
     ops: Op[],
-  ): { ok: true; ops: Op[] } | { ok: false; error: string } {
+  ): { ok: true; ops: Op[]; hostOps: Op[] } | { ok: false; error: string } {
     const out: Op[] = [];
+    const hostOps: Op[] = [];
+    const actionEvidenceClaims = new Set<string>();
+    const newActionMessageIds = new Set(ops.flatMap((op) =>
+      op.kind === "create" && op.coll === "messages" && op.data.system.action !== undefined
+        ? [op.data._id] : []));
     for (const op of ops) {
+      if ((op.kind === "delete" || op.kind === "update") && op.ref.coll === "messages" &&
+          newActionMessageIds.has(op.ref.id))
+        return { ok: false, error: "a new action card cannot be changed in its creation envelope" };
+      if (op.kind === "delete" && op.ref.coll === "messages") {
+        const existing = this.store.get("messages", op.ref.id) as MessageDocument | undefined;
+        if (actionCardOf(existing))
+          return { ok: false, error: "action cards change only through host lifecycle" };
+        if (existing?.system.rollEvidence !== undefined)
+          return { ok: false, error: "host roll evidence is immutable" };
+      }
+      if (op.kind === "update" && op.ref.coll === "messages") {
+        const keys = Object.keys(op.diff);
+        const existing = this.store.get("messages", op.ref.id) as MessageDocument | undefined;
+        const rootSystem = op.diff.system;
+        const rootIntroducesAction = isRecord(rootSystem) && Object.hasOwn(rootSystem, "action");
+        const changesAction = keys.some((key) => key === "system.action" || key === "system.-=action" ||
+          key.startsWith("system.action.") || key === "system" &&
+            (existing?.system.action !== undefined || rootIntroducesAction));
+        const changesLinkedPending = actionCardOf(existing) &&
+          keys.some((key) => key === "system.pendingRoll" || key === "system.pendingRolls" ||
+            key === "system.-=pendingRoll" || key === "system.-=pendingRolls" ||
+            key.startsWith("system.pendingRoll.") || key.startsWith("system.pendingRolls."));
+        const existingRollEvidence = existing?.system.rollEvidence !== undefined;
+        const introducesRollEvidence = isRecord(rootSystem) && Object.hasOwn(rootSystem, "rollEvidence");
+        const changesRollEvidence = keys.some((key) => key === "system.rollEvidence" ||
+          key === "system.-=rollEvidence" || key.startsWith("system.rollEvidence.")) || introducesRollEvidence ||
+          existingRollEvidence && keys.some((key) => key === "system" || key === "roll" || key === "-=roll" ||
+            key.startsWith("roll.") || key === "author" || key === "-=author" || key === "flags" ||
+            key === "flags.core" || key === "flags.-=core" || key.startsWith("flags.core."));
+        if (changesRollEvidence)
+          return { ok: false, error: "host roll evidence is immutable" };
+        if (changesAction || changesLinkedPending)
+          return { ok: false, error: "action cards change only through host resolution" };
+      }
       if (op.kind === "create" && op.coll === "messages") {
         const data = structuredClone(op.data) as MessageDocument;
+        const rollClaims: Array<{ messageId: string; actionId: string }> = [];
         data.author = by;
+        if (data.system.rollEvidence !== undefined)
+          return { ok: false, error: "host roll evidence is host-owned" };
         if (data.whisper === undefined) data.whisper = [];
         data.content = resolveInlineRolls(data.content, this.rng);
+        // A structured action is not arbitrary chat metadata: validate the complete bounded
+        // schema, then bind its identity/time to this host-committed message. Malformed cards
+        // fail the whole envelope rather than rendering prose that disagrees with FX context.
+        if (data.system.action !== undefined) {
+          const checked = validateActionCard(data.system.action);
+          if (!checked.ok) return { ok: false, error: checked.error };
+          const normalized = normalizeNewActionCard(checked.action, data._id, this.now());
+          const referenceError = this.actionReferenceError(normalized, by);
+          if (referenceError) return { ok: false, error: referenceError };
+          const canonical = validateActionCard(
+            this.canonicalActionNames(normalized, ops, by, actionEvidenceClaims),
+          );
+          if (!canonical.ok) return { ok: false, error: `canonical action is invalid: ${canonical.error}` };
+          const action = canonical.action;
+          for (const target of action.targets) {
+            if (target.provenance !== "host" || target.state === "pending" ||
+                !isRecord(target.evidence?.payload)) continue;
+            for (const key of ["damageRollId", "srRollId", "saveRollId"] as const) {
+              const rollId = target.evidence.payload[key];
+              if (typeof rollId === "string") {
+                const rollMessage = this.claimableHostRollEvidenceMessage(rollId, by);
+                if (!rollMessage) return { ok: false, error: "verified roll evidence is no longer claimable" };
+                actionEvidenceClaims.add(rollId);
+                rollClaims.push({ messageId: rollMessage._id, actionId: action.id });
+              }
+            }
+          }
+          data.system.action = actionAsJson(action);
+          const rawPending = data.system.pendingRoll;
+          const rawPendingMany = data.system.pendingRolls;
+          if ((rawPending !== undefined && rawPendingMany !== undefined) ||
+              (rawPending !== undefined && !validatePendingRoll(rawPending).ok) ||
+              (rawPendingMany !== undefined && (!Array.isArray(rawPendingMany) ||
+                rawPendingMany.length > PENDING_ROLL_MAX ||
+                rawPendingMany.some((value) => !validatePendingRoll(value).ok))))
+            return { ok: false, error: "pending roll/action storage is invalid" };
+          const hostTurn = this.currentTurnNumber();
+          const normalizePending = (pending: PendingRoll): PendingRoll => {
+            const target = action.targets.find((candidate) => candidate.key === pending.targetKey);
+            const sourceActor = action.source.actorId
+              ? this.store.get("actors", action.source.actorId) as ActorDocument | undefined : undefined;
+            return {
+              ...pending,
+              initiator: { ...pending.initiator, name: sourceActor?.name ?? action.source.name },
+              target: { ...pending.target, name: target?.name ?? pending.target.name },
+              turnNumber: hostTurn,
+              expiresTurn: hostTurn + 2,
+            };
+          };
+          if (rawPending !== undefined) {
+            const checked = validatePendingRoll(rawPending);
+            if (checked.ok) data.system.pendingRoll = normalizePending(checked.pending) as unknown as Json;
+          } else if (Array.isArray(rawPendingMany)) {
+            data.system.pendingRolls = rawPendingMany.map((value) => {
+              const checked = validatePendingRoll(value);
+              return normalizePending((checked as { ok: true; pending: PendingRoll }).pending);
+            }) as unknown as Json;
+          }
+          const pendingRolls = pendingRollsOfSystem(data.system);
+          const linkedPending = pendingRolls.filter((pending) => pending.actionId !== undefined);
+          const pendingTargets = action.targets.filter((target) => target.check?.status === "pending");
+          const pendingIds = new Set(linkedPending.map((pending) => pending.id));
+          const pendingTargetKeys = new Set(linkedPending.map((pending) => pending.targetKey));
+          if (linkedPending.length !== pendingRolls.length || linkedPending.length !== pendingTargets.length ||
+              pendingIds.size !== linkedPending.length || pendingTargetKeys.size !== linkedPending.length ||
+              linkedPending.some((pending) => {
+            const target = action.targets.find((candidate) => candidate.key === pending.targetKey);
+            return pending.v !== 1 || typeof pending.id !== "string" || pending.actionId !== action.id ||
+              pending.resolved !== false || pending.initiator?.actorId !== action.source.actorId ||
+              pending.initiator.tokenId !== (action.source.tokenId ?? null) || !target ||
+              target.check?.pendingRollId !== pending.id || pending.target?.actorId !== target.actorId ||
+              pending.target?.tokenId !== (target.tokenId ?? null) || pending.formula !== target.check.formula ||
+              pending.dc !== target.check.dc || pending.kind !== target.check.kind ||
+              pending.saveType !== target.check.saveType;
+          })) return { ok: false, error: "pending roll/action linkage is invalid" };
+        }
         if (
           data.ownership.default < OWNERSHIP_LEVELS.LIMITED &&
           Object.keys(data.ownership).length <= 1
@@ -1804,11 +2329,16 @@ export class HostSync {
           };
         }
         out.push({ ...op, data });
+        for (const claim of rollClaims) hostOps.push({
+          kind: "update",
+          ref: { coll: "messages", id: claim.messageId },
+          diff: { "system.rollEvidence.claimedBy": claim.actionId },
+        });
         continue;
       }
       out.push(op);
     }
-    return { ok: true, ops: out };
+    return { ok: true, ops: out, hostOps };
   }
 
   /** A saved graph never trusts a client-supplied step, anchor or media identifier. */
@@ -2387,6 +2917,15 @@ export class HostSync {
         (op.data as SceneDocument).active === true) ||
       (op.kind === "delete" && op.ref.coll === "scenes"));
     const activeSceneBefore = sceneActivationCandidate ? this.activeSceneDocument() : undefined;
+    // Capture action revisions before application. This lets the post-commit hook emit exactly once
+    // for a new/transitioned revision and ignore ordinary edits to the containing chat message.
+    const actionRevisionsBefore = new Map<string, number | null>();
+    if (!restoring) for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id } : op.ref;
+      if (ref.coll !== "messages" || actionRevisionsBefore.has(ref.id)) continue;
+      actionRevisionsBefore.set(ref.id,
+        actionCardOf(this.store.get("messages", ref.id) as MessageDocument | undefined)?.revision ?? null);
+    }
     const envelope: OpEnvelope = {
       seq: this.store.seq + 1,
       ts: movementTimestamp ?? this.now(),
@@ -2403,6 +2942,11 @@ export class HostSync {
     // multi-commit path and refuses stale/intervening edits.
     if (recordUndo) this.undoStack.push(envelope, applied.value.inverses);
     this.broadcastEnvelope(envelope, applied.value.inverses);
+    for (const [messageId, priorRevision] of actionRevisionsBefore) {
+      const action = actionCardOf(this.store.get("messages", messageId) as MessageDocument | undefined);
+      if (action && action.revision !== priorRevision)
+        this.bus.emit("action:committed", actionFxContext(action));
+    }
     this.scheduleSummonExpiry();
     // Undo/Redo/Revert restore recorded state, without re-firing traps or RNG. A graph's
     // own committed Move/Rotation re-enters here through its commit; the depth cap
@@ -2526,6 +3070,7 @@ export class HostSync {
         const prune = pendingPruneOps(
           msgs as unknown as Parameters<typeof pendingPruneOps>[0],
           pruneTurn,
+          this.now(),
         );
         if (prune.length > 0) this.commitSystem(prune, false);
         // F01: prune expired roll ledgers alongside pending rolls
@@ -3494,7 +4039,11 @@ export class HostSync {
           (payload.sourceTokenId !== undefined && typeof payload.sourceTokenId !== "string") ||
           (payload.targetTokenId !== undefined && typeof payload.targetTokenId !== "string") ||
           (payload.waitForEnd !== undefined && payload.waitForEnd !== true) ||
-          Object.keys(payload).some((key) => !["macroId", "sourceTokenId", "targetTokenId", "waitForEnd"].includes(key)))
+          (payload.finishOffsetMs !== undefined && (payload.waitForEnd !== true ||
+            !Number.isSafeInteger(payload.finishOffsetMs) ||
+            Math.abs(payload.finishOffsetMs as number) > FX_FINISH_OFFSET_MAX_MS)) ||
+          Object.keys(payload).some((key) => !["macroId", "sourceTokenId", "targetTokenId", "waitForEnd",
+            "finishOffsetMs"].includes(key)))
         throw new Error("Invalid FX call");
       const projected = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
         ?.find((item) => item._id === scene._id);
@@ -3509,11 +4058,18 @@ export class HostSync {
         ...(payload.targetTokenId ? { targetTokenId: payload.targetTokenId } : {}),
       }, undefined, caller.id);
       if (!prepared.ok) throw new Error(`FX preflight failed: ${prepared.error}`);
-      const durationMs = Math.max(...prepared.cue.sections.map((step) => step.startMs + step.durationMs));
+      // An all-skipped conditional timeline is a successful no-op. It still has the
+      // host's scheduled launch time, but no section contributes additional duration.
+      const durationMs = Math.max(0,
+        ...prepared.cue.sections.map((step) => step.startMs + step.durationMs));
       // An awaited short sequence must be safe to finish before this reviewed
       // Worker expires. Fail BEFORE emitting anything, including a persistent
       // loop or a 60-second cue that the 10-second Worker cannot await.
-      if (payload.waitForEnd === true && (prepared.cue.persistent || durationMs + HostSync.FX_LEAD_MS > 7000))
+      const finishOffsetMs = typeof payload.finishOffsetMs === "number" ? payload.finishOffsetMs : 0;
+      if (payload.waitForEnd === true && durationMs + finishOffsetMs < 0)
+        throw new Error("Awaited FX finish overlap cannot begin before the cue starts");
+      if (payload.waitForEnd === true && (prepared.cue.persistent ||
+          prepared.cue.atHostTime + durationMs + finishOffsetMs - this.now() > 7000))
         throw new Error("Awaited FX must be nonpersistent and finish within 7 seconds");
       if (!this.emitPreparedFx(prepared)) throw new Error("FX instance could not be committed");
       return { runId: prepared.cue.runId, atHostTime: prepared.cue.atHostTime,
@@ -3559,14 +4115,20 @@ export class HostSync {
       if (typeof payload.runId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.runId) ||
           Object.keys(payload).some((key) => key !== "runId")) throw new Error("Invalid FX stop call");
       const instance = this.store.get("fxInstances", payload.runId);
-      if (!instance || instance.sceneId !== scene._id ||
-          (caller.role !== "GM" && caller.role !== "ASSISTANT" && instance.ownerId !== caller.id))
-        throw new Error("FX instance unavailable");
-      const committed = this.commitOps([{ kind: "delete", ref: { coll: "fxInstances", id: instance._id } }],
-        this.systemUserId, `macro-${ctx.requestId}-${seq}`);
-      if (!committed.ok) throw new Error(`FX stop failed: ${committed.error}`);
-      ctx.trace.push(`  stopped FX instance at seq ${committed.seq}`);
-      return { stopped: true, seq: committed.seq };
+      if (instance) {
+        if (instance.sceneId !== scene._id ||
+            (caller.role !== "GM" && caller.role !== "ASSISTANT" && instance.ownerId !== caller.id))
+          throw new Error("FX run unavailable");
+        const committed = this.commitOps([{ kind: "delete", ref: { coll: "fxInstances", id: instance._id } }],
+          this.systemUserId, `macro-${ctx.requestId}-${seq}`);
+        if (!committed.ok) throw new Error(`FX stop failed: ${committed.error}`);
+        ctx.trace.push(`  stopped durable FX instance at seq ${committed.seq}`);
+        return { stopped: true, persistent: true, seq: committed.seq };
+      }
+      if (!this.cancelTransientFx(payload.runId, caller, scene._id))
+        throw new Error("FX run unavailable");
+      ctx.trace.push("  cancelled finite FX run (presentation only; no world transaction)");
+      return { stopped: true, persistent: false };
     }
     if (method === "summons.place") {
       const gm = caller.role === "GM" || caller.role === "ASSISTANT";
@@ -3921,6 +4483,9 @@ export class HostSync {
     this.summonTimer = null;
     if (this.fxMediaTimer) clearTimeout(this.fxMediaTimer);
     this.fxMediaTimer = null;
+    if (this.fxTransientTimer) clearTimeout(this.fxTransientTimer);
+    this.fxTransientTimer = null;
+    this.fxTransientRuns.clear();
   }
 
   // ─── Active-zone graphs: host events → atomic world plan → projected cues ───
@@ -4373,7 +4938,7 @@ export class HostSync {
         macroId: cue.macroId, sceneId: event.scene._id,
         ...(cue.sourceTokenId ? { sourceTokenId: cue.sourceTokenId } : {}),
         ...(cue.targetTokenId ? { targetTokenId: cue.targetTokenId } : {}),
-      }, cue.audience, event.caller.id);
+      }, cue.audience, event.caller.id, prepared);
       if (!ready.ok) {
         const error = `FX preflight failed: ${ready.error}`;
         this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);
@@ -4611,10 +5176,18 @@ export class HostSync {
 
   // ─── Macros / FX Wizard: approved, recipient-projected timeline ─────────────
 
-  private readonly seenFxRequests = new Map<string, number>();
+  /** Idempotency plus the private acknowledgement a same-ID retry receives. */
+  private readonly seenFxRequests = new Map<string, FxRunMsg>();
   /** Per-session delivery ledger: revocation/end is sent only to past recipients. */
   private readonly fxViewers = new Map<string, { sceneId: string; peers: Set<string> }>();
+  /** Non-media cues need only enough lead for every viewer to schedule the host clock. */
   private static readonly FX_LEAD_MS = 300;
+  /**
+   * Active-scene asset request/response plus browser decode can cross the base scheduler
+   * lead even for a tiny image. Media runs receive a bounded extra head start; honest
+   * late reporting still applies when fetch/decode exceeds this window.
+   */
+  private static readonly FX_MEDIA_LEAD_MS = 750;
   /** How many runs' worth of media expectations the host remembers (oldest evicted). */
   private static readonly FX_MEDIA_RUNS = 32;
   /** The shortest wait for viewer answers: a cue with everything due at once still gets this. */
@@ -4623,6 +5196,82 @@ export class HostSync {
   private static readonly FX_MEDIA_MAX_WINDOW_MS = 60_000;
   /** After the first line, how long a changed answer may still produce *one* correction. */
   private static readonly FX_MEDIA_CORRECTION_MS = 20_000;
+  /** Host-memory bound for finite cancellation handles. Timelines already end within 60 s. */
+  private static readonly FX_TRANSIENT_RUNS = 256;
+
+  private fxEndsAt(cue: FxStartMsg): number {
+    // A condition may authoritatively select no sections. Its accepted no-op ends at
+    // the scheduled launch rather than producing -Infinity or a recipient-visible cue.
+    return cue.atHostTime + Math.max(0, ...cue.sections.map((section) =>
+      section.startMs + section.durationMs));
+  }
+
+  private fxRunAck(requestId: string, prepared: PreparedFx): FxRunMsg {
+    const persistent = prepared.cue.persistent === true;
+    return { kind: "fx.run", requestId, runId: prepared.cue.runId,
+      macroId: prepared.cue.macroId, sceneId: prepared.cue.sceneId,
+      atHostTime: prepared.cue.atHostTime, persistent,
+      ...(persistent ? {} : { endsAtHostTime: this.fxEndsAt(prepared.cue) }) };
+  }
+
+  /** Drop naturally completed finite runs. Playback ends locally; no end packet is needed. */
+  private pruneTransientFx(): void {
+    const now = this.now();
+    for (const [runId, run] of this.fxTransientRuns)
+      if (run.endsAtHostTime <= now) this.fxTransientRuns.delete(runId);
+  }
+
+  private sweepTransientFx(): void {
+    if (this.disposed) return;
+    this.pruneTransientFx();
+    this.scheduleTransientFxSweep();
+  }
+
+  /** One absolute-deadline timer for all finite runs, rather than one timer per section/run. */
+  private scheduleTransientFxSweep(): void {
+    if (this.fxTransientTimer) clearTimeout(this.fxTransientTimer);
+    this.fxTransientTimer = null;
+    if (this.disposed) return;
+    let next = Infinity;
+    for (const run of this.fxTransientRuns.values()) next = Math.min(next, run.endsAtHostTime);
+    if (!Number.isFinite(next)) return;
+    this.fxTransientTimer = setTimeout(() => this.sweepTransientFx(),
+      Math.max(0, Math.min(2_147_483_647, next - this.now())));
+    (this.fxTransientTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  /** Register only after successful fan-out. Recipients stay private host state. */
+  private rememberTransientFx(prepared: PreparedFx, recipients: readonly Session[]): void {
+    if (prepared.cue.persistent) return;
+    this.fxTransientRuns.set(prepared.cue.runId, {
+      sceneId: prepared.cue.sceneId, ownerId: prepared.callerId,
+      peers: new Set(recipients.map((session) => session.peerId)),
+      endsAtHostTime: this.fxEndsAt(prepared.cue) });
+    this.scheduleTransientFxSweep();
+  }
+
+  /**
+   * Presentation-only cancellation. It has no world op to undo: the host forgets the
+   * finite handle and sends the same opaque end signal durable instances already use,
+   * only to sessions that received this run. Unknown and unauthorized IDs are identical.
+   */
+  private cancelTransientFx(runId: string, user: SessionUser, sceneId?: string): boolean {
+    this.pruneTransientFx();
+    const run = this.fxTransientRuns.get(runId);
+    const privileged = user.role === "GM" || user.role === "ASSISTANT";
+    if (!run || (sceneId !== undefined && run.sceneId !== sceneId) ||
+        (!privileged && run.ownerId !== user.id)) return false;
+    this.fxTransientRuns.delete(runId);
+    // A cancelled cue has no meaningful late media report. Client-side async work is
+    // epoch-guarded and cannot acknowledge after it receives this end.
+    if (this.fxMediaReceipts.delete(runId)) this.scheduleFxMediaSweep();
+    for (const peerId of run.peers) {
+      const recipient = this.sessions.get(peerId);
+      if (recipient?.user) this.send(recipient, { kind: "fx.end", runId, sceneId: run.sceneId });
+    }
+    this.scheduleTransientFxSweep();
+    return true;
+  }
 
   private handleFxRequest(session: Session, msg: FxRequestMsg): void {
     const caller = session.user;
@@ -4636,7 +5285,8 @@ export class HostSync {
       return;
     }
     const key = `${caller.id}:${msg.requestId}`;
-    if (this.seenFxRequests.has(key)) return;
+    const previous = this.seenFxRequests.get(key);
+    if (previous) { this.send(session, previous); return; }
     const prepared = this.prepareFx(caller, msg);
     if (!prepared.ok) {
       this.reject(session, msg.requestId, prepared.reason, prepared.error);
@@ -4666,8 +5316,13 @@ export class HostSync {
         recipients: prepared.recipients.length, skipped: prepared.skipped,
         ...(targeted > 0 ? { targeted } : {}), ...(empty > 0 ? { empty } : {}) });
     }
-    // Register after a successful host commit/fan-out; retries cannot clone cues.
-    this.seenFxRequests.set(key, this.now());
+    // Name the exact approved run only to its requester. This contains no recipient
+    // counts or projection data. The requester may therefore own the handle without being
+    // a playback recipient (for example, a GM running an `others`-audience timeline).
+    const ack = this.fxRunAck(msg.requestId, prepared);
+    this.send(session, ack);
+    // Register after successful host commit/fan-out; retries receive this ack but cannot clone cues.
+    this.seenFxRequests.set(key, ack);
     if (this.seenFxRequests.size > 256) {
       const first = this.seenFxRequests.keys().next().value;
       if (first) this.seenFxRequests.delete(first);
@@ -4853,6 +5508,58 @@ export class HostSync {
     (this.fxMediaTimer as unknown as { unref?: () => void }).unref?.();
   }
 
+  /**
+   * Phase origins supplied by still-active durable runs of this exact saved timeline.
+   * Scope includes owner, effective audience and invocation anchors: a public cue must
+   * never reveal merely through phase that another caller, hidden token or GM-only run
+   * already existed.
+   */
+  private activeFxSyncOrigins(
+    scene: SceneDocument,
+    macroId: string,
+    ownerId: string,
+    audience: FxAudience,
+    sourceTokenId: string | undefined,
+    targetTokenId: string | undefined,
+    manifest: AssetManifest,
+    pending: readonly PreparedFx[] = [],
+  ): ReadonlyMap<string, number> {
+    const audienceKey = (value: FxAudience): string => typeof value === "string"
+      ? value : `players:${value.players.join("\u0000")}`;
+    const expectedAudience = audienceKey(audience);
+    const origins = new Map<string, number>();
+    const add = (members: readonly FxSyncGroupMember[] | undefined,
+      sections: readonly ResolvedFxSection[]): void => {
+      if (!members?.length) return;
+      const byId = new Map(sections.map((section) => [section.id, section]));
+      for (const member of members) {
+        const section = byId.get(member.sectionId);
+        const origin = section && (section.kind === "image" || section.kind === "text")
+          ? section.syncAtHostTime : undefined;
+        if (origin === undefined) continue;
+        origins.set(member.group, Math.min(origins.get(member.group) ?? Infinity, origin));
+      }
+    };
+    for (const doc of this.store.getAll("fxInstances")) {
+      if (doc.sceneId !== scene._id || doc.macroId !== macroId || doc.ownerId !== ownerId ||
+          doc.sourceTokenId !== sourceTokenId || doc.targetTokenId !== targetTokenId ||
+          audienceKey(doc.audience) !== expectedAudience || !doc.syncGroups?.length ||
+          !validateFxInstance(doc, scene, manifest)) continue;
+      add(doc.syncGroups, doc.sections);
+    }
+    // An automation graph preflights its complete cue list before any durable commit.
+    // Earlier prepared siblings are active-for-this-transaction origins, so two copies
+    // of one grouped timeline in the same atomic graph do not miss each other by 1 ms.
+    for (const prepared of pending) {
+      if (prepared.cue.sceneId !== scene._id || prepared.cue.macroId !== macroId ||
+          prepared.callerId !== ownerId || prepared.sourceTokenId !== sourceTokenId ||
+          prepared.targetTokenId !== targetTokenId ||
+          audienceKey(prepared.audience) !== expectedAudience) continue;
+      add(prepared.syncGroups, prepared.cue.sections);
+    }
+    return origins;
+  }
+
   /** Same host scheduler for editor/macros and triggered FX. Can NARROW a graph's audience,
    * never expand the saved macro's audience or a recipient's asset entitlement. */
   private prepareFx(
@@ -4861,6 +5568,8 @@ export class HostSync {
     narrowAudience?: "gm" | "scene",
     /** Reviewed GM-elevated scripts execute with GM rights but retain the invoking caller as owner/audience. */
     ownerId = caller.id,
+    /** Earlier cues in one atomic automation preflight (not yet present in the store). */
+    pending: readonly PreparedFx[] = [],
   ): { ok: true } & PreparedFx |
      { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
     const invalid = (error: string) => ({ ok: false as const, reason: "invalid_schema" as const, error });
@@ -4889,14 +5598,32 @@ export class HostSync {
         (req.targetTokenId && (!target || !callerScene?.tokens.some((t) => t._id === target._id))))
       return forbidden("FX source/target is not visible to caller");
     const manifest = this.manifestSource();
-    const resolved = resolveFxSequence(macro.sequence, scene, source, target, (id) => manifest[id]?.mime);
+    // Random timing and conditional inclusion are sampled once here, before per-viewer
+    // projection, so every recipient shares one schedule/decision and receives neither
+    // the authored range nor the play predicate.
+    const resolved = resolveFxSequence(macro.sequence, scene, source, target,
+      (id) => manifest[id]?.mime, this.rng);
     if (!resolved.ok) return invalid(resolved.error);
     if (macro.sequence.persistent && (this.store.getAll("fxInstances").length >= 64 ||
         this.store.getAll("fxInstances").filter((entry) => entry.sceneId === scene._id).length >= 24))
       return invalid("persistent FX instance limit reached; stop an effect first");
+    this.pruneTransientFx();
+    if (!macro.sequence.persistent && this.fxTransientRuns.size +
+        pending.filter((entry) => entry.cue.persistent !== true).length >= HostSync.FX_TRANSIENT_RUNS)
+      return invalid("active one-shot FX run limit reached; wait for or cancel a run first");
+    const leadMs = resolved.sections.some((section) => section.kind === "image" || section.kind === "sound")
+      ? HostSync.FX_MEDIA_LEAD_MS : HostSync.FX_LEAD_MS;
+    const atHostTime = this.now() + leadMs;
+    // D-316: one rule for every audience form. It also scopes active sync origins, so a
+    // narrowed/other-owner run cannot disclose itself through a public cue's phase.
+    const audience: FxAudience = narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene";
+    const syncedSections = resolved.syncGroups === undefined ? resolved.sections
+      : fxResolveSyncOrigins(resolved.sections, resolved.syncGroups, atHostTime,
+          this.activeFxSyncOrigins(scene, macro._id, ownerId, audience, source?._id, target?._id,
+            manifest, pending)).sections;
     const cue: FxStartMsg = {
       kind: "fx.start", runId: randomId(), macroId: macro._id, sceneId: scene._id,
-      atHostTime: this.now() + HostSync.FX_LEAD_MS, sections: resolved.sections,
+      atHostTime, sections: syncedSections,
       ...(macro.sequence.persistent ? { persistent: true } : {}),
     };
     const recipients: Session[] = [];
@@ -4906,10 +5633,12 @@ export class HostSync {
     // D-303: preflight also says who got a *reduced* payload (a targeted camera section,
     // D-300) and who was left with nothing, which is a different fact from a skip.
     const targeting = { targeted: 0, empty: 0 };
-    // D-316: one rule for every audience form, evaluated per viewer. A caller-side
-    // narrowing can only ever *narrow* what the saved macro already allows.
-    const audience: FxAudience = narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene";
+    // D-316: audience is evaluated per viewer. A caller-side narrowing can only ever
+    // narrow what the saved macro already allows.
     for (const viewer of this.sessions.values()) {
+      // An all-skipped conditional run has no recipient projection to evaluate. It is
+      // acknowledged privately, without an empty cue or audience/targeting report.
+      if (cue.sections.length === 0) break;
       const user = viewer.user;
       if (!user) continue;
       const asViewer = { id: user.id, isGm: user.role === "GM" || user.role === "ASSISTANT" };
@@ -4920,18 +5649,19 @@ export class HostSync {
       if (!visibleScene || (source && !visibleScene.tokens.some((t) => t._id === source._id)) ||
           (target && !visibleScene.tokens.some((t) => t._id === target._id))) { skipped.anchor++; continue; }
       const available = projectAssetManifest(this.store.world, manifest, user);
-      if (resolved.sections.some((step) =>
+      if (cue.sections.some((step) =>
         (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) { skipped.media++; continue; }
       // Would this viewer receive the whole run? Targeting is decided by the author's
       // audiences, not by a document change, so it is settled here rather than later.
-      const entitled = fxSectionsForViewer(resolved.sections, asViewer, ownerId);
+      const entitled = fxSectionsForViewer(cue.sections, asViewer, ownerId);
       if (entitled.length === 0) { targeting.empty++; continue; }
-      if (entitled.length < resolved.sections.length) targeting.targeted++;
+      if (entitled.length < cue.sections.length) targeting.targeted++;
       recipients.push(viewer);
     }
     return { ok: true, cue, recipients, callerId: ownerId, skipped, targeting,
       audience,
       checkedAtSeq: this.store.seq,
+      ...(resolved.syncGroups ? { syncGroups: resolved.syncGroups } : {}),
       ...(source ? { sourceTokenId: source._id } : {}),
       ...(target ? { targetTokenId: target._id } : {}) };
   }
@@ -4946,6 +5676,7 @@ export class HostSync {
         ownership: { default: 0 }, flags: {}, system: {}, sceneId: scene._id, macroId: macro._id,
         ownerId: prepared.callerId, audience: prepared.audience,
         atHostTime: prepared.cue.atHostTime, sections: prepared.cue.sections,
+        ...(prepared.syncGroups ? { syncGroups: prepared.syncGroups } : {}),
         ...(prepared.sourceTokenId ? { sourceTokenId: prepared.sourceTokenId } : {}),
         ...(prepared.targetTokenId ? { targetTokenId: prepared.targetTokenId } : {}) };
       if (!validateFxInstance(doc, scene, this.manifestSource())) return false;
@@ -4963,6 +5694,7 @@ export class HostSync {
     const hostScene = scene ?? this.store.get("scenes", prepared.cue.sceneId) as SceneDocument | undefined;
     const macro = changed ? this.store.get("macros", prepared.cue.macroId) as MacroDocument | undefined : undefined;
     const manifest = changed ? this.manifestSource() : undefined;
+    const delivered: Session[] = [];
     for (const recipient of prepared.recipients) {
       const user = recipient.user;
       if (this.sessions.get(recipient.peerId) !== recipient || !user) continue;
@@ -4992,11 +5724,13 @@ export class HostSync {
       // chosen-players section would otherwise read the whole list out of their own
       // payload — the membership query SQ-18 keeps out of socket traffic, one hop in.
       const forViewer = hostWithoutAudience(entitled);
+      delivered.push(recipient);
       sentTo?.push(recipient);
       const forSound = hostScene ? this.fxOccludedFor(hostScene, forViewer, user.id) : forViewer;
       const shared = forViewer === prepared.cue.sections && forSound === forViewer;
       this.send(recipient, shared ? prepared.cue : { ...prepared.cue, sections: [...forSound] });
     }
+    this.rememberTransientFx(prepared, delivered);
     return true;
   }
 
@@ -5143,13 +5877,18 @@ export class HostSync {
       return;
     }
     const doc = this.store.get("fxInstances", msg.instanceId);
-    if (!doc || (user.role !== "GM" && user.role !== "ASSISTANT" && doc.ownerId !== user.id)) {
-      this.reject(session, msg.requestId, "forbidden", "FX instance unavailable");
+    if (doc) {
+      if (user.role !== "GM" && user.role !== "ASSISTANT" && doc.ownerId !== user.id) {
+        this.reject(session, msg.requestId, "forbidden", "FX run unavailable");
+        return;
+      }
+      const stopped = this.commitOps([{ kind: "delete", ref: { coll: "fxInstances", id: doc._id } }],
+        this.systemUserId, `fx-stop-${msg.requestId}`);
+      if (!stopped.ok) this.reject(session, msg.requestId, "invariant", "FX instance could not be stopped");
       return;
     }
-    const stopped = this.commitOps([{ kind: "delete", ref: { coll: "fxInstances", id: doc._id } }],
-      this.systemUserId, `fx-stop-${msg.requestId}`);
-    if (!stopped.ok) this.reject(session, msg.requestId, "invariant", "FX instance could not be stopped");
+    if (!this.cancelTransientFx(msg.instanceId, user))
+      this.reject(session, msg.requestId, "forbidden", "FX run unavailable");
   }
 
   // ─── Assets (§7) ─────────────────────────────────────────────────────────────
@@ -5261,7 +6000,7 @@ export class HostSync {
       name: msg.formula,
       ownership: { default: OWNERSHIP_LEVELS.LIMITED },
       flags: { core: { rollId: msg.rollId } },
-      system: {},
+      system: { rollEvidence: { v: 1, rollId: msg.rollId } },
       author: session.user.id,
       content: msg.formula,
       whisper:
@@ -5348,7 +6087,7 @@ export class HostSync {
         name: pending.formula,
         ownership: { default: OWNERSHIP_LEVELS.LIMITED },
         flags: { core: { rollId: msg.rollId } },
-        system: {},
+        system: { rollEvidence: { v: 1, rollId: msg.rollId } },
         author: session.user?.id ?? this.systemUserId,
         content: pending.formula,
         whisper:
@@ -5424,9 +6163,7 @@ export class HostSync {
       );
       return;
     }
-    const pending = (
-      doc.system as unknown as { pendingRoll?: PendingRoll } | undefined
-    )?.pendingRoll;
+    const pending = pendingRollOfSystem(doc.system, msg.pendingId);
     if (!pending) {
       this.reject(
         session,
@@ -5455,7 +6192,7 @@ export class HostSync {
       );
       return;
     }
-    const isGM = session.user.role === "GM";
+    const isGM = session.user.role === "GM" || session.user.role === "ASSISTANT";
     // Roller is initiator for attacks (AoO) and target for saves/checks/concentration.
     const rollerId =
       pending.kind === "attack"
@@ -5552,8 +6289,28 @@ export class HostSync {
       );
       return;
     }
+    // Crypto evaluation yields to the event loop. Re-read the card and authorization before
+    // staging anything: another target may have resolved, the selected roll may have expired,
+    // or ownership/session state may have changed while this request was in flight.
+    const liveDoc = this.store.get("messages", String(msg.messageId)) as MessageDocument | undefined;
+    const livePending = liveDoc ? pendingRollOfSystem(liveDoc.system, msg.pendingId) : null;
+    if (!liveDoc || !livePending || livePending.resolved ||
+        JSON.stringify(livePending) !== JSON.stringify(pending) ||
+        isPendingExpired(livePending, this.currentTurnNumber()) ||
+        this.sessions.get(session.peerId) !== session || session.user === null) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "pending roll changed or expired");
+      return;
+    }
+    const liveRollerId = livePending.kind === "attack"
+      ? livePending.initiator.actorId : livePending.target.actorId;
+    const liveRoller = this.store.get("actors", liveRollerId) as ActorDocument | undefined;
+    const liveLevel = liveRoller?.ownership[session.user.id];
+    if (!isGM && !(typeof liveLevel === "number" && liveLevel >= 1)) {
+      this.reject(session, String(msg.messageId), "forbidden", "you no longer own this pending roll");
+      return;
+    }
     const total = evaluation.value.total;
-    const updated: PendingRoll = resolvePendingRollDoc(pending, {
+    const updated: PendingRoll = resolvePendingRollDoc(livePending, {
       total,
       seedClient: msg.seedClient,
       seedHost,
@@ -5562,55 +6319,75 @@ export class HostSync {
     const followUp: MessageDocument = {
       _id: randomId(),
       type: "message",
-      name: `${pending.target.name} ${pending.kind}`,
+      name: `${livePending.target.name} ${livePending.kind}`,
       ownership: { default: OWNERSHIP_LEVELS.LIMITED },
       flags: {},
       system: {},
       author: session.user.id,
-      content: `${pending.target.name} rolled ${String(total)} vs ${pending.dc !== null ? `DC ${pending.dc}` : "—"} — ${
-        pending.dc !== null && total >= pending.dc
+      content: `${livePending.target.name} rolled ${String(total)} vs ${livePending.dc !== null ? `DC ${livePending.dc}` : "—"} — ${
+        livePending.dc !== null && total >= livePending.dc
           ? "Success"
-          : pending.dc !== null && total < pending.dc
+          : livePending.dc !== null && total < livePending.dc
             ? "Failure"
             : "rolled"
-      } (${pending.formula})`,
+      } (${livePending.formula})`,
       whisper: [],
       roll: null,
       flavor: "",
-      rollMode: pending.rollMode,
+      rollMode: livePending.rollMode,
     };
-    // also post a rolled message for the dice log (so [[total|formula]] chips can be read)
+    // Also post a rolled message for the dice log. Multi-target cards need one durable, unique
+    // evidence identity per selected check; legacy single-roll cards retain their message id.
+    const pendingEvidenceId = livePending.id ?? String(msg.messageId);
+    if (this.hostRollEvidenceIdExists(pendingEvidenceId) ||
+        this.actionEvidenceRollAlreadyUsed(pendingEvidenceId)) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "pending roll identity was already used");
+      return;
+    }
     const rollMessage: MessageDocument = {
       _id: randomId(),
       type: "message",
-      name: pending.formula,
+      name: livePending.formula,
       ownership: { default: OWNERSHIP_LEVELS.LIMITED },
-      flags: { core: { rollId: String(msg.messageId) } },
-      system: {},
+      flags: { core: { rollId: pendingEvidenceId } },
+      // This roll is consumed by the selected pending-card transition in the same envelope.
+      // Mint it already claimed so it cannot later masquerade as fresh immediate evidence.
+      system: { rollEvidence: { v: 1, rollId: pendingEvidenceId, claimedBy: String(msg.messageId) } },
       author: session.user.id,
-      content: pending.formula,
+      content: livePending.formula,
       // Roll content stays visible per rollMode projection downstream; whisper
       // redaction is handled by the existing message projection, not here.
       whisper: [],
       roll: {
-        formula: pending.formula,
+        formula: livePending.formula,
         total,
         terms: evaluation.value.terms,
         seedClient: msg.seedClient,
         seedHost,
         ...(msg.seedClientCommit ? { commit: msg.seedClientCommit } : {}),
       },
-      rollMode: pending.rollMode,
-      flavor: pending.initiator.actionLabel.slice(0, 300),
+      rollMode: livePending.rollMode,
+      flavor: livePending.initiator.actionLabel.slice(0, 300),
     };
+    const pendingDiff = pendingRollUpdateDiff(liveDoc.system, livePending, updated);
+    if (!pendingDiff) {
+      this.reject(session, String(msg.messageId), "invalid_schema", "pending roll storage changed");
+      return;
+    }
+    const action = actionCardOf(liveDoc);
+    if (action && livePending.actionId !== undefined) {
+      const transition = resolveActionPendingTarget(action, livePending, total, this.now());
+      if (!transition.ok) {
+        this.reject(session, String(msg.messageId), "invalid_schema", transition.error);
+        return;
+      }
+      pendingDiff["system.action"] = actionAsJson(transition.action);
+    }
     const ops: Op[] = [
       {
         kind: "update",
         ref: { coll: "messages", id: String(msg.messageId) },
-        diff: { "system.pendingRoll": updated as unknown as Json } as Record<
-          string,
-          Json
-        >,
+        diff: pendingDiff,
       },
       { kind: "create", coll: "messages", data: rollMessage },
       { kind: "create", coll: "messages", data: followUp },
@@ -5618,7 +6395,7 @@ export class HostSync {
     const committed = this.commitOps(
       ops,
       session.user.id,
-      `pending-${String(msg.messageId)}`,
+      `pending-${String(msg.messageId)}-${livePending.id ?? "legacy"}`,
       false,
     );
     if (!committed.ok) {

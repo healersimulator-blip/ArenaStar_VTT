@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 // The media path ends in a Pixi texture; this file is about *when* bytes are asked
 // for and what the viewer is told, so the decoder is stubbed rather than simulated.
-vi.mock("pixi.js", () => ({ Texture: { from: () => ({ destroy: () => undefined }) } }));
+vi.mock("pixi.js", () => ({ Texture: { from: vi.fn(() => ({ destroy: () => undefined })) } }));
 vi.stubGlobal("Image", class {
   src = "";
   decode(): Promise<void> { return Promise.resolve(); }
@@ -21,15 +21,29 @@ vi.stubGlobal("URL", { createObjectURL: () => "blob:test", revokeObjectURL: () =
  * too — `audios` is what those tests read the applied gain from.
  */
 let playAudio: () => Promise<void> = () => Promise.resolve();
-const audios: Array<{ src: string; volume: number; loop: boolean; currentTime: number; duration: number;
-  play: ReturnType<typeof vi.fn>; pause: ReturnType<typeof vi.fn> }> = [];
-vi.stubGlobal("Audio", class {
-  src: string; volume = 1; loop = false; currentTime = 0; duration = 2;
+interface FakeAudioRecord {
+  src: string;
+  volume: number;
+  loop: boolean;
+  playbackRate: number;
+  currentTime: number;
+  duration: number;
+  onended: (() => void) | null;
+  ontimeupdate: (() => void) | null;
+  play: ReturnType<typeof vi.fn>;
+  pause: ReturnType<typeof vi.fn>;
+}
+const audios: FakeAudioRecord[] = [];
+vi.stubGlobal("Audio", class implements FakeAudioRecord {
+  src: string; volume = 1; loop = false; playbackRate = 1; currentTime = 0; duration = 2;
+  onended: (() => void) | null = null;
+  ontimeupdate: (() => void) | null = null;
   play = vi.fn(() => playAudio());
   pause = vi.fn();
   constructor(src: string) { this.src = src; audios.push(this); }
 });
 
+import { Texture } from "pixi.js";
 import { FxPlayer } from "../../src/client/fxPlayer";
 import { createEventBus } from "../../src/core/events";
 import { setFxViewPrefs } from "../../src/core/fxPrefs";
@@ -46,16 +60,30 @@ import type { FxDeliveryReport } from "../../src/core/fxDelivery";
 const SCENE = "sc-1";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function harness(listener: { userId?: string; scenes?: unknown[] } = {}) {
+function harness(listener: { userId?: string; scenes?: unknown[]; localAssets?: readonly string[] } = {}) {
   const bus = createEventBus<ClientEvents>();
   const camera: Camera = { x: 0, y: 0, scale: 1 };
   const cameraWrites: Camera[] = [];
-  const spawned: Array<{ runId: string; kind: string; elapsed: number }> = [];
+  const spawned: Array<{ runId: string; id?: string; kind: string; elapsed: number }> = [];
+  const finishers = new Map<string, Set<() => void>>();
   const fxLayer = {
-    clear: vi.fn(),
+    clear: vi.fn((runId?: string) => {
+      for (const [id, callbacks] of [...finishers]) {
+        if (runId !== undefined && id !== runId) continue;
+        finishers.delete(id);
+        for (const finish of callbacks) finish();
+      }
+    }),
     count: 0,
-    spawn: (runId: string, section: { kind: string }, elapsed: number) => {
-      spawned.push({ runId, kind: section.kind, elapsed });
+    spawn: (runId: string, section: { id?: string; kind: string }, elapsed: number,
+      _texture?: unknown, finish?: () => void) => {
+      spawned.push({ runId, ...(section.id === undefined ? {} : { id: section.id }),
+        kind: section.kind, elapsed });
+      if (finish) {
+        const callbacks = finishers.get(runId) ?? new Set<() => void>();
+        callbacks.add(finish);
+        finishers.set(runId, callbacks);
+      }
     },
   };
   const stage = {
@@ -96,6 +124,7 @@ function harness(listener: { userId?: string; scenes?: unknown[] } = {}) {
       inFlight.set(hash, promise);
       return promise;
     },
+    isAssetLocal: (hash) => listener.localAssets?.includes(hash) === true,
     sceneId: () => SCENE,
     onError: (message) => errors.push(message),
     onDelivery: (report) => reports.push(report),
@@ -103,15 +132,25 @@ function harness(listener: { userId?: string; scenes?: unknown[] } = {}) {
   });
   return {
     bus, player, reports, errors, requests, cameraWrites, spawned, mediaAcks, camera,
+    clearFx: fxLayer.clear,
     /** D-309: move the listening point by moving the view (the camera centre is the fallback). */
     panTo: (x: number, y: number) => { camera.x = x - 400; camera.y = y - 300; },
     fail: (hash: string) => fails.add(hash),
+    recover: (hash: string) => fails.delete(hash),
     /** Let a fetch finish, then let the microtask queue drain. */
     resolveAsset: async (hash: string) => {
       const job = pending.get(hash);
       if (!job) throw new Error(`no pending fetch for ${hash}`);
       job.resolve();
       await sleep(20);
+    },
+    /** Resolve without a timer, for tests that intentionally hold timer dispatch back. */
+    resolveAssetNow: async (hash: string) => {
+      const job = pending.get(hash);
+      if (!job) throw new Error(`no pending fetch for ${hash}`);
+      job.resolve();
+      // `fetchAsset` resumes the shared prefetch, which then resumes each waiting run.
+      for (let turn = 0; turn < 4; turn++) await Promise.resolve();
     },
     rejectAsset: async (hash: string) => {
       const job = pending.get(hash);
@@ -123,7 +162,9 @@ function harness(listener: { userId?: string; scenes?: unknown[] } = {}) {
     // The live-sound registry keys rows by `runId:index:epoch`, and a cue's ramp keeps
     // ticking after its own test ends: a test that reads that registry gives its run its
     // own ID rather than being written to by a previous test's timer.
-    send: (sections: ResolvedFxSection[], opts: { persistent?: boolean; runId?: string } = {}) => {
+    send: (sections: ResolvedFxSection[], opts: {
+      persistent?: boolean; runId?: string; atHostTime?: number;
+    } = {}) => {
       bus.emit("fx", { kind: "fx.start", runId: "run-1", macroId: "macro-1", sceneId: SCENE,
         atHostTime: Date.now() + 40, sections, ...opts } satisfies FxStartMsg);
     },
@@ -178,6 +219,18 @@ describe("FX preload and late-media fallback (D-295)", () => {
     expect(h.reports[0]?.entries[0]).toMatchObject({ kind: "image", state: "late", reason: "not-ready" });
   });
 
+  test("the serverless host does not report its own loopback read as audience lateness", async () => {
+    const hash = "aa".repeat(32);
+    const h = harness({ localAssets: [hash] });
+    h.send([image(0, hash)]);
+    await sleep(200); // its normal client path is still waiting on the host-owned bytes
+    await h.resolveAsset(hash);
+    await sleep(60);
+    expect(h.spawned).toHaveLength(1);
+    expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+    expect(h.reports).toEqual([]);
+  });
+
   test("a viewer who chose strict sync skips the cue instead, and the report says so", async () => {
     setFxViewPrefs({ lateMedia: "skip" });
     const h = harness();
@@ -187,6 +240,49 @@ describe("FX preload and late-media fallback (D-295)", () => {
     await sleep(80);
     expect(h.spawned).toHaveLength(0); // every viewer sees the same frames
     expect(h.reports[0]?.entries[0]).toMatchObject({ state: "skipped", reason: "not-ready" });
+  });
+
+  test("an authored playback rate and clip window reach the video element", async () => {
+    class FakeVideo {
+      muted = false; playsInline = false; loop = false; playbackRate = 1;
+      currentTime = 0; duration = 4;
+      onloadeddata: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onended: (() => void) | null = null;
+      ontimeupdate: (() => void) | null = null;
+      canPlayType(): string { return "probably"; }
+      pause = vi.fn();
+      play = vi.fn(() => Promise.resolve());
+      set src(_value: string) { queueMicrotask(() => this.onloadeddata?.()); }
+    }
+    const videos: FakeVideo[] = [];
+    Object.defineProperty(globalThis, "document", { configurable: true, value: {
+      createElement: () => { const video = new FakeVideo(); videos.push(video); return video; },
+    } });
+    const h = harness();
+    const base = image(0);
+    if (base.kind !== "image") throw new Error("image fixture changed kind");
+    try {
+      h.send([{ ...base, mime: "video/webm", playbackRate: 2,
+        clipStartMs: 1_000, clipEndMs: 2_000 }]);
+      await sleep(60);
+      await h.resolveAsset("aa".repeat(32));
+      await sleep(60);
+      const played = videos.at(-1);
+      expect(played?.playbackRate).toBe(2);
+      expect(played?.loop).toBe(false); // native whole-file looping would escape the clip
+      expect(played?.currentTime).toBeGreaterThanOrEqual(1);
+      expect(played?.currentTime).toBeLessThan(1.5);
+      expect(played?.play).toHaveBeenCalledTimes(1);
+      expect(h.spawned).toHaveLength(1);
+      if (!played) throw new Error("video element missing");
+      played.currentTime = 2.1;
+      played.ontimeupdate?.();
+      expect(played.currentTime).toBeCloseTo(1.1, 6);
+    } finally {
+      h.player.dispose();
+      Reflect.deleteProperty(globalThis, "document");
+    }
   });
 
   test("turning preloading off fetches lazily at cue time (and the cue arrives on time)", async () => {
@@ -239,6 +335,53 @@ describe("local mute and reduced motion (D-295, SQ-16)", () => {
     expect(h.reports[0]?.entries.map((entry) => [entry.kind, entry.state, entry.reason]))
       .toEqual([["camera", "cut", "reduced-motion"], ["camera", "skipped", "reduced-motion"]]);
   });
+
+  test("host cancellation clears an active one-shot and fences every pending timer, fetch, sound and camera", async () => {
+    const h = harness();
+    const camera: ResolvedFxSection = { id: "future-camera", kind: "camera", mode: "pan",
+      startMs: 700, durationMs: 300, toX: 100, toY: 100 };
+    h.send([
+      { id: "now", kind: "text", text: "Now", x: 50, y: 50, startMs: 0,
+        durationMs: 2_000 },
+      image(600), sound(650), camera,
+    ]);
+    await sleep(100);
+    expect(h.spawned.map((entry) => entry.id)).toEqual(["now"]);
+    expect(h.requests.sort()).toEqual(["aa".repeat(32), "bb".repeat(32)].sort());
+
+    h.bus.emit("fxEnd", { kind: "fx.end", runId: "run-1", sceneId: SCENE });
+    expect(h.clearFx).toHaveBeenCalledWith("run-1");
+    await Promise.all([h.resolveAsset("aa".repeat(32)), h.resolveAsset("bb".repeat(32))]);
+    await sleep(750);
+    expect(h.spawned.map((entry) => entry.id)).toEqual(["now"]); // no delayed image
+    expect(audios).toEqual([]); // no delayed sound element
+    expect(h.cameraWrites).toEqual([]); // no delayed camera claim
+    expect(h.mediaAcks).toEqual([]); // cancelled async work cannot report into a dead run
+    h.player.dispose();
+  });
+
+  test("a later persistent visual joins its host-resolved group phase without changing launch time", async () => {
+    const h = harness();
+    const atHostTime = Date.now() + 40;
+    const text = (id: string, startMs: number, syncAtHostTime?: number): ResolvedFxSection => ({
+      id, kind: "text", text: id, x: 50, y: 50, startMs, durationMs: 1_000,
+      ...(syncAtHostTime === undefined ? {} : { syncAtHostTime }),
+    });
+    h.send([
+      text("group-first", 0, atHostTime),
+      text("group-late", 180, atHostTime),
+      text("ordinary-late", 180),
+    ], { persistent: true, atHostTime });
+    await sleep(300);
+    const grouped = h.spawned.find((entry) => entry.id === "group-late");
+    const ordinary = h.spawned.find((entry) => entry.id === "ordinary-late");
+    expect(h.spawned.map((entry) => entry.id).sort()).toEqual([
+      "group-first", "group-late", "ordinary-late",
+    ]);
+    expect((grouped?.elapsed ?? 0) - (ordinary?.elapsed ?? 0)).toBeGreaterThan(120);
+    expect(grouped?.elapsed).toBeGreaterThan(150); // phase was already in progress
+    h.player.dispose();
+  });
 });
 
 describe("failures are contained (D-295, A10)", () => {
@@ -281,6 +424,89 @@ describe("sound channels, fades and the device-local list (D-297, SQ-09)", () =>
     expect(audios[0]?.volume).toBeCloseTo(0.25, 6); // 0.5 authored × 0.5 fader
     expect(audios[0]?.play).toHaveBeenCalledTimes(1);
     expect(h.reports).toEqual([]); // a sound this device can hear is not a degradation
+  });
+
+  test("an authored playback rate reaches the audio element", async () => {
+    const h = harness();
+    h.send([music(0, { playbackRate: 1.75 })]);
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    expect(audios[0]?.playbackRate).toBe(1.75);
+    expect(audios[0]?.play).toHaveBeenCalledTimes(1);
+    h.player.dispose();
+  });
+
+  test("a one-shot sound seeks into its clip and stops at the authored source end", async () => {
+    const h = harness();
+    h.send([music(0, { durationMs: 3_000, playbackRate: 1.5,
+      clipStartMs: 500, clipEndMs: 900 })]);
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    const played = audios[0];
+    expect(played?.loop).toBe(false);
+    expect(played?.currentTime).toBeGreaterThanOrEqual(0.5);
+    expect(played?.currentTime).toBeLessThan(0.8);
+    expect(played?.volume).toBeGreaterThan(0);
+    if (!played) throw new Error("audio element missing");
+    played.currentTime = 0.91;
+    played.ontimeupdate?.();
+    expect(played.pause).toHaveBeenCalledTimes(1);
+    expect(fxSounds()).toEqual([]);
+    h.player.dispose();
+  });
+
+  test("a restored persistent sound wraps its clip instead of the whole source", async () => {
+    const h = harness();
+    h.send([music(0, { clipStartMs: 500, clipEndMs: 2_500 })], { // decoded source ends at 2 s
+      persistent: true, atHostTime: Date.now() - 2_100,
+    });
+    await sleep(20);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    const played = audios[0];
+    expect(played?.loop).toBe(false);
+    expect(played?.currentTime).toBeGreaterThanOrEqual(1);
+    expect(played?.currentTime).toBeLessThan(1.4); // end clamps to 2 s; 2.1 s wraps inside 1.5 s
+    if (!played) throw new Error("audio element missing");
+    played.currentTime = 2.15;
+    played.ontimeupdate?.();
+    expect(played.currentTime).toBeCloseTo(0.65, 6);
+    played.onended?.();
+    expect(played.currentTime).toBe(0.5);
+    expect(played.play).toHaveBeenCalledTimes(2);
+    h.player.dispose();
+  });
+
+  test("a late one-shot whose clip is already exhausted stays silent", async () => {
+    const h = harness();
+    h.send([music(0, { durationMs: 3_000, clipStartMs: 500, clipEndMs: 900 })], {
+      atHostTime: Date.now() - 1_000,
+    });
+    await sleep(20);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    expect(audios[0]?.play).toHaveBeenCalledTimes(1); // startup is still accounted honestly
+    expect(audios[0]?.pause).toHaveBeenCalledTimes(1);
+    expect(audios[0]?.volume).toBe(0);
+    expect(fxSounds()).toEqual([]);
+    expect(h.mediaAcks.at(-1)).toMatchObject({ state: "ready" });
+    h.player.dispose();
+  });
+
+  test("a clip beginning beyond decoded audio fails locally without becoming a codec refusal", async () => {
+    const h = harness();
+    h.send([music(0, { clipStartMs: 2_500 })]); // fake source duration is 2 seconds
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    expect(audios[0]?.play).not.toHaveBeenCalled();
+    expect(audios[0]?.pause).toHaveBeenCalledTimes(1);
+    expect(h.reports[0]?.entries[0]).toMatchObject({ kind: "sound", state: "failed", reason: "error" });
+    expect(h.mediaAcks.at(-1)).toMatchObject({ state: "failed", reason: "decode" });
+    expect(h.errors.at(-1)).toContain("clip starts outside");
+    h.player.dispose();
   });
 
   test("a channel fader at zero skips the cue and never spends the bytes", async () => {
@@ -376,6 +602,323 @@ describe("the table answers with what it actually did (D-308, SQ-13)", () => {
     } finally { h.player.dispose(); }
   });
 
+  test("stopping one run does not discard another run's shared preload record", async () => {
+    const h = harness(); const hash = "aa".repeat(32);
+    try {
+      h.send([image(1500, hash)], { runId: "keep" });
+      h.send([image(1500, hash)], { runId: "stop" });
+      const cache = (h.player as unknown as { prefetched: Map<string, unknown> }).prefetched;
+      expect(cache.has(hash)).toBe(true);
+
+      h.bus.emit("fxEnd", { kind: "fx.end", runId: "stop", sceneId: SCENE });
+      expect(cache.has(hash)).toBe(true);
+      await h.resolveAsset(hash);
+      expect(h.mediaAcks).toContainEqual(expect.objectContaining({ runId: "keep", state: "ready" }));
+      expect(h.mediaAcks.some((ack) => ack.runId === "stop")).toBe(false);
+    } finally { h.player.dispose(); }
+  });
+
+  test("stopping the final waiter abandons an unfinished image decode so its replacement starts fresh", async () => {
+    const before = Object.getOwnPropertyDescriptor(globalThis, "Image");
+    let rejectFirst: ((reason: Error) => void) | undefined;
+    let decodes = 0;
+    vi.stubGlobal("Image", class {
+      src = "";
+      decoding = "auto";
+      decode(): Promise<void> {
+        decodes++;
+        if (decodes > 1) return Promise.resolve();
+        return new Promise((_resolve, reject) => { rejectFirst = reject; });
+      }
+    });
+    const h = harness(); const hash = "aa".repeat(32);
+    try {
+      h.send([image(0, hash)], { persistent: true, runId: "stopped" });
+      await h.resolveAsset(hash);
+      expect(decodes).toBe(1);
+
+      h.bus.emit("fxEnd", { kind: "fx.end", runId: "stopped", sceneId: SCENE });
+      const cache = (h.player as unknown as { prefetched: Map<string, unknown> }).prefetched;
+      expect(cache.has(hash)).toBe(false);
+
+      h.send([image(0, hash)], { persistent: true, runId: "replacement" });
+      await sleep(100);
+      expect(decodes).toBe(2);
+      expect(h.spawned.map(({ runId }) => runId)).toEqual(["replacement"]);
+
+      rejectFirst?.(new Error("cancelled old decode"));
+      await sleep(20);
+      expect(h.spawned.map(({ runId }) => runId)).toEqual(["replacement"]);
+      expect(h.errors).toEqual([]);
+    } finally {
+      h.player.dispose();
+      if (before) Object.defineProperty(globalThis, "Image", before);
+      else Reflect.deleteProperty(globalThis, "Image");
+    }
+  });
+
+  test("a predecoded image URL survives run stop and is released with the scene cache", async () => {
+    const revoke = vi.spyOn(URL, "revokeObjectURL");
+    const h = harness(); const hash = "aa".repeat(32);
+    h.send([image(1500, hash)]);
+    await h.resolveAsset(hash);
+    expect(h.mediaAcks).toContainEqual(expect.objectContaining({ state: "ready" }));
+
+    h.bus.emit("fxEnd", { kind: "fx.end", runId: "run-1", sceneId: SCENE });
+    expect(revoke).not.toHaveBeenCalled(); // another run may reuse this asset-scoped decoder
+    h.player.dispose();
+    expect(revoke).toHaveBeenCalledWith("blob:test");
+  });
+
+  test("a small sprite retains its decoded source without a second blob URL", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const globals = ["window", "btoa"] as const;
+    const before = new Map(globals.map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+    const createUrl = vi.spyOn(URL, "createObjectURL");
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("btoa", (value: string) => Buffer.from(value, "binary").toString("base64"));
+    vi.mocked(Texture.from).mockClear();
+    const h = harness();
+    try {
+      h.send([image(300)]);
+      await h.resolveAssetNow("aa".repeat(32));
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+      expect(createUrl).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(340);
+      const source = vi.mocked(Texture.from).mock.calls.at(-1)?.[0] as unknown as { src?: string };
+      expect(source.src).toMatch(/^data:image\/png;base64,/);
+      expect(Texture.from).toHaveBeenLastCalledWith(source, true);
+      expect(createUrl).not.toHaveBeenCalled();
+    } finally {
+      h.player.dispose();
+      for (const key of globals) {
+        const descriptor = before.get(key);
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  test("a delayed section timer cannot turn an on-time preload acknowledgement into late media", async () => {
+    // Fake only the scheduler. Keeping Date under this test's control models a browser that
+    // does not service an already-due timer until well after the cue (for example a throttled
+    // background tab), while the preload promise was allowed to settle beforehand.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const h = harness();
+    try {
+      h.send([image(300)]); // absolute section time: 1_000_340
+      expect(h.requests).toEqual(["aa".repeat(32)]);
+      await h.resolveAssetNow("aa".repeat(32)); // bytes available at 1_000_000
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+
+      now = 1_000_600; // callback wakes 260 ms late: beyond the 120 ms media tolerance
+      await vi.advanceTimersByTimeAsync(340);
+      expect(h.spawned).toHaveLength(1);
+      expect(h.spawned[0]?.elapsed).toBe(260); // playback catches up to timeline phase
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]); // no ready → late correction
+      expect(h.reports).toEqual([]);
+    } finally {
+      h.player.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  test("a preload handled before an overdue timer is not blamed for scheduler delay", async () => {
+    // This is the loaded-browser variant: wall time has passed the cue, but the event loop
+    // handles the completed preload before it dispatches the overdue section timer. Media
+    // caused no extra wait in the turn where playback could actually proceed.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let now = 2_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const h = harness();
+    try {
+      h.send([image(300)]); // absolute section time: 2_000_340
+      now = 2_000_600;
+      await h.resolveAssetNow("aa".repeat(32)); // preload continuation wins the delayed turn
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+
+      await vi.advanceTimersByTimeAsync(340); // now dispatch that already-overdue cue timer
+      expect(h.spawned).toHaveLength(1);
+      expect(h.spawned[0]?.elapsed).toBe(260);
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+      expect(h.reports).toEqual([]);
+    } finally {
+      h.player.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  test("completed image predecode is reused at cue time instead of decoding again", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let now = 2_500_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let finishDecode: (() => void) | undefined;
+    const decode = vi.spyOn(Image.prototype, "decode").mockImplementation(() =>
+      new Promise<void>((resolve) => { finishDecode = resolve; }));
+    const h = harness();
+    try {
+      h.send([image(300)]);
+      await h.resolveAssetNow("aa".repeat(32));
+      expect(finishDecode).toBeTypeOf("function");
+      expect(decode).toHaveBeenCalledTimes(1); // lead-window work, before the cue
+
+      now = 2_500_100;
+      finishDecode?.();
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+
+      now = 2_500_340;
+      await vi.advanceTimersByTimeAsync(340);
+      expect(decode).toHaveBeenCalledTimes(1); // the cue reuses the decoded DOM source
+      expect(h.spawned).toHaveLength(1);
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+      expect(h.reports).toEqual([]);
+    } finally {
+      h.player.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  test("a predecoded image does not relabel synchronous texture setup as media lateness", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let now = 2_750_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const h = harness();
+    try {
+      h.send([image(300)]);
+      await h.resolveAssetNow("aa".repeat(32));
+      for (let turn = 0; turn < 6; turn++) await Promise.resolve();
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+
+      vi.mocked(Texture.from).mockImplementationOnce(() => {
+        now += 250; // model an OS/renderer pause after the decoded source is already usable
+        return { destroy: () => undefined } as never;
+      });
+      now = 2_750_340;
+      await vi.advanceTimersByTimeAsync(340);
+
+      expect(h.spawned).toHaveLength(1);
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+      expect(h.reports).toEqual([]);
+    } finally {
+      h.player.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  test("image decode uses the preload lead, and an unfinished decoder remains honest lateness", async () => {
+    setFxViewPrefs({ lateMedia: "skip" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let now = 3_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let finishDecode: (() => void) | undefined;
+    const decode = vi.spyOn(Image.prototype, "decode").mockImplementation(() =>
+      new Promise<void>((resolve) => { finishDecode = resolve; }));
+    const h = harness();
+    try {
+      h.send([image(300)]);
+      await h.resolveAssetNow("aa".repeat(32));
+      // Decode starts as soon as preload bytes land, 340 ms before the cue timer. It is
+      // shared with playback rather than starting a second decoder at cue time.
+      expect(finishDecode).toBeTypeOf("function");
+      expect(decode).toHaveBeenCalledTimes(1);
+      // D-308's established preload receipt is byte-scoped; cue-time usability can still
+      // correct it when this already-started decoder runs past the section's start.
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+
+      now = 3_000_340;
+      await vi.advanceTimersByTimeAsync(340);
+      expect(decode).toHaveBeenCalledTimes(1);
+      now = 3_000_540; // predecode still needed another 200 ms beyond the cue
+      finishDecode?.();
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+
+      expect(h.spawned).toEqual([]);
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready", "late"]);
+      expect(h.reports[0]?.entries).toMatchObject([{ state: "skipped", reason: "not-ready" }]);
+    } finally {
+      h.player.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  test("video startup that outlives its section expires honestly without drawing a frame", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let now = 3_500_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let finishPlay: (() => void) | undefined;
+    class SlowVideo {
+      muted = false; playsInline = false; loop = false; playbackRate = 1;
+      currentTime = 0; duration = 4;
+      onloadeddata: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      canPlayType(): string { return "probably"; }
+      pause = vi.fn();
+      play = vi.fn(() => new Promise<void>((resolve) => { finishPlay = resolve; }));
+      set src(_value: string) { queueMicrotask(() => this.onloadeddata?.()); }
+    }
+    Object.defineProperty(globalThis, "document", { configurable: true, value: {
+      createElement: () => new SlowVideo(),
+    } });
+    const h = harness();
+    const base = image(300);
+    if (base.kind !== "image") throw new Error("image fixture changed kind");
+    try {
+      h.send([{ ...base, durationMs: 150, mime: "video/webm" }]);
+      await h.resolveAssetNow("aa".repeat(32));
+      now = 3_500_340;
+      await vi.advanceTimersByTimeAsync(340);
+      for (let turn = 0; turn < 4 && !finishPlay; turn++) await Promise.resolve();
+      if (!finishPlay) throw new Error("video startup did not begin");
+
+      now = 3_500_540;
+      finishPlay();
+      for (let turn = 0; turn < 6; turn++) await Promise.resolve();
+
+      expect(h.spawned).toEqual([]);
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready", "late"]);
+      expect(h.reports[0]?.entries).toMatchObject([{ state: "skipped", reason: "not-ready" }]);
+    } finally {
+      h.player.dispose();
+      Reflect.deleteProperty(globalThis, "document");
+      vi.useRealTimers();
+    }
+  });
+
+  test("slow audio startup corrects a preload acknowledgement but still plays in delay mode", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    let now = 4_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let finishPlay: (() => void) | undefined;
+    playAudio = () => new Promise<void>((resolve) => { finishPlay = resolve; });
+    const h = harness();
+    try {
+      h.send([sound(300)]);
+      await h.resolveAssetNow("bb".repeat(32));
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready"]);
+
+      now = 4_000_340;
+      await vi.advanceTimersByTimeAsync(340);
+      if (!finishPlay) throw new Error("audio startup did not begin");
+      now = 4_000_540;
+      finishPlay();
+      for (let turn = 0; turn < 6; turn++) await Promise.resolve();
+
+      expect(audios[0]?.volume).toBeGreaterThan(0);
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready", "late"]);
+      expect(h.reports[0]?.entries).toContainEqual(expect.objectContaining({
+        kind: "sound", state: "late", reason: "not-ready",
+      }));
+    } finally {
+      h.player.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   test("a shared failed preload answers every waiting run, not just its first requester", async () => {
     const h = harness();
     try {
@@ -386,6 +929,68 @@ describe("the table answers with what it actually did (D-308, SQ-13)", () => {
       expect(h.mediaAcks.map(({ runId, state }) => ({ runId, state }))).toEqual([
         { runId: "first", state: "failed" }, { runId: "second", state: "failed" },
       ]);
+    } finally { h.player.dispose(); }
+  });
+
+  test("a failed preload that recovers at cue time corrects that same run to ready", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const h = harness(); const hash = "aa".repeat(32);
+    try {
+      h.fail(hash);
+      h.send([image(300, hash)], { runId: "recover-in-run" });
+      for (let turn = 0; turn < 6; turn++) await Promise.resolve();
+      expect(h.mediaAcks).toMatchObject([{ runId: "recover-in-run", state: "failed" }]);
+
+      h.recover(hash);
+      await vi.advanceTimersByTimeAsync(340);
+      expect(h.pendingCount()).toBe(1);
+      await h.resolveAssetNow(hash);
+      for (let turn = 0; turn < 6; turn++) await Promise.resolve();
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["failed", "ready"]);
+      expect(h.spawned).toHaveLength(1);
+    } finally {
+      h.player.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  test("a predecode refusal that cue-time decode recovers corrects that same run to ready", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const decode = vi.spyOn(Image.prototype, "decode")
+      .mockRejectedValueOnce(new Error("image decode unsupported"))
+      .mockResolvedValue(undefined);
+    const h = harness(); const hash = "aa".repeat(32);
+    try {
+      h.send([image(300, hash)], { runId: "recover-decode" });
+      await h.resolveAssetNow(hash);
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready", "unsupported"]);
+
+      await vi.advanceTimersByTimeAsync(340);
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+      expect(decode).toHaveBeenCalledTimes(2);
+      expect(h.mediaAcks.map(({ state }) => state)).toEqual(["ready", "unsupported", "ready"]);
+      expect(h.spawned).toHaveLength(1);
+      expect(h.reports).toEqual([]);
+    } finally {
+      h.player.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  test("a later run retries a failed preload instead of inheriting a permanent failure", async () => {
+    const h = harness(); const hash = "aa".repeat(32);
+    try {
+      h.fail(hash);
+      h.send([image(1500, hash)], { runId: "failed-first" });
+      await sleep(20);
+      expect(h.mediaAcks).toMatchObject([{ runId: "failed-first", state: "failed" }]);
+
+      h.recover(hash);
+      h.send([image(1500, hash)], { runId: "retry" });
+      expect(h.requests).toEqual([hash, hash]);
+      await h.resolveAsset(hash);
+      expect(h.mediaAcks.at(-1)).toMatchObject({ runId: "retry", assetId: hash, state: "ready" });
     } finally { h.player.dispose(); }
   });
 

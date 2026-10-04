@@ -45,6 +45,8 @@
  */
 import type { PF1eItemCastSource } from "../../packages/pf1e/consumables";
 import type { Op } from "../../core/ops";
+import { actionAsJson, deriveActionState, type ActionArea, type ActionCard,
+  type ActionTarget } from "../../core/action";
 import type { PermissionUser } from "../../core/ownership";
 import type {
   ActorDocument,
@@ -90,7 +92,7 @@ import {
   pendingCastFromSystem,
 } from "../../packages/pf1e/pendingCast";
 import { pendingRollCreateOp } from "../combat/pf1ePendingRollFlow";
-import { isPlayerOwned } from "../../packages/pf1e/pendingRoll";
+import { buildPendingRoll, isPlayerOwned } from "../../packages/pf1e/pendingRoll";
 import { worldSettingsFrom } from "../../core/worldSettings";
 import {
   PF1E_ALLY_TOUCH_MAX,
@@ -122,6 +124,13 @@ export interface CastFlowClient {
 }
 
 export interface PF1eCastFlowParams {
+  /** Optional spatial invocation facts. Rules do not infer canvas selection inside this flow. */
+  context?: {
+    sceneId?: string;
+    casterTokenId?: string;
+    targetTokenId?: string;
+    area?: ActionArea;
+  };
   casterActor: ActorDocument;
   casterDerived: PF1eDerived;
   spell: {
@@ -340,10 +349,128 @@ export type PF1eCastFlowOutcome =
        */
       pending: true;
       pendingSpell: { name: string; level: number };
+      /** Present when resolution waits for a player-owned save rather than casting time. */
+      pendingRollId?: string;
+      /** Multi-check gates (for example, several concentration declarations). */
+      pendingRollIds?: string[];
       warnings: string[];
       gateNotes: string[];
     }
   | { ok: false; error: string };
+
+function castSpatialContext(client: CastFlowClient, params: PF1eCastFlowParams): NonNullable<PF1eCastFlowParams["context"]> {
+  const authored = params.context ?? {};
+  if (authored.sceneId && authored.casterTokenId && authored.targetTokenId) return authored;
+  const scenes = (client as unknown as { store?: { getAll?: (coll: string) => readonly unknown[] } })
+    .store?.getAll?.("scenes") ?? [];
+  const visibleScenes = scenes.map((value) => value as { _id?: unknown; active?: unknown;
+    tokens?: Array<{ _id?: unknown; actorId?: unknown }> });
+  // An explicit scene is a hard boundary: never borrow token IDs from another visible scene.
+  const scene = authored.sceneId !== undefined
+    ? visibleScenes.find((value) => value._id === authored.sceneId)
+    : visibleScenes.find((value) => value.active === true &&
+        value.tokens?.some((token) => token.actorId === params.casterActor._id)) ??
+      visibleScenes.find((value) => value.tokens?.some((token) => token.actorId === params.casterActor._id));
+  if (!scene || typeof scene._id !== "string" || !Array.isArray(scene.tokens)) return authored;
+  const caster = scene.tokens.find((token) => token.actorId === params.casterActor._id);
+  const target = scene.tokens.find((token) => token.actorId === params.targetActor._id);
+  return {
+    ...authored,
+    ...(authored.sceneId === undefined ? { sceneId: scene._id } : {}),
+    ...(authored.casterTokenId === undefined && typeof caster?._id === "string" ? { casterTokenId: caster._id } : {}),
+    ...(authored.targetTokenId === undefined && typeof target?._id === "string" ? { targetTokenId: target._id } : {}),
+  };
+}
+
+function castActionSource(params: PF1eCastFlowParams): ActionCard["source"] {
+  return {
+    name: params.casterActor.name,
+    actorId: params.casterActor._id,
+    ...(params.context?.casterTokenId !== undefined ? { tokenId: params.context.casterTokenId } : {}),
+    ...(params.source?.itemId !== undefined ? { itemId: params.source.itemId } : {}),
+  };
+}
+
+function castActionTargetBase(params: PF1eCastFlowParams): Pick<ActionTarget, "key" | "name" | "actorId" | "tokenId"> {
+  return {
+    key: params.targetActor._id,
+    name: params.targetName,
+    actorId: params.targetActor._id,
+    ...(params.context?.targetTokenId !== undefined ? { tokenId: params.context.targetTokenId } : {}),
+  };
+}
+
+/** One canonical card constructor for immediate and deferred cast resolution. */
+function castActionCard(params: PF1eCastFlowParams, id: string, targets: ActionTarget[],
+  notes: readonly string[] = [], state: ActionCard["state"] = deriveActionState(targets)): ActionCard {
+  const now = Date.now();
+  return {
+    v: 1,
+    id,
+    revision: 0,
+    kind: "cast",
+    label: params.spell.name,
+    state,
+    source: castActionSource(params),
+    ...(params.context?.sceneId !== undefined ? { sceneId: params.context.sceneId } : {}),
+    ...(params.context?.area !== undefined ? { area: params.context.area } : {}),
+    targets,
+    notes: [...notes].slice(0, 32),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function resolvedCastActionTarget(params: PF1eCastFlowParams, input: {
+  dc: number;
+  saveBonus: number;
+  saveTotal: number | null;
+  result: Extract<PF1eSpellTargetResult, { ok: true }>;
+  evidence?: {
+    damageRollId?: string;
+    srRollId?: string;
+    saveRollId?: string;
+    combatId?: string;
+    critical: boolean;
+  };
+}): ActionTarget {
+  const saveAllowed = params.authored.severity !== "none" && !input.result.resisted;
+  const outcome: ActionTarget["outcome"] = input.result.resisted ? "resisted"
+    : saveAllowed ? input.result.passed ? "saved" : "failedSave" : "affected";
+  return {
+    ...castActionTargetBase(params),
+    state: "resolved",
+    outcome,
+    ...(saveAllowed && input.saveTotal !== null ? { check: {
+      kind: "save" as const,
+      status: "resolved" as const,
+      formula: `1d20${input.saveBonus === 0 ? "" : input.saveBonus > 0 ? `+${input.saveBonus}` : String(input.saveBonus)}`,
+      dc: input.dc,
+      total: input.saveTotal,
+      saveType: params.authored.saveType,
+      passed: input.result.passed,
+      automatic: input.result.automatic,
+    } } : {}),
+    ...(input.evidence !== undefined && params.source === undefined && params.touch === undefined ? { evidence: {
+      adapter: "pf1e.spellTarget.v1",
+      payload: {
+        spellLevel: params.spell.level,
+        saveType: params.authored.saveType,
+        severity: params.authored.severity,
+        damageFormula: params.authored.damageFormula,
+        ...(params.authored.energyType !== undefined ? { energyType: params.authored.energyType } : {}),
+        critical: input.evidence.critical,
+        ...(input.evidence.damageRollId !== undefined ? { damageRollId: input.evidence.damageRollId } : {}),
+        ...(input.evidence.srRollId !== undefined ? { srRollId: input.evidence.srRollId } : {}),
+        ...(input.evidence.saveRollId !== undefined ? { saveRollId: input.evidence.saveRollId } : {}),
+        ...(input.evidence.combatId !== undefined ? { combatId: input.evidence.combatId } : {}),
+      },
+    } } : {}),
+    damage: { dealt: input.result.dealt, prevented: input.result.saveReduced +
+      Object.values(input.result.erApplied).reduce((sum, value) => sum + (value ?? 0), 0) },
+    ...(input.result.notes.length > 0 ? { notes: [...input.result.notes].slice(0, 32) } : {}),
+  };
+}
 
 const DAMAGE_FORMULA = /^(\d+)[dD](\d+)$/;
 
@@ -401,6 +528,13 @@ type SpellEffectResult =
       saveTotal: number | null;
       result: Extract<PF1eSpellTargetResult, { ok: true }>;
       hpWriteError: string | null;
+      evidence: {
+        damageRollId?: string;
+        srRollId?: string;
+        saveRollId?: string;
+        combatId?: string;
+        critical: boolean;
+      };
     }
   | { ok: false; error: string };
 
@@ -420,6 +554,9 @@ async function runSpellEffect(
   const { authored, casterDerived, spellName } = input;
 
   let damageTotal = 0;
+  let damageRollId: string | undefined;
+  let srRollId: string | undefined;
+  let saveRollId: string | undefined;
   if (authored.damageFormula !== "") {
     const match = DAMAGE_FORMULA.exec(authored.damageFormula.trim());
     if (!match)
@@ -436,6 +573,7 @@ async function runSpellEffect(
       undefined,
       `${spellName} damage`,
     );
+    damageRollId = rollId;
     const message = await awaitRollMessage(client, rollId);
     if (
       message === null ||
@@ -481,6 +619,7 @@ async function runSpellEffect(
         undefined,
         `${spellName} caster level check vs SR ${spellResistance}`,
       );
+      srRollId = rollId;
       const message = await awaitRollMessage(client, rollId);
       if (message === null) return fail("The SR check roll never replicated.");
       const srDie = dieFaceOf(message);
@@ -515,6 +654,7 @@ async function runSpellEffect(
       undefined,
       `${input.targetName} ${authored.saveType} save vs ${spellName}`,
     );
+    saveRollId = rollId;
     const message = await awaitRollMessage(client, rollId);
     if (message === null) return fail("The saving throw never replicated.");
     const face = dieFaceOf(message);
@@ -579,6 +719,13 @@ async function runSpellEffect(
     saveTotal,
     result: target,
     hpWriteError,
+    evidence: {
+      ...(damageRollId !== undefined ? { damageRollId } : {}),
+      ...(srRollId !== undefined ? { srRollId } : {}),
+      ...(saveRollId !== undefined ? { saveRollId } : {}),
+      ...(input.combat !== null && input.combat !== undefined ? { combatId: input.combat._id } : {}),
+      critical: input.critical === true,
+    },
   };
 }
 
@@ -592,6 +739,9 @@ export async function resolveCastFlow(
   params: PF1eCastFlowParams,
 ): Promise<PF1eCastFlowOutcome> {
   const fail = (error: string): PF1eCastFlowOutcome => ({ ok: false, error });
+  // Context is inferred only from the caller's projected scenes; hidden tokens can never enter
+  // the public card through a replica that could not see them.
+  params = { ...params, context: castSpatialContext(client, params) };
 
   // ── validation: nothing is rolled before the cast is well-formed ─────────
   const { authored, spell } = params;
@@ -844,9 +994,11 @@ export async function resolveCastFlow(
         const bonusRes = concentrationBonus({ casterLevel: casterDerived.spellCasterLevel, keyAbilityMod: casterDerived.abilityMods[casterDerived.spellKeyAbility], featBonus: casterDerived.concentration });
         const bonus = bonusRes.issues.length === 0 ? bonusRes.bonus : 0;
         const formula = `1d20${bonus >= 0 ? `+${bonus}` : `${bonus}`}`;
-        const concOps: Op[] = [];
+        const cardId = globalThis.crypto.randomUUID();
+        const concRolls: ReturnType<typeof buildPendingRoll>[] = [];
+        const concTargets: ActionTarget[] = [];
         const concLines: string[] = [];
-        for (const declaration of gate.declarations ?? []) {
+        for (const [declarationIndex, declaration] of (gate.declarations ?? []).entries()) {
           let triggerForDc: Parameters<typeof concentrationDc>[0] | null = null;
           switch (declaration.situation) {
             case "injured": triggerForDc = { situation: "injured", damage: declaration.damage, die: 10 }; break;
@@ -864,42 +1016,63 @@ export async function resolveCastFlow(
           }
           const dcRes = triggerForDc !== null ? concentrationDc(triggerForDc, spell.level) : null;
           const dcVal = dcRes !== null && dcRes.issues.length === 0 ? dcRes.dc : null;
-          const pendingOp = pendingRollCreateOp({
+          const pendingId = globalThis.crypto.randomUUID();
+          const targetKey = `${pendingId}-${String(declarationIndex)}`;
+          concRolls.push(buildPendingRoll({
+            id: pendingId,
+            actionId: cardId,
+            targetKey,
             kind: "concentration",
-            initiator: { actorId: params.casterActor._id as unknown as string, tokenId: null, name: params.casterActor.name, actionLabel: `${spell.name} - concentration (${declaration.situation})` },
-            target: { actorId: params.casterActor._id as unknown as string, tokenId: null, name: params.casterActor.name },
+            initiator: { actorId: params.casterActor._id as unknown as string,
+              tokenId: params.context?.casterTokenId ?? null, name: params.casterActor.name,
+              actionLabel: `${spell.name} - concentration (${declaration.situation})` },
+            target: { actorId: params.casterActor._id as unknown as string,
+              tokenId: params.context?.casterTokenId ?? null, name: params.casterActor.name },
             formula,
             dc: dcVal,
             modifiers: [{ label: "Concentration", value: bonus, reason: declaration.situation }],
             turnNumber: turnNumberConc,
             rollMode: "roll",
-            targetIsPlayerOwned: casterIsPlayerOwned,
-            worldSettings: worldSettingsConc,
-            isStrategic: false,
-          });
-          if (pendingOp !== null) {
-            concOps.push(pendingOp);
-            concLines.push(`${declaration.situation}: DC ${dcVal !== null ? String(dcVal) : "—"} vs ${formula} — pending`);
-          }
+          }));
+          concTargets.push({ key: targetKey, name: params.casterActor.name, label: declaration.situation,
+            actorId: params.casterActor._id,
+            ...(params.context?.casterTokenId !== undefined ? { tokenId: params.context.casterTokenId } : {}),
+            state: "pending", outcome: "pending", check: { kind: "concentration", status: "pending",
+              formula, dc: dcVal, total: null, pendingRollId: pendingId } });
+          concLines.push(`${declaration.situation}: DC ${dcVal !== null ? String(dcVal) : "—"} vs ${formula} — pending`);
         }
-        if (concOps.length > 0) {
+        if (concRolls.length > 0) {
+          // Concentration resolves first; the spell effect remains explicit rather than letting
+          // client-authored damage/effects masquerade as an authoritative continuation.
+          const effectKey = `${cardId}-effect`;
+          const action = castActionCard(params, cardId, [...concTargets, {
+            key: effectKey,
+            name: params.targetName,
+            label: `${spell.name} — effect`,
+            actorId: params.targetActor._id,
+            ...(params.context?.targetTokenId !== undefined ? { tokenId: params.context.targetTokenId } : {}),
+            state: "pending",
+            outcome: "pending",
+            notes: ["Awaiting a host-verifiable continuation after all concentration checks resolve."],
+          }], [...gateNotes, ...warnings, ...concLines]);
           const concPendingCard: MessageDocument = {
-            _id: globalThis.crypto.randomUUID(),
+            _id: cardId,
             type: "message",
             name: `${spell.name} - concentration pending`,
             ownership: { default: 1 },
             flags: {},
-            system: {},
+            system: { action: actionAsJson(action), pendingRolls: concRolls as unknown as Json },
             author: user?.id ?? "",
             content: `${params.casterActor.name} casting ${spell.name} — concentration checks pending for player roll:\n${concLines.join("\n")}`,
             whisper: [],
             roll: null,
             flavor: "cast resolution",
           };
-          client.submit([{ kind: "create", coll: "messages", data: concPendingCard }]);
-          client.submit(concOps);
-          if (ops.length > 0) client.submit(ops);
-          return { ok: true, lost: false, held: false, warnings, gateNotes: [...gateNotes, ...concLines.map((l) => `⚠ ${l} — pending for player roll`)], dc, sr: { resisted: false, total: null, reused: false, issues: [] }, result: { ok: true, passed: false, automatic: null, dealt: 0, saveReduced: 0, erApplied: {}, notes: ["Concentration is pending for player roll."], rolled: 0 } as unknown as Extract<PF1eSpellTargetResult, { ok: true }>, hpWriteError: null } as unknown as PF1eCastFlowOutcome;
+          client.submit([{ kind: "create", coll: "messages", data: concPendingCard }, ...ops]);
+          return { ok: true, lost: false, held: false, pending: true,
+            pendingSpell: { name: spell.name, level: spell.level },
+            pendingRollIds: concRolls.flatMap((pending) => pending.id ? [pending.id] : []),
+            warnings, gateNotes: [...gateNotes, ...concLines.map((line) => `⚠ ${line} — pending for player roll`)] };
         }
       }
     } catch (err) {
@@ -1003,21 +1176,24 @@ export async function resolveCastFlow(
         gateNotes,
         warnings,
       );
+      const cardId = globalThis.crypto.randomUUID();
+      const action = castActionCard(params, cardId, [{ ...castActionTargetBase(params),
+        state: "skipped", outcome: "unaffected", notes: ["The spell was lost before its effect resolved."] }],
+        [...gateNotes, ...warnings], "failed");
       const cardMessage: MessageDocument = {
-        _id: globalThis.crypto.randomUUID(),
+        _id: cardId,
         type: "message",
         name: card.name,
         ownership: { default: 1 },
         flags: {},
-        system: {},
+        system: { action: actionAsJson(action) },
         author: user?.id ?? "",
         content: card.content,
         whisper: [],
         roll: null,
         flavor: "cast resolution",
       };
-      client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
-      if (ops.length > 0) client.submit(ops);
+      client.submit([{ kind: "create", coll: "messages", data: cardMessage }, ...ops]);
       return { ok: true, lost: true, held: false, warnings, gateNotes };
     }
   }
@@ -1091,21 +1267,25 @@ export async function resolveCastFlow(
       warnings,
       gateNotes,
     );
+    const cardId = globalThis.crypto.randomUUID();
+    const action = castActionCard(params, cardId, [{ ...castActionTargetBase(params),
+      state: "pending", outcome: "pending",
+      notes: ["The multi-round casting is recorded on the caster and has not completed yet."] }],
+      [...gateNotes, ...warnings]);
     const cardMessage: MessageDocument = {
-      _id: globalThis.crypto.randomUUID(),
+      _id: cardId,
       type: "message",
       name: card.name,
       ownership: { default: 1 },
       flags: {},
-      system: {},
+      system: { action: actionAsJson(action) },
       author: user?.id ?? "",
       content: card.content,
       whisper: [],
       roll: null,
       flavor: "cast resolution",
     };
-    client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
-    if (ops.length > 0) client.submit(ops);
+    client.submit([{ kind: "create", coll: "messages", data: cardMessage }, ...ops]);
     return {
       ok: true,
       lost: false,
@@ -1242,23 +1422,31 @@ export async function resolveCastFlow(
           warnings,
           gateNotes,
         );
+        const cardId = globalThis.crypto.randomUUID();
+        const action = castActionCard(params, cardId, [{ ...castActionTargetBase(params),
+          state: "resolved", outcome: "miss", check: { kind: "attack", status: "resolved",
+            formula: `1d20${touchBonus === 0 ? "" : touchBonus > 0 ? `+${touchBonus}` : String(touchBonus)}`,
+            dc: params.targetDerived.ac.touch, total: touchSummary.total ?? 0, passed: false } }, {
+          key: `${cardId}-charge`, name: params.casterActor.name,
+          label: `${spell.name} — held charge`, actorId: params.casterActor._id,
+          ...(params.context?.casterTokenId !== undefined ? { tokenId: params.context.casterTokenId } : {}),
+          state: "pending", outcome: "pending",
+          notes: ["The melee touch charge remains on the caster until delivered or dissipated."],
+        }], [...gateNotes, ...warnings]);
         const cardMessage: MessageDocument = {
-          _id: globalThis.crypto.randomUUID(),
+          _id: cardId,
           type: "message",
           name: card.name,
           ownership: { default: 1 },
           flags: {},
-          system: {},
+          system: { action: actionAsJson(action) },
           author: user?.id ?? "",
           content: card.content,
           whisper: [],
           roll: null,
           flavor: "cast resolution",
         };
-        client.submit([
-          { kind: "create", coll: "messages", data: cardMessage },
-        ]);
-        if (ops.length > 0) client.submit(ops);
+        client.submit([{ kind: "create", coll: "messages", data: cardMessage }, ...ops]);
         return {
           ok: true,
           lost: false,
@@ -1285,21 +1473,26 @@ export async function resolveCastFlow(
         warnings,
         gateNotes,
       );
+      const cardId = globalThis.crypto.randomUUID();
+      const action = castActionCard(params, cardId, [{ ...castActionTargetBase(params),
+        state: "resolved", outcome: "miss", check: { kind: "attack", status: "resolved",
+          formula: `1d20${touchBonus === 0 ? "" : touchBonus > 0 ? `+${touchBonus}` : String(touchBonus)}`,
+          dc: params.targetDerived.ac.touch, total: touchSummary.total ?? 0, passed: false } }],
+        [...gateNotes, ...warnings], "failed");
       const cardMessage: MessageDocument = {
-        _id: globalThis.crypto.randomUUID(),
+        _id: cardId,
         type: "message",
         name: card.name,
         ownership: { default: 1 },
         flags: {},
-        system: {},
+        system: { action: actionAsJson(action) },
         author: user?.id ?? "",
         content: card.content,
         whisper: [],
         roll: null,
         flavor: "cast resolution",
       };
-      client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
-      if (ops.length > 0) client.submit(ops);
+      client.submit([{ kind: "create", coll: "messages", data: cardMessage }, ...ops]);
       return {
         ok: true,
         lost: true,
@@ -1321,10 +1514,41 @@ export async function resolveCastFlow(
     if (deferSave) {
       const saveBonus = authored.saveType === "fort" ? params.targetDerived.saves.fort : authored.saveType === "ref" ? params.targetDerived.saves.ref : params.targetDerived.saves.will;
       const formula = `1d20${saveBonus >= 0 ? `+${saveBonus}` : `${saveBonus}`}`;
+      const cardId = globalThis.crypto.randomUUID();
+      const pendingId = globalThis.crypto.randomUUID();
+      const targetRef = castActionTargetBase(params);
+      const action = castActionCard(params, cardId, [{
+        ...targetRef,
+        label: "save",
+        state: "pending",
+        outcome: "pending",
+        check: { kind: "save", status: "pending", formula, dc, total: null,
+          saveType: authored.saveType, pendingRollId: pendingId },
+        ...(params.source === undefined && params.touch === undefined ? { evidence: {
+          adapter: "pf1e.pendingSave.v1",
+          payload: { spellLevel: spell.level, saveType: authored.saveType },
+        } } : {}),
+      }, {
+        ...targetRef,
+        key: `${pendingId}-effect`,
+        label: "spell effect",
+        state: "pending",
+        outcome: "pending",
+        notes: ["Awaiting a host-verifiable spell-effect continuation; no damage or condition is inferred from the card."],
+      }], [...gateNotes, ...warnings, ...(touchCardLine ? [touchCardLine] : []),
+        "The save can resolve independently; spell mechanics remain explicitly pending." ]);
       const pendingOp = pendingRollCreateOp({
+        messageId: cardId,
+        pendingId,
+        action,
+        content: `${params.casterActor.name} casts ${spell.name} at ${params.targetName} — ${authored.saveType.toUpperCase()} save DC ${dc} is pending.`,
         kind: "save",
-        initiator: { actorId: params.casterActor._id as unknown as string, tokenId: null, name: params.casterActor.name, actionLabel: `${spell.name} - ${authored.saveType.toUpperCase()} save (DC ${dc})` },
-        target: { actorId: params.targetActor._id as unknown as string, tokenId: null, name: params.targetName },
+        saveType: authored.saveType,
+        initiator: { actorId: params.casterActor._id as unknown as string,
+          tokenId: params.context?.casterTokenId ?? null, name: params.casterActor.name,
+          actionLabel: `${spell.name} - ${authored.saveType.toUpperCase()} save (DC ${dc})` },
+        target: { actorId: params.targetActor._id as unknown as string,
+          tokenId: params.context?.targetTokenId ?? null, name: params.targetName },
         formula,
         dc,
         modifiers: [{ label: authored.saveType.toUpperCase(), value: saveBonus, reason: "save" }],
@@ -1335,44 +1559,11 @@ export async function resolveCastFlow(
         isStrategic: false,
       });
       if (pendingOp !== null) {
-        // Slot and prepared spend already in ops, plus any held-charge dissipation already queued
-        const pendingCardOps: import("../../core/ops").Op[] = [pendingOp];
-        // Also post a lightweight narrative card for the cast that was deferred
-        const castPendingMessage: MessageDocument = {
-          _id: globalThis.crypto.randomUUID(),
-          type: "message",
-          name: `${spell.name} - save pending`,
-          ownership: { default: 1 },
-          flags: {},
-          system: {},
-          author: user?.id ?? "",
-          content: `${params.casterActor.name} casts ${spell.name} at ${params.targetName} - ${authored.saveType.toUpperCase()} save (DC ${dc}) is pending for ${params.targetName} (Roll ${formula}).`,
-          whisper: [],
-          roll: null,
-          flavor: "cast resolution",
-        };
-        client.submit([{ kind: "create", coll: "messages", data: castPendingMessage }]);
-        client.submit([...pendingCardOps]);
-        if (ops.length > 0) client.submit(ops);
-        // Also handle touch line when present
-        if (touchCardLine !== null) {
-          const touchMsg: MessageDocument = {
-            _id: globalThis.crypto.randomUUID(),
-            type: "message",
-            name: `${spell.name} touch`,
-            ownership: { default: 1 },
-            flags: {},
-            system: {},
-            author: user?.id ?? "",
-            content: touchCardLine,
-            whisper: [],
-            roll: null,
-            flavor: "cast resolution",
-          };
-          client.submit([{ kind: "create", coll: "messages", data: touchMsg }]);
-        }
-        return { ok: true, lost: false, held: false, warnings, gateNotes, dc, sr: { resisted: false, total: null, reused: false, issues: [] }, result: { ok: true, passed: false, automatic: null, dealt: 0, saveReduced: 0, erApplied: {}, notes: ["Save is pending for player roll."], rolled: 0 } as unknown as Extract<PF1eSpellTargetResult, { ok: true }>,
-          hpWriteError: null, ...(touchSummary !== undefined ? { touch: touchSummary } : {}) } as unknown as PF1eCastFlowOutcome;
+        // Cost, held-charge cleanup and the one canonical pending card commit together.
+        client.submit([pendingOp, ...ops]);
+        return { ok: true, lost: false, held: false, pending: true,
+          pendingSpell: { name: spell.name, level: spell.level }, pendingRollId: pendingId,
+          warnings, gateNotes };
       }
     }
   } catch (err) {
@@ -1401,7 +1592,7 @@ export async function resolveCastFlow(
   });
   if (!effect.ok) return fail(effect.error);
   ops.push(...effect.ops);
-  const { sr, saveBonus, saveTotal, result: target, hpWriteError } = effect;
+  const { sr, saveBonus, saveTotal, result: target, hpWriteError, evidence } = effect;
 
   // ── the resolution card (public narrative, §11 chips) ─────────────────────
   const card = castResolutionCardContent(
@@ -1426,21 +1617,25 @@ export async function resolveCastFlow(
     gateNotes,
     touchCardLine,
   );
+  const cardId = globalThis.crypto.randomUUID();
+  const action = castActionCard(params, cardId, [resolvedCastActionTarget(params, {
+    dc, saveBonus, saveTotal, result: target, evidence,
+  })], [...gateNotes, ...warnings]);
   const cardMessage: MessageDocument = {
-    _id: globalThis.crypto.randomUUID(),
+    _id: cardId,
     type: "message",
     name: card.name,
     ownership: { default: 1 },
     flags: {},
-    system: {},
+    system: { action: actionAsJson(action) },
     author: user?.id ?? "",
     content: card.content,
     whisper: [],
     roll: null,
     flavor: "cast resolution",
   };
-  client.submit([{ kind: "create", coll: "messages", data: cardMessage }]);
-  if (ops.length > 0) client.submit(ops);
+  // The visible card and its mechanical writes are one intent: neither may commit alone.
+  client.submit([{ kind: "create", coll: "messages", data: cardMessage }, ...ops]);
   return {
     ok: true,
     lost: false,

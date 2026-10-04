@@ -216,24 +216,30 @@ return { names: owned.map(row => row.name), stopped: ended.stopped };`, {},
   test("a reviewed FX chain awaits a host-clock cue, overlaps a parallel lane, calls a macro and returns ordered results", async () => {
     vi.stubGlobal("Worker", WorkerShim);
     const actions: Array<{ method: string; payload: unknown }> = [];
+    let shortEnd = 0;
     const result = await runScriptWorker(`return await api.fx.sequence()
   .parallel((api) => api.fx.play('left'), (api) => api.fx.play('right'))
-  .wait(2).playAndWait('short')
+  .wait(2).playAndWait('short', undefined, undefined, -400)
   .thenDo(async (api, last) => (await api.chat.say('after ' + last.runId, 'gm')).messageId)
   .call('next-script', { choice: true }).run();`, {},
     { sceneId: "s1", callerId: "gm", requestId: "fx-chain" }, async (method, payload) => {
       actions.push({ method, payload });
       if (method === "fx.play") {
         const call = payload as { macroId: string };
-        return { runId: call.macroId, atHostTime: Date.now(), endsAtHostTime: Date.now() + 3,
-          persistent: false };
+        const now = Date.now();
+        const endsAtHostTime = now + (call.macroId === "short" ? 600 : 3);
+        if (call.macroId === "short") shortEnd = endsAtHostTime;
+        return { runId: call.macroId, atHostTime: now, endsAtHostTime, persistent: false };
       }
-      if (method === "chat.say") return { messageId: "message-after" };
+      if (method === "chat.say") {
+        expect(Date.now()).toBeLessThan(shortEnd); // the negative finish offset resumes while the cue is live
+        return { messageId: "message-after" };
+      }
       return { choice: "passed" };
     }, 1000);
     expect(actions.map((call) => call.method))
       .toEqual(["fx.play", "fx.play", "fx.play", "chat.say", "macros.call"]);
-    expect(actions[2]?.payload).toEqual({ macroId: "short", waitForEnd: true });
+    expect(actions[2]?.payload).toEqual({ macroId: "short", waitForEnd: true, finishOffsetMs: -400 });
     expect(actions[3]?.payload).toEqual({ content: "after short", audience: "gm" });
     expect(result).toMatchObject({ timeline: [
       { kind: "parallel", result: [{ runId: "left" }, { runId: "right" }] },
@@ -250,14 +256,21 @@ return chain.run();`, {},
     }, 500).catch((err: unknown) => err);
     expect(invalid).toBeInstanceOf(Error);
     expect(String(invalid)).toMatch(/32 sections/);
+    const invalidOffset = await runScriptWorker(
+      "return api.fx.sequence().playAndWait('short', undefined, undefined, 30001).run();", {},
+      { sceneId: "s1", callerId: "gm", requestId: "bad-offset" }, async () => {
+        throw new Error("Unexpected RPC from invalid FX offset");
+      }, 500).catch((err: unknown) => err);
+    expect(invalidOffset).toBeInstanceOf(Error);
+    expect(String(invalidOffset)).toMatch(/finish offset/);
   });
 
-  test("a reviewed script can stop an FX instance using the run ID returned by play", async () => {
+  test("a reviewed script can cancel an exact finite or persistent FX run using play's run ID", async () => {
     vi.stubGlobal("Worker", WorkerShim);
     const actions: string[] = [];
-    const result = await runScriptWorker(`const instance = await api.fx.play('caller-aura');
-const end = await api.fx.stop(instance.runId);
-return { runId: instance.runId, stopped: end.stopped };`, {},
+    const result = await runScriptWorker(`const run = await api.fx.play('caller-aura');
+const end = await api.fx.stop(run.runId);
+return { runId: run.runId, stopped: end.stopped };`, {},
     { sceneId: "s1", callerId: "player", requestId: "run-stop" }, async (method, payload) => {
       actions.push(method);
       if (method === "fx.play") {

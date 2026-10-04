@@ -7,6 +7,7 @@
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
   import { parseInvite } from "./hostShare";
   import { createStage, type Stage } from "../canvas/stage";
+  import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
   import CrosshairOverlay from "../ui/macros/CrosshairOverlay.svelte";
   import { resolveCrosshairPick, summonCrosshairOptions } from "../ui/macros/crosshairPicker";
@@ -792,7 +793,10 @@
         if (fetcher) {
           fxPlayer = new FxPlayer({
             client, bus: current.bus, stage: view,
-            fetchAsset: (hash) => fetcher.request(hash, "ui"),
+            // An imminent cue is current-scene work, not background/UI prefetch. Giving it
+            // the scene lane prevents a newly joined viewer's remaining asset queue from
+            // spending the whole FX lead window before this request is even served.
+            fetchAsset: (hash) => fetcher.request(hash, "scene"),
             sceneId: () => activeScene()?._id ?? null,
             onError: (message) => console.warn(message),
             // A player whose device could not show a cue on time is told so here;
@@ -823,6 +827,45 @@
         });
         // a reconnect may reach a host session holding a map this tab never saw
         client.bus.on("welcome", () => void fog?.refreshStored());
+        // Player chat uses the same semantic highlight event as the GM shell. Resolve only
+        // projected scene tokens, then center this viewer's own camera on the chosen fact.
+        client.bus.on("rollHighlight", (req) => {
+          try {
+            const currentScene = activeScene();
+            const tokens = currentScene?.tokens ?? [];
+            const rects: RollHighlightRect[] = [];
+            let center: { x: number; y: number } | null = null;
+            if (req.kind === "area" && req.area) {
+              const grid = currentScene?.grid;
+              const distance = grid && grid.distance > 0 ? grid.distance : 5;
+              const size = grid && grid.size > 0 ? grid.size : 50;
+              const radiusPx = (req.area.radiusFt / distance) * size;
+              rects.push({ x: req.area.origin.x - radiusPx, y: req.area.origin.y - radiusPx,
+                width: radiusPx * 2, height: radiusPx * 2, kind: "area" });
+              for (const tokenId of req.affectedTokenIds) {
+                const token = tokens.find((candidate) => candidate._id === tokenId);
+                if (token) rects.push({ ...tokenRect(token), kind: "target" });
+              }
+              center = req.area.origin;
+            } else if (req.tokenId !== null) {
+              const token = tokens.find((candidate) => candidate._id === req.tokenId);
+              if (token) {
+                const rect = tokenRect(token);
+                rects.push({ ...rect, kind: req.kind === "target" ? "target" : "initiator" });
+                center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+              }
+            }
+            if (rects.length === 0) return;
+            view.getRollHighlightLayer().sync(rects, view.camera, req.fadeSec);
+            if (center) view.setCamera({
+              x: center.x - view.viewport.width / (2 * view.camera.scale),
+              y: center.y - view.viewport.height / (2 * view.camera.scale),
+              scale: view.camera.scale,
+            });
+          } catch (err) {
+            console.warn("rollHighlight failed (best-effort overlay)", err);
+          }
+        });
         if (new URLSearchParams(globalThis.location.search).has("e2e")) {
           const fogLoop = fog;
           void import("./e2eHook").then((m) =>

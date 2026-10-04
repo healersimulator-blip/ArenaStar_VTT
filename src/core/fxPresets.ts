@@ -13,8 +13,10 @@
  * applies unchanged. What it deliberately does **not** carry is lifecycle: no
  * `persistent`, no `audience`, no source/target binding. A preset is the look, not the
  * run; loading one leaves the timeline's own lifecycle fields exactly as the author
- * set them, and nothing about a preset reaches the table until the author saves and
- * runs a timeline — which is where the host's authority lives and always did.
+ * set them. A visual playback sync-group name may be part of a persistent look; a
+ * simultaneous launch-group name may be part of a one-shot look. The Wizard keeps those
+ * lifecycle modes separate when loading. Nothing about a preset reaches the table
+ * until the author saves and runs a timeline — where host authority lives.
  *
  * Presets live in the world (a `MacroDocument` of `kind: "fxPreset"`), so they survive
  * a reload, travel with a world archive, and are undoable like every other document.
@@ -56,35 +58,54 @@ export function validateFxPreset(
     return { ok: false, error:
       `an FX preset needs version 1 and ${FX_PRESET_LIMITS.sections.min}–${FX_PRESET_LIMITS.sections.max} sections` };
   }
-  const checked = validateFxSequence({ version: 1, sections: value.sections });
-  if (checked.ok) return { ok: true, preset: { version: 1, sections: checked.sequence.sections } };
+  // Presets carry no lifecycle flag. Most bundles are valid one-shot fragments; a bundle
+  // with visual sync membership is instead a persistent fragment. It must pass wholly in
+  // one mode — mixing a finish-relative one-shot lane with a persistent-only group is not
+  // made valid by checking each section under a different lifecycle.
+  const oneShot = validateFxSequence({ version: 1, sections: value.sections });
+  if (oneShot.ok)
+    return { ok: true, preset: { version: 1, sections: oneShot.sequence.sections } };
+  const persistent = validateFxSequence({ version: 1, persistent: true, sections: value.sections });
+  if (persistent.ok)
+    return { ok: true, preset: { version: 1, sections: persistent.sequence.sections } };
   for (const [index, section] of value.sections.entries()) {
-    const alone = validateFxSequence({ version: 1, sections: [section] });
-    if (!alone.ok) {
+    const one = validateFxSequence({ version: 1, sections: [section] });
+    const loop = validateFxSequence({ version: 1, persistent: true, sections: [section] });
+    if (!one.ok && !loop.ok) {
       const id = isObject(section) && typeof section.id === "string" ? ` (${section.id})` : "";
-      return { ok: false, error: `preset section ${index + 1}${id}: ${alone.error}` };
+      return { ok: false, error: `preset section ${index + 1}${id}: ${one.error}` };
     }
   }
   // Nothing is wrong with any single section, so the fault is between them: overlapping
-  // IDs, too many camera cues, a total timeline past its bound.
-  return { ok: false, error: `FX preset: ${checked.error}` };
+  // IDs, incompatible lifecycle-only timing, too many camera cues, or a total past its bound.
+  return { ok: false, error: `FX preset: ${oneShot.error}` };
 }
 
 /**
  * The sections a load puts into the draft. IDs are **minted fresh** rather than copied,
  * because the same preset may be loaded twice into one timeline (two fireballs, one
  * look) and a duplicated section id is a document the host refuses — a preset must not
- * be able to produce one. Copying is shallow per section: the loader never hands the
- * wizard a reference into a stored document it could then mutate in place.
+ * be able to produce one. Finish-relative references are remapped as one bundle so they
+ * keep pointing at the freshly minted dependency, never back into the stored preset.
+ * Copying is shallow per section: the loader never hands the wizard a section reference
+ * from the stored document that it could then mutate in place.
  */
 export function fxPresetSections(preset: FxPresetDefinition, mintId: () => string): FxSection[] {
   const seen = new Set<string>();
-  return preset.sections.map((section) => {
+  const ids = preset.sections.map(() => {
     let id = mintId();
     while (seen.has(id)) id = mintId();
     seen.add(id);
-    return { ...section, id };
+    return id;
   });
+  const remap = new Map(preset.sections.map((section, index) => [section.id, ids[index] ?? section.id]));
+  return preset.sections.map((section, index) => ({ ...section, id: ids[index] ?? section.id,
+    ...(section.parallel === undefined ? {} : { parallel: { ...section.parallel } }),
+    ...(section.playIf === undefined ? {} : { playIf: { ...section.playIf } }),
+    ...(section.startAfter === undefined ? {} : section.startAfter.sectionId === undefined
+      ? { startAfter: { ...section.startAfter } }
+      : { startAfter: { ...section.startAfter,
+          sectionId: remap.get(section.startAfter.sectionId) ?? section.startAfter.sectionId } }) }));
 }
 
 /**

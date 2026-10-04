@@ -7,6 +7,7 @@
 
 import type { RollLedger } from "../../packages/pf1e/rollLedger";
 import type { PendingRoll } from "../../packages/pf1e/pendingRoll";
+import type { ActionCard } from "../../core/action";
 import type { RollHighlightRequest } from "../../client/rollHighlight";
 
 export function highlightRequestFromLedger(
@@ -49,6 +50,41 @@ export function highlightRequestFromLedger(
         }
       : null,
     affectedTokenIds: ledger.area ? [...ledger.area.affectedTokenIds] : [],
+    fadeSec,
+  };
+}
+
+export function highlightRequestFromAction(
+  action: ActionCard,
+  kind: "initiator" | "target" | "area",
+  clickedId: string | null,
+  fadeSec: number,
+): RollHighlightRequest {
+  if (kind === "initiator") return {
+    kind,
+    tokenId: action.source.tokenId ?? null,
+    actorId: action.source.actorId ?? null,
+    area: null,
+    affectedTokenIds: [],
+    fadeSec,
+  };
+  if (kind === "target") {
+    const target = action.targets.find((entry) => entry.key === clickedId) ?? null;
+    return { kind, tokenId: target?.tokenId ?? null, actorId: target?.actorId ?? null,
+      area: null, affectedTokenIds: [], fadeSec };
+  }
+  return {
+    kind: "area",
+    tokenId: null,
+    actorId: null,
+    area: action.area ? {
+      shape: action.area.shape === "circle" || action.area.shape === "rect" || action.area.shape === "polygon"
+        ? "burst" : action.area.shape,
+      origin: action.area.origin,
+      radiusFt: action.area.radius ?? 0,
+      ...(action.area.direction !== undefined ? { direction: action.area.direction } : {}),
+    } : null,
+    affectedTokenIds: action.targets.flatMap((target) => target.tokenId ? [target.tokenId] : []),
     fadeSec,
   };
 }

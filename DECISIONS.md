@@ -12036,3 +12036,165 @@ This is deliberately a partial foundation. The user-facing wizard cannot yet cre
 Tests: region/store/projection/canvas/HostSync focused batch **232/232**; full Vitest **4,613/12 skipped**, 323 files passed / 2 skipped, **115.81 s**. Production `e2e/movement_actions.spec.ts` **13/13 in 5.3 minutes**, including an embedded create op and rendered outline. Typecheck/lint/whitespace pass; one existing ReplayPanel advisory. `test:fx:prepare` and size pass at **3,957,311 raw / 1,132,300 gzip bytes**, below 6 MB. Full report: [FX_WIZARD_VERIFICATION_D358.md](FX_WIZARD_VERIFICATION_HISTORY.md#report-d358).
 
 **Superseding follow-up — 2026-09-29:** Region work now extends through wizard authoring/selection, active-zone graph binding, swept enter/exit dispatch, region Stop preflight, and region-aware `automation.fire` authority. Focused region-anchored HostSync tests pass **2/2** and production Chromium `e2e/active_zones.spec.ts` passes **19/19 in 4.6 minutes**. A movement-interruption follow-up also exposes the rendered position only during an authored tween, hit-tests at that point, and rebases a real drag from it; the production Chromium movement file passes **14/14 in 4.9 minutes**. Focused interaction/animation tests pass **39/39**; full Vitest passes **4,616/12 skipped**, 323 files passed / 2 skipped, 98.45 s. Production build **3,964,170 raw / 1,142,840 gzip bytes**; typecheck, lint and whitespace pass; one existing ReplayPanel advisory remains. An earlier FX fader timing failure passed in isolation and in both later full-suite runs. The first Firefox Active Zones attempt could not start because its Playwright executable was absent; a browser install retry hit TLS `ECONNRESET`, so cross-browser behavior remains unverified, not failed. Automatic Stop interruption of all in-flight presentation and waypoint-path behavior, compound footprints, remaining A19/A20 acceptance, cross-browser/performance, and broader A01–A41 parity remain open. No full-parity claim.
+
+
+## D-399 — Persistent visual sync groups share a host-resolved phase origin (2026-10-04)
+
+Sequencer `.syncGroup(name)` is interpreted as shared playback origin, not simultaneous launch or shared delay. ArenaStar accepts an exact bounded name only on persistent image/video/text sections. The host keeps every member's existing `startMs` and lifetime, resolves the earliest member to one absolute `syncAtHostTime`, and later members seek/animate from that age. The authored name is stripped from recipient cues. Private durable membership plus the numeric origin survive reconnect; after the final matching instance ends, the next run establishes a new origin.
+
+Cross-run reuse is deliberately scoped to the exact scene, saved timeline, owner, effective audience and source/target invocation bindings. Same-name sections inside one run still align regardless of visual anchor; overlapping runs only reuse an origin when that whole invocation scope matches. This is narrower than a world-wide name map so phase cannot disclose a different caller, GM-only audience, hidden anchor invocation or private macro. Automation cues preflighted in one atomic batch treat earlier prepared siblings as active origins even before commit.
+
+This increment does not create generic launch groups, group-random delay, one-shot/audio groups or cross-timeline group namespaces. Browser-native animated-image source frames remain unseekable; ArenaStar synchronizes its own visual transform/filter/mask/fade clock and video source seeking. Conditional lanes, generalized cancellation and the remaining SQ-02 scheduler/effect-manager surface stay open. Verification and artifact evidence are archived in [D399](FX_WIZARD_VERIFICATION_HISTORY.md#report-d399); no full-parity claim.
+
+
+## D-400 — Exact host-authoritative cancellation for active finite and persistent FX runs (2026-10-04)
+
+The next coherent SQ-02 gap is **cancellation**, selected after comparing the remaining scheduler surface rather than simply taking the next field in the parity table. Conditional play is broader, but an honest implementation first needs a shared event/outcome context and a branch contract across Wizard, item, graph and reviewed-script invocations. Explicit parallel lanes are less error-prone because ArenaStar already schedules overlapping absolute starts. Cancellation crosses the most trust and lifecycle boundaries now: a finite cue previously had no durable document to delete, its owner might not be a playback recipient, only its prior recipients may learn that it ended, and playback may be inside a timer, fetch, decoder, audio startup or camera claim when Stop arrives. It is therefore the most complex bounded group that can be completed without inventing the still-missing conditional context model.
+
+Every accepted FX request now receives a requester-private `fx.run` acknowledgement (`0x52`) containing `requestId`, exact `runId`, macro/scene IDs, authoritative start, optional finite end and the persistent bit. It contains no audience, recipient, section, asset or anchor detail. Retrying the same successful `fx.request` replays that exact acknowledgement only; it never fans out a second cue. A requester can consequently own a handle even when `others` excludes its own session from playback.
+
+Persistent runs retain their existing private `FxInstanceDocument` lifecycle. Finite runs gain only an in-memory host handle after recipient fan-out succeeds: owner, scene, prior-recipient session IDs and authoritative expiry. The host keeps at most 256 finite handles, schedules them through one expiry timer and retires each at its resolved timeline end (validated finite timelines remain bounded to 60 seconds). There is no world document, reconnect replay or durable host-restart handle for a finite run. Registration after fan-out avoids stoppable ghost handles for a cue no viewer received.
+
+`fx.stop` now means an exact **active run** stop. A player may stop only a run they initiated; a GM/assistant may administer any active run. Unknown, expired, already-stopped and unauthorized IDs all answer `FX run unavailable`, avoiding an existence oracle. A finite success removes the live handle and sends opaque `fx.end` only to sessions that received that run; it writes no document, advances no world sequence and creates no Undo entry. A persistent success still performs the authoritative instance deletion, remains undoable, and reaches only currently entitled/prior recipients through the established projection path. `fx.list` and `fx.stopMatching` deliberately remain durable-instance APIs rather than exposing transient-run membership.
+
+The same handle is usable from both intended surfaces. Wizard **Run** tracks its private acknowledgement, shows that exact finite or persistent run in a bounded active list, offers **Cancel run**, and retires one-shots naturally at `endsAtHostTime`. Reviewed `api.fx.play` returns the same run ID and `api.fx.stop(runId)` now cancels either lifecycle; Worker and host validate the exact ID and authority rather than trusting script-side state. Direct client stops and reviewed-script stops converge on the same host path.
+
+On a recipient, `fx.end` increments that run's epoch before clearing visuals. It cancels delayed section/preload/camera timers, active Pixi objects, sounds and camera claims; every fetch/decode/startup continuation and media report rechecks generation plus epoch before doing anything. Browser regression exposed one related shared-cache edge: after the final waiter was stopped, an unfinished asset-scoped image decode could be inherited by an Undo/replacement persistent run. Prefetch records now count in-flight run waiters. Stopping one of several overlapping consumers preserves the shared record; stopping the final waiter abandons only unfinished work, so a replacement starts a fresh decoder while the canceled continuation remains fenced. Successfully decoded scene-cache entries still survive a run stop.
+
+This closes **exact active-run cancellation** for the no-code Wizard and reviewed API, not all of SQ-02. It does not add conditional lanes, generic simultaneous-launch groups, a durable finite-run manager across host restart, cancellation Undo for presentation-only one-shots, finite-run wildcard list/stop, transactional rollback of earlier script cues or automatic cancellation propagation through graphs. A41, the remaining acceptance matrix and full Sequencer/Tagger/MATT parity remain open. Verification and artifact evidence are archived in [D400](FX_WIZARD_VERIFICATION_HISTORY.md#report-d400); no full-parity claim.
+
+
+## D-401 — Conditional play begins with one host-sampled section-chance contract (2026-10-04)
+
+Do not make the client report whether an attack hit, a save failed or an automation branch succeeded. ArenaStar does not yet have one authoritative invocation/outcome context shared by direct Wizard runs, PF1e item/cast resolution, graph sequence steps and reviewed `api.fx.play`; accepting such a value in `fx.request` would make conditional visuals caller-forgeable. Instead, add the coherent subset the host can own today: a non-wait one-shot section may carry `playIf: { kind: "chance", percent: 0..100 }`. Persistent sections and conditional waits are out of scope. This is a bounded first conditional-play primitive, not the committed-outcome branch required by A01/SQ-02.
+
+Resolve all authored anchors, media and concrete schedule positions before deciding inclusion. Random-delay draws remain in section order; then each genuine 1–99% predicate consumes exactly one host RNG draw in authored order. Zero and 100 are deterministic and consume none. That single result governs every replay and every recipient. A skipped predecessor retains its resolved would-be final replay for `startAfter` calculations, preventing a viewer-local collapsed schedule and keeping later cue times independent of projection. Strip `playIf` from every resolved section and durable-state boundary. All-skipped runs are successful requester-private no-ops: `fx.run` ends at its scheduled `atHostTime`, but no empty `fx.start`, recipient projection or delivery report is emitted.
+
+Expose the same saved field in the Wizard and presets. The Wizard canonicalizes 100 to absence, keeps 0 as an intentional disabled section, carries a condition through compatible Text/Image/Sound/Camera changes, blocks persistence while one remains and explains that local Preview takes a deterministic positive-chance path while host Run samples. Automation and reviewed scripts gain no second evaluator or condition argument; they invoke the same saved timeline through `prepareFx`, preserving equal semantics and existing direct-request idempotency.
+
+The rejected alternative is a cosmetic hit/miss dropdown backed by client assertions or path-specific contexts. A future outcome condition must begin with a host-issued/host-observed event context and define branch timing, invocation replay, privacy and item/graph/script equivalence before it extends this discriminated `playIf` vocabulary. Explicit parallel-lane and simultaneous-launch-group authoring also remains separate; existing overlapping absolute starts are not relabelled as full lane parity.
+
+Verification and artifact evidence are archived in [D401](FX_WIZARD_VERIFICATION_HISTORY.md#report-d401): full Vitest **4,924 passed / 12 skipped**; full production Chromium FX sequence **40/40** plus reviewed scripts **9/9**; typecheck/lint/whitespace/build/size pass; artifact SHA-256 **`82df42301878aaf56597afb0e6299a14d334d994d7af7d44bbf2d88dbe7b0b77`**. Full SQ-02/A01–A03/A10 and A01–A41 parity remain open.
+
+
+## D-402 — One-shot simultaneous launch is a shared host schedule, not a playback-phase alias (2026-10-04)
+
+After D401, the next SQ-02 slice is selected from three materially different gaps. Cosmetic lane labels would add no scheduler guarantee because ArenaStar already permits overlapping starts. Hit/miss/save/value conditions would be unsafe without the still-missing host-committed invocation outcome shared by Wizard, PF1e, automation and reviewed scripts. A bounded scheduled launch group can instead be made authoritative with the existing saved timeline and RNG contract. Add `launchGroup` as an exact, trimmed 1–64 character name on non-wait one-shot sections. A single named member is valid; same-name members must have the exact same absolute start or exact same earlier-section finish reference/offset, and the same optional random-delay range. Duration, rendering, replay count/gap and condition remain per section.
+
+Treat membership as a schedule constraint, not a recipient feature. Validate all members and preflight all media/anchors first. The first authored member with a range consumes one host RNG value; later members reuse that value, so matching bases resolve to one concrete start. Ungrouped ranges keep their per-section draws and D401 condition draws still follow complete schedule concretization. Strip the name, range and dependency before projection. Durable records reject forged `launchGroup` state and retain only concrete starts, so reconnect neither learns the name nor rerolls it. Direct Run, graph sequence steps and reviewed `api.fx.play` continue through the same `prepareFx`/resolver path.
+
+Do not reuse D399 `syncGroup`. That persistent visual contract lets later sections start on their own schedule while joining an established transform/video phase; D402 aligns the launch time of finite text/image/video/sound/camera sections and has no durable phase namespace. Persistent timelines and waits reject `launchGroup`, while one-shot sections cannot acquire persistent visual phase membership.
+
+The Wizard makes the invariant constructive rather than waiting for Save to reject it. Joining adopts the first authored member's schedule; a newly named earlier member becomes the schedule source; Start, Finish offset and random-bound edits propagate to every peer; finish dependencies are limited to choices earlier than the first member. Persistence is interlocked, presets preserve valid membership through ID reminting, and the help explicitly distinguishes simultaneous launch from playback sync. This is still not explicit arbitrary lane authoring: there is no lane object, lane-level lifetime/condition, cross-timeline group namespace or generalized group cancellation.
+
+Verification and artifact evidence are archived in [D402](FX_WIZARD_VERIFICATION_HISTORY.md#report-d402): full Vitest **4,929 passed / 12 skipped**; production Chromium FX sequence **41/41** plus reviewed scripts **9/9**; typecheck/lint/whitespace/build/size pass; artifact SHA-256 **`dc7f0c1a824305930f74964cb521cc8937b535c50beb3faefe8e68dc1d308cd5`**. Committed-outcome branching, conditional persistence, full parallel-lane/SQ-02 acceptance and A01–A41 parity remain open.
+
+
+## D-403 — Bounded explicit parallel lanes use a structural fork/lane/longest-join scheduler (2026-10-04)
+
+D402 aligns otherwise independent sections that deliberately share one schedule. It does not express two serial streams after a fork or a join that waits for whichever stream actually ends last. D403 adds that next coherent SQ-02 subset without relabelling arbitrary overlap as lane behavior. A finite section may carry `parallel: { group, lane, offsetMs? }`. Each exact named group is one contiguous block containing 2–8 exact named lanes. Every lane-first member has the same absolute or finish-relative fork schedule and optional random range; subsequent members have no independent schedule/range and instead follow the prior member in their own lane, with a bounded signed overlap/gap. The overlap may reach the predecessor's start but never travel before it. A lane may contain Wait sections, but must contain at least one media or camera section; persistent timelines and simultaneous `launchGroup` membership are refused.
+
+A section outside and after the block can target `startAfter.parallelGroup` instead of a section ID. The two target forms are mutually exclusive, and a group join is released at the maximum final-replay end across all lanes—not whichever member appears last in authored order. Group names may not reopen later, incomplete/current/unknown targets fail closed and a cosmetic one-lane block is invalid. These structural rules keep the existing 60-second/64-cue proofs finite while allowing authored lane members to interleave inside the contiguous block.
+
+Host resolution samples a shared fork range exactly once and reuses it for every lane-first section. Each section's D401 chance remains local, but its would-be replay end still advances its lane and the longest-lane join, preserving one recipient-independent schedule. Validation, media/anchor preflight, condition sampling, finite-run handles and recipient fan-out remain in their established order. `parallel`, `randomDelay` and `startAfter` are stripped from every resolved cue; durable instances reject forged lane metadata and presets clone it while remapping direct section dependencies but retaining group joins. Direct requests, automation preflight and reviewed `api.fx.play` use the same resolver.
+
+The Wizard is constructive rather than a free-form invalid-state editor. **Parallel block** and **Parallel lane** fields create/reuse exact names, generate safe lane names, align every lane's fork controls, expose signed lane-local overlap/gap only after a lane predecessor, and offer **After parallel block … finishes (longest lane)** as a start choice only outside a complete earlier block. Leaving/deleting/reassigning a member repairs dependencies; a block reduced to one lane dissolves to ordinary finish relations rather than saving cosmetic lane metadata. A block must remain contiguous, departure is edge-only, and persistence, simultaneous launch and incompatible preset loads are interlocked. Save/Edit and preset reminting retain the authored structure.
+
+Verification and artifact evidence are archived in [D403](FX_WIZARD_VERIFICATION_HISTORY.md#report-d403): full Vitest **4,935 passed / 12 skipped**; production Chromium FX sequence **42/42** plus reviewed scripts **9/9**; typecheck/lint/whitespace/build/size pass. The new production case authors, saves and reopens two two-step lanes, then proves exact concrete starts `[475,475,875,825,1025]`, one fork entropy draw, a true longest-lane join and no author metadata at the Pixi boundary. The artifact is **4,181,066 raw / 1,193,941 gzip bytes**, SHA-256 **`5d3f5183a8998a9b4873df379629bdce26f2604b2135653fd74bdffd45e66d7b`**.
+
+This is bounded explicit lane scheduling inside one finite saved timeline, not arbitrary/nested lane graphs, cross-timeline namespaces, persistent lanes, branch-local lane topology, committed PF1e hit/miss/save/value conditions or complete SQ-02/A01–A03/A10 acceptance. Cross-browser and qualifying hardware-GPU A41 evidence remain open; full A01–A41 parity is not established.
+
+
+## D-404 — Exclusive random alternatives are host-sampled choice groups, not client outcomes (2026-10-04)
+
+D401 can independently include or omit one section, but composing several chance percentages does
+not guarantee that exactly one authored alternative plays. The next bounded SQ-02 step is therefore
+an exclusive choice the host can decide from its own entropy without inventing an untrusted
+hit/miss context. A finite non-wait section may carry
+`playIf: { kind: "choice", group, option, weight }`. Group and option are exact trimmed 1–64
+character names and weight is an integer 1–100. One timeline has at most eight groups; each group
+has 2–8 distinct options. Several sections can belong to one option and play together, but every
+member of that exact group/option must repeat the same relative weight.
+
+Resolve and validate the complete would-be schedule before any choice. At the first authored member
+of a group, consume one host RNG unit, select exactly one option by relative weight, include all of
+that option's sections/replays and omit every other option. Omission does not move downstream
+finish dependencies, serial lane members or longest-lane joins: they retain the excluded section's
+would-be timing, preserving one schedule for every recipient. Direct Run, automation preflight and
+reviewed `api.fx.play` all use this resolver, so graph commit and Worker emission cannot reroll.
+Strip the entire `playIf` object before recipient projection; durable records reject authored choice
+state, while presets clone it without sharing nested objects.
+
+The Wizard exposes **Random choice group**, **Choice option** and **Choice weight**. Joining creates a
+safe option name; editing one option's weight updates every member. Save/New/Edit and presets retain
+the group. Removing the final member of one arm cannot leave a deceptive one-option group: the
+remaining members become unconditional. Choice membership interlocks persistence, and Wait changes
+remove/repair it. Local Preview deliberately takes the first authored option with deterministic
+zero entropy; only host Run exercises random selection.
+
+This precedes committed-outcome branching because it needs no event claim. Existing item cue
+selection and browser-side results are not an authoritative invocation context shared by direct
+Wizard, automation and reviewed-script paths. D404 does not add a result field to `fx.request`, does
+not trust a caller's hit/miss/save/value, and does not name an authored option as a mechanical
+outcome. A future outcome branch still needs a host-issued or host-verified context plus replay,
+privacy and path-equivalence rules before extending this discriminator.
+
+Verification and artifact evidence are archived in
+[D404](FX_WIZARD_VERIFICATION_HISTORY.md#report-d404): full Vitest **4,941 passed / 12 skipped**;
+production Chromium FX sequence **43/43** plus reviewed scripts **9/9**; typecheck, full lint,
+protocol/contracts and whitespace pass. The artifact is **4,187,519 raw / 1,195,259 gzip bytes**,
+SHA-256 **`ce541f749182907e5dd9c5551a9f0d6eead2da0cb162327308ccdc37783ddd8d`**. This closes only
+bounded, weighted, mutually exclusive **host-random alternatives** inside one finite saved timeline.
+It is not an arbitrary/nested branch graph, branch-local lane topology, conditional persistence,
+committed PF1e outcome branching, reusable nested sequence, full SQ-02/A01–A03/A10 acceptance or
+A01–A41 parity. D395–D403 timing, authority, privacy, lifecycle and recipient-projection invariants
+remain in force.
+
+
+## D-405 — Actions are host-normalized durable facts; mechanics and FX remain separate (2026-10-04)
+
+A cast/result cannot become a trustworthy FX branch by adding richer prose or a client-selected
+success field to an existing chat card. Introduce one strict versioned action record at
+`message.system.action`. The containing message is its durable identity; each independently
+resolvable target and pending roll has a unique stable bidirectional key. The card records source,
+scene/area, all targets, checks and closed outcomes, committed damage/healing/conditions, host time
+and revision. Aggregate state is derived from target rows; expiry is explicit and is never a failed
+save. Legacy singular pending cards remain valid, while multi-target cards use
+`system.pendingRolls` plus optional `roll.pending.pendingId` selection.
+
+The host exact-key validates and normalizes every new structured card, checks live
+actor/item/scene/token/area references, player visibility and source ownership, infers an omitted
+root scene from its area while rejecting cross-scene claims, replaces identity labels from host
+documents, rejects malformed or inconsistent pending links, host-normalizes their two-round window,
+and forbids generic edits to a committed card or its linked pending storage. A host-evaluated pending
+roll re-reads live state after async cryptography, then changes the selected roll and exactly its
+target row in one envelope, preserving concurrent target revisions, the existing dice log and
+narrative follow-up. The roll proves its dice, not client-authored modifiers or DCs:
+`pf1e.pendingSave.v1` rederives supported normal actor-cast save inputs, while unsupported pending
+checks remain reported after resolution. Creation, rules Ops and the visible PF1e card are one intent,
+so prose cannot commit while HP/resources fail. Caller-supplied terminal provenance is never trusted:
+host roll messages mint immutable evidence whose one-use claim is either stamped atomically after
+immediate verification or present at birth for a linked pending transition (and keeps that textual
+roll ID reserved after action-card pruning), while `pf1e.spellTarget.v1` rederives supported
+single-target, noncritical, non-touch immediate spell outcomes from host actor/combat state, final
+staged HP and a matching fresh-SR ledger write. Duplicate, same-envelope reused, unknown, replayed or
+mismatched evidence remains visibly reported. A post-commit `action:committed` hook emits a bounded `ActionFxContext`;
+`{actionId, revision}` is the deduplication key. Unverified targets expose spatial identity but no
+lifecycle/outcome/check/damage/healing/condition facts, and root state is omitted unless every row
+is verified. This context is data, not authority: FX can render/
+anchor but can never mutate HP, effects, inventory, movement or permissions.
+
+PF1e casts are the first producer. Immediate casts, failed gates, long casting and touch misses
+publish structured cards atomically with their existing rules Ops. Manual saves and multiple
+concentration declarations become one canonical card with independently selectable checks. There
+is no host-verifiable generic deferred spell-effect executor yet, so these cards retain a separate
+explicitly pending effect row after a save/check resolves. Inferring damage or conditions from
+client-authored action JSON is rejected as the unsafe alternative. A later continuation must
+reference host roll evidence and rederive target defenses on the host before resolving that row.
+The complete contract and extension plan live in [ACTION_SYSTEM.md](ACTION_SYSTEM.md).
+
+Verification on 2026-10-04: TypeScript/Svelte (zero blocking issues), ESLint and whitespace checks
+pass; full Vitest is **335 files / 4,960 tests passed** with 12 expected skips; the production
+single-file artifact is **4,236,579 raw / 1,209,244 gzip bytes**, SHA-256
+**`3300da8724f0fb6b2a34b95301c03b401a008c8a1032408ca68a5eeb42535563`**; and the focused
+pending-roll Chromium suite is **3/3 passed**.
