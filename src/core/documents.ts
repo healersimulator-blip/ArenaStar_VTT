@@ -475,6 +475,8 @@ export interface FxInstanceDocument extends BaseDocument {
   audience: import("./fx").FxAudience;
   atHostTime: number;
   sections: import("./fx").ResolvedFxSection[];
+  /** Host-private section→group membership; player cues receive only resolved origins. */
+  syncGroups?: import("./fx").FxSyncGroupMember[];
   sourceTokenId?: DocId;
   targetTokenId?: DocId;
 }

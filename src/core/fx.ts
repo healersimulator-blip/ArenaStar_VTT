@@ -665,6 +665,13 @@ interface FxBase {
 }
 interface FxLocated extends FxBase {
   at: FxAnchor;
+  /**
+   * SQ-02: persistent visuals bearing the same name share one host-clock playback
+   * origin. This does not delay or launch a section; a later member joins the phase
+   * already in progress. The resolved cue never carries the name — it receives one
+   * host-selected `syncAtHostTime` instead.
+   */
+  syncGroup?: string;
   /** Local scale, not world/grid size. */
   scale?: number;
   opacity?: number;
@@ -723,6 +730,15 @@ export const FX_PLAYBACK_RATE_LIMITS = { min: 0.25, max: 4 } as const;
 export const FX_MEDIA_CLIP_MAX_MS = 24 * 60 * 60 * 1_000;
 /** SQ-02: a finish-relative section may overlap or follow its dependency by at most 30 seconds. */
 export const FX_FINISH_OFFSET_MAX_MS = 30_000;
+/** SQ-02: a persistent visual's author-facing playback-phase group name is bounded. */
+export const FX_SYNC_GROUP_MAX_LENGTH = 64;
+/** Why this is not a canonical group name, or null when it is one. */
+export function fxSyncGroupError(value: unknown): string | null {
+  return typeof value !== "string" || value.length < 1 || value.length > FX_SYNC_GROUP_MAX_LENGTH ||
+    value !== value.trim() || [...value].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+    ? `FX sync groups need a trimmed 1–${FX_SYNC_GROUP_MAX_LENGTH} character name`
+    : null;
+}
 /** SQ-02: one section may jitter by at most 30 seconds, still inside the 60-second timeline. */
 export const FX_RANDOM_DELAY_MAX_MS = 30_000;
 /**
@@ -819,11 +835,25 @@ export interface FxSequence {
   persistent?: boolean;
 }
 
-type FxAuthoredTimingField = "repeatCount" | "repeatDelayMs" | "randomDelay" | "startAfter";
+type FxAuthoredTimingField = "repeatCount" | "repeatDelayMs" | "randomDelay" | "startAfter" | "syncGroup";
+
+/** Host-private membership used while resolving one durable playback origin. */
+export interface FxSyncGroupMember {
+  sectionId: string;
+  group: string;
+}
+
+/**
+ * The only sync-group fact a recipient needs. It is an absolute host-clock origin,
+ * not the private authored name and not a second launch time.
+ */
+interface ResolvedFxSyncPhase {
+  syncAtHostTime?: number;
+}
 
 export type ResolvedFxSection =
-  | (Omit<Extract<FxSection, { kind: "image" }>, "at" | "to" | "mask" | FxAuthoredTimingField> & { x: number; y: number; toX?: number; toY?: number; mime: string; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
-  | (Omit<Extract<FxSection, { kind: "text" }>, "at" | "to" | "mask" | FxAuthoredTimingField> & { x: number; y: number; toX?: number; toY?: number; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
+  | (Omit<Extract<FxSection, { kind: "image" }>, "at" | "to" | "mask" | FxAuthoredTimingField> & ResolvedFxSyncPhase & { x: number; y: number; toX?: number; toY?: number; mime: string; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
+  | (Omit<Extract<FxSection, { kind: "text" }>, "at" | "to" | "mask" | FxAuthoredTimingField> & ResolvedFxSyncPhase & { x: number; y: number; toX?: number; toY?: number; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
   | (Omit<Extract<FxSection, { kind: "sound" }>, FxAuthoredTimingField | "at" | "radius"> &
       { mime: string; x?: number; y?: number; radiusPx?: number;
         /** Host-computed per recipient (D-309): a sound-blocking wall stands between
@@ -962,12 +992,18 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     const fields = section.kind === "sound"
       ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs", "at", "radius", "pan", "muffle",
           "playbackRate", "clipStartMs", "clipEndMs"] :
-      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg", "playbackRate", "clipStartMs", "clipEndMs"] :
-      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg"] :
+      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg", "playbackRate", "clipStartMs", "clipEndMs", "syncGroup"] :
+      section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg", "syncGroup"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", "startAfter", "randomDelay", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
       return { ok: false, error: "unknown FX section field or zero-duration media" };
+    }
+    if (section.syncGroup !== undefined &&
+        (value.persistent !== true || (section.kind !== "image" && section.kind !== "text") ||
+          fxSyncGroupError(section.syncGroup) !== null)) {
+      return { ok: false, error:
+        `FX sync groups need a trimmed 1–${FX_SYNC_GROUP_MAX_LENGTH} character name on persistent image/text sections` };
     }
     if (section.kind === "image" || section.kind === "sound") {
       const clipError = mediaClipError(section);
@@ -1167,6 +1203,50 @@ export function fxSectionsForViewer(
   return sections.every(allowed) ? sections : sections.filter(allowed);
 }
 
+/**
+ * Resolve authored group membership to one absolute host-clock phase origin per group.
+ *
+ * A later section still waits for its own `startMs`; once it appears, its visual/media
+ * age is measured from this shared origin. An active durable instance may contribute an
+ * older origin, which is how a second run joins the phase already in progress. A future
+ * or malformed candidate is ignored, so phase age can never begin negative.
+ *
+ * The membership list remains host-private. The returned sections carry only
+ * `syncAtHostTime`, and the input arrays are never mutated.
+ */
+export function fxResolveSyncOrigins(
+  sections: readonly ResolvedFxSection[],
+  members: readonly FxSyncGroupMember[] | undefined,
+  atHostTime: number,
+  activeOrigins: ReadonlyMap<string, number> = new Map(),
+): { sections: ResolvedFxSection[]; origins: ReadonlyMap<string, number> } {
+  if (!members?.length) return { sections: [...sections], origins: new Map() };
+  const byId = new Map(sections.map((section) => [section.id, section]));
+  const earliest = new Map<string, number>();
+  const groupBySection = new Map<string, string>();
+  for (const member of members) {
+    const section = byId.get(member.sectionId);
+    if (!section || (section.kind !== "image" && section.kind !== "text")) continue;
+    groupBySection.set(member.sectionId, member.group);
+    earliest.set(member.group, Math.min(earliest.get(member.group) ?? Infinity, section.startMs));
+  }
+  const origins = new Map<string, number>();
+  for (const [group, startMs] of earliest) {
+    const firstStart = atHostTime + startMs;
+    const active = activeOrigins.get(group);
+    origins.set(group, typeof active === "number" && Number.isFinite(active) && active >= 0 && active <= firstStart
+      ? active : firstStart);
+  }
+  return {
+    sections: sections.map((section) => {
+      const group = groupBySection.get(section.id);
+      const syncAtHostTime = group === undefined ? undefined : origins.get(group);
+      return syncAtHostTime === undefined ? section : { ...section, syncAtHostTime };
+    }),
+    origins,
+  };
+}
+
 /** Resolve all anchors ON THE HOST using its committed scene state. */
 export function resolveFxSequence(
   sequence: FxSequence,
@@ -1176,7 +1256,8 @@ export function resolveFxSequence(
   mimeOf: (assetId: string) => string | undefined,
   /** Host entropy. Omitted callers deterministically preview the lower bound. */
   rng: () => number = () => 0,
-): { ok: true; sections: ResolvedFxSection[] } | { ok: false; error: string } {
+): { ok: true; sections: ResolvedFxSection[]; syncGroups?: FxSyncGroupMember[] } |
+   { ok: false; error: string } {
   const validated = validateFxSequence(sequence);
   if (!validated.ok) return validated;
   const sections: ResolvedFxSection[] = [];
@@ -1366,8 +1447,9 @@ export function resolveFxSequence(
       // The authored `mask` is dropped here and replaced by the resolved one: what
       // travels is a polygon, never the author's scene-unit numbers.
       const { at: _anchor, to: _to, mask: _mask, repeatCount: _count,
-        repeatDelayMs: _gap, randomDelay: _random, startAfter: _after, ...projected } = section;
-      void _anchor; void _to; void _mask; void _count; void _gap; void _random; void _after;
+        repeatDelayMs: _gap, randomDelay: _random, startAfter: _after,
+        syncGroup: _syncGroup, ...projected } = section;
+      void _anchor; void _to; void _mask; void _count; void _gap; void _random; void _after; void _syncGroup;
       sections.push({ ...projected, ...coords, ...(mask.mask ? { mask: mask.mask } : {}) });
       continue;
     }
@@ -1381,14 +1463,16 @@ export function resolveFxSequence(
     if ((section.clipStartMs !== undefined || section.clipEndMs !== undefined) && !mime.startsWith("video/"))
       return { ok: false, error: "FX media clips are only available for video and sound" };
     const { at: _anchor, to: _to, mask: _mask, repeatCount: _count,
-      repeatDelayMs: _gap, randomDelay: _random, startAfter: _after, ...projected } = section;
-    void _anchor; void _to; void _mask; void _count; void _gap; void _random; void _after;
+      repeatDelayMs: _gap, randomDelay: _random, startAfter: _after,
+      syncGroup: _syncGroup, ...projected } = section;
+    void _anchor; void _to; void _mask; void _count; void _gap; void _random; void _after; void _syncGroup;
     sections.push({ ...projected, ...coords, ...(mask.mask ? { mask: mask.mask } : {}), mime });
   }
   // All authored anchors and media are preflighted before any playback cue is
   // exposed. IDs with '@' cannot collide with an authored section ID (the
   // validator permits only alphanumerics, hyphens and underscores).
   const expanded: ResolvedFxSection[] = [];
+  const syncGroups: FxSyncGroupMember[] = [];
   const finalEnds = new Map<string, number>();
   for (const [index, prepared] of sections.entries()) {
     const original = sequence.sections[index];
@@ -1412,13 +1496,17 @@ export function resolveFxSequence(
     const count = original.repeatCount ?? 1;
     const gap = original.repeatDelayMs ?? 0;
     for (let play = 0; play < count; play++) {
-      expanded.push(play === 0 ? concrete : { ...concrete, id: `${concrete.id}@${play + 1}`,
-        startMs: concrete.startMs + play * (concrete.durationMs + gap) });
+      const playback = play === 0 ? concrete : { ...concrete, id: `${concrete.id}@${play + 1}`,
+        startMs: concrete.startMs + play * (concrete.durationMs + gap) };
+      expanded.push(playback);
+      if ((original.kind === "image" || original.kind === "text") && original.syncGroup !== undefined)
+        syncGroups.push({ sectionId: playback.id, group: original.syncGroup });
     }
     // A dependent starts after the final replay, so a repeated section remains one
     // authored unit rather than releasing the next lane after its first playback.
     finalEnds.set(original.id,
       concrete.startMs + count * concrete.durationMs + (count - 1) * gap);
   }
-  return { ok: true, sections: expanded };
+  return { ok: true, sections: expanded,
+    ...(syncGroups.length > 0 ? { syncGroups } : {}) };
 }

@@ -120,9 +120,9 @@ import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
-import { FX_FINISH_OFFSET_MAX_MS, fxAudienceAllows, fxSectionsForViewer, resolveFxSequence,
-  validateFxSequence, type FxAudience } from "../core/fx";
-import type { ResolvedFxSection } from "../core/fx";
+import { FX_FINISH_OFFSET_MAX_MS, fxAudienceAllows, fxResolveSyncOrigins, fxSectionsForViewer,
+  resolveFxSequence, validateFxSequence, type FxAudience } from "../core/fx";
+import type { FxSyncGroupMember, ResolvedFxSection } from "../core/fx";
 import { combatTriggerEvents } from "../core/combat";
 import { readWorldClock } from "../packages/pf1e/worldClock";
 import { automationImageError, doorTransitionMethod, pinnedSelectorError, planAutomation, SIMULATABLE_METHODS, sweptTileEvents, tileContainsPoint, validateAutomation, validateAutomationState,
@@ -270,6 +270,8 @@ interface PreparedFx {
   /** The run's effective audience: the narrowing if one was asked for, else the macro's. */
   audience: FxAudience;
   checkedAtSeq: number;
+  /** Private authored memberships stored only with a durable instance. */
+  syncGroups?: FxSyncGroupMember[];
   sourceTokenId?: string;
   targetTokenId?: string;
 }
@@ -4381,7 +4383,7 @@ export class HostSync {
         macroId: cue.macroId, sceneId: event.scene._id,
         ...(cue.sourceTokenId ? { sourceTokenId: cue.sourceTokenId } : {}),
         ...(cue.targetTokenId ? { targetTokenId: cue.targetTokenId } : {}),
-      }, cue.audience, event.caller.id);
+      }, cue.audience, event.caller.id, prepared);
       if (!ready.ok) {
         const error = `FX preflight failed: ${ready.error}`;
         this.reportAutomation(doc, event.method, "rejected", error, result.plan.trace);
@@ -4868,6 +4870,58 @@ export class HostSync {
     (this.fxMediaTimer as unknown as { unref?: () => void }).unref?.();
   }
 
+  /**
+   * Phase origins supplied by still-active durable runs of this exact saved timeline.
+   * Scope includes owner, effective audience and invocation anchors: a public cue must
+   * never reveal merely through phase that another caller, hidden token or GM-only run
+   * already existed.
+   */
+  private activeFxSyncOrigins(
+    scene: SceneDocument,
+    macroId: string,
+    ownerId: string,
+    audience: FxAudience,
+    sourceTokenId: string | undefined,
+    targetTokenId: string | undefined,
+    manifest: AssetManifest,
+    pending: readonly PreparedFx[] = [],
+  ): ReadonlyMap<string, number> {
+    const audienceKey = (value: FxAudience): string => typeof value === "string"
+      ? value : `players:${value.players.join("\u0000")}`;
+    const expectedAudience = audienceKey(audience);
+    const origins = new Map<string, number>();
+    const add = (members: readonly FxSyncGroupMember[] | undefined,
+      sections: readonly ResolvedFxSection[]): void => {
+      if (!members?.length) return;
+      const byId = new Map(sections.map((section) => [section.id, section]));
+      for (const member of members) {
+        const section = byId.get(member.sectionId);
+        const origin = section && (section.kind === "image" || section.kind === "text")
+          ? section.syncAtHostTime : undefined;
+        if (origin === undefined) continue;
+        origins.set(member.group, Math.min(origins.get(member.group) ?? Infinity, origin));
+      }
+    };
+    for (const doc of this.store.getAll("fxInstances")) {
+      if (doc.sceneId !== scene._id || doc.macroId !== macroId || doc.ownerId !== ownerId ||
+          doc.sourceTokenId !== sourceTokenId || doc.targetTokenId !== targetTokenId ||
+          audienceKey(doc.audience) !== expectedAudience || !doc.syncGroups?.length ||
+          !validateFxInstance(doc, scene, manifest)) continue;
+      add(doc.syncGroups, doc.sections);
+    }
+    // An automation graph preflights its complete cue list before any durable commit.
+    // Earlier prepared siblings are active-for-this-transaction origins, so two copies
+    // of one grouped timeline in the same atomic graph do not miss each other by 1 ms.
+    for (const prepared of pending) {
+      if (prepared.cue.sceneId !== scene._id || prepared.cue.macroId !== macroId ||
+          prepared.callerId !== ownerId || prepared.sourceTokenId !== sourceTokenId ||
+          prepared.targetTokenId !== targetTokenId ||
+          audienceKey(prepared.audience) !== expectedAudience) continue;
+      add(prepared.syncGroups, prepared.cue.sections);
+    }
+    return origins;
+  }
+
   /** Same host scheduler for editor/macros and triggered FX. Can NARROW a graph's audience,
    * never expand the saved macro's audience or a recipient's asset entitlement. */
   private prepareFx(
@@ -4876,6 +4930,8 @@ export class HostSync {
     narrowAudience?: "gm" | "scene",
     /** Reviewed GM-elevated scripts execute with GM rights but retain the invoking caller as owner/audience. */
     ownerId = caller.id,
+    /** Earlier cues in one atomic automation preflight (not yet present in the store). */
+    pending: readonly PreparedFx[] = [],
   ): { ok: true } & PreparedFx |
      { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
     const invalid = (error: string) => ({ ok: false as const, reason: "invalid_schema" as const, error });
@@ -4914,9 +4970,17 @@ export class HostSync {
       return invalid("persistent FX instance limit reached; stop an effect first");
     const leadMs = resolved.sections.some((section) => section.kind === "image" || section.kind === "sound")
       ? HostSync.FX_MEDIA_LEAD_MS : HostSync.FX_LEAD_MS;
+    const atHostTime = this.now() + leadMs;
+    // D-316: one rule for every audience form. It also scopes active sync origins, so a
+    // narrowed/other-owner run cannot disclose itself through a public cue's phase.
+    const audience: FxAudience = narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene";
+    const syncedSections = resolved.syncGroups === undefined ? resolved.sections
+      : fxResolveSyncOrigins(resolved.sections, resolved.syncGroups, atHostTime,
+          this.activeFxSyncOrigins(scene, macro._id, ownerId, audience, source?._id, target?._id,
+            manifest, pending)).sections;
     const cue: FxStartMsg = {
       kind: "fx.start", runId: randomId(), macroId: macro._id, sceneId: scene._id,
-      atHostTime: this.now() + leadMs, sections: resolved.sections,
+      atHostTime, sections: syncedSections,
       ...(macro.sequence.persistent ? { persistent: true } : {}),
     };
     const recipients: Session[] = [];
@@ -4926,9 +4990,8 @@ export class HostSync {
     // D-303: preflight also says who got a *reduced* payload (a targeted camera section,
     // D-300) and who was left with nothing, which is a different fact from a skip.
     const targeting = { targeted: 0, empty: 0 };
-    // D-316: one rule for every audience form, evaluated per viewer. A caller-side
-    // narrowing can only ever *narrow* what the saved macro already allows.
-    const audience: FxAudience = narrowAudience === "gm" ? "gm" : macro.sequence.audience ?? "scene";
+    // D-316: audience is evaluated per viewer. A caller-side narrowing can only ever
+    // narrow what the saved macro already allows.
     for (const viewer of this.sessions.values()) {
       const user = viewer.user;
       if (!user) continue;
@@ -4940,18 +5003,19 @@ export class HostSync {
       if (!visibleScene || (source && !visibleScene.tokens.some((t) => t._id === source._id)) ||
           (target && !visibleScene.tokens.some((t) => t._id === target._id))) { skipped.anchor++; continue; }
       const available = projectAssetManifest(this.store.world, manifest, user);
-      if (resolved.sections.some((step) =>
+      if (cue.sections.some((step) =>
         (step.kind === "image" || step.kind === "sound") && !available[step.assetId])) { skipped.media++; continue; }
       // Would this viewer receive the whole run? Targeting is decided by the author's
       // audiences, not by a document change, so it is settled here rather than later.
-      const entitled = fxSectionsForViewer(resolved.sections, asViewer, ownerId);
+      const entitled = fxSectionsForViewer(cue.sections, asViewer, ownerId);
       if (entitled.length === 0) { targeting.empty++; continue; }
-      if (entitled.length < resolved.sections.length) targeting.targeted++;
+      if (entitled.length < cue.sections.length) targeting.targeted++;
       recipients.push(viewer);
     }
     return { ok: true, cue, recipients, callerId: ownerId, skipped, targeting,
       audience,
       checkedAtSeq: this.store.seq,
+      ...(resolved.syncGroups ? { syncGroups: resolved.syncGroups } : {}),
       ...(source ? { sourceTokenId: source._id } : {}),
       ...(target ? { targetTokenId: target._id } : {}) };
   }
@@ -4966,6 +5030,7 @@ export class HostSync {
         ownership: { default: 0 }, flags: {}, system: {}, sceneId: scene._id, macroId: macro._id,
         ownerId: prepared.callerId, audience: prepared.audience,
         atHostTime: prepared.cue.atHostTime, sections: prepared.cue.sections,
+        ...(prepared.syncGroups ? { syncGroups: prepared.syncGroups } : {}),
         ...(prepared.sourceTokenId ? { sourceTokenId: prepared.sourceTokenId } : {}),
         ...(prepared.targetTokenId ? { targetTokenId: prepared.targetTokenId } : {}) };
       if (!validateFxInstance(doc, scene, this.manifestSource())) return false;

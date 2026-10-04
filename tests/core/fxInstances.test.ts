@@ -92,6 +92,40 @@ describe("private durable FX records", () => {
     expect(instance.sections[0]).toHaveProperty("x", 100); // pure; host records aren't rewritten
   });
 
+  test("validates durable host-resolved sync origins and keeps authored names in private membership", () => {
+    const [image, text] = instance.sections;
+    if (!image || image.kind !== "image" || !text || text.kind !== "text")
+      throw new Error("Missing visual fixtures");
+    const synced: FxInstanceDocument = { ...instance,
+      syncGroups: [
+        { sectionId: image.id, group: "shared pulse" },
+        { sectionId: text.id, group: "shared pulse" },
+      ],
+      sections: [{ ...image, syncAtHostTime: 900 }, { ...text, syncAtHostTime: 900 }],
+    };
+    expect(validateFxInstance(synced, scene, manifest)).toBe(true);
+    const { syncGroups: _groups, ...missingMembership } = synced;
+    void _groups;
+    expect(validateFxInstance(missingMembership as FxInstanceDocument, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...synced, sections: [image, { ...text, syncAtHostTime: 900 }] },
+      scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...synced,
+      sections: [{ ...image, syncAtHostTime: 900 }, { ...text, syncAtHostTime: 901 }] },
+    scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...synced,
+      sections: [{ ...image, syncAtHostTime: 1_001 }, { ...text, syncAtHostTime: 1_001 }] },
+    scene, manifest)).toBe(false); // a group's origin cannot be after its first member starts
+    expect(validateFxInstance({ ...synced,
+      syncGroups: [{ sectionId: image.id, group: "shared pulse" },
+        { sectionId: "missing", group: "shared pulse" }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...synced,
+      syncGroups: [{ sectionId: image.id, group: "shared pulse" },
+        { sectionId: image.id, group: "shared pulse" }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...synced,
+      sections: [{ ...image, syncAtHostTime: 900, syncGroup: "shared pulse" } as typeof image,
+        { ...text, syncAtHostTime: 900 }] }, scene, manifest)).toBe(false);
+  });
+
   test("a stored cue's resolved mask is checked as a polygon, not as authored scene units", () => {
     const visual = instance.sections[0];
     if (!visual || visual.kind !== "image") throw new Error("Missing image fixture");

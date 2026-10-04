@@ -64,7 +64,7 @@ function harness(listener: { userId?: string; scenes?: unknown[]; localAssets?: 
   const bus = createEventBus<ClientEvents>();
   const camera: Camera = { x: 0, y: 0, scale: 1 };
   const cameraWrites: Camera[] = [];
-  const spawned: Array<{ runId: string; kind: string; elapsed: number }> = [];
+  const spawned: Array<{ runId: string; id?: string; kind: string; elapsed: number }> = [];
   const finishers = new Map<string, Set<() => void>>();
   const fxLayer = {
     clear: vi.fn((runId?: string) => {
@@ -75,9 +75,10 @@ function harness(listener: { userId?: string; scenes?: unknown[]; localAssets?: 
       }
     }),
     count: 0,
-    spawn: (runId: string, section: { kind: string }, elapsed: number,
+    spawn: (runId: string, section: { id?: string; kind: string }, elapsed: number,
       _texture?: unknown, finish?: () => void) => {
-      spawned.push({ runId, kind: section.kind, elapsed });
+      spawned.push({ runId, ...(section.id === undefined ? {} : { id: section.id }),
+        kind: section.kind, elapsed });
       if (finish) {
         const callbacks = finishers.get(runId) ?? new Set<() => void>();
         callbacks.add(finish);
@@ -332,6 +333,29 @@ describe("local mute and reduced motion (D-295, SQ-16)", () => {
     expect(h.cameraWrites).toHaveLength(1); // the shake never wrote either
     expect(h.reports[0]?.entries.map((entry) => [entry.kind, entry.state, entry.reason]))
       .toEqual([["camera", "cut", "reduced-motion"], ["camera", "skipped", "reduced-motion"]]);
+  });
+
+  test("a later persistent visual joins its host-resolved group phase without changing launch time", async () => {
+    const h = harness();
+    const atHostTime = Date.now() + 40;
+    const text = (id: string, startMs: number, syncAtHostTime?: number): ResolvedFxSection => ({
+      id, kind: "text", text: id, x: 50, y: 50, startMs, durationMs: 1_000,
+      ...(syncAtHostTime === undefined ? {} : { syncAtHostTime }),
+    });
+    h.send([
+      text("group-first", 0, atHostTime),
+      text("group-late", 180, atHostTime),
+      text("ordinary-late", 180),
+    ], { persistent: true, atHostTime });
+    await sleep(300);
+    const grouped = h.spawned.find((entry) => entry.id === "group-late");
+    const ordinary = h.spawned.find((entry) => entry.id === "ordinary-late");
+    expect(h.spawned.map((entry) => entry.id).sort()).toEqual([
+      "group-first", "group-late", "ordinary-late",
+    ]);
+    expect((grouped?.elapsed ?? 0) - (ordinary?.elapsed ?? 0)).toBeGreaterThan(120);
+    expect(grouped?.elapsed).toBeGreaterThan(150); // phase was already in progress
+    h.player.dispose();
   });
 });
 

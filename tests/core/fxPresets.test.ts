@@ -65,6 +65,26 @@ describe("FX preset payload (D-310)", () => {
     expect(eight.ok).toBe(true);
   });
 
+  test("persistent sync membership is reusable look metadata and its name is not remapped", () => {
+    const checked = validateFxPreset(preset(
+      image({ syncGroup: "shared pulse" }),
+      image({ id: "fx-three", startMs: 400, syncGroup: "shared pulse" }),
+    ));
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    let n = 0;
+    const sections = fxPresetSections(checked.preset, () => `synced-${n++}`);
+    expect(sections.map((section) => section.id)).toEqual(["synced-0", "synced-1"]);
+    expect(sections.map((section) => section.kind === "image" || section.kind === "text"
+      ? section.syncGroup : undefined)).toEqual(["shared pulse", "shared pulse"]);
+    expect(checked.preset.sections.map((section) => section.id)).toEqual(["fx-one", "fx-three"]);
+
+    // A bundle must fit one lifecycle as a whole: one-shot finish-relative timing cannot
+    // be combined with a persistent-only group merely because each section works alone.
+    expect(validateFxPreset(preset(image({ syncGroup: "shared pulse" }),
+      sound({ startMs: 0, startAfter: { sectionId: "fx-one", offsetMs: 0 } }))).ok).toBe(false);
+  });
+
   test("loading mints fresh ids and retains authored timing, so one preset can be used twice", () => {
     const checked = validateFxPreset(preset(
       image({ randomDelay: { minMs: 100, maxMs: 400 }, clipStartMs: 250, clipEndMs: 900 }),

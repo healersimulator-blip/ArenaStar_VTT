@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-398, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-399, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -59,6 +59,7 @@ Consolidated historical archive through D-398, including the incremental trigger
 - [D-396 archived verification report](#report-d396)
 - [D-397 archived verification report](#report-d397)
 - [D-398 archived verification report](#report-d398)
+- [D-399 archived verification report](#report-d399)
 
 <a id="report-d293-d319"></a>
 
@@ -4822,3 +4823,57 @@ The Chromium executable and AL2023 libraries were npm-provisioned outside the re
 ### Remaining scope
 
 D398 closes only finish-relative timing with bounded signed offsets and its reviewed-script wait parity. Group controls, conditional lanes, generalized cancellation and the remaining shared scheduler/effect-manager surface remain open. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**
+
+<a id="report-d399"></a>
+
+## D-399 — Host-resolved persistent visual playback-phase sync groups (2026-10-04)
+
+### Audited meaning and bounded authored contract
+
+Upstream Sequencer's `.syncGroup(name)` was audited before choosing this increment. It does not schedule grouped effects to launch simultaneously and is not a shared random delay. Its first active scene/group member supplies a creation timestamp; a later member uses that timestamp as playback origin and joins the phase already in progress. The group vanishes after its final active member is destroyed. ArenaStar therefore models a shared **host-clock phase origin**, not another start dependency.
+
+A persistent image/video/text section may now author `syncGroup`, an exact trimmed name of 1–64 characters without controls. Sound, wait and camera sections, one-shot timelines, empty/padded/control-bearing/oversized names and imported unresolved fields fail closed. A section keeps its own concrete `startMs`, duration and playback rate. The earliest member in one run establishes the fresh origin; every grouped member gets the same absolute `syncAtHostTime`, so a section starting later launches on schedule but derives transform/filter/mask/fade/video source age from the phase already in progress. Different durations/rates remain different local timelines measured from one origin, matching creation-time rather than forced-frame semantics.
+
+### Host authority, durability and privacy scope
+
+`resolveFxSequence` strips every authored group name from resolved sections and returns bounded section→group preparation metadata separately. `HostSync` chooses origins before recipient projection. It may reuse an active durable origin only for an exact scene, saved macro, owner, effective audience and source/target invocation binding; same-name groups in a different macro or anchor scope start independently. That conservative scope preserves useful overlapping runs without making phase an oracle for a different caller, GM-only audience or hidden invocation. Multiple copies prepared in one atomic automation graph see earlier prepared siblings even before their durable commits. When every matching durable instance is stopped/deleted, no separate registry survives and the next run establishes phase zero again.
+
+A private `FxInstanceDocument.syncGroups` stores section membership while each resolved visual stores its absolute origin. Durable validation requires 1–16 exact unique memberships, a matching visual and origin in both directions, one identical finite origin per name, and an origin no later than each member's own scheduled start. Recipient `fx.start` payloads and reconnect cues contain only `syncAtHostTime`; they never contain membership or the authored name. Current rights, macro, scene, anchor and media checks still run before every replay. `FxPlayer` separates schedule/lifetime elapsed time from visual phase elapsed time, so timers, expiry and media-readiness accounting retain their established semantics while Pixi visuals and videos catch up from the durable host origin.
+
+### Wizard, preset and programmable-path integration
+
+The Wizard shows **Playback sync group** for image/text sections, disabled until Persist is enabled. Existing exact names are suggested but not imposed. Text ↔ Image conversion retains membership; conversion to a nonvisual step clears it. A grouped draft cannot turn persistence off until all names are cleared. Save/edit and local one-pass preview preserve the contract. Presets may retain group names while section IDs are reminted, but the complete bundle must be valid under one lifecycle; loading grouped look metadata into a one-shot draft is refused with an instruction to enable Persist.
+
+No parallel client or Worker implementation was added. Wizard Run, item/automation triggers and reviewed `api.fx.play` all reach the existing common `prepareFx` scheduler, so a saved grouped timeline has one host-owned meaning on every invocation path.
+
+### Verification
+
+- Focused `tests/core/fx.test.ts`, `tests/core/fxInstances.test.ts`, `tests/core/fxPresets.test.ts`, `tests/client/fxDeliveryFlow.test.ts` and `tests/host/sync.test.ts`: **379/379** (59 + 5 + 6 + 55 + 254). Coverage pins schema bounds/lifecycle, stripped names, fresh and active origins, future-origin rejection, durable membership equality, preset lifecycle/remint behavior, client schedule-vs-phase elapsed time, cross-run reuse, final-member reset and macro/anchor privacy scoping.
+- Full `corepack pnpm test`: **4,917 passed / 12 skipped**, **334 passing / 2 skipped files**, **135.00 s**. Typecheck: **69 components / 0 blocking issues / 1 existing ReplayPanel advisory**. Full ESLint and `git diff --check` pass.
+- Production preparation succeeded; the optional PF1e content-based starter remains absent and is skipped normally. `dist/index.html`: **4,152,923 raw / 1,186,411 gzip bytes**, below 6 MB; SHA-256 **`31ae05b5206cd1a97b6d48abe716a406c7aaa597d80e57e660b32090bd493d2b`**.
+- Production `file://` Chromium **153.0.8010.0**, one worker, zero retries: `e2e/fx_sequence.spec.ts` (38) plus `e2e/script_macros.spec.ts` (9) — **47/47 in 11.3 minutes** on that exact artifact. The new real-browser Wizard case authors two persistent growing text visuals 500 ms apart, saves/reopens the names, observes one equal `syncAtHostTime`, no `syncGroup` at the Pixi boundary and more than 400 ms of phase age on the later spawn. It reads both live drawn scales as aligned, crosses the IDB durability barrier, reloads the whole app and reads both restored scales as aligned again.
+
+Commands used for the final evidence:
+
+```sh
+corepack pnpm vitest run tests/core/fx.test.ts tests/core/fxInstances.test.ts \
+  tests/core/fxPresets.test.ts tests/client/fxDeliveryFlow.test.ts tests/host/sync.test.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm lint
+git diff --check
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm playwright test e2e/fx_sequence.spec.ts e2e/script_macros.spec.ts \
+  --project=chromium --workers=1
+```
+
+The Chromium executable and AL2023 libraries were npm-provisioned outside the repository because the standard Playwright browser remains unavailable in this sandbox. This is functional production-artifact evidence, not cross-browser or A41 hardware-GPU acceptance.
+
+### Remaining scope
+
+D399 closes only persistent visual host-clock phase groups inside one saved-timeline invocation scope. It does not add simultaneous-launch groups, shared group delay, one-shot/audio groups, cross-timeline group namespaces, seekable browser-native GIF frame control, conditional lanes, generalized cancellation or the remaining shared scheduler/effect-manager surface. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**

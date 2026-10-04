@@ -1,8 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_RANGES, FX_FINISH_OFFSET_MAX_MS,
-  FX_MEDIA_CLIP_MAX_MS, fxAudienceAllows, fxAudiencePlayers,
+  FX_MEDIA_CLIP_MAX_MS, FX_SYNC_GROUP_MAX_LENGTH, fxAudienceAllows, fxAudiencePlayers,
   fxAuthoredFilters, fxFilterFields, fxFilterStrengths,
-  fxFilterStrength, fxMaskError, fxMaskFromCrosshair, fxSectionsForViewer, fxStylePlan,
+  fxFilterStrength, fxMaskError, fxMaskFromCrosshair, fxResolveSyncOrigins,
+  fxSectionsForViewer, fxStylePlan,
   resolveFxSequence, validateFxSequence, type FxSequence } from "../../src/core/fx";
 import { CROSSHAIR_DEFAULT_SPREAD } from "../../src/core/crosshair";
 import { fxFollowAnchors, fxPosition } from "../../src/canvas/layers/FxLayer";
@@ -116,6 +117,57 @@ describe("versioned audiovisual timeline", () => {
     expect(validateFxSequence({ version: 1, sections: [{ kind: "text", id: "text", text: "x",
       at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 1_000,
       clipStartMs: 200 } as never] }).ok).toBe(false);
+  });
+
+  test("persistent visual sync groups resolve to one host phase origin without sending their names", () => {
+    const grouped: FxSequence = { version: 1, persistent: true, sections: [
+      { kind: "text", id: "first", text: "First", at: { kind: "point", x: 100, y: 100 },
+        startMs: 100, durationMs: 1_000, syncGroup: "arcane pulse" },
+      { kind: "image", id: "late", assetId: hash, at: { kind: "point", x: 120, y: 100 },
+        startMs: 600, durationMs: 1_000, syncGroup: "arcane pulse" },
+      { kind: "text", id: "other", text: "Other", at: { kind: "point", x: 140, y: 100 },
+        startMs: 200, durationMs: 1_000, syncGroup: "other" },
+    ] };
+    expect(validateFxSequence(grouped).ok).toBe(true);
+    const resolved = resolveFxSequence(grouped, scene, undefined, undefined, () => "image/png");
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.syncGroups).toEqual([
+      { sectionId: "first", group: "arcane pulse" },
+      { sectionId: "late", group: "arcane pulse" },
+      { sectionId: "other", group: "other" },
+    ]);
+    expect(resolved.sections.every((section) =>
+      !Object.hasOwn(section, "syncGroup") && !Object.hasOwn(section, "syncAtHostTime"))).toBe(true);
+
+    const fresh = fxResolveSyncOrigins(resolved.sections, resolved.syncGroups, 1_000);
+    expect(fresh.sections.map((section) => [section.id,
+      (section.kind === "image" || section.kind === "text") ? section.syncAtHostTime : undefined]))
+      .toEqual([["first", 1_100], ["late", 1_100], ["other", 1_200]]);
+    expect([...fresh.origins]).toEqual([["arcane pulse", 1_100], ["other", 1_200]]);
+    const joined = fxResolveSyncOrigins(resolved.sections, resolved.syncGroups, 2_000,
+      new Map([["arcane pulse", 900], ["other", 9_999]]));
+    expect(joined.sections.map((section) => [section.id,
+      (section.kind === "image" || section.kind === "text") ? section.syncAtHostTime : undefined]))
+      .toEqual([["first", 900], ["late", 900], ["other", 2_200]]);
+    expect(grouped.sections[0]).toHaveProperty("syncGroup", "arcane pulse"); // pure
+
+    const syncedText = grouped.sections[0];
+    if (!syncedText) throw new Error("sync fixture missing");
+    expect(validateFxSequence({ version: 1, sections: [syncedText] }).ok).toBe(false);
+    for (const syncGroup of ["", " padded", "padded ", "bad\nname",
+      "x".repeat(FX_SYNC_GROUP_MAX_LENGTH + 1), 42]) {
+      expect(validateFxSequence({ version: 1, persistent: true, sections: [
+        { ...syncedText, syncGroup } as never,
+      ] }).ok, String(syncGroup)).toBe(false);
+    }
+    expect(validateFxSequence({ version: 1, persistent: true, sections: [{
+      kind: "sound", id: "sound-sync", assetId: sound, startMs: 0, durationMs: 1_000,
+      syncGroup: "arcane pulse",
+    } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, persistent: true, sections: [{
+      kind: "wait", id: "wait-sync", startMs: 0, durationMs: 1_000, syncGroup: "arcane pulse",
+    } as never] }).ok).toBe(false);
   });
 
   test("finish-relative timing waits for the final replay and supports a bounded negative overlap", () => {

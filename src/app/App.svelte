@@ -47,7 +47,7 @@
   import { WindowManager } from "../ui/windows";
   import { selectedMacroItem } from "../core/macroItems";
   import { MacroHotbar, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
-  import { resolveFxSequence, type FxImportPermissions } from "../core/fx";
+  import { fxResolveSyncOrigins, resolveFxSequence, type FxImportPermissions } from "../core/fx";
 import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
@@ -2053,12 +2053,16 @@ const WALL_PICK_RADIUS = 12;
     if (!scene || scene._id !== sceneId) return { ok: false, error: "Open the timeline's scene before previewing" };
     const source = sourceTokenId ? scene.tokens.find((token) => token._id === sourceTokenId) : undefined;
     const target = targetTokenId ? scene.tokens.find((token) => token._id === targetTokenId) : undefined;
-    const resolved = resolveFxSequence({ ...sequence, persistent: false }, scene, source, target,
+    // Validate the lifecycle the author actually chose: a persistent-only sync group is
+    // legal even though the local preview intentionally renders just one pass.
+    const resolved = resolveFxSequence(sequence, scene, source, target,
       (id) => current.gm.client.store.world.assetManifest[id]?.mime, Math.random);
     if (!resolved.ok) return { ok: false, error: resolved.error };
     const runId = `preview-${globalThis.crypto.randomUUID()}`;
-    fxPlayer.preview({ kind: "fx.start", runId, macroId: "preview", sceneId, sections: resolved.sections,
-      atHostTime: Date.now() + 120 });
+    const atHostTime = Date.now() + 120;
+    const synced = fxResolveSyncOrigins(resolved.sections, resolved.syncGroups, atHostTime);
+    fxPlayer.preview({ kind: "fx.start", runId, macroId: "preview", sceneId, sections: synced.sections,
+      atHostTime });
     return { ok: true, runId };
   }
   function stopFxPreview(): void {

@@ -2669,6 +2669,93 @@ player.client.requestFxSync("s1");
     expect(received.filter((cue) => cue.runId === instance._id)).toHaveLength(3);
   });
 
+  test("persistent visual sync groups share one durable host origin across active runs", async () => {
+    let now = 10_000;
+    const h = await setup({}, undefined, undefined, () => now);
+    const macro = fxMacro("phase-loop");
+    macro.sequence = { version: 1, persistent: true, audience: "scene", sections: [
+      { kind: "text", id: "first", text: "First", at: { kind: "point", x: 100, y: 100 },
+        startMs: 100, durationMs: 1_000, syncGroup: "shared pulse" },
+      { kind: "text", id: "late", text: "Late", at: { kind: "point", x: 130, y: 100 },
+        startMs: 600, durationMs: 1_000, syncGroup: "shared pulse" },
+      { kind: "text", id: "plain", text: "Plain", at: { kind: "point", x: 160, y: 100 },
+        startMs: 300, durationMs: 1_000 },
+    ] };
+    const other: MacroDocument = { ...macro, _id: "other-phase-loop", name: "other-phase-loop",
+      sequence: { ...macro.sequence, sections: macro.sequence.sections.map((section) => ({ ...section })) } };
+    h.gm.submit([{ kind: "create", coll: "macros", data: macro },
+      { kind: "create", coll: "macros", data: other }]);
+    await flushMicrotasks();
+    const cues: ClientEvents["fx"][] = [];
+    h.gmBus.on("fx", (cue) => cues.push(cue));
+    const phase = (cue: ClientEvents["fx"] | undefined, id: string): number | undefined => {
+      const section = cue?.sections.find((entry) => entry.id === id);
+      return section && (section.kind === "image" || section.kind === "text")
+        ? section.syncAtHostTime : undefined;
+    };
+
+    h.gm.requestSequence("phase-loop", "s1");
+    await flushMicrotasks();
+    const firstCue = cues.at(-1);
+    const firstOrigin = phase(firstCue, "first");
+    expect(firstOrigin).toBe(firstCue?.atHostTime === undefined ? undefined : firstCue.atHostTime + 100);
+    expect(phase(firstCue, "late")).toBe(firstOrigin);
+    expect(phase(firstCue, "plain")).toBeUndefined();
+    expect(firstCue?.sections.every((section) => !Object.hasOwn(section, "syncGroup"))).toBe(true);
+    expect(JSON.stringify(firstCue)).not.toContain("shared pulse");
+    const firstDoc = h.hostStore.getAll("fxInstances").find((doc) => doc._id === firstCue?.runId);
+    expect(firstDoc?.syncGroups).toEqual([
+      { sectionId: "first", group: "shared pulse" },
+      { sectionId: "late", group: "shared pulse" },
+    ]);
+    expect(firstDoc?.sections.map((section) => [section.id,
+      section.kind === "image" || section.kind === "text" ? section.syncAtHostTime : undefined]))
+      .toEqual([["first", firstOrigin], ["late", firstOrigin], ["plain", undefined]]);
+
+    now += 900;
+    h.gm.requestSequence("phase-loop", "s1");
+    await flushMicrotasks();
+    const secondCue = cues.at(-1);
+    expect(phase(secondCue, "first")).toBe(firstOrigin); // joins the active phase, not a new delay
+
+    // An otherwise identical invocation bound to a token has a separate privacy scope.
+    now += 900;
+    h.gm.requestSequence("phase-loop", "s1", "t-pl");
+    await flushMicrotasks();
+    const anchoredCue = cues.at(-1);
+    expect(phase(anchoredCue, "first")).toBe((anchoredCue?.atHostTime ?? 0) + 100);
+    expect(phase(anchoredCue, "first")).not.toBe(firstOrigin);
+
+    // The same author-facing name in another saved timeline is deliberately a separate
+    // privacy scope: its phase cannot reveal an active run the other macro did not expose.
+    now += 900;
+    h.gm.requestSequence("other-phase-loop", "s1");
+    await flushMicrotasks();
+    const otherCue = cues.at(-1);
+    expect(phase(otherCue, "first")).toBe((otherCue?.atHostTime ?? 0) + 100);
+    expect(phase(otherCue, "first")).not.toBe(firstOrigin);
+
+    // Ending the first member does not erase the group while the second run remains.
+    if (firstCue) h.gm.requestFxStop(firstCue.runId);
+    await flushMicrotasks();
+    now += 900;
+    h.gm.requestSequence("phase-loop", "s1");
+    await flushMicrotasks();
+    const thirdCue = cues.at(-1);
+    expect(phase(thirdCue, "first")).toBe(firstOrigin);
+
+    // Once every run in this timeline/owner/audience scope ends, the next one starts at
+    // phase zero and becomes the new durable origin.
+    for (const cue of [secondCue, thirdCue]) if (cue) h.gm.requestFxStop(cue.runId);
+    await flushMicrotasks();
+    now += 900;
+    h.gm.requestSequence("phase-loop", "s1");
+    await flushMicrotasks();
+    const restarted = cues.at(-1);
+    expect(phase(restarted, "first")).toBe((restarted?.atHostTime ?? 0) + 100);
+    expect(phase(restarted, "first")).not.toBe(firstOrigin);
+  });
+
   test("hidden sources revoke live FX per viewer; reveal, source deletion and undo restore it", async () => {
     const h = await setup();
     const macro = fxMacro("ward", "source");

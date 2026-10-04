@@ -586,11 +586,17 @@ export class FxPlayer {
 
   private async play(cue: FxStartMsg, section: Exclude<ResolvedFxSection, { kind: "wait" }>,
     generation: number, epoch: number, index = -1): Promise<void> {
-    const elapsed = () => Math.max(0, this.hostNow() - cue.atHostTime - section.startMs);
+    // Scheduling/lifetime remains relative to this section. A host-resolved visual sync
+    // origin changes only playback phase: a later group member appears on time, already
+    // caught up to the animation/media cycle in progress.
+    const scheduledElapsed = () => Math.max(0, this.hostNow() - cue.atHostTime - section.startMs);
+    const elapsed = () => (section.kind === "image" || section.kind === "text") &&
+      section.syncAtHostTime !== undefined
+      ? Math.max(0, this.hostNow() - section.syncAtHostTime) : scheduledElapsed();
     const active = () => !this.disposed && generation === this.generation &&
       this.runEpoch.get(cue.runId) === epoch && this.options.sceneId() === cue.sceneId;
     const skipExpired = (mediaLateMs: number): boolean => {
-      if (cue.persistent || elapsed() < section.durationMs) return false;
+      if (cue.persistent || scheduledElapsed() < section.durationMs) return false;
       if (section.kind === "image" || section.kind === "sound") {
         // Expiry and media readiness are separate facts. If the bytes arrived on time but
         // the browser serviced this timer after the whole section, the run is stale but the

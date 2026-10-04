@@ -160,6 +160,90 @@ test("finish-relative timing waits for the final replay and resolves a negative 
   expect(cues.every(({ hasDependency }) => !hasDependency)).toBe(true);
 });
 
+test("persistent visual sync groups join the live phase and keep it across durable reconnect", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.locator("[data-fx-name]").fill("Synchronized pulse");
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const first = wizard.locator("[data-fx-section]").nth(0);
+  await expect(first.getByLabel("Playback sync group")).toBeDisabled();
+  await wizard.locator("[data-fx-persistent]").check();
+  await first.getByLabel("Text", { exact: true }).fill("First pulse");
+  await first.getByLabel("Duration ms").fill("2000");
+  await first.getByLabel("Scale", { exact: true }).fill("1");
+  await first.getByLabel("Grow/shrink to").fill("2");
+  await first.getByLabel("Playback sync group").fill("table pulse");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const second = wizard.locator("[data-fx-section]").nth(1);
+  await second.getByLabel("Text", { exact: true }).fill("Late pulse");
+  await second.getByLabel("Start ms").fill("500");
+  await second.getByLabel("Duration ms").fill("2000");
+  await second.getByLabel("Scale", { exact: true }).fill("1");
+  await second.getByLabel("Grow/shrink to").fill("2");
+  await second.getByLabel("Playback sync group").fill("table pulse");
+  await expect(wizard.locator("[data-fx-persistent]")).toBeDisabled();
+
+  await wizard.locator("[data-fx-save]").click();
+  const saved = wizard.locator("[data-fx-macro-id]").filter({ hasText: "Synchronized pulse" });
+  await expect(saved).toBeVisible();
+  await wizard.getByRole("button", { name: "New", exact: true }).click();
+  await saved.getByRole("button", { name: "Edit" }).click();
+  await expect(wizard.locator("[data-fx-persistent]")).toBeChecked();
+  await expect(first.getByLabel("Playback sync group")).toHaveValue("table pulse");
+  await expect(second.getByLabel("Playback sync group")).toHaveValue("table pulse");
+
+  await page.evaluate(() => {
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      spawn: (...args: unknown[]) => void;
+    } } }).__stage?.getFxLayer();
+    if (!layer) throw new Error("FX layer missing");
+    const spawn = layer.spawn.bind(layer);
+    const global = globalThis as unknown as { __syncGroupSpawns?: Array<{
+      startMs: number; elapsed: number; syncAtHostTime?: number; hasAuthoredName: boolean;
+    }> };
+    global.__syncGroupSpawns = [];
+    layer.spawn = (...args: unknown[]) => {
+      const section = args[1] as { startMs: number; syncAtHostTime?: number; syncGroup?: string };
+      global.__syncGroupSpawns?.push({ startMs: section.startMs, elapsed: Number(args[2]),
+        ...(section.syncAtHostTime === undefined ? {} : { syncAtHostTime: section.syncAtHostTime }),
+        hasAuthoredName: Object.hasOwn(section, "syncGroup") });
+      spawn(...args);
+    };
+  });
+  await wizard.locator("[data-fx-run]").click();
+  const count = () => page.evaluate(() => (
+    globalThis as unknown as { __stage?: { getFxLayer: () => { count: number } } }
+  ).__stage?.getFxLayer().count ?? 0);
+  await expect.poll(count, { timeout: 5_000, intervals: [50, 100] }).toBe(2);
+  const spawns = await page.evaluate(() =>
+    (globalThis as unknown as { __syncGroupSpawns?: Array<{
+      startMs: number; elapsed: number; syncAtHostTime?: number; hasAuthoredName: boolean;
+    }> }).__syncGroupSpawns ?? []);
+  expect(spawns.map(({ startMs }) => startMs)).toEqual([0, 500]);
+  expect(spawns[0]?.syncAtHostTime).toBe(spawns[1]?.syncAtHostTime);
+  expect(spawns[1]?.elapsed ?? 0).toBeGreaterThan(400); // joined the phase; it did not restart at zero
+  expect(spawns.every(({ hasAuthoredName }) => !hasAuthoredName)).toBe(true);
+  const aligned = async () => page.evaluate(() => {
+    const visuals = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      inspect: () => Array<{ scale: number }>;
+    } } }).__stage?.getFxLayer().inspect() ?? [];
+    return visuals.length === 2 ? Math.abs((visuals[0]?.scale ?? 0) - (visuals[1]?.scale ?? 0)) : 99;
+  });
+  await expect.poll(aligned, { timeout: 3_000, intervals: [50, 100] }).toBeLessThan(0.08);
+
+  // The durable record keeps the host origin. A full app reload gets both old sections at
+  // their current shared phase rather than starting either animation over.
+  expect(await hostCall<number>(page, "drainOps")).toBe(await hostCall<number>(page, "seq"));
+  await page.reload();
+  await waitForSurface(page, "app");
+  await expect.poll(count, { timeout: 10_000, intervals: [100, 200] }).toBe(2);
+  await expect.poll(aligned, { timeout: 3_000, intervals: [50, 100] }).toBeLessThan(0.08);
+});
+
 test("destination, easing and repeat controls survive host save and edit, then play", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");

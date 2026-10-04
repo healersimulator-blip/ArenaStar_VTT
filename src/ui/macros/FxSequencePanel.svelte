@@ -7,6 +7,7 @@
   import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES,
     FX_FINISH_OFFSET_MAX_MS, FX_MASK_LIMITS, FX_MEDIA_CLIP_MAX_MS, FX_PLAYBACK_RATE_LIMITS,
     FX_POLYGON_POINTS, FX_RANDOM_DELAY_MAX_MS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
+    FX_SYNC_GROUP_MAX_LENGTH,
     fxAudiencePlayers, fxAuthoredFilters, fxFilterFields, fxMaskError, fxMaskFromCrosshair,
     resolveFxSequence,
     validateFxSequence, type FxAnchor,
@@ -102,6 +103,15 @@
   /** The local preview this panel started, if any (stopped on close/New/replace). */
   let previewRun = $state("");
   const scene = $derived(scenes.find((s) => s._id === sceneId) ?? null);
+  const hasFinishTiming = $derived(draft.sections.some((section) => section.startAfter !== undefined));
+  const hasSyncGroups = $derived(draft.sections.some((section) =>
+    (section.kind === "image" || section.kind === "text") && section.syncGroup !== undefined));
+  // Existing names are suggestions, not a closed list: matching is exact and an author
+  // may deliberately start a new group. An array avoids a mutable Set in Svelte state.
+  const syncGroupNames = $derived(draft.sections.reduce<string[]>((names, section) => {
+    const group = (section.kind === "image" || section.kind === "text") ? section.syncGroup : undefined;
+    return group && !names.includes(group) ? [...names, group] : names;
+  }, []));
   const canPlay = domCanPlay();
   /**
    * SQ-13, authoring half: what this save would ship that a viewer cannot get. The
@@ -267,7 +277,10 @@
       : { id: before.id, kind, startMs: before.startMs, durationMs: before.durationMs };
     const timed = { ...section,
       ...(before.randomDelay === undefined ? {} : { randomDelay: { ...before.randomDelay } }),
-      ...(before.startAfter === undefined ? {} : { startAfter: { ...before.startAfter } }) } as FxSection;
+      ...(before.startAfter === undefined ? {} : { startAfter: { ...before.startAfter } }),
+      ...((kind === "image" || kind === "text") &&
+        (before.kind === "image" || before.kind === "text") && before.syncGroup !== undefined
+        ? { syncGroup: before.syncGroup } : {}) } as FxSection;
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? timed : old) };
   }
   /** Pan ⇄ shake ⇄ path is a real discriminator: the shapes share no destination field. */
@@ -390,6 +403,18 @@
     const maxMs = bound === "maxMs" ? entered : Math.max(1, prior?.maxMs ?? entered, entered);
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? { ...before, randomDelay: { minMs, maxMs } } as FxSection : old) };
+  }
+
+  /** Empty means no membership. Blurring canonicalizes harmless surrounding whitespace. */
+  function changeSyncGroup(index: number, value: string, trim = false): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "text")) return;
+    const group = trim ? value.trim() : value;
+    const { syncGroup: _group, ...ungrouped } = before;
+    void _group;
+    const changed = group === "" ? ungrouped : { ...ungrouped, syncGroup: group };
+    draft = { ...draft, sections: draft.sections.map((old, i) =>
+      i === index ? changed as FxSection : old) };
   }
 
   /**
@@ -928,7 +953,10 @@
     const doc: MacroDocument = { _id: globalThis.crypto.randomUUID(), type: "macro", name: nextName,
       command: "", kind: "fxPreset", ownership: { default: 0 }, flags: {}, system: {}, preset };
     client.submit([{ kind: "create", coll: "macros", data: doc }]);
-    status = `Preset "${nextName}" submitted with ${preset.sections.length} section(s) — load it into any draft`;
+    const hasSync = preset.sections.some((section) =>
+      (section.kind === "image" || section.kind === "text") && section.syncGroup !== undefined);
+    status = `Preset "${nextName}" submitted with ${preset.sections.length} section(s)`
+      + (hasSync ? " — enable Persist before loading its sync group" : " — load it into any draft");
     return true;
   }
   function savePreset(): void {
@@ -954,6 +982,12 @@
     error = "";
     const checked = validateFxPreset(macro.preset);
     if (!checked.ok) { error = `Preset "${macro.name}" cannot be loaded: ${checked.error}`; return; }
+    const needsPersistent = checked.preset.sections.some((section) =>
+      (section.kind === "image" || section.kind === "text") && section.syncGroup !== undefined);
+    if (needsPersistent && draft.persistent !== true) {
+      error = `Preset "${macro.name}" contains a playback sync group — enable Persist / loop before loading it`;
+      return;
+    }
     stopPreview(); // the cue on the canvas belongs to the draft that is about to be replaced
     // Fresh ids per section, because the same preset may be loaded twice into one
     // timeline and a repeated id is a document the host refuses.
@@ -1227,7 +1261,7 @@
 
 <section class="fx-wizard" aria-label="FX sequence wizard" data-fx-wizard>
   <header><h3>FX timeline wizard</h3><button type="button" onclick={reset}>New</button></header>
-  <p class="hint">Author overlapping image/video/text/audio sections. A section can use an absolute start or wait for an earlier section's final replay with a signed overlap/gap. One-shot sections can replay at a fixed interval; host-approved cues stay beneath fog. Persistent timelines loop until stopped in Live FX or their source disappears (they cannot also use section replays). A **Camera** section pans or shakes the *viewer's own* view — the host resolves where a pan may land, and a real drag or zoom always takes the map back. <strong>Preview</strong> renders the unsaved draft on this tab's canvas only — no host commit, no durable instance, no player receives it; a persistent draft previews a single pass. This is a subset of the full Sequencer action library.</p>
+  <p class="hint">Author overlapping image/video/text/audio sections. A section can use an absolute start or wait for an earlier section's final replay with a signed overlap/gap. One-shot sections can replay at a fixed interval; host-approved cues stay beneath fog. Persistent timelines loop until stopped in Live FX or their source disappears (they cannot also use section replays); named visual sync groups let a later member join the animation phase already in progress. A **Camera** section pans or shakes the *viewer's own* view — the host resolves where a pan may land, and a real drag or zoom always takes the map back. <strong>Preview</strong> renders the unsaved draft on this tab's canvas only — no host commit, no durable instance, no player receives it; a persistent draft previews a single pass. This is a subset of the full Sequencer action library.</p>
   <div class="library">
     <label>Import licensed media <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,video/webm,video/mp4,audio/ogg,audio/mpeg,audio/wav,audio/webm" disabled={busy || !onImport} onchange={(e) => void importFile(e)} /></label>
     <label><input type="checkbox" data-fx-share bind:checked={shareWithPlayers} /> I have permission to serve this file to players</label>
@@ -1283,12 +1317,18 @@
       </div>
     {/if}
     <label><input type="checkbox" bind:checked={playerCallable} /> Published for player invocation</label>
-    <label title={draft.persistent !== true && draft.sections.some((section) => section.startAfter !== undefined)
-      ? "Finish-relative timing is one-shot only; switch those sections to absolute timing first" : undefined}>
+    <label title={draft.persistent !== true && hasFinishTiming
+      ? "Finish-relative timing is one-shot only; switch those sections to absolute timing first"
+      : draft.persistent === true && hasSyncGroups
+        ? "Playback sync groups are persistent-only; clear those names before turning persistence off"
+        : undefined}>
       <input type="checkbox" data-fx-persistent checked={draft.persistent === true}
-        disabled={draft.persistent !== true && draft.sections.some((section) => section.startAfter !== undefined)}
+        disabled={(draft.persistent !== true && hasFinishTiming) || (draft.persistent === true && hasSyncGroups)}
         onchange={(e) => draft = { ...draft, persistent: e.currentTarget.checked }} /> Persist / loop until stopped</label>
   </div>
+  <datalist id="fx-sync-group-names">
+    {#each syncGroupNames as group (group)}<option value={group}></option>{/each}
+  </datalist>
   <div class="sections">
     {#each draft.sections as section, i (section.id)}
       <fieldset data-fx-section={section.id}>
@@ -1339,6 +1379,20 @@
                 value={section.repeatDelayMs ?? 0} onchange={(e) => changeReplayGap(i, e.currentTarget.value)} /></label>
             {/if}
             <small>Separate clock-aligned plays (not motion cycles). One-shot only; 2–8 plays, ≤64 cues total, end before 60 s.</small>
+          </div>
+        {/if}
+        {#if section.kind === "image" || section.kind === "text"}
+          <div class="controls" data-fx-sync-group>
+            <label>Playback sync group <input data-fx-sync-group-name list="fx-sync-group-names"
+              maxlength={FX_SYNC_GROUP_MAX_LENGTH} placeholder="e.g. arcane-pulse"
+              disabled={draft.persistent !== true && section.syncGroup === undefined}
+              value={section.syncGroup ?? ""}
+              oninput={(e) => changeSyncGroup(i, e.currentTarget.value)}
+              onblur={(e) => changeSyncGroup(i, e.currentTarget.value, true)} /></label>
+            <small>Persistent visuals with the same exact name share one host phase inside this run; overlapping
+              active runs of the same saved timeline, caller, audience and source/target bindings join it too.
+              Start time is unchanged; a later member joins the cycle already in progress, including after reconnect.
+              Enable Persist first, and clear every name before turning it off.</small>
           </div>
         {/if}
         {#if section.kind === "image" || section.kind === "sound"}
@@ -1886,8 +1940,8 @@
         maxlength={FX_PRESET_LIMITS.name} placeholder="e.g. Fireball look" /></label>
       <button type="button" data-fx-preset-save onclick={savePreset}>Save draft as preset</button>
       <small>A preset is the draft's <strong>sections</strong> — not its persistence, audience or bound tokens.
-        Loading one replaces the draft; nothing reaches the table until the timeline is saved and run,
-        and a preset never copies a named placement.</small>
+        Loading one replaces the draft; a preset with sync-group membership requires Persist to be enabled first.
+        Nothing reaches the table until the timeline is saved and run, and a preset never copies a named placement.</small>
     </div>
     {#if presets.length === 0}
       <small data-fx-presets-empty>No presets saved in this world yet.</small>
