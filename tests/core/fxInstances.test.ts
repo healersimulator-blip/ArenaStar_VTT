@@ -59,10 +59,15 @@ describe("private durable FX records", () => {
     expect(validateFxInstance({ ...instance, sections: [missingY] }, scene, manifest)).toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, durationMs: 1 }] }, scene, manifest)).toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, assetId: videoHash,
-      mime: "video/webm", playbackRate: 2 }] }, scene, manifest)).toBe(true);
+      mime: "video/webm", playbackRate: 2, clipStartMs: 400, clipEndMs: 1_400 }] }, scene, manifest))
+      .toBe(true);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, playbackRate: 2 }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      clipStartMs: 100, clipEndMs: 500 }] }, scene, manifest)).toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, assetId: videoHash,
       mime: "video/webm", playbackRate: 4.01 }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual, assetId: videoHash,
+      mime: "video/webm", clipStartMs: 500, clipEndMs: 500 }] }, scene, manifest)).toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual,
       randomDelay: { minMs: 100, maxMs: 300 } } as typeof instance.sections[number]] }, scene, manifest))
       .toBe(false); // durable cues keep the sampled start, never an authored reroll range

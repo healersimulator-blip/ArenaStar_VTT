@@ -868,6 +868,8 @@ test("a sound plays on its channel, fades in, and this device can stop and mix i
   await section.locator("[data-fx-sound-channel]").selectOption("music");
   await section.locator("[data-fx-sound-fade-in]").fill("500");
   await section.locator("[data-fx-sound-fade-out]").fill("500");
+  await section.getByLabel("Clip start ms").fill("2000");
+  await section.getByLabel("Clip end ms").fill("10000");
   await wizard.locator("[data-fx-save]").click();
   await expect(wizard.locator("li")).toContainText(["Ward hum"]);
 
@@ -877,9 +879,31 @@ test("a sound plays on its channel, fades in, and this device can stop and mix i
   await expect(wizard.locator("[data-fx-sound-channel]")).toHaveValue("music");
   await expect(wizard.locator("[data-fx-sound-fade-in]")).toHaveValue("500");
   await expect(wizard.locator("[data-fx-sound-fade-out]")).toHaveValue("500");
+  await expect(section.getByLabel("Clip start ms")).toHaveValue("2000");
+  await expect(section.getByLabel("Clip end ms")).toHaveValue("10000");
 
+  // Record the detached Audio element the real player creates; no playback method is
+  // stubbed, so fetch, decode, startup, fades and mixing still use the browser.
+  await page.evaluate(() => {
+    const NativeAudio = globalThis.Audio;
+    const made: HTMLAudioElement[] = [];
+    const recording = function(this: unknown, src?: string): HTMLAudioElement {
+      const audio = new NativeAudio(src);
+      made.push(audio);
+      return audio;
+    } as unknown as typeof Audio;
+    recording.prototype = NativeAudio.prototype;
+    globalThis.Audio = recording;
+    (globalThis as unknown as { __fxClipAudios?: HTMLAudioElement[] }).__fxClipAudios = made;
+  });
   const seqBefore = await hostCall<number>(page, "seq");
   await wizard.locator("[data-fx-run]").click();
+  const currentSourceTime = () => page.evaluate(() =>
+    (globalThis as unknown as { __fxClipAudios?: HTMLAudioElement[] }).__fxClipAudios?.[0]?.currentTime ?? -1);
+  await expect.poll(currentSourceTime,
+    { timeout: 15_000, intervals: [50, 100] }).toBeGreaterThanOrEqual(2);
+  const initialSourceTime = await currentSourceTime();
+  expect(initialSourceTime).toBeLessThan(3); // the browser sought to the clip, not source zero
   await page.locator('[data-window="macros"] [data-window-close]').click();
 
   // This device's own list, in the Settings window: the world's name for the sound,
@@ -2578,15 +2602,21 @@ test("a preset saves the draft's look, loads it back, updates and deletes it", a
   await soundSection.getByRole("combobox", { name: "Media" }).selectOption({ label: "ember.wav (audio/wav)" });
   await soundSection.getByLabel("Duration ms").fill("6000");
   await soundSection.getByLabel("Playback speed").fill("1.5");
+  await soundSection.getByLabel("Clip start ms").fill("2000");
+  await soundSection.getByLabel("Clip end ms").fill("10000");
   await wizard.getByRole("button", { name: "Image / video", exact: true }).click();
   const imageSection = wizard.locator("[data-fx-section]").nth(2);
   const imageMedia = imageSection.getByRole("combobox", { name: "Media" });
   await imageMedia.selectOption({ label: "ember.webm (video/webm)" });
   await expect(imageSection.locator("[data-fx-playback-speed]")).toBeVisible();
+  await expect(imageSection.locator("[data-fx-clip-window]")).toBeVisible();
   await imageSection.getByLabel("Playback speed").fill("2");
+  await imageSection.getByLabel("Clip start ms").fill("300");
+  await imageSection.getByLabel("Clip end ms").fill("900");
   await imageMedia.selectOption({ label: "ember.png (image/png)" });
   const stillHash = await imageMedia.inputValue();
   await expect(imageSection.locator("[data-fx-playback-speed]")).toHaveCount(0);
+  await expect(imageSection.locator("[data-fx-clip-window]")).toHaveCount(0);
 
   // Saving a preset is its own act: it does not need a saved timeline, and the name is
   // the only thing the author has to type.
@@ -2607,6 +2637,8 @@ test("a preset saves the draft's look, loads it back, updates and deletes it", a
     .not.toHaveValue("");
   await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Duration ms")).toHaveValue("6000");
   await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Playback speed")).toHaveValue("1.5");
+  await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Clip start ms")).toHaveValue("2000");
+  await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Clip end ms")).toHaveValue("10000");
   await expect(wizard.locator("[data-fx-section]").nth(2).getByRole("combobox", { name: "Media" }))
     .toHaveValue(stillHash);
   await expect(wizard.locator("[data-fx-section]").nth(2).locator("[data-fx-playback-speed]")).toHaveCount(0);

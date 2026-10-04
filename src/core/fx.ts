@@ -704,6 +704,11 @@ export const FX_SCALE_LIMITS = { min: 0.05, max: 10 } as const;
 export const FX_SPIN_LIMIT = 3_600;
 /** SQ-02: bounded browser media speed; 1 is native speed. */
 export const FX_PLAYBACK_RATE_LIMITS = { min: 0.25, max: 4 } as const;
+/**
+ * SQ-02: source-time clip marks may address a long ambience/music file, but remain
+ * bounded so a forged seek never asks a browser for an unbounded media timestamp.
+ */
+export const FX_MEDIA_CLIP_MAX_MS = 24 * 60 * 60 * 1_000;
 /** SQ-02: one section may jitter by at most 30 seconds, still inside the 60-second timeline. */
 export const FX_RANDOM_DELAY_MAX_MS = 30_000;
 /**
@@ -756,11 +761,19 @@ export type FxCameraSection = FxCameraPanSection | FxCameraShakeSection | FxCame
 export type FxSection =
   | (FxLocated & { kind: "image"; assetId: string; stretch?: boolean; tint?: string;
       /** Video speed multiplier; the host rejects it when this asset is a still image. */
-      playbackRate?: number }) // image/* and alpha video
+      playbackRate?: number;
+      /** Inclusive source-media start; 0/absence means the beginning. Video only. */
+      clipStartMs?: number;
+      /** Exclusive source-media end; absence means the decoded source's end. Video only. */
+      clipEndMs?: number }) // image/* and alpha video
   | (FxLocated & { kind: "text"; text: string; color?: string })
   | (FxBase & { kind: "sound"; assetId: string; volume?: number;
       /** Audio speed multiplier; 1 is the browser's native speed. */
       playbackRate?: number;
+      /** Inclusive source-media start; 0/absence means the beginning. */
+      clipStartMs?: number;
+      /** Exclusive source-media end; absence means the decoded source's end. */
+      clipEndMs?: number;
       /** Which fader this sound belongs to (viewer-local mix, D-297). */
       channel?: FxSoundChannel;
       /** Ramp 0→1 over this many ms at the start of the section. */
@@ -830,6 +843,17 @@ function isObject(value: unknown): value is Record<string, unknown> {
 function inRange(value: unknown, min: number, max: number): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
 }
+function mediaClipError(value: Record<string, unknown>): string | null {
+  const start = value.clipStartMs;
+  const end = value.clipEndMs;
+  if (start === undefined && end === undefined) return null;
+  if (start !== undefined && (!Number.isSafeInteger(start) || !inRange(start, 0, FX_MEDIA_CLIP_MAX_MS)) ||
+      end !== undefined && (!Number.isSafeInteger(end) || !inRange(end, 1, FX_MEDIA_CLIP_MAX_MS)) ||
+      end !== undefined && (start === undefined ? 0 : typeof start === "number" ? start : 0) >= end) {
+    return `FX media clip needs integer source times within 0–${FX_MEDIA_CLIP_MAX_MS} ms and end after start`;
+  }
+  return null;
+}
 function validAnchor(at: unknown): at is FxAnchor {
   return isObject(at) && (
     (at.kind === "point" && Object.keys(at).every((k) => ["kind", "x", "y"].includes(k)) &&
@@ -883,13 +907,18 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
     const repeatFields = section.kind === "wait" || section.kind === "camera"
       ? [] : ["repeatCount", "repeatDelayMs"];
     const fields = section.kind === "sound"
-      ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs", "at", "radius", "pan", "muffle", "playbackRate"] :
-      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg", "playbackRate"] :
+      ? ["assetId", "volume", "channel", "fadeInMs", "fadeOutMs", "at", "radius", "pan", "muffle",
+          "playbackRate", "clipStartMs", "clipEndMs"] :
+      section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg", "playbackRate", "clipStartMs", "clipEndMs"] :
       section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
     if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", "randomDelay", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
       return { ok: false, error: "unknown FX section field or zero-duration media" };
+    }
+    if (section.kind === "image" || section.kind === "sound") {
+      const clipError = mediaClipError(section);
+      if (clipError) return { ok: false, error: clipError };
     }
     if (section.kind === "camera") {
       if (value.persistent)
@@ -1291,6 +1320,8 @@ export function resolveFxSequence(
     // speed on a still would be a valid-looking control that does nothing, so refuse it.
     if (section.playbackRate !== undefined && !mime.startsWith("video/"))
       return { ok: false, error: "FX playback rate is only available for video and sound" };
+    if ((section.clipStartMs !== undefined || section.clipEndMs !== undefined) && !mime.startsWith("video/"))
+      return { ok: false, error: "FX media clips are only available for video and sound" };
     const { at: _anchor, to: _to, mask: _mask, repeatCount: _count,
       repeatDelayMs: _gap, randomDelay: _random, ...projected } = section;
     void _anchor; void _to; void _mask; void _count; void _gap; void _random;

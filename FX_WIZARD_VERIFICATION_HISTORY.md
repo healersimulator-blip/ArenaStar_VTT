@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-396, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-397, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -57,6 +57,7 @@ Consolidated historical archive through D-396, including the incremental trigger
 - [D-394 archived verification report](#report-d394)
 - [D-395 archived verification report](#report-d395)
 - [D-396 archived verification report](#report-d396)
+- [D-397 archived verification report](#report-d397)
 
 <a id="report-d293-d319"></a>
 
@@ -4722,3 +4723,51 @@ The Chromium executable and AL2023 libraries were npm-provisioned outside the re
 ### Remaining scope
 
 D396 closes only per-section random delay. It does not implement group delay, clip windows, wait-until-finished negative overlap, conditional lanes, generalized cancellation or the rest of SQ-02. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**
+
+<a id="report-d397"></a>
+
+## D-397 — Source-media clip windows for sound and video (2026-10-04)
+
+### Authored and host-validated contract
+
+This bounded SQ-02 increment adds `clipStartMs` and `clipEndMs` to sound and video-backed image sections. The values are source-media timestamps, not timeline offsets: start is inclusive, end is exclusive, absent/zero start means source beginning, and absent end means the browser-decoded source end. Each present value must be a safe integer no greater than **86,400,000 ms**; end must be positive and strictly after start. The core schema rejects malformed, fractional, non-finite, reversed and over-budget values. Host media resolution rejects either mark on a still image, and durable-instance reconstruction independently rejects forged clip/rate state on non-video images.
+
+Clip marks do not alter the host schedule, section duration, fades, replay expansion, D396 random-delay sampling or recipient projection. `playbackRate` controls traversal through the selected source span, so late/restored media phase is `clipStart + elapsed × playbackRate`; the authored marks themselves never scale. The Wizard exposes paired **Clip start ms / Clip end ms** controls for sound and selected video media, canonicalizes blank/zero bounds, preserves valid marks through timeline and preset storage, and removes both marks plus video-only rate state when a video is changed to a still.
+
+### Decoded playback and lifecycle
+
+Actual browser duration is resolved at playback. An authored end beyond it clamps to the decoded end; a start at or beyond it is a local playback/decode failure, not an unsupported-codec refusal. Audio begins at zero gain until startup and the established late-media policy have both completed. A clipped one-shot that has already elapsed stays silent; otherwise it stops at the exclusive endpoint. Persistent clipped audio disables native whole-file looping and wraps explicitly inside the selected span, including restored runs. Video-backed images likewise disable native looping only when clipped and wrap inside the selected span for their visual lifetime. Unclipped behavior remains unchanged.
+
+Every clip-specific timeout, interval, `timeupdate` handler and `ended` handler is tied into the existing stop/release lifecycle: device stop, host stop, run replacement, scene teardown, Pixi-layer completion and disposal remove the new resources. Controlled tests also exposed a readiness race: cue-time clip validation could report a genuine decode failure before an older byte-preload continuation emitted `ready`. Prefetch now snapshots the run's prior acknowledgement and emits its byte result only if no newer cue-time outcome won while it waited. Fetch-failure recovery and D395's later corrective acknowledgements remain intact.
+
+### Verification
+
+- Focused `tests/client/fxDeliveryFlow.test.ts`, `tests/core/fx.test.ts`, `tests/core/fxInstances.test.ts`, `tests/core/fxPresets.test.ts` and `tests/host/sync.test.ts`: **373/373** (54 + 57 + 4 + 5 + 253). Coverage pins schema bounds/order, still-image refusal, preset and durable preservation, decoded-end clamping, playback-rate phase, late one-shot exhaustion, restored persistent wrapping, one-shot endpoints, invalid source bounds/failure correction, video wrapping and cleanup.
+- Full `corepack pnpm test`: **4,911 passed / 12 skipped**, **334 passing / 2 skipped files**, **118.44 s**. Typecheck: **69 components / 0 blocking issues / 1 existing ReplayPanel advisory**. Full ESLint and `git diff --check` pass.
+- Production preparation succeeded; the optional PF1e content-based starter remains absent and is skipped normally. `dist/index.html`: **4,141,340 raw / 1,183,115 gzip bytes**, below 6 MB; SHA-256 **`f55285e6665b4d1912b2bcdcd7fea3f055f6f5e67cef1bd42052b448bedafd0a`**.
+- Production `file://` Chromium **153.0.8010.0**, one worker, zero retries: `e2e/fx_sequence.spec.ts` **36/36 in 8.8 minutes** on that exact artifact. The real sound scenario saves/reloads a 2–10 second clip and observes the detached native `Audio` element seek into that window without replacing fetch, decode, `play()`, fade or channel-mix behavior. The preset scenario preserves sound clip marks, authors clip/rate state on video, changes it to a still, proves the controls disappear, then saves/loads/runs the draft successfully—pinning hidden-field removal at the host boundary.
+
+Commands used for the final evidence:
+
+```sh
+corepack pnpm exec vitest run tests/client/fxDeliveryFlow.test.ts tests/core/fx.test.ts \
+  tests/core/fxInstances.test.ts tests/core/fxPresets.test.ts tests/host/sync.test.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm eslint .
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test --project=chromium --workers=1 --retries=0 \
+  --global-timeout=900000 e2e/fx_sequence.spec.ts
+git diff --check
+```
+
+The Chromium executable and AL2023 libraries were npm-provisioned outside the repository because the standard Playwright browser remains unavailable in this sandbox. This is functional production-artifact evidence, not cross-browser or A41 hardware-GPU acceptance.
+
+### Remaining scope
+
+D397 closes only source-media clip windows. It does not implement group timing, wait-until-finished negative overlap, conditional lanes, generalized cancellation or the rest of SQ-02. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**

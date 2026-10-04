@@ -67,13 +67,14 @@ describe("FX preset payload (D-310)", () => {
 
   test("loading mints fresh ids and retains authored timing, so one preset can be used twice", () => {
     const checked = validateFxPreset(preset(
-      image({ randomDelay: { minMs: 100, maxMs: 400 } }), sound()));
+      image({ randomDelay: { minMs: 100, maxMs: 400 }, clipStartMs: 250, clipEndMs: 900 }), sound()));
     expect(checked.ok).toBe(true);
     if (!checked.ok) return;
     let n = 0;
     const sections = fxPresetSections(checked.preset, () => `new-${n++}`);
     expect(sections.map((section) => section.id)).toEqual(["new-0", "new-1"]);
     expect(sections[0]?.randomDelay).toEqual({ minMs: 100, maxMs: 400 });
+    expect(sections[0]).toMatchObject({ clipStartMs: 250, clipEndMs: 900 });
     expect(sections.every((section) => section.id !== "fx-one")).toBe(true);
     // Shallow copies: mutating the loaded section must not reach back into the stored one.
     expect(sections[0]).not.toBe(checked.preset.sections[0]);

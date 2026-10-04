@@ -39,6 +39,28 @@ const staticImageDataUrl = (bytes: Uint8Array, mime: string): string | undefined
 const decoderUnsupported = (error: unknown): boolean =>
   /unsupported|format|decode|not supported/i.test(String(error));
 
+interface FxMediaClipWindow {
+  /** Seconds in the decoded source; start is inclusive and end exclusive. */
+  start: number;
+  end: number;
+  span: number;
+}
+/** Resolve authored source-time marks only after the browser knows the real duration. */
+function fxMediaClipWindow(
+  section: { clipStartMs?: number; clipEndMs?: number },
+  sourceDuration: number,
+): FxMediaClipWindow | null {
+  if (section.clipStartMs === undefined && section.clipEndMs === undefined) return null;
+  if (!Number.isFinite(sourceDuration) || sourceDuration <= 0)
+    throw new Error("FX media clip needs a finite source duration");
+  const start = (section.clipStartMs ?? 0) / 1_000;
+  const end = Math.min(sourceDuration, (section.clipEndMs ?? sourceDuration * 1_000) / 1_000);
+  if (!(end > start)) throw new Error("FX media clip starts outside this source's duration");
+  return { start, end, span: end - start };
+}
+const fxLoopedClipTime = (clip: FxMediaClipWindow, mediaElapsed: number): number =>
+  clip.start + mediaElapsed % clip.span;
+
 interface FxPrefetchRecord {
   /** The D-308 receipt stays byte-scoped; decoder usability is tracked separately. */
   done: boolean;
@@ -445,12 +467,17 @@ export class FxPlayer {
       })();
       record = fresh;
     }
-    // The bytes are shared, but the answer belongs to EVERY waiting run. A
-    // cancelled/replaced run must never answer for its successor.
+    // The bytes are shared, but the answer belongs to EVERY waiting run. Capture the
+    // run's answer before waiting: a cue-time decoder/startup result that settles first is
+    // newer and must not be overwritten by this older byte-only continuation.
+    const ackBeforeWork = this.mediaAcks.get(runId)?.get(assetId);
     await record.work;
     if (this.disposed || generation !== this.generation || this.runEpoch.get(runId) !== epoch) return;
-    if (record.done) this.ackMedia(runId, assetId, "ready", { ms: Math.max(0, Date.now() - record.startedAt) });
-    else this.ackMedia(runId, assetId, "failed", { reason: "fetch" });
+    if (this.mediaAcks.get(runId)?.get(assetId) === ackBeforeWork) {
+      if (record.done)
+        this.ackMedia(runId, assetId, "ready", { ms: Math.max(0, Date.now() - record.startedAt) });
+      else this.ackMedia(runId, assetId, "failed", { reason: "fetch" });
+    }
     // D-308 keeps `ready` byte-scoped, but a decoder refusal is still a later, truer
     // answer. Every run sharing this record observes the same predecode settlement.
     if (!record.done || !record.decodeWork) return;
@@ -687,7 +714,6 @@ export class FxPlayer {
       if (section.kind === "sound") {
         const channel = soundChannelOf(section);
         const audio = new Audio(url);
-        audio.loop = cue.persistent === true;
         // D-309: pan and muffle are the two things an element cannot do; a device that
         // cannot do them plays everything else and *says* so (once, in this viewer's own
         // report) rather than pretending the author's placement took effect.
@@ -736,13 +762,16 @@ export class FxPlayer {
         // policy has had its say. A strict-sync viewer must not hear a blip from a cue that
         // is discarded because startup itself was late.
         const playbackRate = section.playbackRate ?? 1;
+        const hasClip = section.clipStartMs !== undefined || section.clipEndMs !== undefined;
         audio.volume = 0;
         audio.playbackRate = playbackRate;
-        const duration = Number.isFinite(audio.duration) && audio.duration > 0
-          ? audio.duration : section.durationMs / 1000;
-        const mediaElapsed = (elapsed() / 1000) * playbackRate;
-        audio.currentTime = cue.persistent ? mediaElapsed % duration : mediaElapsed;
+        // Native looping always returns to source time zero. A clipped persistent sound
+        // instead wraps explicitly to the authored start below.
+        audio.loop = cue.persistent === true && !hasClip;
+        let clip: FxMediaClipWindow | null = null;
         let timer: ReturnType<typeof setTimeout> | null = null;
+        let clipEndTimer: ReturnType<typeof setTimeout> | null = null;
+        let clipWatch: ReturnType<typeof setInterval> | null = null;
         let ramp: ReturnType<typeof setInterval> | null = null;
         let unregister: (() => void) | null = null;
         let stopped = false;
@@ -750,7 +779,11 @@ export class FxPlayer {
           if (stopped) return;
           stopped = true;
           if (timer !== null) clearTimeout(timer);
+          if (clipEndTimer !== null) clearTimeout(clipEndTimer);
+          if (clipWatch !== null) clearInterval(clipWatch);
           if (ramp !== null) clearInterval(ramp);
+          audio.onended = null;
+          audio.ontimeupdate = null;
           audio.pause();
           audio.src = "";
           revokeUrl();
@@ -764,7 +797,6 @@ export class FxPlayer {
         const stops = this.stopAudio.get(cue.runId) ?? new Set<() => void>();
         stops.add(stop);
         this.stopAudio.set(cue.runId, stops);
-        audio.onended = () => stop();
         if (!cue.persistent) timer = setTimeout(() => {
           if (stopped) return;
           if (!settled && active() && !skipExpired(usableLateMs())) settle();
@@ -776,7 +808,26 @@ export class FxPlayer {
           name: this.options.assetName?.(section.assetId) ?? null,
           gain: 0, persistent: cue.persistent === true, startedAt: Date.now(), stop });
         try {
+          const knownDuration = Number.isFinite(audio.duration) && audio.duration > 0
+            ? audio.duration : null;
+          const mediaElapsed = (elapsed() / 1000) * playbackRate;
+          if (hasClip && knownDuration !== null) {
+            clip = fxMediaClipWindow(section, knownDuration);
+            if (clip) {
+              const sourceTime = cue.persistent
+                ? fxLoopedClipTime(clip, mediaElapsed) : clip.start + mediaElapsed;
+              // An already-exhausted one-shot still starts silently so browser startup is
+              // honestly accounted, but never seeks past EOF or leaks a beginning blip.
+              audio.currentTime = sourceTime < clip.end ? sourceTime : clip.start;
+            }
+          } else if (!hasClip) {
+            const duration = knownDuration ?? section.durationMs / 1_000;
+            audio.currentTime = cue.persistent ? mediaElapsed % duration : mediaElapsed;
+          }
           await audio.play();
+          // Some browsers do not expose duration until `play()` has started. Startup stays
+          // silent, then the source is sought before gain is applied.
+          if (hasClip && !clip) clip = fxMediaClipWindow(section, audio.duration);
         } catch (err) {
           const report = active() && !stopped;
           stop(false); // genuine failure is settled by the outer failure-report path
@@ -786,6 +837,49 @@ export class FxPlayer {
         if (!active() || stopped) { stop(); return; }
         const lateMs = usableLateMs();
         if (skipExpired(lateMs) || skipLate(lateMs)) { stop(false); return; }
+        if (clip) {
+          const sourceTime = clip.start + (elapsed() / 1_000) * playbackRate;
+          if (!cue.persistent && sourceTime >= clip.end) {
+            // The clipped one-shot elapsed while startup was pending. It is expected to be
+            // silent now, but startup/lateness was still measured and reported honestly.
+            reportUsable(lateMs);
+            stop(false);
+            settle();
+            return;
+          }
+          const window = clip;
+          audio.currentTime = cue.persistent
+            ? fxLoopedClipTime(window, (elapsed() / 1_000) * playbackRate) : sourceTime;
+          if (cue.persistent) {
+            const rewind = () => {
+              if (stopped || !active()) { stop(); return; }
+              const current = audio.currentTime;
+              if (current >= window.end || current < window.start - 0.02) {
+                const overflow = current >= window.end ? current - window.end : 0;
+                audio.currentTime = window.start + overflow % window.span;
+              }
+            };
+            audio.ontimeupdate = rewind;
+            audio.onended = () => {
+              if (stopped || !active()) { stop(); return; }
+              audio.currentTime = window.start;
+              void audio.play().catch(() => stop());
+            };
+            clipWatch = setInterval(rewind, 40);
+          } else {
+            const stopAtEnd = () => {
+              if (stopped || !active()) { stop(); return; }
+              if (audio.currentTime >= window.end - 0.01) { stop(); return; }
+              const remainingMs = ((window.end - audio.currentTime) / playbackRate) * 1_000;
+              clipEndTimer = setTimeout(stopAtEnd, Math.max(10, remainingMs));
+            };
+            audio.ontimeupdate = () => {
+              if (audio.currentTime >= window.end - 0.01) stop();
+            };
+            audio.onended = () => stop();
+            stopAtEnd();
+          }
+        } else audio.onended = () => stop();
         reportUsable(lateMs);
         if (spatialReduced) {
           this.noteDelivery(cue.runId, { index, kind: "sound", state: "reduced",
@@ -808,12 +902,12 @@ export class FxPlayer {
       // Decode is still pending: settling here would discard a later local failure report.
       let texture: Texture;
       let video: HTMLVideoElement | null = null;
+      let clearVideoClip: (() => void) | null = null;
       try {
         if (section.mime.startsWith("video/")) {
           video = document.createElement("video");
           video.muted = true; // sound is an explicit sound section, not an autoplay side effect
           video.playsInline = true;
-          video.loop = true;
           video.playbackRate = section.playbackRate ?? 1;
           video.src = url;
           await new Promise<void>((resolve, reject) => {
@@ -821,18 +915,46 @@ export class FxPlayer {
             video.onloadeddata = () => resolve();
             video.onerror = () => reject(new Error("video format unsupported"));
           });
+          video.onloadeddata = null;
+          video.onerror = null;
           const loadedLateMs = usableLateMs();
           if (!active() || skipExpired(loadedLateMs) || skipLate(loadedLateMs)) {
             video.pause();
             revokeUrl();
             return;
           }
-          // Restored instances may have started hours ago. Seek into the
-          // decoded clip's actual loop, not past EOF (which can stall WebM).
-          const seconds = (elapsed() / 1000) * (section.playbackRate ?? 1);
-          video.currentTime = cue.persistent && Number.isFinite(video.duration) && video.duration > 0
-            ? seconds % video.duration : seconds;
+          const clip = fxMediaClipWindow(section, video.duration);
+          // An unclipped video keeps the browser's native whole-source loop. A clip loops
+          // explicitly to its own start for both one-shot and persistent timeline sections.
+          video.loop = clip === null;
+          const seconds = (elapsed() / 1_000) * (section.playbackRate ?? 1);
+          video.currentTime = clip ? fxLoopedClipTime(clip, seconds)
+            : cue.persistent && Number.isFinite(video.duration) && video.duration > 0
+              ? seconds % video.duration : seconds;
           await video.play();
+          if (clip) {
+            const rewind = () => {
+              if (!video || !active()) return;
+              const current = video.currentTime;
+              if (current >= clip.end || current < clip.start - 0.02) {
+                const overflow = current >= clip.end ? current - clip.end : 0;
+                video.currentTime = clip.start + overflow % clip.span;
+              }
+            };
+            const watch = setInterval(rewind, 40);
+            video.ontimeupdate = rewind;
+            video.onended = () => {
+              if (!video || !active()) return;
+              video.currentTime = clip.start;
+              void video.play().catch(() => undefined);
+            };
+            clearVideoClip = () => {
+              clearInterval(watch);
+              if (!video) return;
+              video.ontimeupdate = null;
+              video.onended = null;
+            };
+          }
           texture = Texture.from(video);
         } else {
           let image: HTMLImageElement;
@@ -854,6 +976,7 @@ export class FxPlayer {
         }
         const lateMs = staticImageLateMs ?? usableLateMs();
         if (!active() || skipExpired(lateMs) || skipLate(lateMs)) {
+          clearVideoClip?.();
           video?.pause();
           texture.destroy(true);
           revokeUrl();
@@ -861,13 +984,16 @@ export class FxPlayer {
         }
         reportUsable(lateMs);
         const media = video;
+        const releaseClip = clearVideoClip;
         this.options.stage.getFxLayer().spawn(cue.runId, section, elapsed(), texture, () => {
+          releaseClip?.();
           media?.pause();
           texture.destroy(true);
           revokeUrl();
         }, cue.persistent === true);
         this.settleCue(cue.runId);
       } catch (err) {
+        clearVideoClip?.();
         video?.pause();
         revokeUrl();
         throw err;

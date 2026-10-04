@@ -5,7 +5,8 @@
   import type { ActorDocument, AssetManifest, MacroDocument, SceneDocument,
     UserDocument } from "../../core/documents";
   import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES, FX_MASK_LIMITS,
-    FX_PLAYBACK_RATE_LIMITS, FX_POLYGON_POINTS, FX_RANDOM_DELAY_MAX_MS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
+    FX_MEDIA_CLIP_MAX_MS, FX_PLAYBACK_RATE_LIMITS, FX_POLYGON_POINTS, FX_RANDOM_DELAY_MAX_MS,
+    FX_SCALE_LIMITS, FX_SPIN_LIMIT,
     fxAudiencePlayers, fxAuthoredFilters, fxFilterFields, fxMaskError, fxMaskFromCrosshair,
     resolveFxSequence,
     validateFxSequence, type FxAnchor,
@@ -223,14 +224,14 @@
   }
   const mediaMime = (hash: string): string | undefined =>
     media.find((asset) => asset.hash === hash)?.mime ?? client.store.world.assetManifest[hash]?.mime;
-  /** A still cannot retain a hidden video-only speed when the selected asset changes. */
+  /** A still cannot retain hidden video-only speed or source-clip controls. */
   function changeMedia(index: number, hash: string): void {
     const before = draft.sections[index];
     if (!before || (before.kind !== "image" && before.kind !== "sound")) return;
     const mime = mediaMime(hash);
     if (before.kind === "image" && !mime?.startsWith("video/")) {
-      const { playbackRate: _rate, ...still } = before;
-      void _rate;
+      const { playbackRate: _rate, clipStartMs: _clipStart, clipEndMs: _clipEnd, ...still } = before;
+      void _rate; void _clipStart; void _clipEnd;
       draft = { ...draft, sections: draft.sections.map((old, i) => i === index
         ? { ...still, assetId: hash } as FxSection : old) };
       return;
@@ -352,6 +353,29 @@
     const maxMs = bound === "maxMs" ? entered : Math.max(1, prior?.maxMs ?? entered, entered);
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? { ...before, randomDelay: { minMs, maxMs } } as FxSection : old) };
+  }
+
+  /**
+   * Clip marks are source-media time, independent of the shared section clock. Zero start
+   * and a blank end are canonical absence (the beginning and decoded source end).
+   */
+  function changeMediaClip(index: number, bound: "clipStartMs" | "clipEndMs", value: string): void {
+    const before = draft.sections[index];
+    if (!before || (before.kind !== "image" && before.kind !== "sound")) return;
+    const parsed = value.trim() === "" ? 0 : Number(value);
+    const entered = Number.isFinite(parsed)
+      ? Math.round(Math.min(FX_MEDIA_CLIP_MAX_MS, Math.max(0, parsed))) : 0;
+    let changed: FxSection;
+    if (bound === "clipStartMs") {
+      const { clipStartMs: _start, ...remaining } = before;
+      void _start;
+      changed = (entered === 0 ? remaining : { ...remaining, clipStartMs: entered }) as FxSection;
+    } else {
+      const { clipEndMs: _end, ...remaining } = before;
+      void _end;
+      changed = (entered === 0 ? remaining : { ...remaining, clipEndMs: entered }) as FxSection;
+    }
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? changed : old) };
   }
 
   /** Native speed is canonical absence; authored rates are clamped to the host contract. */
@@ -1267,6 +1291,16 @@
               value={section.playbackRate ?? 1}
               oninput={(e) => changePlaybackRate(i, e.currentTarget.value)} /></label>
             <small>1× is native speed; section timing, fades and replays stay on the shared timeline clock.</small>
+          </div>
+          <div class="controls" data-fx-clip-window>
+            <label>Clip start ms <input type="number" min="0" max={FX_MEDIA_CLIP_MAX_MS} step="10"
+              value={section.clipStartMs ?? ""}
+              oninput={(e) => changeMediaClip(i, "clipStartMs", e.currentTarget.value)} /></label>
+            <label>Clip end ms <input type="number" min="1" max={FX_MEDIA_CLIP_MAX_MS} step="10"
+              value={section.clipEndMs ?? ""}
+              oninput={(e) => changeMediaClip(i, "clipEndMs", e.currentTarget.value)} /></label>
+            <small>Source-media time: blank start/end means the file's beginning/end. Video loops this window;
+              one-shot sound stops at its end, while persistent sound loops it. Playback speed changes traversal, not these marks.</small>
           </div>
         {/if}
         {#if section.kind === "text"}

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_RANGES, fxAudienceAllows, fxAudiencePlayers,
+import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_RANGES, FX_MEDIA_CLIP_MAX_MS,
+  fxAudienceAllows, fxAudiencePlayers,
   fxAuthoredFilters, fxFilterFields, fxFilterStrengths,
   fxFilterStrength, fxMaskError, fxMaskFromCrosshair, fxSectionsForViewer, fxStylePlan,
   resolveFxSequence, validateFxSequence, type FxSequence } from "../../src/core/fx";
@@ -76,6 +77,45 @@ describe("versioned audiovisual timeline", () => {
     expect(validateFxSequence({ version: 1, sections: [{ kind: "text", id: "text", text: "x",
       at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 1000,
       playbackRate: 2 } as never] }).ok).toBe(false);
+  });
+
+  test("sound and video clip windows are bounded, preserved and refused for still images", () => {
+    const clipped: FxSequence = { version: 1, sections: [
+      { kind: "image", id: "video", assetId: hash, at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 3_000, clipStartMs: 500, clipEndMs: 2_500 },
+      { kind: "sound", id: "sound", assetId: sound, startMs: 0, durationMs: 2_000,
+        clipEndMs: 1_200 },
+    ] };
+    expect(validateFxSequence(clipped).ok).toBe(true);
+    const resolved = resolveFxSequence(clipped, scene, undefined, undefined,
+      (id) => id === hash ? "video/webm" : "audio/ogg");
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) expect(resolved.sections).toMatchObject([
+      { kind: "image", clipStartMs: 500, clipEndMs: 2_500, mime: "video/webm" },
+      { kind: "sound", clipEndMs: 1_200, mime: "audio/ogg" },
+    ]);
+    expect(resolveFxSequence(clipped, scene, undefined, undefined,
+      (id) => id === hash ? "image/png" : "audio/ogg")).toEqual({
+      ok: false, error: "FX media clips are only available for video and sound",
+    });
+
+    const clip = (patch: Record<string, unknown>) => validateFxSequence(visual(patch)).ok;
+    expect(clip({ clipStartMs: 0 })).toBe(true); // core accepts the canonical-equivalent edge
+    expect(clip({ clipEndMs: 1 })).toBe(true);
+    expect(clip({ clipStartMs: FX_MEDIA_CLIP_MAX_MS - 1,
+      clipEndMs: FX_MEDIA_CLIP_MAX_MS })).toBe(true);
+    for (const invalid of [
+      { clipStartMs: -1 }, { clipStartMs: 0.5 }, { clipStartMs: Number.NaN },
+      { clipEndMs: 0 }, { clipEndMs: 1.5 }, { clipEndMs: Number.POSITIVE_INFINITY },
+      { clipStartMs: 500, clipEndMs: 500 }, { clipStartMs: 501, clipEndMs: 500 },
+      { clipStartMs: FX_MEDIA_CLIP_MAX_MS + 1 }, { clipEndMs: FX_MEDIA_CLIP_MAX_MS + 1 },
+    ]) expect(clip(invalid), JSON.stringify(invalid)).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "sound", id: "sound",
+      assetId: sound, startMs: 0, durationMs: 1_000, clipStartMs: 200, clipEndMs: 800 }] }).ok)
+      .toBe(true);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "text", id: "text", text: "x",
+      at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 1_000,
+      clipStartMs: 200 } as never] }).ok).toBe(false);
   });
 
   test("host samples one bounded random delay per section and sends only the shared concrete schedule", () => {

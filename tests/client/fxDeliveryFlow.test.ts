@@ -21,10 +21,23 @@ vi.stubGlobal("URL", { createObjectURL: () => "blob:test", revokeObjectURL: () =
  * too — `audios` is what those tests read the applied gain from.
  */
 let playAudio: () => Promise<void> = () => Promise.resolve();
-const audios: Array<{ src: string; volume: number; loop: boolean; playbackRate: number;
-  currentTime: number; duration: number; play: ReturnType<typeof vi.fn>; pause: ReturnType<typeof vi.fn> }> = [];
-vi.stubGlobal("Audio", class {
+interface FakeAudioRecord {
+  src: string;
+  volume: number;
+  loop: boolean;
+  playbackRate: number;
+  currentTime: number;
+  duration: number;
+  onended: (() => void) | null;
+  ontimeupdate: (() => void) | null;
+  play: ReturnType<typeof vi.fn>;
+  pause: ReturnType<typeof vi.fn>;
+}
+const audios: FakeAudioRecord[] = [];
+vi.stubGlobal("Audio", class implements FakeAudioRecord {
   src: string; volume = 1; loop = false; playbackRate = 1; currentTime = 0; duration = 2;
+  onended: (() => void) | null = null;
+  ontimeupdate: (() => void) | null = null;
   play = vi.fn(() => playAudio());
   pause = vi.fn();
   constructor(src: string) { this.src = src; audios.push(this); }
@@ -52,11 +65,24 @@ function harness(listener: { userId?: string; scenes?: unknown[]; localAssets?: 
   const camera: Camera = { x: 0, y: 0, scale: 1 };
   const cameraWrites: Camera[] = [];
   const spawned: Array<{ runId: string; kind: string; elapsed: number }> = [];
+  const finishers = new Map<string, Set<() => void>>();
   const fxLayer = {
-    clear: vi.fn(),
+    clear: vi.fn((runId?: string) => {
+      for (const [id, callbacks] of [...finishers]) {
+        if (runId !== undefined && id !== runId) continue;
+        finishers.delete(id);
+        for (const finish of callbacks) finish();
+      }
+    }),
     count: 0,
-    spawn: (runId: string, section: { kind: string }, elapsed: number) => {
+    spawn: (runId: string, section: { kind: string }, elapsed: number,
+      _texture?: unknown, finish?: () => void) => {
       spawned.push({ runId, kind: section.kind, elapsed });
+      if (finish) {
+        const callbacks = finishers.get(runId) ?? new Set<() => void>();
+        callbacks.add(finish);
+        finishers.set(runId, callbacks);
+      }
     },
   };
   const stage = {
@@ -134,7 +160,9 @@ function harness(listener: { userId?: string; scenes?: unknown[]; localAssets?: 
     // The live-sound registry keys rows by `runId:index:epoch`, and a cue's ramp keeps
     // ticking after its own test ends: a test that reads that registry gives its run its
     // own ID rather than being written to by a previous test's timer.
-    send: (sections: ResolvedFxSection[], opts: { persistent?: boolean; runId?: string } = {}) => {
+    send: (sections: ResolvedFxSection[], opts: {
+      persistent?: boolean; runId?: string; atHostTime?: number;
+    } = {}) => {
       bus.emit("fx", { kind: "fx.start", runId: "run-1", macroId: "macro-1", sceneId: SCENE,
         atHostTime: Date.now() + 40, sections, ...opts } satisfies FxStartMsg);
     },
@@ -212,12 +240,14 @@ describe("FX preload and late-media fallback (D-295)", () => {
     expect(h.reports[0]?.entries[0]).toMatchObject({ state: "skipped", reason: "not-ready" });
   });
 
-  test("an authored playback rate reaches the video element", async () => {
+  test("an authored playback rate and clip window reach the video element", async () => {
     class FakeVideo {
       muted = false; playsInline = false; loop = false; playbackRate = 1;
       currentTime = 0; duration = 4;
       onloadeddata: (() => void) | null = null;
       onerror: (() => void) | null = null;
+      onended: (() => void) | null = null;
+      ontimeupdate: (() => void) | null = null;
       canPlayType(): string { return "probably"; }
       pause = vi.fn();
       play = vi.fn(() => Promise.resolve());
@@ -231,14 +261,22 @@ describe("FX preload and late-media fallback (D-295)", () => {
     const base = image(0);
     if (base.kind !== "image") throw new Error("image fixture changed kind");
     try {
-      h.send([{ ...base, mime: "video/webm", playbackRate: 2 }]);
+      h.send([{ ...base, mime: "video/webm", playbackRate: 2,
+        clipStartMs: 1_000, clipEndMs: 2_000 }]);
       await sleep(60);
       await h.resolveAsset("aa".repeat(32));
       await sleep(60);
       const played = videos.at(-1);
       expect(played?.playbackRate).toBe(2);
+      expect(played?.loop).toBe(false); // native whole-file looping would escape the clip
+      expect(played?.currentTime).toBeGreaterThanOrEqual(1);
+      expect(played?.currentTime).toBeLessThan(1.5);
       expect(played?.play).toHaveBeenCalledTimes(1);
       expect(h.spawned).toHaveLength(1);
+      if (!played) throw new Error("video element missing");
+      played.currentTime = 2.1;
+      played.ontimeupdate?.();
+      expect(played.currentTime).toBeCloseTo(1.1, 6);
     } finally {
       h.player.dispose();
       Reflect.deleteProperty(globalThis, "document");
@@ -347,6 +385,78 @@ describe("sound channels, fades and the device-local list (D-297, SQ-09)", () =>
     await sleep(60);
     expect(audios[0]?.playbackRate).toBe(1.75);
     expect(audios[0]?.play).toHaveBeenCalledTimes(1);
+    h.player.dispose();
+  });
+
+  test("a one-shot sound seeks into its clip and stops at the authored source end", async () => {
+    const h = harness();
+    h.send([music(0, { durationMs: 3_000, playbackRate: 1.5,
+      clipStartMs: 500, clipEndMs: 900 })]);
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    const played = audios[0];
+    expect(played?.loop).toBe(false);
+    expect(played?.currentTime).toBeGreaterThanOrEqual(0.5);
+    expect(played?.currentTime).toBeLessThan(0.8);
+    expect(played?.volume).toBeGreaterThan(0);
+    if (!played) throw new Error("audio element missing");
+    played.currentTime = 0.91;
+    played.ontimeupdate?.();
+    expect(played.pause).toHaveBeenCalledTimes(1);
+    expect(fxSounds()).toEqual([]);
+    h.player.dispose();
+  });
+
+  test("a restored persistent sound wraps its clip instead of the whole source", async () => {
+    const h = harness();
+    h.send([music(0, { clipStartMs: 500, clipEndMs: 2_500 })], { // decoded source ends at 2 s
+      persistent: true, atHostTime: Date.now() - 2_100,
+    });
+    await sleep(20);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    const played = audios[0];
+    expect(played?.loop).toBe(false);
+    expect(played?.currentTime).toBeGreaterThanOrEqual(1);
+    expect(played?.currentTime).toBeLessThan(1.4); // end clamps to 2 s; 2.1 s wraps inside 1.5 s
+    if (!played) throw new Error("audio element missing");
+    played.currentTime = 2.15;
+    played.ontimeupdate?.();
+    expect(played.currentTime).toBeCloseTo(0.65, 6);
+    played.onended?.();
+    expect(played.currentTime).toBe(0.5);
+    expect(played.play).toHaveBeenCalledTimes(2);
+    h.player.dispose();
+  });
+
+  test("a late one-shot whose clip is already exhausted stays silent", async () => {
+    const h = harness();
+    h.send([music(0, { durationMs: 3_000, clipStartMs: 500, clipEndMs: 900 })], {
+      atHostTime: Date.now() - 1_000,
+    });
+    await sleep(20);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    expect(audios[0]?.play).toHaveBeenCalledTimes(1); // startup is still accounted honestly
+    expect(audios[0]?.pause).toHaveBeenCalledTimes(1);
+    expect(audios[0]?.volume).toBe(0);
+    expect(fxSounds()).toEqual([]);
+    expect(h.mediaAcks.at(-1)).toMatchObject({ state: "ready" });
+    h.player.dispose();
+  });
+
+  test("a clip beginning beyond decoded audio fails locally without becoming a codec refusal", async () => {
+    const h = harness();
+    h.send([music(0, { clipStartMs: 2_500 })]); // fake source duration is 2 seconds
+    await sleep(60);
+    await h.resolveAsset("bb".repeat(32));
+    await sleep(60);
+    expect(audios[0]?.play).not.toHaveBeenCalled();
+    expect(audios[0]?.pause).toHaveBeenCalledTimes(1);
+    expect(h.reports[0]?.entries[0]).toMatchObject({ kind: "sound", state: "failed", reason: "error" });
+    expect(h.mediaAcks.at(-1)).toMatchObject({ state: "failed", reason: "decode" });
+    expect(h.errors.at(-1)).toContain("clip starts outside");
     h.player.dispose();
   });
 
