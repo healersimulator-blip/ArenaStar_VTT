@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-397, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-398, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -58,6 +58,7 @@ Consolidated historical archive through D-397, including the incremental trigger
 - [D-395 archived verification report](#report-d395)
 - [D-396 archived verification report](#report-d396)
 - [D-397 archived verification report](#report-d397)
+- [D-398 archived verification report](#report-d398)
 
 <a id="report-d293-d319"></a>
 
@@ -4771,3 +4772,53 @@ The Chromium executable and AL2023 libraries were npm-provisioned outside the re
 ### Remaining scope
 
 D397 closes only source-media clip windows. It does not implement group timing, wait-until-finished negative overlap, conditional lanes, generalized cancellation or the rest of SQ-02. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**
+
+<a id="report-d398"></a>
+
+## D-398 — Host-resolved finish-relative section timing (2026-10-04)
+
+### Authored schedule and authoritative resolution
+
+This bounded SQ-02 scheduler increment adds `startAfter: { sectionId, offsetMs }` to an authored section. The target must be an earlier section in the same sequence; dependency mode requires `startMs: 0`, exact nested keys and a safe-integer offset from **−30,000 to +30,000 ms**. A negative offset overlaps the target's finish and a positive offset leaves a gap. The target finishes only after its **final replay**, including every replay duration and inter-play pause. The dependent section's own D396 random delay is then sampled and added once. Forward/self/missing references, loose keys, fractional or out-of-range offsets and every dependency on a persistent timeline fail validation.
+
+Validation recursively tracks each section's minimum and maximum finish over all possible random draws. It proves that a negative overlap cannot precede the referenced section's own start and that every chained start/replay finish remains inside the established 0–60 second timeline. Resolution still preflights the entire sequence's anchors and media first. The host then walks authored order, samples each section once, derives a dependency from the target's concrete final-play end, expands replays, and retains the final end under the authored ID for later dependencies. Entitled viewers receive only absolute `startMs` values. `startAfter` and `randomDelay` are both excluded from `ResolvedFxSection`, recipient cues and durable instance state.
+
+Durability and reuse fail closed at the same boundary. `validateFxInstance` rejects imported/reconnected records carrying unresolved finish or random authoring state. FX preset loading now uses a two-pass ID mint: all section IDs are chosen first, then every cloned `startAfter.sectionId` is remapped to the corresponding fresh ID. The stored preset and nested reference are not mutated, including when an ID supplier repeats candidates.
+
+### Wizard and reviewed-script parity
+
+The Wizard's **Start timing** control offers absolute time or an earlier section's finish; dependency mode exposes a signed **Finish offset ms** field and explains final-replay/overlap behavior. Timing survives text/image/sound/wait/camera discriminator changes. New-section placement follows the draft's worst-case dependency/random/replay end. Removing a referenced section resets its direct dependents to a valid absolute zero start. A draft with finish dependencies cannot enable persistence, while a persistent draft disables new relative choices; malformed imported state can still be switched back to absolute.
+
+Reviewed scripts expose the same signed concept as the optional fourth argument to direct and builder `playAndWait`: `playAndWait(macroId, sourceTokenId?, targetTokenId?, finishOffsetMs?)`. The Worker validates the bound and waits until `endsAtHostTime + finishOffsetMs`. Its `fx.play` RPC carries the offset only with `waitForEnd: true`. The authoritative host independently accepts exact known keys, a safe integer in range and an awaited cue only; it refuses persistent cues, an offset point before the cue begins, and a point beyond the existing seven-second finite-await budget **before cue emission**. Positive gaps and negative live-cue overlap therefore have one host-clock meaning rather than a client timer approximation.
+
+### Verification
+
+- Focused `tests/core/fx.test.ts`, `tests/core/fxInstances.test.ts`, `tests/core/fxPresets.test.ts`, `tests/host/scriptWorker.test.ts` and `tests/host/sync.test.ts`: **334/334** (58 + 4 + 5 + 14 + 253). Coverage pins final-replay math, dependency/random ordering, immutable authoring input, concrete-field stripping, malformed/forward/persistent/timeline refusals, durable rejection, preset remapping, shared host schedules, Worker overlap timing and forged host RPC rejection/preflight.
+- Full `corepack pnpm test`: **4,912 passed / 12 skipped**, **334 passing / 2 skipped files**, **127.65 s**. Typecheck: **69 components / 0 blocking issues / 1 existing ReplayPanel advisory**. Full ESLint and `git diff --check` pass.
+- Production preparation succeeded; the optional PF1e content-based starter remains absent and is skipped normally. `dist/index.html`: **4,147,142 raw / 1,184,766 gzip bytes**, below 6 MB; SHA-256 **`e0d59b2305bde55eb1da98b796736c41e9626924f109a3da3e58dcd6a91b002b`**.
+- Production `file://` Chromium **153.0.8010.0**, one worker, zero retries: `e2e/fx_sequence.spec.ts` (37) plus `e2e/script_macros.spec.ts` (9) — **46/46 in 10.8 minutes** on that exact artifact. The new Wizard scenario authors a fixed-random repeated predecessor and a random dependent with a −150 ms overlap, retains the relation through Text → Wait → Text, saves/reloads it and observes concrete starts `[100, 500, 700]` with no `startAfter` at the Pixi boundary. The existing preset scenario now proves fresh-ID relationship remapping; a persistent scenario proves relative choices disable. The reviewed Worker scenario uses −600 ms and observes its callback/chat while the cue is still active, then observes normal cleanup.
+
+Commands used for the final evidence:
+
+```sh
+corepack pnpm exec vitest run tests/core/fx.test.ts tests/core/fxInstances.test.ts \
+  tests/core/fxPresets.test.ts tests/host/scriptWorker.test.ts tests/host/sync.test.ts
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm lint
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test --project=chromium --workers=1 --retries=0 \
+  --global-timeout=1200000 e2e/fx_sequence.spec.ts e2e/script_macros.spec.ts
+git diff --check
+```
+
+The Chromium executable and AL2023 libraries were npm-provisioned outside the repository because the standard Playwright browser remains unavailable in this sandbox. This is functional production-artifact evidence, not cross-browser or A41 hardware-GPU acceptance.
+
+### Remaining scope
+
+D398 closes only finish-relative timing with bounded signed offsets and its reviewed-script wait parity. Group controls, conditional lanes, generalized cancellation and the remaining shared scheduler/effect-manager surface remain open. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**

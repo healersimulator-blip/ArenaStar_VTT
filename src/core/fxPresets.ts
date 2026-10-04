@@ -74,17 +74,23 @@ export function validateFxPreset(
  * The sections a load puts into the draft. IDs are **minted fresh** rather than copied,
  * because the same preset may be loaded twice into one timeline (two fireballs, one
  * look) and a duplicated section id is a document the host refuses — a preset must not
- * be able to produce one. Copying is shallow per section: the loader never hands the
- * wizard a reference into a stored document it could then mutate in place.
+ * be able to produce one. Finish-relative references are remapped as one bundle so they
+ * keep pointing at the freshly minted dependency, never back into the stored preset.
+ * Copying is shallow per section: the loader never hands the wizard a section reference
+ * from the stored document that it could then mutate in place.
  */
 export function fxPresetSections(preset: FxPresetDefinition, mintId: () => string): FxSection[] {
   const seen = new Set<string>();
-  return preset.sections.map((section) => {
+  const ids = preset.sections.map(() => {
     let id = mintId();
     while (seen.has(id)) id = mintId();
     seen.add(id);
-    return { ...section, id };
+    return id;
   });
+  const remap = new Map(preset.sections.map((section, index) => [section.id, ids[index] ?? section.id]));
+  return preset.sections.map((section, index) => ({ ...section, id: ids[index] ?? section.id,
+    ...(section.startAfter === undefined ? {} : { startAfter: { ...section.startAfter,
+      sectionId: remap.get(section.startAfter.sectionId) ?? section.startAfter.sectionId } }) }));
 }
 
 /**

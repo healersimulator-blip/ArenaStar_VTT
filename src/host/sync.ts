@@ -120,8 +120,8 @@ import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
-import { fxAudienceAllows, fxSectionsForViewer, resolveFxSequence, validateFxSequence,
-  type FxAudience } from "../core/fx";
+import { FX_FINISH_OFFSET_MAX_MS, fxAudienceAllows, fxSectionsForViewer, resolveFxSequence,
+  validateFxSequence, type FxAudience } from "../core/fx";
 import type { ResolvedFxSection } from "../core/fx";
 import { combatTriggerEvents } from "../core/combat";
 import { readWorldClock } from "../packages/pf1e/worldClock";
@@ -3494,7 +3494,11 @@ export class HostSync {
           (payload.sourceTokenId !== undefined && typeof payload.sourceTokenId !== "string") ||
           (payload.targetTokenId !== undefined && typeof payload.targetTokenId !== "string") ||
           (payload.waitForEnd !== undefined && payload.waitForEnd !== true) ||
-          Object.keys(payload).some((key) => !["macroId", "sourceTokenId", "targetTokenId", "waitForEnd"].includes(key)))
+          (payload.finishOffsetMs !== undefined && (payload.waitForEnd !== true ||
+            !Number.isSafeInteger(payload.finishOffsetMs) ||
+            Math.abs(payload.finishOffsetMs as number) > FX_FINISH_OFFSET_MAX_MS)) ||
+          Object.keys(payload).some((key) => !["macroId", "sourceTokenId", "targetTokenId", "waitForEnd",
+            "finishOffsetMs"].includes(key)))
         throw new Error("Invalid FX call");
       const projected = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
         ?.find((item) => item._id === scene._id);
@@ -3513,8 +3517,11 @@ export class HostSync {
       // An awaited short sequence must be safe to finish before this reviewed
       // Worker expires. Fail BEFORE emitting anything, including a persistent
       // loop or a 60-second cue that the 10-second Worker cannot await.
+      const finishOffsetMs = typeof payload.finishOffsetMs === "number" ? payload.finishOffsetMs : 0;
+      if (payload.waitForEnd === true && durationMs + finishOffsetMs < 0)
+        throw new Error("Awaited FX finish overlap cannot begin before the cue starts");
       if (payload.waitForEnd === true && (prepared.cue.persistent ||
-          prepared.cue.atHostTime + durationMs - this.now() > 7000))
+          prepared.cue.atHostTime + durationMs + finishOffsetMs - this.now() > 7000))
         throw new Error("Awaited FX must be nonpersistent and finish within 7 seconds");
       if (!this.emitPreparedFx(prepared)) throw new Error("FX instance could not be committed");
       return { runId: prepared.cue.runId, atHostTime: prepared.cue.atHostTime,

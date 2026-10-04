@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_RANGES, FX_MEDIA_CLIP_MAX_MS,
-  fxAudienceAllows, fxAudiencePlayers,
+import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_RANGES, FX_FINISH_OFFSET_MAX_MS,
+  FX_MEDIA_CLIP_MAX_MS, fxAudienceAllows, fxAudiencePlayers,
   fxAuthoredFilters, fxFilterFields, fxFilterStrengths,
   fxFilterStrength, fxMaskError, fxMaskFromCrosshair, fxSectionsForViewer, fxStylePlan,
   resolveFxSequence, validateFxSequence, type FxSequence } from "../../src/core/fx";
@@ -116,6 +116,63 @@ describe("versioned audiovisual timeline", () => {
     expect(validateFxSequence({ version: 1, sections: [{ kind: "text", id: "text", text: "x",
       at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 1_000,
       clipStartMs: 200 } as never] }).ok).toBe(false);
+  });
+
+  test("finish-relative timing waits for the final replay and supports a bounded negative overlap", () => {
+    const chained: FxSequence = { version: 1, sections: [
+      { kind: "text", id: "opening", text: "Opening", at: { kind: "point", x: 100, y: 100 },
+        startMs: 100, durationMs: 1_000, repeatCount: 2, repeatDelayMs: 100,
+        randomDelay: { minMs: 100, maxMs: 200 } },
+      { kind: "text", id: "followup", text: "Follow-up", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 400, startAfter: { sectionId: "opening", offsetMs: -250 },
+        randomDelay: { minMs: 50, maxMs: 100 } },
+    ] };
+    expect(validateFxSequence(chained).ok).toBe(true);
+    const draws = [1, 0];
+    const resolved = resolveFxSequence(chained, scene, undefined, undefined, () => undefined,
+      () => draws.shift() ?? 0);
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      // Opening: 300–1300, replay 1400–2400. Follow-up overlaps that final end by
+      // 250 ms, then applies its own sampled 50 ms random delay: 2200.
+      expect(resolved.sections.map(({ id, startMs }) => ({ id, startMs }))).toEqual([
+        { id: "opening", startMs: 300 }, { id: "opening@2", startMs: 1_400 },
+        { id: "followup", startMs: 2_200 },
+      ]);
+      expect(resolved.sections.every((section) => !Object.hasOwn(section, "startAfter"))).toBe(true);
+    }
+    expect(chained.sections[1]).toMatchObject({ startMs: 0,
+      startAfter: { sectionId: "opening", offsetMs: -250 } }); // host resolution is immutable
+
+    const opening = chained.sections[0];
+    const followup = chained.sections[1];
+    if (!opening || !followup) throw new Error("timing fixture missing");
+    const check = (sections: unknown[], persistent = false) =>
+      validateFxSequence({ version: 1, persistent, sections }).ok;
+    expect(check([opening, { ...followup, startMs: 1 }])).toBe(false);
+    expect(check([opening, { ...followup, startAfter: { sectionId: "missing", offsetMs: 0 } }])).toBe(false);
+    expect(check([{ ...followup, startAfter: { sectionId: "opening", offsetMs: 0 } }, opening])).toBe(false);
+    expect(check([opening, { ...followup,
+      startAfter: { sectionId: "followup", offsetMs: 0 } }])).toBe(false);
+    expect(check([opening, { ...followup,
+      startAfter: { sectionId: "opening", offsetMs: 0.5 } }])).toBe(false);
+    expect(check([opening, { ...followup,
+      startAfter: { sectionId: "opening", offsetMs: FX_FINISH_OFFSET_MAX_MS + 1 } }])).toBe(false);
+    expect(check([opening, { ...followup,
+      startAfter: { sectionId: "opening", offsetMs: 0, stray: true } }])).toBe(false);
+    expect(check([opening, followup], true)).toBe(false); // a persistent lane never finishes
+    expect(check([
+      { ...opening, startMs: 0, durationMs: 100, repeatCount: undefined,
+        repeatDelayMs: undefined, randomDelay: undefined },
+      { ...followup, durationMs: 100, randomDelay: undefined,
+        startAfter: { sectionId: "opening", offsetMs: -101 } },
+    ])).toBe(false); // an overlap cannot begin before its dependency
+    expect(check([
+      { ...opening, startMs: 30_000, durationMs: 30_000, repeatCount: undefined,
+        repeatDelayMs: undefined, randomDelay: undefined },
+      { ...followup, durationMs: 1, randomDelay: undefined,
+        startAfter: { sectionId: "opening", offsetMs: 0 } },
+    ])).toBe(false); // dependency expansion cannot escape the 60-second timeline
   });
 
   test("host samples one bounded random delay per section and sends only the shared concrete schedule", () => {

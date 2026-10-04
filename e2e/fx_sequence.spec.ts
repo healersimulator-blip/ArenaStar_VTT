@@ -91,6 +91,75 @@ test("a random delay is authored once and reaches playback as one host-resolved 
   expect(observed?.hasAuthoredRange).toBe(false);
 });
 
+test("finish-relative timing waits for the final replay and resolves a negative overlap on the host", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.locator("[data-fx-name]").fill("Overlapping finale");
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const first = wizard.locator("[data-fx-section]").nth(0);
+  await first.getByLabel("Text", { exact: true }).fill("Opening");
+  await first.getByLabel("Duration ms").fill("300");
+  await first.getByLabel("Random delay min ms").fill("100");
+  await first.getByLabel("Random delay max ms").fill("100");
+  await first.getByLabel("Section play count").fill("2");
+  await first.getByLabel("Pause between plays ms").fill("100");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const second = wizard.locator("[data-fx-section]").nth(1);
+  await second.getByLabel("Start timing").selectOption({ index: 1 });
+  await second.getByLabel("Finish offset ms").fill("-150");
+  await second.getByLabel("Random delay min ms").fill("50");
+  await second.getByLabel("Random delay max ms").fill("50");
+  await second.getByLabel("Duration ms").fill("300");
+  // Finish-relative timing belongs to the section, not its rendering discriminator.
+  await second.getByLabel("Step").selectOption("wait");
+  await expect(second.getByLabel("Finish offset ms")).toHaveValue("-150");
+  await second.getByLabel("Step").selectOption("text");
+  await second.getByLabel("Text", { exact: true }).fill("Overlapping close");
+  await expect(wizard.locator("[data-fx-persistent]")).toBeDisabled();
+
+  await wizard.locator("[data-fx-save]").click();
+  const saved = wizard.locator("[data-fx-macro-id]").filter({ hasText: "Overlapping finale" });
+  await expect(saved).toBeVisible();
+  await wizard.getByRole("button", { name: "New", exact: true }).click();
+  await saved.getByRole("button", { name: "Edit" }).click();
+  await expect(second.getByLabel("Start timing")).toHaveValue(await first.getAttribute("data-fx-section") ?? "");
+  await expect(second.getByLabel("Finish offset ms")).toHaveValue("-150");
+
+  await page.evaluate(() => {
+    const stage = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      spawn: (...args: unknown[]) => void;
+    } } }).__stage;
+    if (!stage) throw new Error("FX stage missing");
+    const layer = stage.getFxLayer();
+    const spawn = layer.spawn.bind(layer);
+    const global = globalThis as unknown as { __finishTimingCues?: Array<{
+      id: string; startMs: number; hasDependency: boolean;
+    }> };
+    global.__finishTimingCues = [];
+    layer.spawn = (...args: unknown[]) => {
+      const cue = args[1] as { id: string; startMs: number; startAfter?: unknown };
+      global.__finishTimingCues?.push({ id: cue.id, startMs: cue.startMs,
+        hasDependency: Object.hasOwn(cue, "startAfter") });
+      spawn(...args);
+    };
+  });
+  await wizard.locator("[data-fx-run]").click();
+  const observed = () => page.evaluate(() =>
+    (globalThis as unknown as { __finishTimingCues?: Array<{
+      id: string; startMs: number; hasDependency: boolean;
+    }> }).__finishTimingCues ?? []);
+  await expect.poll(async () => (await observed()).length,
+    { timeout: 5_000, intervals: [50, 100] }).toBe(3);
+  const cues = await observed();
+  expect(cues.map(({ startMs }) => startMs)).toEqual([100, 500, 700]);
+  expect(cues[1]?.id).toBe(`${cues[0]?.id}@2`);
+  expect(cues.every(({ hasDependency }) => !hasDependency)).toBe(true);
+});
+
 test("destination, easing and repeat controls survive host save and edit, then play", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
@@ -199,6 +268,7 @@ test("persistent aura follows the projected token after a real move and a reload
   await section.locator("[data-fx-follow]").check();
   await wizard.getByRole("combobox", { name: "Source", exact: true }).selectOption({ label: "Token 1" });
   await wizard.locator("[data-fx-persistent]").check();
+  await expect(section.getByLabel("Start timing")).toBeDisabled();
   await wizard.locator("[data-fx-save]").click();
   await expect(wizard.locator("li")).toContainText(["Following light"]);
   await wizard.locator("[data-fx-run]").click();
@@ -2601,6 +2671,8 @@ test("a preset saves the draft's look, loads it back, updates and deletes it", a
   const soundSection = wizard.locator("[data-fx-section]").nth(1);
   await soundSection.getByRole("combobox", { name: "Media" }).selectOption({ label: "ember.wav (audio/wav)" });
   await soundSection.getByLabel("Duration ms").fill("6000");
+  await soundSection.getByLabel("Start timing").selectOption({ index: 1 });
+  await soundSection.getByLabel("Finish offset ms").fill("-100");
   await soundSection.getByLabel("Playback speed").fill("1.5");
   await soundSection.getByLabel("Clip start ms").fill("2000");
   await soundSection.getByLabel("Clip end ms").fill("10000");
@@ -2635,7 +2707,11 @@ test("a preset saves the draft's look, loads it back, updates and deletes it", a
   await expect(wizard.locator("[data-fx-section]").first().getByLabel("Text", { exact: true })).toHaveValue("Kindling");
   await expect(wizard.locator("[data-fx-section]").nth(1).getByRole("combobox", { name: "Media" }))
     .not.toHaveValue("");
+  const loadedFirstId = await wizard.locator("[data-fx-section]").nth(0).getAttribute("data-fx-section");
   await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Duration ms")).toHaveValue("6000");
+  await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Start timing"))
+    .toHaveValue(loadedFirstId ?? "");
+  await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Finish offset ms")).toHaveValue("-100");
   await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Playback speed")).toHaveValue("1.5");
   await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Clip start ms")).toHaveValue("2000");
   await expect(wizard.locator("[data-fx-section]").nth(1).getByLabel("Clip end ms")).toHaveValue("10000");

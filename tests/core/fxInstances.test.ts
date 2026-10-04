@@ -71,6 +71,9 @@ describe("private durable FX records", () => {
     expect(validateFxInstance({ ...instance, sections: [{ ...visual,
       randomDelay: { minMs: 100, maxMs: 300 } } as typeof instance.sections[number]] }, scene, manifest))
       .toBe(false); // durable cues keep the sampled start, never an authored reroll range
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      startAfter: { sectionId: "earlier", offsetMs: -100 } } as typeof instance.sections[number]] },
+    scene, manifest)).toBe(false); // reconnect keeps the host-resolved start, never a live dependency
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, evil: "op" } as typeof instance.sections[number]] }, scene, manifest))
       .toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, follow: true, followTokenId: "source" }] }, scene, manifest))

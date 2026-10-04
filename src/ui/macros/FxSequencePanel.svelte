@@ -4,9 +4,9 @@
   import type { EventBus } from "../../core/events";
   import type { ActorDocument, AssetManifest, MacroDocument, SceneDocument,
     UserDocument } from "../../core/documents";
-  import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES, FX_MASK_LIMITS,
-    FX_MEDIA_CLIP_MAX_MS, FX_PLAYBACK_RATE_LIMITS, FX_POLYGON_POINTS, FX_RANDOM_DELAY_MAX_MS,
-    FX_SCALE_LIMITS, FX_SPIN_LIMIT,
+  import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES,
+    FX_FINISH_OFFSET_MAX_MS, FX_MASK_LIMITS, FX_MEDIA_CLIP_MAX_MS, FX_PLAYBACK_RATE_LIMITS,
+    FX_POLYGON_POINTS, FX_RANDOM_DELAY_MAX_MS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
     fxAudiencePlayers, fxAuthoredFilters, fxFilterFields, fxMaskError, fxMaskFromCrosshair,
     resolveFxSequence,
     validateFxSequence, type FxAnchor,
@@ -198,11 +198,24 @@
       to: { kind: "point", x: Math.round((scene?.width ?? 500) / 2), y: Math.round((scene?.height ?? 500) / 2) },
       easing: "easeInOut" };
   }
+  /** Worst-case authored finish, including dependency chains, random delay and replays. */
+  function latestDraftEnd(): number {
+    const ends = Object.create(null) as Record<string, number>;
+    let latest = 0;
+    for (const section of draft.sections) {
+      const base = section.startAfter === undefined ? section.startMs
+        : (ends[section.startAfter.sectionId] ?? 0) + section.startAfter.offsetMs;
+      const count = section.kind === "wait" || section.kind === "camera" ? 1 : section.repeatCount ?? 1;
+      const end = base + (section.randomDelay?.maxMs ?? 0) + count * section.durationMs +
+        (count - 1) * (section.repeatDelayMs ?? 0);
+      ends[section.id] = end;
+      latest = Math.max(latest, end);
+    }
+    return latest;
+  }
   function add(kind: FxSection["kind"]): void {
     const id = `fx-${globalThis.crypto.randomUUID().slice(0, 8)}`;
-    const startMs = Math.min(30_000, Math.max(0, ...draft.sections.map((s) =>
-      s.startMs + (s.randomDelay?.maxMs ?? 0) + s.durationMs * (s.repeatCount ?? 1) +
-      ((s.repeatCount ?? 1) - 1) * (s.repeatDelayMs ?? 0) - 250)));
+    const startMs = Math.min(30_000, Math.max(0, latestDraftEnd() - 250));
     const durationMs = kind === "wait" ? 500 : 1000;
     const at = { kind: "point" as const, x: Math.round((scene?.width ?? 500) / 2), y: Math.round((scene?.height ?? 500) / 2) };
     const section: FxSection = kind === "text" ? { id, kind, startMs, durationMs, at, text: "A dramatic moment" }
@@ -252,8 +265,9 @@
       : kind === "text" ? { id: before.id, kind, at, text: "A dramatic moment", startMs: before.startMs, durationMs: before.durationMs }
       : kind === "camera" ? cameraSection(before.id, before.startMs, Math.max(100, before.durationMs))
       : { id: before.id, kind, startMs: before.startMs, durationMs: before.durationMs };
-    const timed = before.randomDelay === undefined ? section
-      : { ...section, randomDelay: { ...before.randomDelay } } as FxSection;
+    const timed = { ...section,
+      ...(before.randomDelay === undefined ? {} : { randomDelay: { ...before.randomDelay } }),
+      ...(before.startAfter === undefined ? {} : { startAfter: { ...before.startAfter } }) } as FxSection;
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? timed : old) };
   }
   /** Pan ⇄ shake ⇄ path is a real discriminator: the shapes share no destination field. */
@@ -265,8 +279,9 @@
           durationMs: Math.min(before.durationMs, 800) }
       : mode === "path" ? pathSection(before.id, before.startMs, Math.max(1_000, before.durationMs))
       : cameraSection(before.id, before.startMs);
-    const timed = before.randomDelay === undefined ? section
-      : { ...section, randomDelay: { ...before.randomDelay } } as FxSection;
+    const timed = { ...section,
+      ...(before.randomDelay === undefined ? {} : { randomDelay: { ...before.randomDelay } }),
+      ...(before.startAfter === undefined ? {} : { startAfter: { ...before.startAfter } }) } as FxSection;
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? timed : old) };
   }
   /**
@@ -328,6 +343,28 @@
     const zoom = value.trim() === "" ? undefined : Number(value);
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? { ...before, ...(zoom === undefined ? {} : { zoom }) } as FxSection : old) };
+  }
+
+  /** Switch between one absolute host-clock start and a dependency on an earlier section. */
+  function changeStartTiming(index: number, sectionId: string): void {
+    const before = draft.sections[index];
+    if (!before) return;
+    const { startAfter: _after, ...absolute } = before;
+    void _after;
+    const changed = sectionId === "" ? { ...absolute, startMs: 0 }
+      : { ...absolute, startMs: 0, startAfter: { sectionId, offsetMs: 0 } };
+    draft = { ...draft, sections: draft.sections.map((old, i) =>
+      i === index ? changed as FxSection : old) };
+  }
+  /** Negative means overlap before the dependency's final replay ends; positive is a gap. */
+  function changeFinishOffset(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before?.startAfter) return;
+    const parsed = value.trim() === "" ? 0 : Number(value);
+    const offsetMs = Number.isFinite(parsed) ? Math.round(Math.min(FX_FINISH_OFFSET_MAX_MS,
+      Math.max(-FX_FINISH_OFFSET_MAX_MS, parsed))) : 0;
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, startAfter: { ...before.startAfter, offsetMs } } as FxSection : old) };
   }
 
   /**
@@ -861,7 +898,14 @@
           ...(kind === "none" && before.kind === "image" ? { stretch: false } : {}) } as FxSection : old) };
   }
   function remove(index: number): void {
-    draft = { ...draft, sections: draft.sections.filter((_, i) => i !== index) };
+    const removed = draft.sections[index];
+    if (!removed) return;
+    draft = { ...draft, sections: draft.sections.filter((_, i) => i !== index).map((section) => {
+      if (section.startAfter?.sectionId !== removed.id) return section;
+      const { startAfter: _after, ...absolute } = section;
+      void _after;
+      return { ...absolute, startMs: 0 } as FxSection;
+    }) };
   }
   // ─── D-310 (SQ-12): save/load/edit/delete the look ──────────────────────────
   //
@@ -1183,7 +1227,7 @@
 
 <section class="fx-wizard" aria-label="FX sequence wizard" data-fx-wizard>
   <header><h3>FX timeline wizard</h3><button type="button" onclick={reset}>New</button></header>
-  <p class="hint">Author overlapping image/video/text/audio sections. One-shot sections can replay at a fixed interval; host-approved cues stay beneath fog. Persistent timelines loop until stopped in Live FX or their source disappears (they cannot also use section replays). A **Camera** section pans or shakes the *viewer's own* view — the host resolves where a pan may land, and a real drag or zoom always takes the map back. <strong>Preview</strong> renders the unsaved draft on this tab's canvas only — no host commit, no durable instance, no player receives it; a persistent draft previews a single pass. This is a subset of the full Sequencer action library.</p>
+  <p class="hint">Author overlapping image/video/text/audio sections. A section can use an absolute start or wait for an earlier section's final replay with a signed overlap/gap. One-shot sections can replay at a fixed interval; host-approved cues stay beneath fog. Persistent timelines loop until stopped in Live FX or their source disappears (they cannot also use section replays). A **Camera** section pans or shakes the *viewer's own* view — the host resolves where a pan may land, and a real drag or zoom always takes the map back. <strong>Preview</strong> renders the unsaved draft on this tab's canvas only — no host commit, no durable instance, no player receives it; a persistent draft previews a single pass. This is a subset of the full Sequencer action library.</p>
   <div class="library">
     <label>Import licensed media <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,video/webm,video/mp4,audio/ogg,audio/mpeg,audio/wav,audio/webm" disabled={busy || !onImport} onchange={(e) => void importFile(e)} /></label>
     <label><input type="checkbox" data-fx-share bind:checked={shareWithPlayers} /> I have permission to serve this file to players</label>
@@ -1239,8 +1283,11 @@
       </div>
     {/if}
     <label><input type="checkbox" bind:checked={playerCallable} /> Published for player invocation</label>
-    <label><input type="checkbox" data-fx-persistent checked={draft.persistent === true}
-      onchange={(e) => draft = { ...draft, persistent: e.currentTarget.checked }} /> Persist / loop until stopped</label>
+    <label title={draft.persistent !== true && draft.sections.some((section) => section.startAfter !== undefined)
+      ? "Finish-relative timing is one-shot only; switch those sections to absolute timing first" : undefined}>
+      <input type="checkbox" data-fx-persistent checked={draft.persistent === true}
+        disabled={draft.persistent !== true && draft.sections.some((section) => section.startAfter !== undefined)}
+        onchange={(e) => draft = { ...draft, persistent: e.currentTarget.checked }} /> Persist / loop until stopped</label>
   </div>
   <div class="sections">
     {#each draft.sections as section, i (section.id)}
@@ -1250,10 +1297,30 @@
           <label>Step <select value={section.kind} onchange={(e) => changeKind(i, (e.target as HTMLSelectElement).value as FxSection["kind"])}>
             <option value="text">Text</option><option value="image">Image / video</option><option value="sound">Sound</option><option value="camera">Camera</option><option value="wait">Wait</option>
           </select></label>
-          <label>Start ms <input type="number" min="0" max="60000" step="50" bind:value={section.startMs} /></label>
+          <label data-fx-finish-timing title={draft.persistent && section.startAfter === undefined
+            ? "Finish-relative timing is available on one-shot timelines" : undefined}>Start timing
+            <select value={section.startAfter?.sectionId ?? ""}
+              disabled={draft.persistent === true && section.startAfter === undefined}
+              onchange={(e) => changeStartTiming(i, e.currentTarget.value)}>
+            <option value="">Absolute timeline time</option>
+            {#each draft.sections.slice(0, i) as prior, priorIndex (prior.id)}
+              <option value={prior.id}>After section {priorIndex + 1} ({prior.kind}) finishes</option>
+            {/each}
+          </select></label>
+          {#if section.startAfter}
+            <label>Finish offset ms <input type="number" min={-FX_FINISH_OFFSET_MAX_MS}
+              max={FX_FINISH_OFFSET_MAX_MS} step="50" value={section.startAfter.offsetMs}
+              oninput={(e) => changeFinishOffset(i, e.currentTarget.value)} /></label>
+          {:else}
+            <label>Start ms <input type="number" min="0" max="60000" step="50" bind:value={section.startMs} /></label>
+          {/if}
           <label>Duration ms <input type="number" min="0" max="30000" step="50" bind:value={section.durationMs} /></label>
           <button type="button" aria-label={`Remove section ${i + 1}`} onclick={() => remove(i)}>×</button>
         </div>
+        {#if section.startAfter}
+          <small data-fx-finish-help>Waits for that section's final replay. A negative offset overlaps its end;
+            a positive offset leaves a gap. The host sends only the resolved start time.</small>
+        {/if}
         <div class="controls" data-fx-random-delay>
           <label>Random delay min ms <input type="number" min="0" max={FX_RANDOM_DELAY_MAX_MS} step="50"
             value={section.randomDelay?.minMs ?? ""}

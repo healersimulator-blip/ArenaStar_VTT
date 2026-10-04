@@ -69,8 +69,8 @@ test.describe("reviewed script macros in the production single-file build", () =
     await scripts.locator("[data-script-source]").fill(`const id = ${JSON.stringify(macroId)};
 return await api.fx.sequence()
   .parallel(api => api.fx.play(id), api => api.fx.play(id))
-  .playAndWait(id)
-  .thenDo(api => api.chat.say('Cues finished', 'gm'))
+  .playAndWait(id, undefined, undefined, -600)
+  .thenDo(api => api.chat.say('Cues finishing with overlap', 'gm'))
   .run();`);
     await scripts.locator(".grants label").filter({ hasText: "fx" }).locator("input").check();
     await scripts.locator(".grants label").filter({ hasText: "chat" }).locator("input").check();
@@ -85,7 +85,8 @@ return await api.fx.sequence()
     await expect(scripts.getByRole("status")).toContainText("Script completed");
     await expect(scripts.locator("details pre")).toContainText('"kind": "parallel"');
     await expect(scripts.locator("details pre")).toContainText('"kind": "callback"');
-    await expect(page.locator("#chat-log")).toContainText("Cues finished");
+    await expect(page.locator("#chat-log")).toContainText("Cues finishing with overlap");
+    expect(await active()).toBeGreaterThan(0); // negative finish offset resumed while the cue still lived
     await expect.poll(active, { timeout: 5_000 }).toBe(0);
   });
 

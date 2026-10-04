@@ -1604,7 +1604,7 @@ describe("Macros / FX host authority and audience", () => {
         { kind: "brightness", strength: 1.1 }]);
   });
 
-  test("random section delays are sampled once by the host and shared as concrete recipient times", async () => {
+  test("random and finish-relative section timing resolve once on the host into shared concrete times", async () => {
     let draws = 0;
     const hostNow = 1_000_000;
     const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
@@ -1617,7 +1617,8 @@ describe("Macros / FX host authority and audience", () => {
       throw new Error("missing fixture sequence");
     jittered.sequence.sections[0] = { ...firstSection,
       randomDelay: { minMs: 100, maxMs: 300 } };
-    jittered.sequence.sections[1] = { ...secondSection,
+    jittered.sequence.sections[1] = { ...secondSection, startMs: 0,
+      startAfter: { sectionId: firstSection.id, offsetMs: -200 },
       randomDelay: { minMs: 400, maxMs: 600 } };
     h.gm.submit([{ kind: "create", coll: "macros", data: jittered }]);
     await flushMicrotasks();
@@ -1636,8 +1637,9 @@ describe("Macros / FX host authority and audience", () => {
       expect(cues).toHaveLength(1);
       const cue = cues[0];
       expect(cue?.kind).toBe("fx.start");
-      expect(cue?.sections.map((section) => section.startMs)).toEqual([200, 800]);
-      expect(cue?.sections.every((section) => !Object.hasOwn(section, "randomDelay"))).toBe(true);
+      expect(cue?.sections.map((section) => section.startMs)).toEqual([200, 1_300]);
+      expect(cue?.sections.every((section) => !Object.hasOwn(section, "randomDelay") &&
+        !Object.hasOwn(section, "startAfter"))).toBe(true);
       expect(cue?.atHostTime).toBe(hostNow + 750);
     }
     expect(received[1]?.[0]?.sections).toEqual(received[2]?.[0]?.sections);
@@ -7106,8 +7108,15 @@ describe("GM-reviewed scripted macros: authority, projection, persistence", () =
         .rejects.toThrow(/nonpersistent/);
       await expect(action("fx.play", { macroId: "short-fx", waitForEnd: false }, () => true))
         .rejects.toThrow(/Invalid FX call/);
+      await expect(action("fx.play", { macroId: "short-fx", finishOffsetMs: -100 }, () => true))
+        .rejects.toThrow(/Invalid FX call/);
+      await expect(action("fx.play", { macroId: "short-fx", waitForEnd: true,
+        finishOffsetMs: 30_001 }, () => true)).rejects.toThrow(/Invalid FX call/);
+      await expect(action("fx.play", { macroId: "short-fx", waitForEnd: true,
+        finishOffsetMs: -451 }, () => true)).rejects.toThrow(/before the cue starts/);
       expect(h.hostStore.seq).toBe(before);
-      const played = await action("fx.play", { macroId: "short-fx", waitForEnd: true }, () => true) as {
+      const played = await action("fx.play", { macroId: "short-fx", waitForEnd: true,
+        finishOffsetMs: -100 }, () => true) as {
         runId: string; atHostTime: number; endsAtHostTime: number; persistent: boolean;
       };
       expect(played).toMatchObject({ persistent: false, runId: expect.any(String) });
