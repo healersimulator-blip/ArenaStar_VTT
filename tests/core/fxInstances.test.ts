@@ -74,6 +74,18 @@ describe("private durable FX records", () => {
     expect(validateFxInstance({ ...instance, sections: [{ ...visual,
       startAfter: { sectionId: "earlier", offsetMs: -100 } } as typeof instance.sections[number]] },
     scene, manifest)).toBe(false); // reconnect keeps the host-resolved start, never a live dependency
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      playIf: { kind: "chance", percent: 50 } } as typeof instance.sections[number]] }, scene, manifest))
+      .toBe(false); // a concrete durable cue never reevaluates an authored predicate
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      playIf: { kind: "choice", group: "secret", option: "red", weight: 2 } } as typeof
+        instance.sections[number]] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      launchGroup: "forged burst" } as typeof instance.sections[number]] }, scene, manifest))
+      .toBe(false); // a concrete durable cue never keeps an authored launch name
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      parallel: { group: "forged block", lane: "forged lane" } } as typeof instance.sections[number]] },
+    scene, manifest)).toBe(false); // reconnect receives concrete starts, never lane structure
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, evil: "op" } as typeof instance.sections[number]] }, scene, manifest))
       .toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, follow: true, followTokenId: "source" }] }, scene, manifest))

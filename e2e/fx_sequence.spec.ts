@@ -30,6 +30,58 @@ test("a saved FX timeline is host-approved, renders below fog and removes its vi
   await expect.poll(active, { timeout: 5_000 }).toBe(0);
 });
 
+test("the wizard cancels one exact finite run before its delayed section can start", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.locator("[data-fx-name]").fill("Cancellable signal");
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const first = wizard.locator("[data-fx-section]").nth(0);
+  await first.getByLabel("Text", { exact: true }).fill("Active now");
+  await first.getByLabel("Duration ms").fill("3000");
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const delayed = wizard.locator("[data-fx-section]").nth(1);
+  await delayed.getByLabel("Text", { exact: true }).fill("Must never start");
+  await delayed.getByLabel("Start ms").fill("1000");
+  await delayed.getByLabel("Duration ms").fill("1500");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("[data-fx-macro-id]").filter({ hasText: "Cancellable signal" })).toBeVisible();
+  expect(await hostCall<number>(page, "drainOps")).toBe(await hostCall<number>(page, "seq"));
+  const seq = await hostCall<number>(page, "seq");
+
+  await page.evaluate(() => {
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      spawn: (...args: unknown[]) => void;
+    } } }).__stage?.getFxLayer();
+    if (!layer) throw new Error("FX layer missing");
+    const spawn = layer.spawn.bind(layer);
+    (globalThis as unknown as { __cancelledRunSpawns?: string[] }).__cancelledRunSpawns = [];
+    layer.spawn = (...args: unknown[]) => {
+      (globalThis as unknown as { __cancelledRunSpawns?: string[] }).__cancelledRunSpawns
+        ?.push((args[1] as { id: string }).id);
+      spawn(...args);
+    };
+  });
+  await wizard.locator("[data-fx-run]").click();
+  const active = () => page.evaluate(() => (
+    globalThis as unknown as { __stage?: { getFxLayer: () => { count: number } } }
+  ).__stage?.getFxLayer().count ?? 0);
+  await expect.poll(active, { timeout: 5_000, intervals: [50, 100] }).toBe(1);
+  const cancel = wizard.locator("[data-fx-cancel-run]");
+  await expect(cancel).toHaveCount(1); // private fx.run acknowledgement reached only its requester
+  await cancel.click();
+  await expect.poll(active, { timeout: 2_000, intervals: [25, 50] }).toBe(0);
+  await expect(cancel).toHaveCount(0);
+  await page.waitForTimeout(1_250); // cross the delayed section's scheduled start
+  expect(await page.evaluate(() =>
+    (globalThis as unknown as { __cancelledRunSpawns?: string[] }).__cancelledRunSpawns ?? []))
+    .toEqual([await first.getAttribute("data-fx-section")]);
+  expect(await hostCall<number>(page, "seq")).toBe(seq); // finite playback/cancel writes no world op
+  await expect(wizard.locator("[data-fx-status]")).toContainText("Cancellation requested");
+});
+
 test("a random delay is authored once and reaches playback as one host-resolved cue time", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
@@ -89,6 +141,480 @@ test("a random delay is authored once and reaches playback as one host-resolved 
   expect(observed?.startMs).toBeGreaterThanOrEqual(250);
   expect(observed?.startMs).toBeLessThanOrEqual(450);
   expect(observed?.hasAuthoredRange).toBe(false);
+});
+
+test("simultaneous launch groups align in the Wizard and share one host draw at real playback", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.locator("[data-fx-name]").fill("Grouped impact");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const base = wizard.locator("[data-fx-section]").nth(0);
+  await base.getByLabel("Text", { exact: true }).fill("Opening");
+  await base.getByLabel("Duration ms").fill("200");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const flash = wizard.locator("[data-fx-section]").nth(1);
+  await flash.getByLabel("Text", { exact: true }).fill("Flash");
+  await flash.getByLabel("Duration ms").fill("300");
+  await flash.getByLabel("Start timing").selectOption({ index: 1 });
+  await flash.getByLabel("Finish offset ms").fill("100");
+  await flash.getByLabel("Random delay min ms").fill("300");
+  await flash.getByLabel("Random delay max ms").fill("400");
+  await expect(flash.getByLabel("Playback sync group")).toBeDisabled();
+  await flash.getByLabel("Simultaneous launch group").fill("impact burst");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const label = wizard.locator("[data-fx-section]").nth(2);
+  await label.getByLabel("Text", { exact: true }).fill("Impact");
+  await label.getByLabel("Duration ms").fill("700");
+  await label.getByLabel("Simultaneous launch group").fill("impact burst");
+  // Joining adopts the first member's complete schedule rather than leaving a draft
+  // that looks grouped but would be refused at save time.
+  await expect(label.getByLabel("Start timing")).toHaveValue(
+    await base.getAttribute("data-fx-section") ?? "");
+  await expect(label.getByLabel("Finish offset ms")).toHaveValue("100");
+  await expect(label.getByLabel("Random delay min ms")).toHaveValue("300");
+  await expect(label.getByLabel("Random delay max ms")).toHaveValue("400");
+  // Editing either peer propagates the shared clock, while duration remains local.
+  await label.getByLabel("Finish offset ms").fill("-50");
+  await expect(flash.getByLabel("Finish offset ms")).toHaveValue("-50");
+  await label.getByLabel("Random delay min ms").fill("350");
+  await expect(flash.getByLabel("Random delay min ms")).toHaveValue("350");
+  await expect(flash.getByLabel("Duration ms")).toHaveValue("300");
+  await expect(label.getByLabel("Duration ms")).toHaveValue("700");
+  await expect(wizard.locator("[data-fx-persistent]")).toBeDisabled();
+
+  await wizard.locator("[data-fx-save]").click();
+  const saved = wizard.locator("[data-fx-macro-id]").filter({ hasText: "Grouped impact" });
+  await expect(saved).toBeVisible();
+  await wizard.getByRole("button", { name: "New", exact: true }).click();
+  await saved.getByRole("button", { name: "Edit" }).click();
+  await expect(flash.getByLabel("Simultaneous launch group")).toHaveValue("impact burst");
+  await expect(label.getByLabel("Simultaneous launch group")).toHaveValue("impact burst");
+  await expect(flash.getByLabel("Finish offset ms")).toHaveValue("-50");
+  await expect(label.getByLabel("Random delay min ms")).toHaveValue("350");
+  expect(await hostCall<number>(page, "drainOps")).toBe(await hostCall<number>(page, "seq"));
+
+  await page.evaluate(() => {
+    const cryptoApi = globalThis.crypto;
+    const original = cryptoApi.getRandomValues.bind(cryptoApi);
+    const global = globalThis as unknown as { __launchEntropyDraws?: number;
+      __launchGroupCues?: Array<{ id: string; text?: string; startMs: number; durationMs: number;
+        at: number; hasGroup: boolean; hasRange: boolean; hasDependency: boolean }> };
+    global.__launchEntropyDraws = 0;
+    Object.defineProperty(cryptoApi, "getRandomValues", {
+      configurable: true,
+      value: (array: ArrayBufferView) => {
+        if (array instanceof Uint32Array && array.length === 1) {
+          global.__launchEntropyDraws = (global.__launchEntropyDraws ?? 0) + 1;
+          array[0] = 0xc0000000; // 75%
+          return array;
+        }
+        return original(array);
+      },
+    });
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      spawn: (...args: unknown[]) => void;
+    } } }).__stage?.getFxLayer();
+    if (!layer) throw new Error("FX layer missing");
+    const spawn = layer.spawn.bind(layer);
+    global.__launchGroupCues = [];
+    layer.spawn = (...args: unknown[]) => {
+      const cue = args[1] as { id: string; text?: string; startMs: number; durationMs: number;
+        launchGroup?: unknown; randomDelay?: unknown; startAfter?: unknown };
+      global.__launchGroupCues?.push({ id: cue.id,
+        ...(cue.text === undefined ? {} : { text: cue.text }), startMs: cue.startMs,
+        durationMs: cue.durationMs, at: performance.now(),
+        hasGroup: Object.hasOwn(cue, "launchGroup"),
+        hasRange: Object.hasOwn(cue, "randomDelay"),
+        hasDependency: Object.hasOwn(cue, "startAfter") });
+      spawn(...args);
+    };
+  });
+  await wizard.locator("[data-fx-run]").click();
+  const observed = () => page.evaluate(() =>
+    (globalThis as unknown as { __launchGroupCues?: Array<{ id: string; text?: string; startMs: number;
+      durationMs: number; at: number; hasGroup: boolean; hasRange: boolean;
+      hasDependency: boolean }> }).__launchGroupCues ?? []);
+  await expect.poll(async () => (await observed()).length,
+    { timeout: 5_000, intervals: [50, 100] }).toBe(3);
+  const cues = await observed();
+  expect(cues[0]?.startMs).toBe(0);
+  const grouped = cues.slice(1);
+  expect(grouped.map(({ startMs }) => startMs)).toEqual([grouped[0]?.startMs, grouped[0]?.startMs]);
+  expect(grouped[0]?.startMs).toBeGreaterThanOrEqual(500);
+  expect(grouped[0]?.startMs).toBeLessThanOrEqual(550);
+  expect(Object.fromEntries(grouped.map(({ text, durationMs }) => [text, durationMs]))).toEqual({
+    Flash: 300,
+    Impact: 700,
+  });
+  expect(Math.abs((grouped[1]?.at ?? 0) - (grouped[0]?.at ?? 0))).toBeLessThan(50);
+  expect(cues.every((cue) => !cue.hasGroup && !cue.hasRange && !cue.hasDependency)).toBe(true);
+  expect(await page.evaluate(() =>
+    (globalThis as unknown as { __launchEntropyDraws?: number }).__launchEntropyDraws ?? 0)).toBe(1);
+});
+
+test("explicit parallel lanes author a real fork, serial lane timing and longest-lane join", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.locator("[data-fx-name]").fill("Two-sided volley");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const leftOne = wizard.locator("[data-fx-section]").nth(0);
+  await leftOne.getByLabel("Text", { exact: true }).fill("Left one");
+  await leftOne.getByLabel("Start ms").fill("100");
+  await leftOne.getByLabel("Duration ms").fill("500");
+  await leftOne.getByLabel("Random delay min ms").fill("300");
+  await leftOne.getByLabel("Random delay max ms").fill("400");
+  await leftOne.getByLabel("Parallel block", { exact: true }).fill("volley");
+  await leftOne.getByLabel("Parallel block", { exact: true }).press("Tab");
+  await expect(leftOne.getByLabel("Parallel lane", { exact: true })).toHaveValue("lane-1");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const rightOne = wizard.locator("[data-fx-section]").nth(1);
+  await rightOne.getByLabel("Text", { exact: true }).fill("Right one");
+  await rightOne.getByLabel("Duration ms").fill("300");
+  await rightOne.getByLabel("Parallel block", { exact: true }).fill("volley");
+  await rightOne.getByLabel("Parallel block", { exact: true }).press("Tab");
+  await expect(rightOne.getByLabel("Parallel lane", { exact: true })).toHaveValue("lane-2");
+  await expect(rightOne.getByLabel("Start ms")).toHaveValue("100");
+  await expect(rightOne.getByLabel("Random delay min ms")).toHaveValue("300");
+  await expect(rightOne.getByLabel("Simultaneous launch group")).toBeDisabled();
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const leftTwo = wizard.locator("[data-fx-section]").nth(2);
+  await leftTwo.getByLabel("Text", { exact: true }).fill("Left two");
+  await leftTwo.getByLabel("Duration ms").fill("200");
+  await leftTwo.getByLabel("Parallel block", { exact: true }).fill("volley");
+  await leftTwo.getByLabel("Parallel block", { exact: true }).press("Tab");
+  await leftTwo.getByLabel("Parallel lane", { exact: true }).fill("lane-1");
+  await leftTwo.getByLabel("Parallel lane", { exact: true }).press("Tab");
+  await expect(leftTwo.locator("[data-fx-parallel-managed]")).toBeVisible();
+  await leftTwo.getByLabel("Lane overlap / gap ms").fill("-100");
+  await expect(leftTwo.locator("[data-fx-random-delay]")).toHaveCount(0);
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const rightTwo = wizard.locator("[data-fx-section]").nth(3);
+  await rightTwo.getByLabel("Text", { exact: true }).fill("Right two");
+  await rightTwo.getByLabel("Duration ms").fill("100");
+  await rightTwo.getByLabel("Parallel block", { exact: true }).fill("volley");
+  await rightTwo.getByLabel("Parallel block", { exact: true }).press("Tab");
+  await rightTwo.getByLabel("Parallel lane", { exact: true }).fill("lane-2");
+  await rightTwo.getByLabel("Parallel lane", { exact: true }).press("Tab");
+  await rightTwo.getByLabel("Lane overlap / gap ms").fill("50");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const joined = wizard.locator("[data-fx-section]").nth(4);
+  await joined.getByLabel("Text", { exact: true }).fill("Joined");
+  await joined.getByLabel("Duration ms").fill("100");
+  await joined.getByLabel("Start timing").selectOption("parallel:volley");
+  await joined.getByLabel("Join offset ms").fill("-50");
+  await expect(wizard.locator("[data-fx-persistent]")).toBeDisabled();
+
+  await wizard.locator("[data-fx-save]").click();
+  const saved = wizard.locator("[data-fx-macro-id]").filter({ hasText: "Two-sided volley" });
+  await expect(saved).toBeVisible();
+  await wizard.getByRole("button", { name: "New", exact: true }).click();
+  await saved.getByRole("button", { name: "Edit" }).click();
+  await expect(leftOne.getByLabel("Parallel block", { exact: true })).toHaveValue("volley");
+  await expect(leftOne.getByLabel("Parallel lane", { exact: true })).toHaveValue("lane-1");
+  await expect(rightOne.getByLabel("Parallel lane", { exact: true })).toHaveValue("lane-2");
+  await expect(leftTwo.getByLabel("Lane overlap / gap ms")).toHaveValue("-100");
+  await expect(rightTwo.getByLabel("Lane overlap / gap ms")).toHaveValue("50");
+  await expect(joined.getByLabel("Start timing")).toHaveValue("parallel:volley");
+  await expect(joined.getByLabel("Join offset ms")).toHaveValue("-50");
+  expect(await hostCall<number>(page, "drainOps")).toBe(await hostCall<number>(page, "seq"));
+
+  await page.evaluate(() => {
+    const cryptoApi = globalThis.crypto;
+    const original = cryptoApi.getRandomValues.bind(cryptoApi);
+    const global = globalThis as unknown as { __parallelEntropyDraws?: number;
+      __parallelCues?: Array<{ id: string; startMs: number; durationMs: number; at: number;
+        hasParallel: boolean; hasRange: boolean; hasDependency: boolean }> };
+    global.__parallelEntropyDraws = 0;
+    Object.defineProperty(cryptoApi, "getRandomValues", {
+      configurable: true,
+      value: (array: ArrayBufferView) => {
+        if (array instanceof Uint32Array && array.length === 1) {
+          global.__parallelEntropyDraws = (global.__parallelEntropyDraws ?? 0) + 1;
+          array[0] = 0xc0000000; // 75% of the inclusive 300–400 ms range => 375 ms
+          return array;
+        }
+        return original(array);
+      },
+    });
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      spawn: (...args: unknown[]) => void;
+    } } }).__stage?.getFxLayer();
+    if (!layer) throw new Error("FX layer missing");
+    const spawn = layer.spawn.bind(layer);
+    global.__parallelCues = [];
+    layer.spawn = (...args: unknown[]) => {
+      const cue = args[1] as { id: string; startMs: number; durationMs: number;
+        parallel?: unknown; randomDelay?: unknown; startAfter?: unknown };
+      global.__parallelCues?.push({ id: cue.id, startMs: cue.startMs,
+        durationMs: cue.durationMs, at: performance.now(),
+        hasParallel: Object.hasOwn(cue, "parallel"),
+        hasRange: Object.hasOwn(cue, "randomDelay"),
+        hasDependency: Object.hasOwn(cue, "startAfter") });
+      spawn(...args);
+    };
+  });
+  await wizard.locator("[data-fx-run]").click();
+  const observed = () => page.evaluate(() =>
+    (globalThis as unknown as { __parallelCues?: Array<{ id: string; startMs: number;
+      durationMs: number; at: number; hasParallel: boolean; hasRange: boolean;
+      hasDependency: boolean }> }).__parallelCues ?? []);
+  await expect.poll(async () => (await observed()).length,
+    { timeout: 5_000, intervals: [50, 100] }).toBe(5);
+  const cues = await observed();
+  const byText = Object.fromEntries(cues.map((cue) => [cue.id, cue]));
+  const ids = await Promise.all([leftOne, rightOne, leftTwo, rightTwo, joined]
+    .map((section) => section.getAttribute("data-fx-section")));
+  const [leftOneId, rightOneId, leftTwoId, rightTwoId, joinedId] = ids;
+  expect(byText[leftOneId ?? ""]?.startMs).toBe(475);
+  expect(byText[rightOneId ?? ""]?.startMs).toBe(475);
+  expect(byText[leftTwoId ?? ""]?.startMs).toBe(875);
+  expect(byText[rightTwoId ?? ""]?.startMs).toBe(825);
+  expect(byText[joinedId ?? ""]?.startMs).toBe(1_025);
+  expect(Math.abs((byText[rightOneId ?? ""]?.at ?? 0) - (byText[leftOneId ?? ""]?.at ?? 0)))
+    .toBeLessThan(50);
+  expect(cues.every((cue) => !cue.hasParallel && !cue.hasRange && !cue.hasDependency)).toBe(true);
+  expect(await page.evaluate(() =>
+    (globalThis as unknown as { __parallelEntropyDraws?: number }).__parallelEntropyDraws ?? 0)).toBe(1);
+});
+
+test("conditional play is saved in the Wizard and selected once by the host before playback", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.locator("[data-fx-name]").fill("Host conditional signal");
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const base = wizard.locator("[data-fx-section]").nth(0);
+  await base.getByLabel("Text", { exact: true }).fill("Always visible");
+  await base.getByLabel("Duration ms").fill("500");
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const optional = wizard.locator("[data-fx-section]").nth(1);
+  await optional.getByLabel("Text", { exact: true }).fill("Host decides");
+  await optional.getByLabel("Start ms").fill("0");
+  await optional.getByLabel("Duration ms").fill("500");
+  await optional.getByLabel("Play chance %").fill("50");
+  await expect(wizard.locator("[data-fx-persistent]")).toBeDisabled();
+  await wizard.locator("[data-fx-save]").click();
+  const saved = wizard.locator("[data-fx-macro-id]").filter({ hasText: "Host conditional signal" });
+  await expect(saved).toBeVisible();
+  await wizard.getByRole("button", { name: "New", exact: true }).click();
+  await saved.getByRole("button", { name: "Edit" }).click();
+  await expect(optional.getByLabel("Play chance %")).toHaveValue("50");
+  expect(await hostCall<number>(page, "drainOps")).toBe(await hostCall<number>(page, "seq"));
+
+  // HostSync uses cryptoRng. A constant 75% draw makes 50% skip, then—after a
+  // real saved edit—makes 90% play. Other crypto shapes keep their native source.
+  await page.evaluate(() => {
+    const cryptoApi = globalThis.crypto;
+    const original = cryptoApi.getRandomValues.bind(cryptoApi);
+    Object.defineProperty(cryptoApi, "getRandomValues", {
+      configurable: true,
+      value: (array: ArrayBufferView) => {
+        if (array instanceof Uint32Array && array.length === 1) {
+          array[0] = 0xc0000000;
+          return array;
+        }
+        return original(array);
+      },
+    });
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      spawn: (...args: unknown[]) => void;
+    } } }).__stage?.getFxLayer();
+    if (!layer) throw new Error("FX layer missing");
+    const spawn = layer.spawn.bind(layer);
+    const global = globalThis as unknown as { __conditionalSpawns?: Array<{
+      id: string; hasPredicate: boolean;
+    }> };
+    global.__conditionalSpawns = [];
+    layer.spawn = (...args: unknown[]) => {
+      const cue = args[1] as { id: string; playIf?: unknown };
+      global.__conditionalSpawns?.push({ id: cue.id,
+        hasPredicate: Object.hasOwn(cue, "playIf") });
+      spawn(...args);
+    };
+  });
+  const observed = () => page.evaluate(() =>
+    (globalThis as unknown as { __conditionalSpawns?: Array<{
+      id: string; hasPredicate: boolean;
+    }> }).__conditionalSpawns ?? []);
+  const baseId = await base.getAttribute("data-fx-section");
+  const optionalId = await optional.getAttribute("data-fx-section");
+  await wizard.locator("[data-fx-run]").click();
+  await expect.poll(async () => (await observed()).length,
+    { timeout: 5_000, intervals: [50, 100] }).toBe(1);
+  expect(await observed()).toEqual([{ id: baseId, hasPredicate: false }]);
+
+  // Edit and publish the same saved timeline, then exercise the opposite decision.
+  await optional.getByLabel("Play chance %").fill("90");
+  await wizard.locator("[data-fx-save]").click();
+  await expect(wizard.locator("[data-fx-status]")).toContainText("Timeline update submitted");
+  expect(await hostCall<number>(page, "drainOps")).toBe(await hostCall<number>(page, "seq"));
+  await wizard.locator("[data-fx-run]").click();
+  await expect.poll(async () => (await observed()).length,
+    { timeout: 5_000, intervals: [50, 100] }).toBe(3);
+  expect(await observed()).toEqual([
+    { id: baseId, hasPredicate: false },
+    { id: baseId, hasPredicate: false },
+    { id: optionalId, hasPredicate: false },
+  ]);
+});
+
+test("exclusive choices save, repair and select one weighted option once on the host", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.locator("[data-fx-name]").fill("Weighted impact");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const redOne = wizard.locator("[data-fx-section]").nth(0);
+  await redOne.getByLabel("Text", { exact: true }).fill("Red one");
+  await redOne.getByLabel("Start ms").fill("100");
+  await redOne.getByLabel("Duration ms").fill("500");
+  await redOne.getByLabel("Random choice group").fill("impact color");
+  await redOne.getByLabel("Random choice group").press("Tab");
+  await expect(redOne.getByLabel("Choice option")).toHaveValue("option-1");
+  await redOne.getByLabel("Choice option").fill("red");
+  await redOne.getByLabel("Choice option").press("Tab");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const blue = wizard.locator("[data-fx-section]").nth(1);
+  await blue.getByLabel("Text", { exact: true }).fill("Blue");
+  await blue.getByLabel("Start ms").fill("200");
+  await blue.getByLabel("Duration ms").fill("200");
+  await blue.getByLabel("Random choice group").fill("impact color");
+  await blue.getByLabel("Random choice group").press("Tab");
+  await blue.getByLabel("Choice option").fill("blue");
+  await blue.getByLabel("Choice option").press("Tab");
+  await blue.getByLabel("Choice weight").fill("3");
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const redTwo = wizard.locator("[data-fx-section]").nth(2);
+  await redTwo.getByLabel("Text", { exact: true }).fill("Red two");
+  await redTwo.getByLabel("Start ms").fill("300");
+  await redTwo.getByLabel("Duration ms").fill("100");
+  await redTwo.getByLabel("Random choice group").fill("impact color");
+  await redTwo.getByLabel("Random choice group").press("Tab");
+  await redTwo.getByLabel("Choice option").fill("red");
+  await redTwo.getByLabel("Choice option").press("Tab");
+  await redTwo.getByLabel("Choice weight").fill("2");
+  await expect(redOne.getByLabel("Choice weight")).toHaveValue("2");
+  await expect(wizard.locator("[data-fx-persistent]")).toBeDisabled(); // choice lifecycle interlock
+
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const after = wizard.locator("[data-fx-section]").nth(3);
+  await after.getByLabel("Text", { exact: true }).fill("After");
+  await after.getByLabel("Duration ms").fill("100");
+  await after.getByLabel("Start timing").selectOption(await redOne.getAttribute("data-fx-section") ?? "");
+  await after.getByLabel("Finish offset ms").fill("50");
+  await expect(wizard.locator("[data-fx-persistent]")).toBeDisabled();
+
+  await wizard.locator("[data-fx-save]").click();
+  const saved = wizard.locator("[data-fx-macro-id]").filter({ hasText: "Weighted impact" });
+  await expect(saved).toBeVisible();
+  await wizard.getByRole("button", { name: "New", exact: true }).click();
+  await saved.getByRole("button", { name: "Edit" }).click();
+  await expect(redOne.getByLabel("Random choice group")).toHaveValue("impact color");
+  await expect(redOne.getByLabel("Choice option")).toHaveValue("red");
+  await expect(redOne.getByLabel("Choice weight")).toHaveValue("2");
+  await expect(blue.getByLabel("Choice option")).toHaveValue("blue");
+  await expect(blue.getByLabel("Choice weight")).toHaveValue("3");
+  await expect(redTwo.getByLabel("Choice option")).toHaveValue("red");
+  await expect(after.getByLabel("Finish offset ms")).toHaveValue("50");
+  expect(await hostCall<number>(page, "drainOps")).toBe(await hostCall<number>(page, "seq"));
+
+  await page.evaluate(() => {
+    const cryptoApi = globalThis.crypto;
+    const original = cryptoApi.getRandomValues.bind(cryptoApi);
+    const global = globalThis as unknown as { __choiceEntropyDraws?: number;
+      __choiceCues?: Array<{ id: string; text?: string; startMs: number;
+        hasPredicate: boolean; hasDependency: boolean }> };
+    global.__choiceEntropyDraws = 0;
+    Object.defineProperty(cryptoApi, "getRandomValues", {
+      configurable: true,
+      value: (array: ArrayBufferView) => {
+        if (array instanceof Uint32Array && array.length === 1) {
+          global.__choiceEntropyDraws = (global.__choiceEntropyDraws ?? 0) + 1;
+          array[0] = 0xc0000000; // 75% selects blue from weights red=2, blue=3
+          return array;
+        }
+        return original(array);
+      },
+    });
+    const layer = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      spawn: (...args: unknown[]) => void;
+    } } }).__stage?.getFxLayer();
+    if (!layer) throw new Error("FX layer missing");
+    const spawn = layer.spawn.bind(layer);
+    global.__choiceCues = [];
+    layer.spawn = (...args: unknown[]) => {
+      const cue = args[1] as { id: string; text?: string; startMs: number;
+        playIf?: unknown; startAfter?: unknown };
+      global.__choiceCues?.push({ id: cue.id,
+        ...(cue.text === undefined ? {} : { text: cue.text }), startMs: cue.startMs,
+        hasPredicate: Object.hasOwn(cue, "playIf"),
+        hasDependency: Object.hasOwn(cue, "startAfter") });
+      spawn(...args);
+    };
+  });
+  const observed = () => page.evaluate(() =>
+    (globalThis as unknown as { __choiceCues?: Array<{ id: string; text?: string;
+      startMs: number; hasPredicate: boolean; hasDependency: boolean }> }).__choiceCues ?? []);
+
+  // Local Preview is intentionally repeatable: it takes the first authored option and
+  // consumes none of HostSync's entropy. Run below is the authoritative random choice.
+  await wizard.locator("[data-fx-preview]").click();
+  await expect.poll(async () => (await observed()).length,
+    { timeout: 5_000, intervals: [50, 100] }).toBe(3);
+  expect((await observed()).map(({ text, startMs }) => [text, startMs])).toEqual([
+    ["Red one", 100], ["Red two", 300], ["After", 650],
+  ]);
+  expect(await page.evaluate(() =>
+    (globalThis as unknown as { __choiceEntropyDraws?: number }).__choiceEntropyDraws ?? 0)).toBe(0);
+  await wizard.locator("[data-fx-preview-stop]").click();
+  await page.evaluate(() => {
+    (globalThis as unknown as { __choiceCues?: unknown[] }).__choiceCues = [];
+  });
+
+  await wizard.locator("[data-fx-run]").click();
+  await expect.poll(async () => (await observed()).length,
+    { timeout: 5_000, intervals: [50, 100] }).toBe(2);
+  expect((await observed()).map(({ text, startMs }) => [text, startMs])).toEqual([
+    ["Blue", 200], ["After", 650],
+  ]);
+  expect((await observed()).every((cue) => !cue.hasPredicate && !cue.hasDependency)).toBe(true);
+  expect(await page.evaluate(() =>
+    (globalThis as unknown as { __choiceEntropyDraws?: number }).__choiceEntropyDraws ?? 0)).toBe(1);
+
+  // Removing one of two options cannot leave a deceptive one-option random group. The
+  // Wizard dissolves every surviving member to unconditional playback. Finish timing
+  // independently keeps persistence off until cleared; reopening restores the saved choice.
+  await blue.getByLabel("Random choice group").fill("");
+  await blue.getByLabel("Random choice group").press("Tab");
+  for (const section of [redOne, blue, redTwo])
+    await expect(section.getByLabel("Random choice group")).toHaveValue("");
+  await expect(wizard.locator("[data-fx-persistent]")).toBeDisabled(); // finish timing still interlocks
+  await after.getByLabel("Start timing").selectOption("");
+  await expect(wizard.locator("[data-fx-persistent]")).toBeEnabled();
+  await saved.getByRole("button", { name: "Edit" }).click();
+  await expect(redOne.getByLabel("Random choice group")).toHaveValue("impact color");
+  await expect(blue.getByLabel("Choice option")).toHaveValue("blue");
 });
 
 test("finish-relative timing waits for the final replay and resolves a negative overlap on the host", async ({ page }) => {

@@ -6,8 +6,10 @@ import {
   isPendingExpired,
   isPlayerOwned,
   pendingPruneOps,
+  pendingRollsOfSystem,
   resolvePendingRoll,
   shouldDeferToPlayer,
+  validatePendingRoll,
   type PendingRollInitiator,
   type PendingRollTarget,
 } from "../../src/packages/pf1e/pendingRoll";
@@ -19,6 +21,7 @@ import {
   type CoreWorldSettings,
 } from "../../src/core/worldSettings";
 import type { UserId } from "../../src/core/ids";
+import type { ActionCard } from "../../src/core/action";
 
 const init: PendingRollInitiator = {
   actorId: "a-init",
@@ -47,6 +50,20 @@ describe("pendingRoll: build + window", () => {
     expect(p.expiresTurn).toBe(12);
     expect(p.resolved).toBe(false);
     expect(p.total).toBe(null);
+  });
+
+  test("untrusted pending JSON is exact-key/cardinality checked before readers expose it", () => {
+    const valid = buildPendingRoll({ id: "roll-1", actionId: "card-1", targetKey: "target-1",
+      kind: "save", initiator: init, target, formula: "1d20+5", dc: 17,
+      modifiers: [{ label: "Reflex", value: 5, reason: "save" }], turnNumber: 1 });
+    expect(validatePendingRoll(valid)).toMatchObject({ ok: true });
+    const extra = { ...valid, executable: "never" };
+    expect(validatePendingRoll(extra)).toMatchObject({ ok: false });
+    expect(pendingRollsOfSystem({ pendingRoll: extra })).toEqual([]);
+    expect(validatePendingRoll({ ...valid, modifiers: Array.from({ length: 33 }, () =>
+      ({ label: "x", value: 1, reason: "x" })) })).toMatchObject({ ok: false });
+    expect(validatePendingRoll({ ...valid, area: { shape: "burst", origin: { x: 1_000_001, y: 0 },
+      radius: 30, units: "ft" } })).toMatchObject({ ok: false });
   });
 
   test("expired window: T+2 allowed, T+3 refused", () => {
@@ -138,6 +155,31 @@ describe("pendingRoll: build + window", () => {
     const only = ops[0];
     if (only?.kind !== "update") throw new Error("expected update op");
     expect(only.ref.id).toBe("m1");
+  });
+
+  test("pruning an action-linked pending save expires the same target atomically", () => {
+    const pending = buildPendingRoll({ id: "roll-target", actionId: "card-1", targetKey: "target",
+      kind: "save", saveType: "ref", initiator: init, target, formula: "1d20+5", dc: 17,
+      modifiers: [], turnNumber: 1 });
+    const action: ActionCard = {
+      v: 1, id: "card-1", revision: 0, kind: "cast", label: "Entangle", state: "pending",
+      source: { name: "Goblin", actorId: "a-init" },
+      targets: [{ key: "target", name: "Valeros", actorId: "a-tgt", state: "pending", outcome: "pending",
+        check: { kind: "save", status: "pending", formula: "1d20+5", dc: 17, total: null,
+          saveType: "ref", pendingRollId: "roll-target" } }],
+      notes: [], createdAt: 10, updatedAt: 10,
+    };
+    const [op] = pendingPruneOps(
+      [{ _id: "card-1", system: { pendingRoll: pending, action } }], 4, 42_000,
+    );
+    expect(op?.kind).toBe("update");
+    if (op?.kind !== "update") return;
+    expect(op.diff).toMatchObject({
+      "system.pendingRoll": null,
+      "system.action": { revision: 1, state: "expired", updatedAt: 42_000, targets: [
+        { key: "target", state: "expired", outcome: "expired", check: { status: "expired" } },
+      ] },
+    });
   });
 });
 

@@ -85,9 +85,82 @@ describe("FX preset payload (D-310)", () => {
       sound({ startMs: 0, startAfter: { sectionId: "fx-one", offsetMs: 0 } }))).ok).toBe(false);
   });
 
+  test("one-shot launch groups survive validation and reminting with their shared schedule", () => {
+    const checked = validateFxPreset(preset(
+      image({ startMs: 200, randomDelay: { minMs: 50, maxMs: 150 },
+        launchGroup: "impact burst" }),
+      sound({ startMs: 200, randomDelay: { minMs: 50, maxMs: 150 },
+        launchGroup: "impact burst" }),
+    ));
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    let n = 0;
+    const sections = fxPresetSections(checked.preset, () => `launched-${n++}`);
+    expect(sections.map((section) => [section.id, section.launchGroup, section.startMs,
+      section.randomDelay])).toEqual([
+      ["launched-0", "impact burst", 200, { minMs: 50, maxMs: 150 }],
+      ["launched-1", "impact burst", 200, { minMs: 50, maxMs: 150 }],
+    ]);
+    expect(checked.preset.sections.map((section) => section.id)).toEqual(["fx-one", "fx-two"]);
+    expect(validateFxPreset(preset(
+      image({ startMs: 200, launchGroup: "impact burst" }),
+      sound({ startMs: 201, launchGroup: "impact burst" }),
+    )).ok).toBe(false);
+  });
+
+  test("explicit parallel lanes and their join survive preset validation and fresh section ids", () => {
+    const checked = validateFxPreset(preset(
+      image({ startMs: 200, randomDelay: { minMs: 50, maxMs: 150 },
+        parallel: { group: "volley", lane: "left" } }),
+      sound({ startMs: 200, randomDelay: { minMs: 50, maxMs: 150 },
+        parallel: { group: "volley", lane: "right" } }),
+      image({ id: "fx-three", startMs: 0,
+        parallel: { group: "volley", lane: "left", offsetMs: -100 } }),
+      sound({ id: "fx-four", startMs: 0,
+        startAfter: { parallelGroup: "volley", offsetMs: 25 } }),
+    ));
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    let n = 0;
+    const sections = fxPresetSections(checked.preset, () => `parallel-${n++}`);
+    expect(sections.map((section) => section.id)).toEqual([
+      "parallel-0", "parallel-1", "parallel-2", "parallel-3",
+    ]);
+    expect(sections.slice(0, 3).map((section) => section.parallel)).toEqual([
+      { group: "volley", lane: "left" },
+      { group: "volley", lane: "right" },
+      { group: "volley", lane: "left", offsetMs: -100 },
+    ]);
+    expect(sections[0]?.parallel).not.toBe(checked.preset.sections[0]?.parallel);
+    expect(sections[3]?.startAfter).toEqual({ parallelGroup: "volley", offsetMs: 25 });
+    expect(checked.preset.sections.map((section) => section.id)).toEqual([
+      "fx-one", "fx-two", "fx-three", "fx-four",
+    ]);
+  });
+
+  test("exclusive choices survive preset reminting without aliasing option metadata", () => {
+    const checked = validateFxPreset(preset(
+      image({ playIf: { kind: "choice", group: "impact", option: "red", weight: 2 } }),
+      sound({ playIf: { kind: "choice", group: "impact", option: "blue", weight: 3 } }),
+      image({ id: "fx-three", startMs: 900,
+        playIf: { kind: "choice", group: "impact", option: "red", weight: 2 } }),
+    ));
+    expect(checked.ok).toBe(true);
+    if (!checked.ok) return;
+    let n = 0;
+    const sections = fxPresetSections(checked.preset, () => `choice-${n++}`);
+    expect(sections.map((section) => [section.id, section.playIf])).toEqual([
+      ["choice-0", { kind: "choice", group: "impact", option: "red", weight: 2 }],
+      ["choice-1", { kind: "choice", group: "impact", option: "blue", weight: 3 }],
+      ["choice-2", { kind: "choice", group: "impact", option: "red", weight: 2 }],
+    ]);
+    expect(sections[0]?.playIf).not.toBe(checked.preset.sections[0]?.playIf);
+  });
+
   test("loading mints fresh ids and retains authored timing, so one preset can be used twice", () => {
     const checked = validateFxPreset(preset(
-      image({ randomDelay: { minMs: 100, maxMs: 400 }, clipStartMs: 250, clipEndMs: 900 }),
+      image({ randomDelay: { minMs: 100, maxMs: 400 }, clipStartMs: 250, clipEndMs: 900,
+        playIf: { kind: "chance", percent: 35 } }),
       sound({ startMs: 0, startAfter: { sectionId: "fx-one", offsetMs: -100 } })));
     expect(checked.ok).toBe(true);
     if (!checked.ok) return;
@@ -95,7 +168,8 @@ describe("FX preset payload (D-310)", () => {
     const sections = fxPresetSections(checked.preset, () => `new-${n++}`);
     expect(sections.map((section) => section.id)).toEqual(["new-0", "new-1"]);
     expect(sections[0]?.randomDelay).toEqual({ minMs: 100, maxMs: 400 });
-    expect(sections[0]).toMatchObject({ clipStartMs: 250, clipEndMs: 900 });
+    expect(sections[0]).toMatchObject({ clipStartMs: 250, clipEndMs: 900,
+      playIf: { kind: "chance", percent: 35 } });
     expect(sections[1]).toMatchObject({ startAfter: { sectionId: "new-0", offsetMs: -100 } });
     expect(sections.every((section) => section.id !== "fx-one")).toBe(true);
     // Shallow copies: mutating the loaded section must not reach back into the stored one.

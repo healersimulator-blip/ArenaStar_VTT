@@ -67,6 +67,9 @@ interface FxPrefetchRecord {
   failed: boolean;
   work: Promise<void>;
   startedAt: number;
+  /** In-flight consumers only. A stopped last consumer may abandon unfinished decode work. */
+  waiters: Map<string, number>;
+  abandoned?: boolean;
   /** Byte availability; final image readiness may be later. */
   readyAtHost?: number;
   /** Static images are decoded during their lead window, not for the first time at cue time. */
@@ -236,9 +239,19 @@ export class FxPlayer {
     this.flushDelivery(runId); // a stopped run still reports what it never managed to show
     this.delivery.delete(runId);
     this.mediaAcks.delete(runId);
-    // Prefetch records are shared by overlapping runs for the same asset. Stopping one run
-    // must not discard another run's readiness timestamp; scene/reconnect teardown owns the
-    // full clear, while a failed record is replaced on the next prefetch below.
+    // Decoded records remain an asset cache and in-flight work remains shared while another
+    // run is actually awaiting it. If the stopped run was the final waiter, however, keeping
+    // its unfinished decoder would make an Undo/replacement run inherit work that cancellation
+    // explicitly fenced. Detach that orphan and let the replacement begin a fresh decode.
+    for (const [assetId, record] of this.prefetched) {
+      if (!record.waiters.delete(runId)) continue;
+      const unfinished = !record.done ||
+        (record.decodeWork !== undefined && record.image === undefined && !record.decodeFailed);
+      if (!unfinished || record.waiters.size > 0) continue;
+      this.prefetched.delete(assetId);
+      record.abandoned = true;
+      this.releasePrefetch(record);
+    }
     if (this.view?.runId === runId) this.releaseCamera(true);
     this.runEpoch.set(runId, (this.runEpoch.get(runId) ?? 0) + 1);
     this.seenRuns.delete(runId);
@@ -414,7 +427,7 @@ export class FxPlayer {
     if (!record || record.failed || record.decodeFailed) {
       if (record) this.releasePrefetch(record);
       const fresh: FxPrefetchRecord = {
-        done: false, failed: false, decodeFailed: false,
+        done: false, failed: false, decodeFailed: false, waiters: new Map(),
         work: Promise.resolve(), startedAt: Date.now(),
       };
       this.prefetched.set(assetId, fresh);
@@ -430,6 +443,7 @@ export class FxPlayer {
           fresh.failed = true;
           return;
         }
+        if (fresh.abandoned) return;
         if (mime.startsWith("image/") && typeof Image !== "undefined") {
           fresh.decodeWork = (async () => {
             try {
@@ -445,6 +459,7 @@ export class FxPlayer {
                 try {
                   await image.decode();
                 } catch {
+                  if (fresh.abandoned) return;
                   // A browser/CSP that refuses data images still gets the portable path;
                   // only refusal of both sources becomes an unsupported decoder report.
                   fresh.objectUrl = URL.createObjectURL(blob);
@@ -456,6 +471,7 @@ export class FxPlayer {
                 image.src = fresh.objectUrl;
                 await image.decode();
               }
+              if (fresh.abandoned) return;
               fresh.image = image;
               fresh.decodeReadyAtHost = this.hostNow();
             } catch (cause) {
@@ -467,26 +483,34 @@ export class FxPlayer {
       })();
       record = fresh;
     }
-    // The bytes are shared, but the answer belongs to EVERY waiting run. Capture the
-    // run's answer before waiting: a cue-time decoder/startup result that settles first is
-    // newer and must not be overwritten by this older byte-only continuation.
-    const ackBeforeWork = this.mediaAcks.get(runId)?.get(assetId);
-    await record.work;
-    if (this.disposed || generation !== this.generation || this.runEpoch.get(runId) !== epoch) return;
-    if (this.mediaAcks.get(runId)?.get(assetId) === ackBeforeWork) {
-      if (record.done)
-        this.ackMedia(runId, assetId, "ready", { ms: Math.max(0, Date.now() - record.startedAt) });
-      else this.ackMedia(runId, assetId, "failed", { reason: "fetch" });
+    record.waiters.set(runId, (record.waiters.get(runId) ?? 0) + 1);
+    try {
+      // The bytes are shared, but the answer belongs to EVERY waiting run. Capture the
+      // run's answer before waiting: a cue-time decoder/startup result that settles first is
+      // newer and must not be overwritten by this older byte-only continuation.
+      const ackBeforeWork = this.mediaAcks.get(runId)?.get(assetId);
+      await record.work;
+      if (this.disposed || generation !== this.generation || this.runEpoch.get(runId) !== epoch) return;
+      if (this.mediaAcks.get(runId)?.get(assetId) === ackBeforeWork) {
+        if (record.done)
+          this.ackMedia(runId, assetId, "ready", { ms: Math.max(0, Date.now() - record.startedAt) });
+        else this.ackMedia(runId, assetId, "failed", { reason: "fetch" });
+      }
+      // D-308 keeps `ready` byte-scoped, but a decoder refusal is still a later, truer
+      // answer. Every run sharing this record observes the same predecode settlement.
+      if (!record.done || !record.decodeWork) return;
+      await record.decodeWork;
+      if (this.disposed || generation !== this.generation || this.runEpoch.get(runId) !== epoch ||
+          this.prefetched.get(assetId) !== record || !record.decodeFailed) return;
+      const unsupported = decoderUnsupported(record.decodeError);
+      this.ackMedia(runId, assetId, unsupported ? "unsupported" : "failed",
+        unsupported ? {} : { reason: "decode" });
+    } finally {
+      const waiting = record.waiters.get(runId) ?? 0;
+      if (waiting > 1) record.waiters.set(runId, waiting - 1);
+      else record.waiters.delete(runId);
+      if (record.abandoned && record.waiters.size === 0) this.releasePrefetch(record);
     }
-    // D-308 keeps `ready` byte-scoped, but a decoder refusal is still a later, truer
-    // answer. Every run sharing this record observes the same predecode settlement.
-    if (!record.done || !record.decodeWork) return;
-    await record.decodeWork;
-    if (this.disposed || generation !== this.generation || this.runEpoch.get(runId) !== epoch ||
-        this.prefetched.get(assetId) !== record || !record.decodeFailed) return;
-    const unsupported = decoderUnsupported(record.decodeError);
-    this.ackMedia(runId, assetId, unsupported ? "unsupported" : "failed",
-      unsupported ? {} : { reason: "decode" });
   }
 
   /**

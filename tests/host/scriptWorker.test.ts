@@ -265,12 +265,12 @@ return chain.run();`, {},
     expect(String(invalidOffset)).toMatch(/finish offset/);
   });
 
-  test("a reviewed script can stop an FX instance using the run ID returned by play", async () => {
+  test("a reviewed script can cancel an exact finite or persistent FX run using play's run ID", async () => {
     vi.stubGlobal("Worker", WorkerShim);
     const actions: string[] = [];
-    const result = await runScriptWorker(`const instance = await api.fx.play('caller-aura');
-const end = await api.fx.stop(instance.runId);
-return { runId: instance.runId, stopped: end.stopped };`, {},
+    const result = await runScriptWorker(`const run = await api.fx.play('caller-aura');
+const end = await api.fx.stop(run.runId);
+return { runId: run.runId, stopped: end.stopped };`, {},
     { sceneId: "s1", callerId: "player", requestId: "run-stop" }, async (method, payload) => {
       actions.push(method);
       if (method === "fx.play") {

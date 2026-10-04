@@ -75,7 +75,9 @@ export function validateFxInstance(
   const sections: FxSection[] = [];
   for (const section of doc.sections) {
     if (!section || typeof section !== "object" || Object.hasOwn(section, "randomDelay") ||
-        Object.hasOwn(section, "startAfter") || Object.hasOwn(section, "syncGroup")) return false;
+        Object.hasOwn(section, "startAfter") || Object.hasOwn(section, "syncGroup") ||
+        Object.hasOwn(section, "launchGroup") || Object.hasOwn(section, "parallel") ||
+        Object.hasOwn(section, "playIf")) return false;
     const group = syncBySection.get(section.id);
     const hasOrigin = Object.hasOwn(section, "syncAtHostTime");
     const origin = hasOrigin ? (section as { syncAtHostTime?: unknown }).syncAtHostTime : undefined;
@@ -89,8 +91,9 @@ export function validateFxInstance(
       syncOrigins.set(group, origin);
       seenSyncSections.add(section.id);
     }
-    // Random ranges, finish dependencies and group names are authoring state. A durable
-    // instance stores the host's concrete starts/origins and never rerolls/re-links on reconnect.
+    // Random ranges, finish dependencies, launch/conditional controls and group names
+    // are authoring state. A durable instance stores only concrete starts/origins and
+    // never rerolls, re-links or reevaluates on reconnect.
     if (section.kind === "wait") { sections.push(section); continue; }
     // A durable instance can never hold a camera cue (`validateFxSequence`
     // forbids camera sections in a persistent timeline), so fail closed rather

@@ -2055,8 +2055,10 @@ const WALL_PICK_RADIUS = 12;
     const target = targetTokenId ? scene.tokens.find((token) => token._id === targetTokenId) : undefined;
     // Validate the lifecycle the author actually chose: a persistent-only sync group is
     // legal even though the local preview intentionally renders just one pass.
+    // Preview is repeatable rather than pretending to be the authoritative host draw:
+    // lower-bound random delay, every positive chance, and the first exclusive option.
     const resolved = resolveFxSequence(sequence, scene, source, target,
-      (id) => current.gm.client.store.world.assetManifest[id]?.mime, Math.random);
+      (id) => current.gm.client.store.world.assetManifest[id]?.mime, () => 0);
     if (!resolved.ok) return { ok: false, error: resolved.error };
     const runId = `preview-${globalThis.crypto.randomUUID()}`;
     const atHostTime = Date.now() + 120;

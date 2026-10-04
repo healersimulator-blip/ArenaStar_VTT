@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_RANGES, FX_FINISH_OFFSET_MAX_MS,
-  FX_MEDIA_CLIP_MAX_MS, FX_SYNC_GROUP_MAX_LENGTH, fxAudienceAllows, fxAudiencePlayers,
+  FX_LAUNCH_GROUP_MAX_LENGTH, FX_MEDIA_CLIP_MAX_MS, FX_SYNC_GROUP_MAX_LENGTH,
+  fxAudienceAllows, fxAudiencePlayers,
   fxAuthoredFilters, fxFilterFields, fxFilterStrengths,
   fxFilterStrength, fxMaskError, fxMaskFromCrosshair, fxResolveSyncOrigins,
   fxSectionsForViewer, fxStylePlan,
@@ -270,6 +271,285 @@ describe("versioned audiovisual timeline", () => {
     expect(validateFxSequence({ version: 1, sections: [{ kind: "text", id: "late-replays",
       text: "x", at: { kind: "source" }, startMs: 58_000, durationMs: 500,
       randomDelay: { minMs: 0, maxMs: 1_001 }, repeatCount: 2 }] }).ok).toBe(false);
+  });
+
+  test("simultaneous launch groups share one concrete host schedule and strip their authored names", () => {
+    const grouped: FxSequence = { version: 1, sections: [
+      { kind: "text", id: "flash", text: "Flash", at: { kind: "point", x: 100, y: 100 },
+        startMs: 100, durationMs: 200, randomDelay: { minMs: 100, maxMs: 200 },
+        launchGroup: "impact burst", repeatCount: 2, repeatDelayMs: 50,
+        playIf: { kind: "chance", percent: 50 } },
+      { kind: "sound", id: "boom", assetId: sound, startMs: 100, durationMs: 700,
+        randomDelay: { minMs: 100, maxMs: 200 }, launchGroup: "impact burst",
+        playIf: { kind: "chance", percent: 25 } },
+      { kind: "text", id: "independent", text: "Later", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 100, randomDelay: { minMs: 10, maxMs: 20 } },
+    ] };
+    expect(validateFxSequence(grouped).ok).toBe(true);
+    // One draw for the whole group's range, one for the independent section, then one
+    // per genuine condition. Different durations/replays/conditions remain section-local.
+    const draws = [0.5, 1, 0.49, 0.24];
+    const resolved = resolveFxSequence(grouped, scene, undefined, undefined,
+      () => "audio/ogg", () => draws.shift() ?? Number.NaN);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(draws).toEqual([]);
+    expect(resolved.sections.map((section) => [section.id, section.startMs])).toEqual([
+      ["flash", 250], ["flash@2", 500], ["boom", 250], ["independent", 20],
+    ]);
+    expect(resolved.sections.every((section) => !Object.hasOwn(section, "launchGroup") &&
+      !Object.hasOwn(section, "randomDelay") && !Object.hasOwn(section, "playIf"))).toBe(true);
+    expect(grouped.sections[0]).toMatchObject({ launchGroup: "impact burst",
+      randomDelay: { minMs: 100, maxMs: 200 } }); // pure
+
+    const prior = { kind: "text" as const, id: "prior", text: "Prior",
+      at: { kind: "point" as const, x: 100, y: 100 }, startMs: 0, durationMs: 100 };
+    const member = { kind: "text" as const, id: "one", text: "One",
+      at: { kind: "point" as const, x: 100, y: 100 }, startMs: 0, durationMs: 100,
+      startAfter: { sectionId: "prior", offsetMs: -25 },
+      randomDelay: { minMs: 5, maxMs: 10 }, launchGroup: "relative" };
+    const peer = { ...member, id: "two", text: "Two" };
+    expect(validateFxSequence({ version: 1, sections: [prior, member, peer] }).ok).toBe(true);
+    for (const changed of [
+      { ...peer, startAfter: { sectionId: "prior", offsetMs: -24 } },
+      { ...peer, startAfter: undefined, startMs: 75 },
+      { ...peer, randomDelay: { minMs: 6, maxMs: 10 } },
+      { ...peer, randomDelay: { minMs: 5, maxMs: 11 } },
+      { ...peer, randomDelay: undefined },
+    ]) expect(validateFxSequence({ version: 1, sections: [prior, member, changed] }).ok).toBe(false);
+
+    expect(validateFxSequence(visual({ launchGroup: "solo" })).ok).toBe(true);
+    for (const launchGroup of ["", " padded", "padded ", "bad\nname",
+      "x".repeat(FX_LAUNCH_GROUP_MAX_LENGTH + 1), 42]) {
+      expect(validateFxSequence(visual({ launchGroup })).ok, String(launchGroup)).toBe(false);
+    }
+    expect(validateFxSequence({ ...visual({ launchGroup: "burst" }), persistent: true }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "wait", id: "wait-launch",
+      startMs: 0, durationMs: 100, launchGroup: "burst" } as never] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [
+      { ...prior, launchGroup: "mixed" },
+      { kind: "sound", id: "sound-launch", assetId: sound, startMs: 0,
+        durationMs: 300, launchGroup: "mixed" },
+      { kind: "camera", id: "camera-launch", mode: "shake", intensity: 0.3,
+        startMs: 0, durationMs: 300, launchGroup: "mixed" },
+    ] }).ok).toBe(true);
+  });
+
+  test("explicit parallel lanes fork once, run serially per lane and expose one longest-lane join", () => {
+    const parallel: FxSequence = { version: 1, sections: [
+      { kind: "text", id: "lead", text: "Lead", at: { kind: "point", x: 100, y: 100 },
+        startMs: 100, durationMs: 200 },
+      { kind: "text", id: "left-one", text: "Left one", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 500, startAfter: { sectionId: "lead", offsetMs: -50 },
+        randomDelay: { minMs: 100, maxMs: 200 },
+        parallel: { group: "volley", lane: "left" } },
+      { kind: "sound", id: "right-one", assetId: sound,
+        startMs: 0, durationMs: 300, startAfter: { sectionId: "lead", offsetMs: -50 },
+        randomDelay: { minMs: 100, maxMs: 200 },
+        parallel: { group: "volley", lane: "right" } },
+      { kind: "text", id: "left-two", text: "Left two", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 300, parallel: { group: "volley", lane: "left", offsetMs: -100 } },
+      { kind: "wait", id: "right-pause", startMs: 0, durationMs: 200,
+        parallel: { group: "volley", lane: "right", offsetMs: 50 } },
+      { kind: "sound", id: "right-two", assetId: sound, startMs: 0, durationMs: 100,
+        parallel: { group: "volley", lane: "right" } },
+      { kind: "text", id: "joined", text: "Joined", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 100,
+        startAfter: { parallelGroup: "volley", offsetMs: -50 } },
+    ] };
+    expect(validateFxSequence(parallel).ok).toBe(true);
+    const draws = [0.5];
+    const resolved = resolveFxSequence(parallel, scene, undefined, undefined,
+      () => "audio/ogg", () => draws.shift() ?? Number.NaN);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(draws).toEqual([]); // one host draw belongs to the fork, not one per lane
+    expect(resolved.sections.map((section) => [section.id, section.startMs])).toEqual([
+      ["lead", 100],
+      ["left-one", 400], ["right-one", 400],
+      ["left-two", 800], // overlaps the prior left member's end by 100 ms
+      ["right-pause", 750], ["right-two", 950],
+      ["joined", 1_050], // longest lane ends at 1,100; join overlaps it by 50 ms
+    ]);
+    expect(resolved.sections.every((section) => !Object.hasOwn(section, "parallel") &&
+      !Object.hasOwn(section, "randomDelay") && !Object.hasOwn(section, "startAfter"))).toBe(true);
+    expect(parallel.sections[1]).toMatchObject({ parallel: { group: "volley", lane: "left" },
+      randomDelay: { minMs: 100, maxMs: 200 } }); // host resolution is immutable
+  });
+
+  test("parallel block validation refuses cosmetic, ambiguous and unbounded lane shapes", () => {
+    const first = (id: string, lane: string) => ({
+      kind: "text" as const, id, text: id, at: { kind: "point" as const, x: 100, y: 100 },
+      startMs: 100, durationMs: 200, randomDelay: { minMs: 10, maxMs: 20 },
+      parallel: { group: "block", lane },
+    });
+    const later = { kind: "text" as const, id: "a2", text: "a2",
+      at: { kind: "point" as const, x: 100, y: 100 }, startMs: 0, durationMs: 100,
+      parallel: { group: "block", lane: "a", offsetMs: 0 } };
+    const valid = [first("a1", "a"), first("b1", "b"), later];
+    expect(validateFxSequence({ version: 1, sections: valid }).ok).toBe(true);
+    expect(validateFxSequence({ version: 1, sections: [first("a1", "a"), later] }).ok)
+      .toBe(false); // a one-lane label is not a parallel construct
+    expect(validateFxSequence({ version: 1, sections: [first("a1", "a"),
+      { kind: "wait", id: "unrelated", startMs: 0, durationMs: 10 }, first("b1", "b")] }).ok)
+      .toBe(false); // a block cannot silently capture across unrelated content
+    expect(validateFxSequence({ version: 1, sections: [first("a1", "a"), {
+      kind: "wait", id: "wait-only", startMs: 100, durationMs: 100,
+      randomDelay: { minMs: 10, maxMs: 20 }, parallel: { group: "block", lane: "b" },
+    }] }).ok).toBe(false); // a Wait may sequence in a lane but is not a lane by itself
+    expect(validateFxSequence({ version: 1, sections: [first("a1", "a"),
+      { ...first("b1", "b"), startMs: 101 }] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [first("a1", "a"), first("b1", "b"),
+      { ...later, startMs: 1 }] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [first("a1", "a"), first("b1", "b"),
+      { ...later, parallel: { ...later.parallel, offsetMs: -201 } }] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, persistent: true, sections: valid }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [
+      { ...first("a1", "a"), launchGroup: "also" }, first("b1", "b") ] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [
+      { ...first("a1", "a"), parallel: { group: " padded", lane: "a" } }, first("b1", "b") ] }).ok)
+      .toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [...valid, {
+      kind: "text", id: "bad-join", text: "bad", at: { kind: "point", x: 100, y: 100 },
+      startMs: 0, durationMs: 100, startAfter: { parallelGroup: "missing", offsetMs: 0 },
+    }] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [...valid, {
+      kind: "text", id: "both-targets", text: "bad", at: { kind: "point", x: 100, y: 100 },
+      startMs: 0, durationMs: 100,
+      startAfter: { sectionId: "a2", parallelGroup: "block", offsetMs: 0 },
+    } as never] }).ok).toBe(false);
+    const tooMany = Array.from({ length: 9 }, (_, index) => first(`lane-${index}`, `lane-${index}`));
+    expect(validateFxSequence({ version: 1, sections: tooMany }).ok).toBe(false);
+  });
+
+  test("host samples conditional play once per authored section and strips the predicate from every cue", () => {
+    const conditional: FxSequence = { version: 1, sections: [
+      { kind: "text", id: "optional", text: "Optional", at: { kind: "point", x: 100, y: 100 },
+        startMs: 100, durationMs: 200, randomDelay: { minMs: 100, maxMs: 200 },
+        repeatCount: 2, repeatDelayMs: 50, playIf: { kind: "chance", percent: 50 } },
+      { kind: "text", id: "skipped", text: "Skipped", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 100, startAfter: { sectionId: "optional", offsetMs: 0 },
+        playIf: { kind: "chance", percent: 25 } },
+      { kind: "text", id: "disabled", text: "Disabled", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 100, playIf: { kind: "chance", percent: 0 } },
+      { kind: "text", id: "always", text: "Always", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 100, playIf: { kind: "chance", percent: 100 } },
+      { kind: "text", id: "after-skip", text: "After", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 100, startAfter: { sectionId: "skipped", offsetMs: 0 } },
+    ] };
+    expect(validateFxSequence(conditional).ok).toBe(true);
+    // Timing entropy is resolved first (0.5 => 150 ms), then one draw per genuine
+    // condition. Exactly 0.25 does not satisfy a 25% predicate; 0/100 consume no draw.
+    const draws = [0.5, 0.49, 0.25];
+    const resolved = resolveFxSequence(conditional, scene, undefined, undefined,
+      () => undefined, () => draws.shift() ?? Number.NaN);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(draws).toEqual([]);
+    expect(resolved.sections.map((section) => [section.id, section.startMs])).toEqual([
+      ["optional", 250], ["optional@2", 500], ["always", 0], ["after-skip", 800],
+    ]);
+    expect(resolved.sections.every((section) => !Object.hasOwn(section, "playIf"))).toBe(true);
+    expect(conditional.sections[0]).toHaveProperty("playIf.percent", 50); // resolution is immutable
+
+    const allSkipped = resolveFxSequence({ version: 1, sections: [{
+      kind: "text", id: "none", text: "None", at: { kind: "point", x: 100, y: 100 },
+      startMs: 0, durationMs: 100, playIf: { kind: "chance", percent: 0 },
+    }] }, scene, undefined, undefined, () => undefined, () => { throw new Error("0% drew entropy"); });
+    expect(allSkipped.ok && allSkipped.sections).toEqual([]);
+
+    const valid = (playIf: unknown) => validateFxSequence(visual({ playIf })).ok;
+    expect(valid({ kind: "chance", percent: 0 })).toBe(true);
+    expect(valid({ kind: "chance", percent: 100 })).toBe(true);
+    for (const invalid of [null, {}, { kind: "chance" }, { percent: 50 },
+      { kind: "result", percent: 50 }, { kind: "chance", percent: -1 },
+      { kind: "chance", percent: 101 }, { kind: "chance", percent: 50.5 },
+      { kind: "chance", percent: Number.NaN }, { kind: "chance", percent: 50, clientRoll: true }])
+      expect(valid(invalid), JSON.stringify(invalid)).toBe(false);
+    expect(validateFxSequence({ ...visual({ playIf: { kind: "chance", percent: 50 } }),
+      persistent: true }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "wait", id: "wait",
+      startMs: 0, durationMs: 100, playIf: { kind: "chance", percent: 50 } } as never] }).ok).toBe(false);
+  });
+
+  test("host samples one exclusive weighted choice for every option member and keeps would-be timing", () => {
+    const choice: FxSequence = { version: 1, sections: [
+      { kind: "text", id: "base", text: "Base", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 100 },
+      { kind: "text", id: "red-one", text: "Red one", at: { kind: "point", x: 100, y: 100 },
+        startMs: 100, durationMs: 100, repeatCount: 2, repeatDelayMs: 50,
+        playIf: { kind: "choice", group: "impact", option: "red", weight: 2 } },
+      { kind: "text", id: "blue", text: "Blue", at: { kind: "point", x: 100, y: 100 },
+        startMs: 200, durationMs: 200,
+        playIf: { kind: "choice", group: "impact", option: "blue", weight: 3 } },
+      { kind: "text", id: "red-two", text: "Red two", at: { kind: "point", x: 100, y: 100 },
+        startMs: 300, durationMs: 100,
+        playIf: { kind: "choice", group: "impact", option: "red", weight: 2 } },
+      { kind: "text", id: "after", text: "After", at: { kind: "point", x: 100, y: 100 },
+        startMs: 0, durationMs: 100, startAfter: { sectionId: "blue", offsetMs: 50 } },
+    ] };
+    expect(validateFxSequence(choice).ok).toBe(true);
+    const firstDraws = [0];
+    const red = resolveFxSequence(choice, scene, undefined, undefined, () => undefined,
+      () => firstDraws.shift() ?? Number.NaN);
+    expect(red.ok).toBe(true);
+    if (!red.ok) return;
+    expect(firstDraws).toEqual([]); // one draw for the group, not each section/replay
+    expect(red.sections.map((section) => [section.id, section.startMs])).toEqual([
+      ["base", 0], ["red-one", 100], ["red-one@2", 250], ["red-two", 300], ["after", 450],
+    ]);
+    expect(red.sections.every((section) => !Object.hasOwn(section, "playIf"))).toBe(true);
+
+    const lastDraws = [0.999];
+    const blue = resolveFxSequence(choice, scene, undefined, undefined, () => undefined,
+      () => lastDraws.shift() ?? Number.NaN);
+    expect(blue.ok).toBe(true);
+    if (!blue.ok) return;
+    expect(lastDraws).toEqual([]);
+    expect(blue.sections.map((section) => [section.id, section.startMs])).toEqual([
+      ["base", 0], ["blue", 200], ["after", 450],
+    ]);
+    expect(choice.sections[1]).toHaveProperty("playIf.option", "red"); // immutable authoring state
+  });
+
+  test("exclusive choice validation refuses malformed, one-option and excessive groups", () => {
+    const member = (id: string, group: string, option: string, weight = 1) => ({
+      kind: "text" as const, id, text: id, at: { kind: "point" as const, x: 100, y: 100 },
+      startMs: 0, durationMs: 100,
+      playIf: { kind: "choice" as const, group, option, weight },
+    });
+    expect(validateFxSequence({ version: 1, sections: [
+      member("a", "choice", "a"), member("b", "choice", "b"),
+    ] }).ok).toBe(true);
+    expect(validateFxSequence({ version: 1, sections: [member("a", "choice", "a")] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [
+      member("a", "choice", "a"), member("a2", "choice", "a", 2),
+      member("b", "choice", "b"),
+    ] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections:
+      Array.from({ length: 9 }, (_, index) => member(`arm-${index}`, "choice", `arm-${index}`)),
+    }).ok).toBe(false);
+    for (const playIf of [
+      { kind: "choice", group: "", option: "a", weight: 1 },
+      { kind: "choice", group: " padded", option: "a", weight: 1 },
+      { kind: "choice", group: "choice", option: "", weight: 1 },
+      { kind: "choice", group: "choice", option: "a", weight: 0 },
+      { kind: "choice", group: "choice", option: "a", weight: 101 },
+      { kind: "choice", group: "choice", option: "a", weight: 1.5 },
+      { kind: "choice", group: "choice", option: "a", weight: 1, outcome: "hit" },
+    ]) expect(validateFxSequence(visual({ playIf })).ok, JSON.stringify(playIf)).toBe(false);
+    expect(validateFxSequence({ version: 1, persistent: true, sections: [
+      member("a", "choice", "a"), member("b", "choice", "b"),
+    ] }).ok).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [
+      { kind: "wait", id: "wait", startMs: 0, durationMs: 100,
+        playIf: { kind: "choice", group: "choice", option: "a", weight: 1 } } as never,
+      member("b", "choice", "b"),
+    ] }).ok).toBe(false);
+    const manyGroups = Array.from({ length: 9 }, (_, group) => [
+      member(`g${group}-a`, `g${group}`, "a"), member(`g${group}-b`, `g${group}`, "b"),
+    ]).flat();
+    expect(validateFxSequence({ version: 1, sections: manyGroups }).ok).toBe(false);
   });
 
   test("bounded one-shot section replays expand into host-clock cues, distinct from motion cycles", () => {

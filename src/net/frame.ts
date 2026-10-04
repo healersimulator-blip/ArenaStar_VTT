@@ -59,6 +59,7 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "macro.result":
     case "fx.request":
     case "fx.start":
+    case "fx.run":
     case "fx.sync":
     case "fx.stop":
     case "fx.stopMatching":
@@ -177,6 +178,7 @@ export function channelFor(kind: MsgName): ChannelName {
     case "macro.result":
     case "fx.request":
     case "fx.start":
+    case "fx.run":
     case "fx.sync":
     case "fx.stop":
     case "fx.stopMatching":

@@ -99,25 +99,38 @@ interface RollChallengeMsg {
 }
 ```
 
+A dice-log message produced by either host roll path carries
+`system.rollEvidence = { v: 1, rollId }`. Clients cannot create that marker or mutate/delete the
+marker, roll payload, or roll-id flag. A successful immediate-action verification atomically evolves
+it to `{ v: 1, rollId, claimedBy: actionId }`; a roll minted as part of a linked pending-card
+transition is born with that same claim. The claimed textual ID remains reserved even if a fresh
+host roll later reuses it. This durable fact is consumed only by registered action evidence
+adapters; it grants no document-write authority and cannot be claimed a second time.
+
 ### roll.pending (0x33 · client → host · ops)
 
 F03 — host-verified resolution of a pending player reaction roll. The
 table already shows the *shell* (who → what → target → DC + modifiers,
 no total); the owning player presses **Roll** on that chat card and the
-client sends `roll.pending` with the `messageId` of the pending card and
-the `seedClient` commitment (commit-reveal, same crypto as `roll`/
+client sends `roll.pending` with the `messageId` of the pending card, an
+optional stable `pendingId` selector, and the `seedClient` commitment
+(commit-reveal, same crypto as `roll`/
 `rollVerified`). The host validates the 2-round window + ownership +
 `shouldDeferToPlayer` predicate (auto/savesChecksAuto/manual + strategic
-gate), reveals with `seedHost`, evaluates `d20+mods` vs `DC`/`AC` through
+gate), reveals with `seedHost`, then re-reads the live selected row, expiry, ownership, and action
+revision after async cryptography. It evaluates `d20+mods` vs `DC`/`AC` through
 the same pure functions auto-rolls use, and submits one envelope
-`[pendingRoll resolved + follow-up message + ledgerOps]` atomically — so a
-rejected follow-up rolls the whole reaction back. GM Resolve uses the same
-path with host RNG.
+`[selected pendingRoll resolved + linked action target/revision + dice log + follow-up message]`
+atomically — so a rejected follow-up rolls the whole reaction back. The dice-log evidence ID is the
+selected pending ID (with the containing message ID retained only for legacy single-roll cards). When
+`pendingId` is omitted, compatibility selection succeeds only if the message has exactly one
+pending roll. GM Resolve uses the same host path.
 
 ```ts
 interface RollPendingMsg {
   kind: "roll.pending";
   messageId: DocId;
+  pendingId?: string;
   seedClient: string;
   seedClientCommit?: string;
 }
@@ -520,7 +533,19 @@ interface FxRequestMsg {
 
 ### fx.start (0x36 · host → client · ops)
 
-Recipient-projected visual/audio timeline with authoritative coordinates and asset MIME. One-shots start at least 300 ms ahead; each client uses the host-clock offset. After a graph commits a visibility-changing envelope, the host rechecks source/target visibility and asset entitlement before sending a cue. Cues do not mutate mechanics and never travel over `ephemeral`. Only explicitly persistent cues are durable: the host commits a private `FxInstanceDocument` (`fxInstances` top-level collection) and sends `fx.start` after commit. The viewer receives **only** this resolved cue, not its private instance document. Persistent image/text/audio lanes loop; recipients who re-enter a scene request `fx.sync` to recover the original host-clock phase. A persistent image/text section may author a bounded `syncGroup` name. The host scopes that name to the same scene, saved timeline, owner, effective audience and source/target invocation bindings, chooses the earliest member's absolute origin (or reuses the origin of an active durable run in that scope), strips the name, and sends only `syncAtHostTime` on entitled visual sections. This changes animation/video **phase**, never the section's scheduled start or lifetime: a later member launches at its own `startMs` already caught up to the shared cycle. The private membership and resolved origin survive reconnect; after the final scoped instance ends, the next run establishes a new origin. Scoping prevents a public cue's phase from becoming an oracle for a GM-only/different-owner timeline. An explicitly `follow`ing visual carries only host-verified source/target token IDs, never author-supplied references. The canvas samples **projected, fog-visible** token centers; lost visibility hides playback locally and revokes the persistent cue on the host. Media sharing and permission to embed its bytes in a world ZIP are independent GM declarations; restricted FX media cancels export rather than silently redistributing a premium pack. A **camera section** of a one-shot cue carries its own audience word (`scene` — everyone receiving the run — `gm`, `caller` for the session that requested the run, or `others` for everyone *except* that session; a timeline carries the same vocabulary, and `{ players: [...] }` names users instead); the host builds the payload **per recipient**, so a viewer outside that audience receives the run *without* the section and learns nothing about where someone else's view went. A recipient left with no sections at all receives no cue. A **positioned sound** (D-309) likewise carries host-resolved geometry — `x`/`y` and a `radiusPx` on the scene's own grid: the client measures distance (silent at the rim, full at the source, linear between) and may pan across the stereo field, and a sound with no position stays a global cue at its authored volume. Occlusion is answered **per recipient** as well: `occluded: true` is added to that recipient's copy of a `muffle` sound when the scene's own *sound* axis (with door state) puts a wall between them and the source, tested from that recipient's own token at ownership level 3 — a recipient with nothing of their own on the scene is sent no answer at all. The client is never handed the walls, only the host's answer for it, and a device without Web Audio plays the cue at its distance level and reports the reduction instead.
+Recipient-projected visual/audio timeline with authoritative coordinates and asset MIME. One-shots start at least 300 ms ahead; each client uses the host-clock offset. After a graph commits a visibility-changing envelope, the host rechecks source/target visibility and asset entitlement before sending a cue. Cues do not mutate mechanics and never travel over `ephemeral`.
+
+A saved non-wait one-shot section may carry an exact, trimmed 1–64 character `launchGroup` name. Members with the same name must author the identical absolute start or identical earlier-section finish relation (including offset), plus the identical optional random-delay range. When that range exists, the first authored member consumes one host RNG unit and every peer reuses it, producing one concrete launch time; a one-member group is valid. Duration, replay expansion and conditional inclusion remain per section. The name, range and finish relation are stripped before projection, waits and persistent timelines reject launch membership, and imported durable cues carrying it fail closed. This simultaneous-launch contract is distinct from persistent visual `syncGroup`: launch groups align finite schedule time, while playback sync groups keep each scheduled start and align media/animation phase. Direct Wizard, automation and reviewed `api.fx.play` invocation all converge on this resolver.
+
+A finite section may carry author-only `parallel: { group, lane, offsetMs? }` metadata. One exact 1–64 character group occupies one contiguous block with 2–8 exact 1–64 character lanes. The first member of every lane authors the same fork schedule (absolute or earlier-section finish relation plus the same optional random-delay range) and no lane offset. Each later member has no independent schedule/range: it starts after that lane's previous member's final replay, plus a signed −30,000..30,000 ms offset that may overlap but may not begin before the predecessor. Wait sections may sequence inside a lane, but every lane must contain at least one media or camera section; persistence and simultaneous `launchGroup` membership are refused. A section outside and after the complete block may use exactly one `startAfter` target—`sectionId` or `parallelGroup`—and a group target starts from the latest final-replay end among all lanes, plus its signed offset. This is a longest-lane barrier, not the last section in author order.
+
+The fork consumes one host RNG unit when its shared range exists; all lane-first members reuse that concrete delay. Lane-local conditions remain per section, but skipped sections retain their would-be schedule, so neither serial lane progress nor a join collapses differently by recipient. Validation rejects cosmetic one-lane groups, discontinuous/reopened blocks, mismatched lane-first schedules, lane count overflow, negative-time overlap and joins that target an incomplete/current/unknown block. `parallel`, `randomDelay` and `startAfter` are stripped before recipient projection, durable instances reject forged authoring metadata and preset reminting preserves lanes and group joins while remapping direct section references. Wizard Run, automation and reviewed `api.fx.play` all converge on this scheduler. This is bounded explicit fork/lane/longest-join behavior inside one finite saved timeline, not arbitrary/nested lane graphs, committed-outcome branching or full SQ-02 parity.
+
+A saved non-wait one-shot section may carry `playIf: { kind: "chance", percent: 0..100 }`. The host resolves every section's bounded schedule and media/anchor validity first, then samples each genuine 1–99% predicate exactly once in authored order; 0/100 consume no entropy. One decision includes or removes that section **and all of its replays** for every recipient. Finish-relative dependents retain the skipped section's would-be concrete final-playback schedule rather than collapsing differently by viewer. `playIf` never appears in `ResolvedFxSection`, a persistent timeline rejects it, and an all-skipped run is an accepted requester-private no-op (`fx.run` only, no empty `fx.start`). Direct Wizard, automation and reviewed `api.fx.play` invocation all converge on this same host resolution. This bounded predicate does **not** accept caller-supplied hit/miss/value context and does not claim committed-outcome conditional branching.
+
+D404 extends the same author-only discriminator with `playIf: { kind: "choice", group, option, weight }` for finite non-wait sections. Group and option are exact trimmed 1–64 character names; weight is an integer 1–100. A timeline has at most eight groups, each group has 2–8 distinct options, and every section in one group/option carries the same relative weight. Several sections may belong to one option and are included together. After resolving the complete would-be schedule, the host consumes exactly one RNG unit at the first authored member of each group and selects exactly one option by relative weight for every replay and recipient; all other options are omitted without collapsing dependencies, parallel lanes or joins. The host strips the entire `playIf` object before projection, and durable cues reject it. Wizard Run, automation preflight and reviewed `api.fx.play` share this resolver; local Preview deterministically shows the first option rather than pretending to make an authoritative draw. Choice names and weights are not event results and never accept a caller-supplied hit/miss/save/value. This is bounded host-random alternative selection, not committed-outcome branching or full SQ-02.
+
+Only explicitly persistent cues are durable: the host commits a private `FxInstanceDocument` (`fxInstances` top-level collection) and sends `fx.start` after commit. The viewer receives **only** this resolved cue, not its private instance document. Persistent image/text/audio lanes loop; recipients who re-enter a scene request `fx.sync` to recover the original host-clock phase. A persistent image/text section may author a bounded `syncGroup` name. The host scopes that name to the same scene, saved timeline, owner, effective audience and source/target invocation bindings, chooses the earliest member's absolute origin (or reuses the origin of an active durable run in that scope), strips the name, and sends only `syncAtHostTime` on entitled visual sections. This changes animation/video **phase**, never the section's scheduled start or lifetime: a later member launches at its own `startMs` already caught up to the shared cycle. The private membership and resolved origin survive reconnect; after the final scoped instance ends, the next run establishes a new origin. Scoping prevents a public cue's phase from becoming an oracle for a GM-only/different-owner timeline. An explicitly `follow`ing visual carries only host-verified source/target token IDs, never author-supplied references. The canvas samples **projected, fog-visible** token centers; lost visibility hides playback locally and revokes the persistent cue on the host. Media sharing and permission to embed its bytes in a world ZIP are independent GM declarations; restricted FX media cancels export rather than silently redistributing a premium pack. A **camera section** of a one-shot cue carries its own audience word (`scene` — everyone receiving the run — `gm`, `caller` for the session that requested the run, or `others` for everyone *except* that session; a timeline carries the same vocabulary, and `{ players: [...] }` names users instead); the host builds the payload **per recipient**, so a viewer outside that audience receives the run *without* the section and learns nothing about where someone else's view went. A recipient left with no sections at all receives no cue. A **positioned sound** (D-309) likewise carries host-resolved geometry — `x`/`y` and a `radiusPx` on the scene's own grid: the client measures distance (silent at the rim, full at the source, linear between) and may pan across the stereo field, and a sound with no position stays a global cue at its authored volume. Occlusion is answered **per recipient** as well: `occluded: true` is added to that recipient's copy of a `muffle` sound when the scene's own *sound* axis (with door state) puts a wall between them and the source, tested from that recipient's own token at ownership level 3 — a recipient with nothing of their own on the scene is sent no answer at all. The client is never handed the walls, only the host's answer for it, and a device without Web Audio plays the cue at its distance level and reports the reduction instead.
 
 ```ts
 interface FxStartMsg {
@@ -534,6 +559,18 @@ interface FxStartMsg {
 }
 ```
 
+### fx.run (0x52 · host → requesting client · ops)
+
+Private acknowledgement that a saved timeline request became one exact host-approved run. It is sent only to the requesting session after durable commit or finite cue fan-out, including when the saved `others` audience means that session correctly received no `fx.start`. It carries no audience, recipient count, asset, anchor or projection detail, so it cannot be used as a membership oracle. A retry with the same caller/request ID receives the same acknowledgement and never creates a second run.
+
+`endsAtHostTime` is the natural host-clock end of a finite run, including resolved random/relative timing and replay expansion. When every conditional section is skipped it equals `atHostTime`. Persistent runs omit it. The run ID is the opaque reference the owner—or a GM/assistant—may submit to `fx.stop`; it is not authority by itself, and knowing an unauthorized ID grants nothing.
+
+```ts
+interface FxRunMsg { kind: "fx.run"; requestId: string; runId: string;
+  macroId: DocId; sceneId: DocId; atHostTime: number;
+  endsAtHostTime?: number; persistent: boolean }
+```
+
 ### fx.sync (0x3f · client → host · ops)
 
 Read-only request to replay currently authorized persistent cues for one scene. The host checks current scene/macro/anchor visibility and **each** media entitlement, then sends only entitled `fx.start` messages; unknown/inaccessible scene IDs get no effect existence oracle. No mechanics or new world op runs on reconnect.
@@ -544,7 +581,11 @@ interface FxSyncMsg { kind: "fx.sync"; sceneId: DocId }
 
 ### fx.stop (0x44 · client → host · ops)
 
-Host-only state transition: GM/assistant may stop any instance; a player may stop only an instance they started. Direct document intents against `fxInstances` are forbidden **even for the GM**. The host deletes it through an authoritative transaction and sends `fx.end` only to prior recipients. Source/target-token, macro and scene deletion cascade-bound instances in the same transaction and undo group.
+Host-authoritative exact-run stop/cancellation: GM/assistant may stop any active run; a player may stop only one they started. Unknown, expired and unauthorized IDs all receive the same generic refusal. Direct document intents against `fxInstances` remain forbidden **even for the GM**.
+
+For a persistent run, the host deletes its durable instance through an authoritative transaction; normal Undo can restore it. For a finite one-shot, the host retains a bounded private handle only through its natural end (at most 256 concurrent handles under the existing 60-second timeline limit). Cancellation removes that handle and any pending media receipt, then sends `fx.end` only to sessions that received the cue. It writes no world state and is deliberately not undoable: resuming half-fetched media/camera/audio at a consistent past phase would be a new playback operation, not an Undo. Pending section timers, in-flight fetch/decode, active Pixi visuals, sounds and camera claims all stop through the same recipient-side run epoch.
+
+The field remains named `instanceId` for wire compatibility; for a finite run it is the `runId` from `fx.run`. Source/target-token, macro and scene deletion continue to cascade-bound durable instances in the same transaction and undo group.
 
 ```ts
 interface FxStopMsg { kind: "fx.stop"; requestId: string; instanceId: DocId }
@@ -561,7 +602,7 @@ interface FxStopMatchingMsg { kind: "fx.stopMatching"; requestId: string;
 
 ### fx.end (0x45 · host → prior recipients · ops)
 
-A private stop/revocation signal with no author, macro, source, asset or scene-graph data. The client cancels pending decode/playback and removes only the named run. Visibility and asset-rights changes can revoke (or later regrant) an instance without deleting the GM's durable record.
+A private stop/cancellation/revocation signal with no author, macro, source, asset or scene-graph data. The client cancels pending timers and decode/playback, active sound/visuals and that run's camera claim, then removes only the named run. Visibility and asset-rights changes can revoke (or later regrant) a durable instance without deleting the GM's record; finite cancellation does not regrant or replay.
 
 ```ts
 interface FxEndMsg { kind: "fx.end"; runId: string; sceneId: DocId }
@@ -1070,6 +1111,78 @@ interface RelayFrameMsg {
   bytes: Uint8Array;
 }
 ```
+
+## Structured action records (message system payload · version 1)
+
+An action is not a new wire message. It is a bounded, host-normalized record at
+`MessageDocument.system.action`; normal projected message Ops carry it. The host forces
+`action.id === message._id`, revision `0`, author identity, and host timestamps on creation. It
+infers an omitted root scene from a supplied area and rejects cross-scene area claims.
+Every later pending-roll transition updates the selected `system.pendingRoll` or member of
+`system.pendingRolls` and the linked action target in the same envelope.
+
+```ts
+interface ActionCard {
+  v: 1;
+  id: string;                  // containing message id after host normalization
+  revision: number;            // increments on each host-owned transition
+  kind: "attack" | "cast" | "save" | "check" | "ability" | "item" | "movement" | "custom";
+  label: string;
+  state: "pending" | "resolved" | "partial" | "failed" | "cancelled" | "expired";
+  source: { name: string; actorId?: DocId; tokenId?: DocId; itemId?: DocId };
+  sceneId?: DocId;
+  area?: ActionArea;
+  targets: ActionTarget[];     // at most 64, unique stable keys
+  notes: string[];
+  createdAt: number;           // host clock
+  updatedAt: number;           // host clock
+}
+
+interface ActionTarget {
+  key: string;
+  name: string;                // replaced from the referenced host actor/token
+  label?: string;              // bounded stage description, not identity
+  actorId?: DocId;
+  tokenId?: DocId;
+  state: "pending" | "resolved" | "skipped" | "expired";
+  outcome: "pending" | "saved" | "failedSave" | "hit" | "miss" |
+    "succeeded" | "failed" | "resisted" | "affected" | "unaffected" |
+    "rolled" | "skipped" | "expired";
+  provenance?: "host" | "reported"; // overwritten by the host
+  evidence?: { adapter: string; payload: Json }; // bounded; never executable
+  check?: ActionCheck;
+  damage?: { dealt: number; prevented?: number };
+  healing?: { applied: number };
+  conditions?: { applied?: string[]; removed?: string[] };
+  notes?: string[];
+}
+```
+
+A pending `ActionCheck.pendingRollId` is bidirectionally linked to exactly one strictly parsed
+pending roll's `{id, actionId, targetKey}`; IDs and target keys are unique within the card. The host
+rejects mixed/oversized/malformed storage,
+canonicalizes names, and replaces the submitted turn window with the current host turn plus the
+fixed two-round expiry. Player-authored references must already be visible to that player; guessed
+private IDs are never converted into canonical names. Generic client updates to action data or linked pending storage are rejected;
+only host resolution/expiry may increment a revision. A host die result does not prove a submitted
+modifier or DC: `pf1e.pendingSave.v1` rederives supported normal actor-cast save inputs, while an
+unsupported pending check stays `reported` after its host roll or expiry.
+
+Submitted terminal provenance is not trusted: known adapters can upgrade a row to `host` only after
+rederiving it. `pf1e.spellTarget.v1` resolves immutable `system.rollEvidence` records and atomically
+stamps the successful action claim back onto each roll record, rejects duplicate, same-envelope, already-claimed, or claimed-ID reuse, and rederives a single normal noncritical/non-touch PF1e target
+result from host documents, requires final staged HP and fresh-SR ledger agreement, and rejects
+conflicting same-envelope actor-input changes. Unsupported or mismatched evidence leaves the row
+`reported`.
+
+After a real commit the host emits a local `action:committed` event carrying the data-only
+`ActionFxContext`. Every projected target includes `verified`; when false, target state/outcome/
+check/damage/healing/conditions are absent. Root `state` is likewise present only when every target
+is verified. The event is a presentation input, not an authorization token: FX cannot apply HP,
+effects, inventory, movement, or permissions. Consumers deduplicate with `{actionId, revision}` and
+branch only on verified lifecycle/mechanics. See
+[ACTION_SYSTEM.md](ACTION_SYSTEM.md) and `src/core/action.ts` for the complete exact-key schema,
+area/check definitions, bounds, and state invariants.
 
 ## Supporting types
 

@@ -17,6 +17,7 @@
 import type { Op } from "../../core/ops";
 import type { RollMode } from "../../core/documents";
 import type { CoreWorldSettings } from "../../core/worldSettings";
+import { actionAsJson, type ActionCard } from "../../core/action";
 import {
   buildPendingRoll,
   shouldDeferToPlayer,
@@ -25,7 +26,13 @@ import {
 } from "../../packages/pf1e/pendingRoll";
 
 export interface PendingRollGateInput {
+  /** Optional canonical card identity/action link. Omission preserves legacy standalone cards. */
+  messageId?: string;
+  pendingId?: string;
+  action?: ActionCard;
+  content?: string;
   kind: PendingRollKind;
+  saveType?: "fort" | "ref" | "will";
   initiator: PendingRoll["initiator"];
   target: PendingRoll["target"];
   formula: string;
@@ -52,7 +59,11 @@ export function pendingRollCreateOp(input: PendingRollGateInput): Op | null {
   });
   if (!defer) return null;
   const pending = buildPendingRoll({
+    ...(input.pendingId !== undefined ? { id: input.pendingId } : {}),
+    ...(input.action !== undefined ? { actionId: input.action.id } : {}),
+    ...(input.action?.targets[0]?.key !== undefined ? { targetKey: input.action.targets[0].key } : {}),
     kind: input.kind,
+    ...(input.saveType !== undefined ? { saveType: input.saveType } : {}),
     initiator: input.initiator,
     target: input.target,
     formula: input.formula,
@@ -67,14 +78,15 @@ export function pendingRollCreateOp(input: PendingRollGateInput): Op | null {
     kind: "create",
     coll: "messages",
     data: {
-      _id: globalThis.crypto?.randomUUID?.() ?? `msg-pending-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      _id: input.messageId ?? globalThis.crypto?.randomUUID?.() ?? `msg-pending-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       type: "message",
       name: `${pending.target.name} pending ${pending.kind}`,
       ownership: { default: 1 },
       flags: {},
-      system: { pendingRoll: pending },
+      system: { pendingRoll: pending,
+        ...(input.action !== undefined ? { action: actionAsJson(input.action) } : {}) },
       author,
-      content: `${pending.initiator.name} → ${pending.initiator.actionLabel} → ${pending.target.name} — pending (${pending.formula}${pending.dc !== null ? ` vs DC ${pending.dc}` : ""})`,
+      content: input.content ?? `${pending.initiator.name} → ${pending.initiator.actionLabel} → ${pending.target.name} — pending (${pending.formula}${pending.dc !== null ? ` vs DC ${pending.dc}` : ""})`,
       whisper: [] as string[],
       roll: null,
       flavor: "",

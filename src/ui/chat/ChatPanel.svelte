@@ -21,6 +21,8 @@
   import EncounterCard from "./EncounterCard.svelte";
   import { encounterPayloadOf } from "../../core/hexcrawl/encounterFlow";
   import PendingRollCard from "./PendingRollCard.svelte";
+  import ActionCardView from "./ActionCard.svelte";
+  import { actionCardOf, type ActionCard } from "../../core/action";
   import RollApplyRow from "./RollApplyRow.svelte";
   import { rollApplyTarget } from "./applyTarget";
   import { tacticalLedgerTurn } from "../../packages/pf1e/rollLedger";
@@ -29,8 +31,10 @@
   import {
     canPlayerRoll as canPendingPlayerRoll,
     isPendingExpired,
+    pendingRollsOfSystem,
   } from "../../packages/pf1e/pendingRoll";
   import {
+    highlightRequestFromAction,
     highlightRequestFromLedger,
     highlightRequestFromPending,
   } from "./rollHighlight";
@@ -155,14 +159,22 @@
     if (isPendingExpired(pending, currentTurn)) return;
     // Host-verified commit-reveal via roll.pending (0x33). A failed send leaves
     // the card pending — never a client-fabricated total.
-    await client.rollPending(messageId);
+    await client.rollPending(messageId, pending.id);
   }
 
   function handlePendingGMResolve(messageId: string, pending: PendingRoll): void {
     if (!isGMDerived) return;
     if (isPendingExpired(pending, currentTurn)) return;
     // GM resolve is the same host path — the host always allows GMs.
-    void client.rollPending(messageId);
+    void client.rollPending(messageId, pending.id);
+  }
+
+  function highlightFromAction(
+    action: ActionCard,
+    kind: "initiator" | "target" | "area",
+    id: string | null,
+  ): void {
+    bus.emit("rollHighlight", highlightRequestFromAction(action, kind, id, fadeSec));
   }
 
 
@@ -368,7 +380,9 @@
       </div>
     {/if}
     {#each messages as message (message._id)}
-      {@const pendingRoll = (message.system as unknown as { pendingRoll?: PendingRoll } | undefined)?.pendingRoll}
+      {@const action = actionCardOf(message)}
+      {@const pendingRolls = pendingRollsOfSystem(message.system)}
+      {@const pendingRoll = pendingRolls.length === 1 ? pendingRolls[0] : undefined}
       {@const ledger = (message.system as unknown as { rollLedger?: RollLedger } | undefined)?.rollLedger}
       {@const encounter = encounterPayloadOf(message)}
       {#if encounter}
@@ -381,6 +395,17 @@
           onExplore={
             onEncounterExplore ? () => onEncounterExplore(encounter.cellKey) : undefined
           }
+        />
+      {:else if action}
+        <ActionCardView
+          {action}
+          {pendingRolls}
+          currentTurn={currentTurn}
+          isGM={isGMDerived}
+          canRoll={(pending: PendingRoll) => isOwnerOfPending(pending) || isGMDerived}
+          onRoll={(pending: PendingRoll) => handlePendingRoll(message._id, pending)}
+          onHighlight={(kind: "initiator" | "target" | "area", id: string | null) =>
+            highlightFromAction(action, kind, id)}
         />
       {:else if pendingRoll}
         <PendingRollCard

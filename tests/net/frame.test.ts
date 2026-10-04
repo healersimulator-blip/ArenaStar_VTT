@@ -90,6 +90,7 @@ describe("channelFor (§6.1)", () => {
       "summon.result": "ops",
       "fx.request": "ops",
       "fx.start": "ops",
+      "fx.run": "ops",
       "fx.sync": "ops",
       "fx.stop": "ops",
       "fx.stopMatching": "ops",

@@ -1467,8 +1467,9 @@
       if (!outcome.ok) {
         castError = outcome.error;
       } else if (outcome.pending) {
-        castWarning =
-          "the casting has begun — it comes into effect just before your next turn";
+        castWarning = outcome.pendingRollId
+          ? "the spell is committed — the target's save is pending on the action card"
+          : "the casting has begun — it comes into effect just before your next turn";
       } else if (outcome.held) {
         castWarning =
           "the touch attack missed — the charge is held; deliver it below";

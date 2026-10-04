@@ -4,10 +4,12 @@
   import type { EventBus } from "../../core/events";
   import type { ActorDocument, AssetManifest, MacroDocument, SceneDocument,
     UserDocument } from "../../core/documents";
-  import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES,
-    FX_FINISH_OFFSET_MAX_MS, FX_MASK_LIMITS, FX_MEDIA_CLIP_MAX_MS, FX_PLAYBACK_RATE_LIMITS,
-    FX_POLYGON_POINTS, FX_RANDOM_DELAY_MAX_MS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
-    FX_SYNC_GROUP_MAX_LENGTH,
+  import { FX_AUDIENCE_PLAYERS_MAX, FX_CHOICE_GROUPS_MAX, FX_CHOICE_NAME_MAX_LENGTH,
+    FX_CHOICE_OPTIONS, FX_CHOICE_WEIGHT, FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES,
+    FX_FINISH_OFFSET_MAX_MS, FX_LAUNCH_GROUP_MAX_LENGTH, FX_MASK_LIMITS,
+    FX_MEDIA_CLIP_MAX_MS, FX_PARALLEL_LANES, FX_PARALLEL_NAME_MAX_LENGTH,
+    FX_PLAYBACK_RATE_LIMITS, FX_POLYGON_POINTS,
+    FX_RANDOM_DELAY_MAX_MS, FX_SCALE_LIMITS, FX_SPIN_LIMIT, FX_SYNC_GROUP_MAX_LENGTH,
     fxAudiencePlayers, fxAuthoredFilters, fxFilterFields, fxMaskError, fxMaskFromCrosshair,
     resolveFxSequence,
     validateFxSequence, type FxAnchor,
@@ -102,15 +104,44 @@
   let busy = $state(false);
   /** The local preview this panel started, if any (stopped on close/New/replace). */
   let previewRun = $state("");
+  /** Direct Wizard runs awaiting the host's private exact-run acknowledgement. */
+  let pendingRuns = $state<Array<{ requestId: string; macroId: string }>>([]);
+  /** Runs started from this open Wizard and still cancellable on the host. */
+  let activeRuns = $state<Array<{ runId: string; macroId: string; persistent: boolean;
+    endsAtHostTime?: number }>>([]);
+  const runExpiryTimers: Array<ReturnType<typeof setTimeout>> = [];
   const scene = $derived(scenes.find((s) => s._id === sceneId) ?? null);
   const hasFinishTiming = $derived(draft.sections.some((section) => section.startAfter !== undefined));
+  const hasConditionalPlay = $derived(draft.sections.some((section) => section.playIf !== undefined));
+  const hasLaunchGroups = $derived(draft.sections.some((section) => section.launchGroup !== undefined));
+  const hasParallelBlocks = $derived(draft.sections.some((section) => section.parallel !== undefined));
   const hasSyncGroups = $derived(draft.sections.some((section) =>
     (section.kind === "image" || section.kind === "text") && section.syncGroup !== undefined));
   // Existing names are suggestions, not a closed list: matching is exact and an author
-  // may deliberately start a new group. An array avoids a mutable Set in Svelte state.
+  // may deliberately start a new group. Arrays avoid mutable Sets in Svelte state.
   const syncGroupNames = $derived(draft.sections.reduce<string[]>((names, section) => {
     const group = (section.kind === "image" || section.kind === "text") ? section.syncGroup : undefined;
     return group && !names.includes(group) ? [...names, group] : names;
+  }, []));
+  const launchGroupNames = $derived(draft.sections.reduce<string[]>((names, section) => {
+    const group = section.launchGroup;
+    return group && !names.includes(group) ? [...names, group] : names;
+  }, []));
+  const parallelGroupNames = $derived(draft.sections.reduce<string[]>((names, section) => {
+    const group = section.parallel?.group;
+    return group && !names.includes(group) ? [...names, group] : names;
+  }, []));
+  const parallelLaneNames = $derived(draft.sections.reduce<string[]>((names, section) => {
+    const lane = section.parallel?.lane;
+    return lane && !names.includes(lane) ? [...names, lane] : names;
+  }, []));
+  const choiceGroupNames = $derived(draft.sections.reduce<string[]>((names, section) => {
+    const group = section.playIf?.kind === "choice" ? section.playIf.group : undefined;
+    return group && !names.includes(group) ? [...names, group] : names;
+  }, []));
+  const choiceOptionNames = $derived(draft.sections.reduce<string[]>((names, section) => {
+    const option = section.playIf?.kind === "choice" ? section.playIf.option : undefined;
+    return option && !names.includes(option) ? [...names, option] : names;
   }, []));
   const canPlay = domCanPlay();
   /**
@@ -208,16 +239,94 @@
       to: { kind: "point", x: Math.round((scene?.width ?? 500) / 2), y: Math.round((scene?.height ?? 500) / 2) },
       easing: "easeInOut" };
   }
-  /** Worst-case authored finish, including dependency chains, random delay and replays. */
+  /** All members/lanes are derived with arrays: Svelte state never holds a mutable Map. */
+  function parallelMemberIndices(group: string, sections = draft.sections): number[] {
+    return sections.flatMap((section, index) => section.parallel?.group === group ? [index] : []);
+  }
+  function parallelLaneNamesOf(group: string, sections = draft.sections): string[] {
+    return sections.reduce<string[]>((names, section) => {
+      const lane = section.parallel?.group === group ? section.parallel.lane : undefined;
+      return lane && !names.includes(lane) ? [...names, lane] : names;
+    }, []);
+  }
+  function parallelLaneFirstIndex(group: string, lane: string, sections = draft.sections): number {
+    return sections.findIndex((section) => section.parallel?.group === group && section.parallel.lane === lane);
+  }
+  function parallelLanePriorIndex(index: number, sections = draft.sections): number {
+    const member = sections[index]?.parallel;
+    if (!member) return -1;
+    return sections.findLastIndex((section, candidate) => candidate < index &&
+      section.parallel?.group === member.group && section.parallel.lane === member.lane);
+  }
+  function parallelBlockFirstIndex(group: string, sections = draft.sections): number {
+    return sections.findIndex((section) => section.parallel?.group === group);
+  }
+  function parallelBlockLastIndex(group: string, sections = draft.sections): number {
+    return sections.findLastIndex((section) => section.parallel?.group === group);
+  }
+  function isParallelLaneFirst(index: number): boolean {
+    const member = draft.sections[index]?.parallel;
+    return member !== undefined && parallelLaneFirstIndex(member.group, member.lane) === index;
+  }
+  function choiceOptionsOf(group: string, sections = draft.sections): string[] {
+    return sections.reduce<string[]>((names, section) => {
+      const choice = section.playIf?.kind === "choice" && section.playIf.group === group
+        ? section.playIf.option : undefined;
+      return choice && !names.includes(choice) ? [...names, choice] : names;
+    }, []);
+  }
+  function choiceWeightOf(group: string, option: string, sections = draft.sections): number | undefined {
+    const member = sections.find((section) => section.playIf?.kind === "choice" &&
+      section.playIf.group === group && section.playIf.option === option);
+    return member?.playIf?.kind === "choice" ? member.playIf.weight : undefined;
+  }
+  function timingValue(section: FxSection): string {
+    if (section.startAfter?.sectionId !== undefined) return section.startAfter.sectionId;
+    if (section.startAfter?.parallelGroup !== undefined) return `parallel:${section.startAfter.parallelGroup}`;
+    return "";
+  }
+  function playbackSpan(section: FxSection): number {
+    const count = section.kind === "wait" || section.kind === "camera" ? 1 : section.repeatCount ?? 1;
+    return count * section.durationMs + (count - 1) * (section.repeatDelayMs ?? 0);
+  }
+  /** Worst-case authored finish, including explicit lane forks/joins, dependencies and replays. */
   function latestDraftEnd(): number {
     const ends = Object.create(null) as Record<string, number>;
+    const joins = Object.create(null) as Record<string, number>;
+    const handled: string[] = [];
     let latest = 0;
+    const dependencyEnd = (section: FxSection): number | undefined =>
+      section.startAfter?.sectionId !== undefined ? ends[section.startAfter.sectionId]
+        : section.startAfter?.parallelGroup !== undefined ? joins[section.startAfter.parallelGroup] : undefined;
     for (const section of draft.sections) {
-      const base = section.startAfter === undefined ? section.startMs
-        : (ends[section.startAfter.sectionId] ?? 0) + section.startAfter.offsetMs;
-      const count = section.kind === "wait" || section.kind === "camera" ? 1 : section.repeatCount ?? 1;
-      const end = base + (section.randomDelay?.maxMs ?? 0) + count * section.durationMs +
-        (count - 1) * (section.repeatDelayMs ?? 0);
+      const group = section.parallel?.group;
+      if (group !== undefined) {
+        if (handled.includes(group)) continue;
+        handled.push(group);
+        const members = parallelMemberIndices(group).map((index) => draft.sections[index]).filter(Boolean) as FxSection[];
+        const clock = members[0];
+        if (!clock) continue;
+        const prior = dependencyEnd(clock);
+        const fork = (prior === undefined ? clock.startMs : prior + (clock.startAfter?.offsetMs ?? 0)) +
+          (clock.randomDelay?.maxMs ?? 0);
+        let join = fork;
+        for (const lane of parallelLaneNamesOf(group)) {
+          let laneEnd = fork;
+          for (const member of members.filter((candidate) => candidate.parallel?.lane === lane)) {
+            const first = parallelLaneFirstIndex(group, lane) === draft.sections.indexOf(member);
+            const start = first ? fork : laneEnd + (member.parallel?.offsetMs ?? 0);
+            laneEnd = start + playbackSpan(member);
+            ends[member.id] = laneEnd;
+            latest = Math.max(latest, laneEnd);
+          }
+          join = Math.max(join, laneEnd);
+        }
+        joins[group] = join;
+        continue;
+      }
+      const prior = dependencyEnd(section);
+      const base = prior === undefined ? section.startMs : prior + (section.startAfter?.offsetMs ?? 0);
+      const end = base + (section.randomDelay?.maxMs ?? 0) + playbackSpan(section);
       ends[section.id] = end;
       latest = Math.max(latest, end);
     }
@@ -278,10 +387,16 @@
     const timed = { ...section,
       ...(before.randomDelay === undefined ? {} : { randomDelay: { ...before.randomDelay } }),
       ...(before.startAfter === undefined ? {} : { startAfter: { ...before.startAfter } }),
+      ...(kind === "wait" || before.launchGroup === undefined ? {} : { launchGroup: before.launchGroup }),
+      ...(before.parallel === undefined ? {} : { parallel: { ...before.parallel } }),
+      ...(kind === "wait" || before.playIf === undefined ? {} : { playIf: { ...before.playIf } }),
       ...((kind === "image" || kind === "text") &&
         (before.kind === "image" || before.kind === "text") && before.syncGroup !== undefined
         ? { syncGroup: before.syncGroup } : {}) } as FxSection;
-    draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? timed : old) };
+    let sections = draft.sections.map((old, i) => i === index ? timed : old);
+    if (kind === "wait" && before.playIf?.kind === "choice")
+      sections = repairChoiceGroup(sections, before.playIf.group);
+    draft = { ...draft, sections };
   }
   /** Pan ⇄ shake ⇄ path is a real discriminator: the shapes share no destination field. */
   function changeCameraMode(index: number, mode: "pan" | "shake" | "path"): void {
@@ -294,7 +409,10 @@
       : cameraSection(before.id, before.startMs);
     const timed = { ...section,
       ...(before.randomDelay === undefined ? {} : { randomDelay: { ...before.randomDelay } }),
-      ...(before.startAfter === undefined ? {} : { startAfter: { ...before.startAfter } }) } as FxSection;
+      ...(before.startAfter === undefined ? {} : { startAfter: { ...before.startAfter } }),
+      ...(before.launchGroup === undefined ? {} : { launchGroup: before.launchGroup }),
+      ...(before.parallel === undefined ? {} : { parallel: { ...before.parallel } }),
+      ...(before.playIf === undefined ? {} : { playIf: { ...before.playIf } }) } as FxSection;
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? timed : old) };
   }
   /**
@@ -358,16 +476,60 @@
       ? { ...before, ...(zoom === undefined ? {} : { zoom }) } as FxSection : old) };
   }
 
-  /** Switch between one absolute host-clock start and a dependency on an earlier section. */
-  function changeStartTiming(index: number, sectionId: string): void {
+  /** Copy only the authored launch clock; rendering, duration, repeats and chance stay local. */
+  function alignLaunchSchedule(section: FxSection, clock: FxSection): FxSection {
+    const { startAfter: _after, randomDelay: _random, ...untimed } = section;
+    void _after; void _random;
+    return { ...untimed, startMs: clock.startMs,
+      ...(clock.startAfter === undefined ? {} : { startAfter: { ...clock.startAfter } }),
+      ...(clock.randomDelay === undefined ? {} : { randomDelay: { ...clock.randomDelay } }) } as FxSection;
+  }
+  /** A grouped/fork schedule edit is atomic in the draft: no peer is left invalid. */
+  function writeLaunchSchedule(index: number, changed: FxSection): void {
+    const parallel = changed.parallel;
+    if (parallel !== undefined && parallelLaneFirstIndex(parallel.group, parallel.lane) === index) {
+      draft = { ...draft, sections: draft.sections.map((old, i) =>
+        i === index ? changed
+          : old.parallel?.group === parallel.group &&
+              parallelLaneFirstIndex(parallel.group, old.parallel.lane) === i
+            ? alignLaunchSchedule(old, changed) : old) };
+      return;
+    }
+    const group = changed.launchGroup;
+    draft = { ...draft, sections: draft.sections.map((old, i) =>
+      i === index ? changed
+        : group !== undefined && old.launchGroup === group ? alignLaunchSchedule(old, changed) : old) };
+  }
+  /** Only dependencies authored before the launch group/block's first member are safe. */
+  function launchDependencyLimit(index: number, group: string | undefined,
+    parallelGroup: string | undefined): number {
+    const launchFirst = group === undefined ? index
+      : draft.sections.findIndex((section) => section.launchGroup === group);
+    const parallelFirst = parallelGroup === undefined ? index : parallelBlockFirstIndex(parallelGroup);
+    return Math.min(index, launchFirst < 0 ? index : launchFirst,
+      parallelFirst < 0 ? index : parallelFirst);
+  }
+  /** Switch between an absolute fork/start and an earlier section or parallel-block join. */
+  function changeStartTiming(index: number, target: string): void {
     const before = draft.sections[index];
-    if (!before) return;
+    if (!before || (before.parallel !== undefined && !isParallelLaneFirst(index))) return;
     const { startAfter: _after, ...absolute } = before;
     void _after;
-    const changed = sectionId === "" ? { ...absolute, startMs: 0 }
-      : { ...absolute, startMs: 0, startAfter: { sectionId, offsetMs: 0 } };
-    draft = { ...draft, sections: draft.sections.map((old, i) =>
-      i === index ? changed as FxSection : old) };
+    const changed = target === "" ? { ...absolute, startMs: 0 }
+      : target.startsWith("parallel:")
+        ? { ...absolute, startMs: 0,
+            startAfter: { parallelGroup: target.slice("parallel:".length), offsetMs: 0 } }
+        : { ...absolute, startMs: 0,
+            startAfter: { sectionId: target.replace(/^section:/, ""), offsetMs: 0 } };
+    writeLaunchSchedule(index, changed as FxSection);
+  }
+  function changeAbsoluteStart(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || before.startAfter !== undefined) return;
+    const parsed = value.trim() === "" ? 0 : Number(value);
+    const startMs = Number.isFinite(parsed)
+      ? Math.round(Math.min(60_000, Math.max(0, parsed))) : 0;
+    writeLaunchSchedule(index, { ...before, startMs } as FxSection);
   }
   /** Negative means overlap before the dependency's final replay ends; positive is a gap. */
   function changeFinishOffset(index: number, value: string): void {
@@ -376,8 +538,8 @@
     const parsed = value.trim() === "" ? 0 : Number(value);
     const offsetMs = Number.isFinite(parsed) ? Math.round(Math.min(FX_FINISH_OFFSET_MAX_MS,
       Math.max(-FX_FINISH_OFFSET_MAX_MS, parsed))) : 0;
-    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
-      ? { ...before, startAfter: { ...before.startAfter, offsetMs } } as FxSection : old) };
+    writeLaunchSchedule(index,
+      { ...before, startAfter: { ...before.startAfter, offsetMs } } as FxSection);
   }
 
   /**
@@ -391,8 +553,7 @@
     if (bound === "maxMs" && (text === "" || Number(text) <= 0)) {
       const { randomDelay: _range, ...fixed } = before;
       void _range;
-      draft = { ...draft, sections: draft.sections.map((old, i) =>
-        i === index ? fixed as FxSection : old) };
+      writeLaunchSchedule(index, fixed as FxSection);
       return;
     }
     const parsed = text === "" ? 0 : Number(text);
@@ -401,8 +562,305 @@
     const prior = before.randomDelay;
     const minMs = bound === "minMs" ? entered : Math.min(prior?.minMs ?? 0, entered);
     const maxMs = bound === "maxMs" ? entered : Math.max(1, prior?.maxMs ?? entered, entered);
-    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
-      ? { ...before, randomDelay: { minMs, maxMs } } as FxSection : old) };
+    writeLaunchSchedule(index,
+      { ...before, randomDelay: { minMs, maxMs } } as FxSection);
+  }
+
+  /**
+   * Join by exact name. The earliest authored member owns the group's schedule: a new
+   * earlier member aligns existing peers to itself; a later member adopts the first.
+   */
+  function changeLaunchGroup(index: number, value: string, trim = false): void {
+    const before = draft.sections[index];
+    if (!before || before.kind === "wait") return;
+    const group = trim ? value.trim() : value;
+    const { launchGroup: _oldGroup, ...ungrouped } = before;
+    void _oldGroup;
+    if (group === "") {
+      draft = { ...draft, sections: draft.sections.map((old, i) =>
+        i === index ? ungrouped as FxSection : old) };
+      return;
+    }
+    if (draft.persistent === true) return;
+    const member = { ...ungrouped, launchGroup: group } as FxSection;
+    const first = draft.sections.findIndex((section, i) => i !== index && section.launchGroup === group);
+    if (first < 0) {
+      draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? member : old) };
+      return;
+    }
+    const clock = index < first ? member : draft.sections[first] ?? member;
+    const aligned = alignLaunchSchedule(member, clock);
+    draft = { ...draft, sections: draft.sections.map((old, i) => {
+      if (i === index) return aligned;
+      return old.launchGroup === group ? alignLaunchSchedule(old, clock) : old;
+    }) };
+  }
+
+  /** Canonicalize every member after a lane/group edit; firsts share one real fork. */
+  function normalizeParallelGroup(sections: FxSection[], group: string): FxSection[] {
+    const indices = parallelMemberIndices(group, sections);
+    const clockIndex = indices[0];
+    const clock = clockIndex === undefined ? undefined : sections[clockIndex];
+    if (clock === undefined) return sections;
+    return sections.map((section, index) => {
+      const member = section.parallel;
+      if (member?.group !== group) return section;
+      const first = parallelLaneFirstIndex(group, member.lane, sections) === index;
+      const { launchGroup: _launch, ...withoutLaunch } = section;
+      void _launch;
+      if (first) {
+        const aligned = alignLaunchSchedule(withoutLaunch as FxSection, clock);
+        return { ...aligned, parallel: { group, lane: member.lane } } as FxSection;
+      }
+      const { startAfter: _after, randomDelay: _random, ...managed } = withoutLaunch;
+      void _after; void _random;
+      return { ...managed, startMs: 0, parallel: { group, lane: member.lane,
+        ...(member.offsetMs === undefined || member.offsetMs === 0 ? {} : { offsetMs: member.offsetMs }) } } as FxSection;
+    });
+  }
+  /**
+   * If an edit leaves only one lane, turn its implicit serial schedule back into ordinary
+   * finish dependencies. A one-lane label is never left masquerading as parallel behavior.
+   */
+  function repairParallelGroup(sections: FxSection[], group: string): FxSection[] {
+    const indices = parallelMemberIndices(group, sections);
+    if (indices.length === 0) return sections.map((section) => {
+      if (section.startAfter?.parallelGroup !== group) return section;
+      const { startAfter: _after, ...absolute } = section;
+      void _after;
+      return { ...absolute, startMs: 0 } as FxSection;
+    });
+    const lanes = parallelLaneNamesOf(group, sections);
+    if (lanes.length >= FX_PARALLEL_LANES.min) return normalizeParallelGroup(sections, group);
+    const members = indices.map((index) => sections[index]).filter(Boolean) as FxSection[];
+    let priorId: string | undefined;
+    let repaired = sections.map((section) => {
+      if (section.parallel?.group !== group) return section;
+      const offsetMs = section.parallel.offsetMs ?? 0;
+      const { parallel: _parallel, startAfter: _after, randomDelay: _random, ...plain } = section;
+      void _parallel; void _after; void _random;
+      if (priorId === undefined) {
+        priorId = section.id;
+        // The lane's first already carries the block fork (including its random range).
+        const original = members[0];
+        return original ? (() => {
+          const { parallel: _membership, ...first } = original;
+          void _membership;
+          return first as FxSection;
+        })() : plain as FxSection;
+      }
+      const changed = { ...plain, startMs: 0,
+        startAfter: { sectionId: priorId, offsetMs } } as FxSection;
+      priorId = section.id;
+      return changed;
+    });
+    const lastId = priorId;
+    repaired = repaired.map((section) => {
+      if (section.startAfter?.parallelGroup !== group) return section;
+      if (lastId === undefined) {
+        const { startAfter: _after, ...absolute } = section;
+        void _after;
+        return { ...absolute, startMs: 0 } as FxSection;
+      }
+      return { ...section,
+        startAfter: { sectionId: lastId, offsetMs: section.startAfter.offsetMs } } as FxSection;
+    });
+    return repaired;
+  }
+  function nextParallelLane(group: string): string {
+    const names = parallelLaneNamesOf(group);
+    for (let index = 1; index <= FX_PARALLEL_LANES.max; index += 1) {
+      const candidate = `lane-${index}`;
+      if (!names.includes(candidate)) return candidate;
+    }
+    return `lane-${names.length + 1}`;
+  }
+  /** Join/leave an exact block. Existing blocks can only grow at an edge, keeping them contiguous. */
+  function changeParallelGroup(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before) return;
+    const group = value.trim();
+    const oldGroup = before.parallel?.group;
+    if (group === oldGroup) return;
+    if (group.length > FX_PARALLEL_NAME_MAX_LENGTH) {
+      error = `Parallel block names are at most ${FX_PARALLEL_NAME_MAX_LENGTH} characters`; return;
+    }
+    if (group !== "" && draft.persistent === true) return;
+    if (oldGroup !== undefined) {
+      const first = parallelBlockFirstIndex(oldGroup);
+      const last = parallelBlockLastIndex(oldGroup);
+      if (index !== first && index !== last) {
+        error = "Leave or move a parallel block from one of its edges so unrelated content cannot split it";
+        return;
+      }
+    }
+    if (group !== "") {
+      const peers = parallelMemberIndices(group).filter((candidate) => candidate !== index);
+      if (peers.length > 0) {
+        const first = Math.min(...peers); const last = Math.max(...peers);
+        if (index < first - 1 || index > last + 1) {
+          error = `Parallel block "${group}" is contiguous — join it with an adjacent section`;
+          return;
+        }
+      }
+    }
+    error = "";
+    let sections = [...draft.sections];
+    const prior = parallelLanePriorIndex(index, sections);
+    const { parallel: _parallel, launchGroup: _launch, startAfter: _after,
+      randomDelay: _random, ...plain } = before;
+    void _parallel; void _launch; void _after; void _random;
+    let changed: FxSection;
+    if (group === "") {
+      changed = prior < 0 ? (() => {
+        const { parallel: _membership, ...ungrouped } = before;
+        void _membership;
+        return ungrouped as FxSection;
+      })() : { ...plain, startMs: 0, startAfter: { sectionId: sections[prior]?.id ?? "",
+        offsetMs: before.parallel?.offsetMs ?? 0 } } as FxSection;
+    } else {
+      const lane = oldGroup === group && before.parallel ? before.parallel.lane : nextParallelLane(group);
+      changed = { ...plain, startMs: before.startMs,
+        ...(before.startAfter === undefined ? {} : { startAfter: { ...before.startAfter } }),
+        ...(before.randomDelay === undefined ? {} : { randomDelay: { ...before.randomDelay } }),
+        parallel: { group, lane } } as FxSection;
+    }
+    sections[index] = changed;
+    if (oldGroup !== undefined && oldGroup !== group) sections = repairParallelGroup(sections, oldGroup);
+    if (group !== "") sections = normalizeParallelGroup(sections, group);
+    draft = { ...draft, sections };
+  }
+  function changeParallelLane(index: number, value: string): void {
+    const before = draft.sections[index];
+    const membership = before?.parallel;
+    const lane = value.trim();
+    if (!before || !membership || lane === "" || lane === membership.lane) return;
+    if (lane.length > FX_PARALLEL_NAME_MAX_LENGTH) {
+      error = `Parallel lane names are at most ${FX_PARALLEL_NAME_MAX_LENGTH} characters`; return;
+    }
+    const changed = draft.sections.map((section, candidate) => candidate === index
+      ? { ...section, parallel: { ...membership, lane } } as FxSection : section);
+    const lanes = parallelLaneNamesOf(membership.group, changed);
+    if (lanes.length > FX_PARALLEL_LANES.max ||
+        (parallelLaneNamesOf(membership.group).length >= FX_PARALLEL_LANES.min &&
+          lanes.length < FX_PARALLEL_LANES.min)) {
+      error = `A parallel block keeps ${FX_PARALLEL_LANES.min}–${FX_PARALLEL_LANES.max} lanes`;
+      return;
+    }
+    error = "";
+    draft = { ...draft, sections: normalizeParallelGroup(changed, membership.group) };
+  }
+  function changeParallelOffset(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before?.parallel || isParallelLaneFirst(index)) return;
+    const parsed = value.trim() === "" ? 0 : Number(value);
+    const offsetMs = Number.isFinite(parsed) ? Math.round(Math.min(FX_FINISH_OFFSET_MAX_MS,
+      Math.max(-FX_FINISH_OFFSET_MAX_MS, parsed))) : 0;
+    const parallel = { group: before.parallel.group, lane: before.parallel.lane,
+      ...(offsetMs === 0 ? {} : { offsetMs }) };
+    draft = { ...draft, sections: draft.sections.map((section, candidate) => candidate === index
+      ? { ...before, parallel } as FxSection : section) };
+  }
+  function priorParallelBlocks(limit: number): string[] {
+    return parallelGroupNames.filter((group) => parallelBlockLastIndex(group) < limit &&
+      parallelLaneNamesOf(group).length >= FX_PARALLEL_LANES.min);
+  }
+
+  /** A surviving one-option "choice" is not a choice: make its sections unconditional. */
+  function repairChoiceGroup(sections: FxSection[], group: string): FxSection[] {
+    if (choiceOptionsOf(group, sections).length >= FX_CHOICE_OPTIONS.min) return sections;
+    return sections.map((section) => {
+      if (section.playIf?.kind !== "choice" || section.playIf.group !== group) return section;
+      const { playIf: _choice, ...always } = section;
+      void _choice;
+      return always as FxSection;
+    });
+  }
+  function nextChoiceOption(group: string): string {
+    const names = choiceOptionsOf(group);
+    for (let index = 1; index <= FX_CHOICE_OPTIONS.max; index += 1) {
+      const candidate = `option-${index}`;
+      if (!names.includes(candidate)) return candidate;
+    }
+    return names[0] ?? "option-1";
+  }
+  function changeChoiceGroup(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || before.kind === "wait") return;
+    const group = value.trim();
+    const priorChoice = before.playIf?.kind === "choice" ? before.playIf : undefined;
+    if (group === priorChoice?.group) return;
+    if (group.length > FX_CHOICE_NAME_MAX_LENGTH) {
+      error = `Choice group names are at most ${FX_CHOICE_NAME_MAX_LENGTH} characters`; return;
+    }
+    if (group !== "" && draft.persistent === true) return;
+    const { playIf: _condition, ...always } = before;
+    void _condition;
+    const option = group === "" ? "" : nextChoiceOption(group);
+    const changed = group === "" ? always as FxSection : { ...always,
+      playIf: { kind: "choice" as const, group, option,
+        weight: choiceWeightOf(group, option) ?? 1 } } as FxSection;
+    let sections = draft.sections.map((section, candidate) => candidate === index ? changed : section);
+    if (priorChoice !== undefined && priorChoice.group !== group)
+      sections = repairChoiceGroup(sections, priorChoice.group);
+    const groups = sections.reduce<string[]>((names, section) => {
+      const name = section.playIf?.kind === "choice" ? section.playIf.group : undefined;
+      return name && !names.includes(name) ? [...names, name] : names;
+    }, []);
+    if (groups.length > FX_CHOICE_GROUPS_MAX) {
+      error = `A timeline has at most ${FX_CHOICE_GROUPS_MAX} random choice groups`; return;
+    }
+    error = "";
+    draft = { ...draft, sections };
+  }
+  function changeChoiceOption(index: number, value: string): void {
+    const before = draft.sections[index];
+    const choice = before?.playIf?.kind === "choice" ? before.playIf : undefined;
+    const option = value.trim();
+    if (!before || !choice || option === "" || option === choice.option) return;
+    if (option.length > FX_CHOICE_NAME_MAX_LENGTH) {
+      error = `Choice option names are at most ${FX_CHOICE_NAME_MAX_LENGTH} characters`; return;
+    }
+    const priorOptions = choiceOptionsOf(choice.group);
+    const adoptedWeight = choiceWeightOf(choice.group, option) ?? choice.weight;
+    const sections = draft.sections.map((section, candidate) => candidate === index
+      ? { ...before, playIf: { ...choice, option, weight: adoptedWeight } } as FxSection : section);
+    const options = choiceOptionsOf(choice.group, sections);
+    if (options.length > FX_CHOICE_OPTIONS.max ||
+        (priorOptions.length >= FX_CHOICE_OPTIONS.min && options.length < FX_CHOICE_OPTIONS.min)) {
+      error = `A choice group keeps ${FX_CHOICE_OPTIONS.min}–${FX_CHOICE_OPTIONS.max} options`;
+      return;
+    }
+    error = "";
+    draft = { ...draft, sections };
+  }
+  function changeChoiceWeight(index: number, value: string): void {
+    const before = draft.sections[index];
+    const choice = before?.playIf?.kind === "choice" ? before.playIf : undefined;
+    if (!before || !choice) return;
+    const parsed = Number(value);
+    const weight = Number.isFinite(parsed) ? Math.round(Math.min(FX_CHOICE_WEIGHT.max,
+      Math.max(FX_CHOICE_WEIGHT.min, parsed))) : FX_CHOICE_WEIGHT.min;
+    draft = { ...draft, sections: draft.sections.map((section) =>
+      section.playIf?.kind === "choice" && section.playIf.group === choice.group &&
+          section.playIf.option === choice.option
+        ? { ...section, playIf: { ...section.playIf, weight } } as FxSection : section) };
+  }
+
+  /** 100% is canonical unconditional playback; 0% is an intentional disabled section. */
+  function changePlayChance(index: number, value: string): void {
+    const before = draft.sections[index];
+    if (!before || before.kind === "wait" || draft.persistent === true ||
+        before.playIf?.kind === "choice") return;
+    const parsed = value.trim() === "" ? 100 : Number(value);
+    const percent = Number.isFinite(parsed)
+      ? Math.round(Math.min(100, Math.max(0, parsed))) : 100;
+    const { playIf: _condition, ...always } = before;
+    void _condition;
+    const changed = percent >= 100 ? always : { ...always,
+      playIf: { kind: "chance" as const, percent } };
+    draft = { ...draft, sections: draft.sections.map((old, i) =>
+      i === index ? changed as FxSection : old) };
   }
 
   /** Empty means no membership. Blurring canonicalizes harmless surrounding whitespace. */
@@ -925,12 +1383,17 @@
   function remove(index: number): void {
     const removed = draft.sections[index];
     if (!removed) return;
-    draft = { ...draft, sections: draft.sections.filter((_, i) => i !== index).map((section) => {
+    let sections = draft.sections.filter((_, i) => i !== index).map((section) => {
       if (section.startAfter?.sectionId !== removed.id) return section;
       const { startAfter: _after, ...absolute } = section;
       void _after;
       return { ...absolute, startMs: 0 } as FxSection;
-    }) };
+    });
+    if (removed.parallel?.group !== undefined)
+      sections = repairParallelGroup(sections, removed.parallel.group);
+    if (removed.playIf?.kind === "choice")
+      sections = repairChoiceGroup(sections, removed.playIf.group);
+    draft = { ...draft, sections };
   }
   // ─── D-310 (SQ-12): save/load/edit/delete the look ──────────────────────────
   //
@@ -955,8 +1418,15 @@
     client.submit([{ kind: "create", coll: "macros", data: doc }]);
     const hasSync = preset.sections.some((section) =>
       (section.kind === "image" || section.kind === "text") && section.syncGroup !== undefined);
+    const hasLaunch = preset.sections.some((section) => section.launchGroup !== undefined);
+    const hasParallel = preset.sections.some((section) => section.parallel !== undefined);
+    const hasConditional = preset.sections.some((section) => section.playIf !== undefined);
     status = `Preset "${nextName}" submitted with ${preset.sections.length} section(s)`
-      + (hasSync ? " — enable Persist before loading its sync group" : " — load it into any draft");
+      + (hasSync ? " — enable Persist before loading its playback sync group"
+        : hasParallel ? " — explicit parallel blocks load into one-shot drafts"
+          : hasLaunch ? " — simultaneous launch groups load into one-shot drafts"
+            : hasConditional ? " — conditional play can be loaded into a one-shot draft"
+              : " — load it into any draft");
     return true;
   }
   function savePreset(): void {
@@ -984,8 +1454,19 @@
     if (!checked.ok) { error = `Preset "${macro.name}" cannot be loaded: ${checked.error}`; return; }
     const needsPersistent = checked.preset.sections.some((section) =>
       (section.kind === "image" || section.kind === "text") && section.syncGroup !== undefined);
+    const hasPresetLaunch = checked.preset.sections.some((section) => section.launchGroup !== undefined);
+    const hasPresetParallel = checked.preset.sections.some((section) => section.parallel !== undefined);
+    const hasPresetCondition = checked.preset.sections.some((section) => section.playIf !== undefined);
+    const hasPresetFinish = checked.preset.sections.some((section) => section.startAfter !== undefined);
     if (needsPersistent && draft.persistent !== true) {
       error = `Preset "${macro.name}" contains a playback sync group — enable Persist / loop before loading it`;
+      return;
+    }
+    if ((hasPresetLaunch || hasPresetParallel || hasPresetCondition || hasPresetFinish) && draft.persistent === true) {
+      const feature = hasPresetParallel ? "an explicit parallel block"
+        : hasPresetLaunch ? "a simultaneous launch group"
+          : hasPresetCondition ? "conditional play" : "finish-relative timing";
+      error = `Preset "${macro.name}" contains ${feature} — turn Persist / loop off before loading it`;
       return;
     }
     stopPreview(); // the cue on the canvas belongs to the draft that is about to be replaced
@@ -1105,7 +1586,8 @@
   }
   function run(macroId: string): void {
     if (!sceneId) { error = "Choose a scene"; return; }
-    client.requestSequence(macroId, sceneId, sourceId || undefined, targetId || undefined);
+    const requestId = client.requestSequence(macroId, sceneId, sourceId || undefined, targetId || undefined);
+    pendingRuns = [...pendingRuns, { requestId, macroId }];
     // D-297: the author is the first viewer. If this device's own mix silences the
     // whole timeline, say so here rather than letting them wonder why the table is
     // reacting to something they cannot hear. The request itself is unchanged.
@@ -1113,6 +1595,31 @@
     status = cueSilentForViewer(sections, fxViewPrefs().soundMix)
       ? "Requested saved timeline from host — this device's own mix silences every sound in it, so you will not hear this run"
       : "Requested saved timeline from host";
+  }
+  /** The host names only this request's exact run; recipient membership remains private. */
+  function noteRun(msg: ClientEvents["fxRun"]): void {
+    const pending = pendingRuns.find((entry) => entry.requestId === msg.requestId &&
+      entry.macroId === msg.macroId);
+    if (!pending) return;
+    pendingRuns = pendingRuns.filter((entry) => entry.requestId !== msg.requestId);
+    if (!activeRuns.some((entry) => entry.runId === msg.runId))
+      activeRuns = [...activeRuns, { runId: msg.runId, macroId: msg.macroId,
+        persistent: msg.persistent,
+        ...(msg.endsAtHostTime === undefined ? {} : { endsAtHostTime: msg.endsAtHostTime }) }];
+    const title = macros.find((macro) => macro._id === msg.macroId)?.name ?? "Timeline";
+    status = `${title} started on the host — use Cancel run to stop pending and active sections for its recipients`;
+    if (msg.endsAtHostTime !== undefined) {
+      const hostNow = Date.now() + (client.clockOffset()?.offsetMs ?? 0);
+      const timer = setTimeout(() => {
+        activeRuns = activeRuns.filter((entry) => entry.runId !== msg.runId);
+      }, Math.max(0, msg.endsAtHostTime - hostNow + 100));
+      runExpiryTimers.push(timer);
+    }
+  }
+  function cancelRun(runId: string): void {
+    client.requestFxStop(runId);
+    activeRuns = activeRuns.filter((entry) => entry.runId !== runId);
+    status = "Cancellation requested from the host — pending and active playback will end for prior recipients";
   }
   /**
    * Canvas picking for a point anchor. Cancel resolves `null`, so an abandoned
@@ -1249,19 +1756,29 @@
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
     const offOps = bus.on("ops", refresh);
-    const offRejected = bus.on("rejected", (reason) => { error = `${reason.reason}: ${reason.detail}`; });
+    const offRun = bus.on("fxRun", noteRun);
+    const offEnd = bus.on("fxEnd", (msg) => {
+      activeRuns = activeRuns.filter((entry) => entry.runId !== msg.runId);
+    });
+    const offRejected = bus.on("rejected", (reason) => {
+      pendingRuns = pendingRuns.filter((entry) => entry.requestId !== reason.txId);
+      error = `${reason.reason}: ${reason.detail}`;
+    });
     refresh();
     void refreshAssets();
-    return () => { offSnapshot(); offOps(); offRejected(); };
+    return () => { offSnapshot(); offOps(); offRun(); offEnd(); offRejected(); };
   });
-  // Closing the wizard (or leaving the world) ends this tab's own preview; the
-  // windows are not part of the world, so nothing else would clear it.
-  onDestroy(() => { if (previewRun) onStopPreview?.(); });
+  // Closing the wizard (or leaving the world) ends this tab's own preview; host-approved
+  // runs continue unless explicitly cancelled, but their local UI expiry timers do not.
+  onDestroy(() => {
+    if (previewRun) onStopPreview?.();
+    for (const timer of runExpiryTimers) clearTimeout(timer);
+  });
 </script>
 
 <section class="fx-wizard" aria-label="FX sequence wizard" data-fx-wizard>
   <header><h3>FX timeline wizard</h3><button type="button" onclick={reset}>New</button></header>
-  <p class="hint">Author overlapping image/video/text/audio sections. A section can use an absolute start or wait for an earlier section's final replay with a signed overlap/gap. One-shot sections can replay at a fixed interval; host-approved cues stay beneath fog. Persistent timelines loop until stopped in Live FX or their source disappears (they cannot also use section replays); named visual sync groups let a later member join the animation phase already in progress. A **Camera** section pans or shakes the *viewer's own* view — the host resolves where a pan may land, and a real drag or zoom always takes the map back. <strong>Preview</strong> renders the unsaved draft on this tab's canvas only — no host commit, no durable instance, no player receives it; a persistent draft previews a single pass. This is a subset of the full Sequencer action library.</p>
+  <p class="hint">Author overlapping image/video/text/audio sections. A section can use an absolute start or wait for an earlier section's final replay with a signed overlap/gap. A bounded one-shot parallel block forks 2–8 independently serial lanes on one host schedule, allows signed overlap/gap inside each lane, and exposes a real longest-lane join to later sections; members must stay contiguous. One-shot sections with the same simultaneous launch group instead share only one host-resolved start (including one shared random-delay draw), while keeping their own duration, replays and conditional inclusion. A non-wait one-shot section may use a host-sampled play chance, or join a bounded random choice where one host draw selects exactly one weighted option for every viewer. Neither rule branches on hit/miss or another committed outcome. Persistent timelines loop until stopped in Live FX or their source disappears (they cannot use launch groups, conditional play or section replays); their named visual playback sync groups instead let a later member join an animation phase already in progress. Host-approved cues stay beneath fog, and a run remains cancellable here while pending or active. A **Camera** section pans or shakes the *viewer's own* view — the host resolves where a pan may land, and a real drag or zoom always takes the map back. <strong>Preview</strong> renders the unsaved draft on this tab's canvas only — no host commit, no durable instance, no player receives it; a persistent draft previews a single pass. This is a subset of the full Sequencer action library.</p>
   <div class="library">
     <label>Import licensed media <input type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,video/webm,video/mp4,audio/ogg,audio/mpeg,audio/wav,audio/webm" disabled={busy || !onImport} onchange={(e) => void importFile(e)} /></label>
     <label><input type="checkbox" data-fx-share bind:checked={shareWithPlayers} /> I have permission to serve this file to players</label>
@@ -1317,50 +1834,90 @@
       </div>
     {/if}
     <label><input type="checkbox" bind:checked={playerCallable} /> Published for player invocation</label>
-    <label title={draft.persistent !== true && hasFinishTiming
-      ? "Finish-relative timing is one-shot only; switch those sections to absolute timing first"
-      : draft.persistent === true && hasSyncGroups
-        ? "Playback sync groups are persistent-only; clear those names before turning persistence off"
-        : undefined}>
+    <label title={draft.persistent !== true && hasParallelBlocks
+      ? "Explicit parallel blocks are one-shot only; remove their lane memberships first"
+      : draft.persistent !== true && hasFinishTiming
+        ? "Finish-relative timing is one-shot only; switch those sections to absolute timing first"
+        : draft.persistent !== true && hasLaunchGroups
+          ? "Simultaneous launch groups are one-shot only; clear those names first"
+          : draft.persistent !== true && hasConditionalPlay
+            ? "Conditional play is one-shot only; clear random choices and set chances to 100% first"
+          : draft.persistent === true && hasSyncGroups
+            ? "Playback sync groups are persistent-only; clear those names before turning persistence off"
+            : undefined}>
       <input type="checkbox" data-fx-persistent checked={draft.persistent === true}
-        disabled={(draft.persistent !== true && hasFinishTiming) || (draft.persistent === true && hasSyncGroups)}
+        disabled={(draft.persistent !== true &&
+          (hasParallelBlocks || hasFinishTiming || hasLaunchGroups || hasConditionalPlay)) ||
+          (draft.persistent === true && hasSyncGroups)}
         onchange={(e) => draft = { ...draft, persistent: e.currentTarget.checked }} /> Persist / loop until stopped</label>
   </div>
   <datalist id="fx-sync-group-names">
     {#each syncGroupNames as group (group)}<option value={group}></option>{/each}
   </datalist>
+  <datalist id="fx-launch-group-names">
+    {#each launchGroupNames as group (group)}<option value={group}></option>{/each}
+  </datalist>
+  <datalist id="fx-parallel-group-names">
+    {#each parallelGroupNames as group (group)}<option value={group}></option>{/each}
+  </datalist>
+  <datalist id="fx-parallel-lane-names">
+    {#each parallelLaneNames as lane (lane)}<option value={lane}></option>{/each}
+  </datalist>
+  <datalist id="fx-choice-group-names">
+    {#each choiceGroupNames as group (group)}<option value={group}></option>{/each}
+  </datalist>
+  <datalist id="fx-choice-option-names">
+    {#each choiceOptionNames as option (option)}<option value={option}></option>{/each}
+  </datalist>
   <div class="sections">
     {#each draft.sections as section, i (section.id)}
-      <fieldset data-fx-section={section.id}>
-        <legend>{i + 1}. {section.kind}</legend>
+      {@const parallelFirst = section.parallel !== undefined && isParallelLaneFirst(i)}
+      {@const managedLane = section.parallel !== undefined && !parallelFirst}
+      {@const dependencyLimit = launchDependencyLimit(i, section.launchGroup, section.parallel?.group)}
+      <fieldset data-fx-section={section.id} data-fx-parallel-group={section.parallel?.group} data-fx-parallel-lane={section.parallel?.lane}>
+        <legend>{i + 1}. {section.kind}{section.parallel ? ` · ${section.parallel.group} / ${section.parallel.lane}` : ""}</legend>
         <div class="controls">
           <label>Step <select value={section.kind} onchange={(e) => changeKind(i, (e.target as HTMLSelectElement).value as FxSection["kind"])}>
             <option value="text">Text</option><option value="image">Image / video</option><option value="sound">Sound</option><option value="camera">Camera</option><option value="wait">Wait</option>
           </select></label>
-          <label data-fx-finish-timing title={draft.persistent && section.startAfter === undefined
-            ? "Finish-relative timing is available on one-shot timelines" : undefined}>Start timing
-            <select value={section.startAfter?.sectionId ?? ""}
-              disabled={draft.persistent === true && section.startAfter === undefined}
-              onchange={(e) => changeStartTiming(i, e.currentTarget.value)}>
-            <option value="">Absolute timeline time</option>
-            {#each draft.sections.slice(0, i) as prior, priorIndex (prior.id)}
-              <option value={prior.id}>After section {priorIndex + 1} ({prior.kind}) finishes</option>
-            {/each}
-          </select></label>
-          {#if section.startAfter}
-            <label>Finish offset ms <input type="number" min={-FX_FINISH_OFFSET_MAX_MS}
-              max={FX_FINISH_OFFSET_MAX_MS} step="50" value={section.startAfter.offsetMs}
-              oninput={(e) => changeFinishOffset(i, e.currentTarget.value)} /></label>
+          {#if managedLane}
+            <span data-fx-parallel-managed>Starts after the previous <strong>{section.parallel?.lane}</strong> lane section</span>
+            <label>Lane overlap / gap ms <input data-fx-parallel-offset type="number"
+              min={-FX_FINISH_OFFSET_MAX_MS} max={FX_FINISH_OFFSET_MAX_MS} step="50"
+              value={section.parallel?.offsetMs ?? 0}
+              oninput={(e) => changeParallelOffset(i, e.currentTarget.value)} /></label>
           {:else}
-            <label>Start ms <input type="number" min="0" max="60000" step="50" bind:value={section.startMs} /></label>
+            <label data-fx-finish-timing title={draft.persistent && section.startAfter === undefined
+              ? "Finish-relative timing is available on one-shot timelines" : undefined}>Start timing
+              <select value={timingValue(section)}
+                disabled={draft.persistent === true && section.startAfter === undefined}
+                onchange={(e) => changeStartTiming(i, e.currentTarget.value)}>
+              <option value="">Absolute timeline time</option>
+              {#each draft.sections.slice(0, dependencyLimit) as prior, priorIndex (prior.id)}
+                <option value={prior.id}>After section {priorIndex + 1} ({prior.kind}) finishes</option>
+              {/each}
+              {#each priorParallelBlocks(dependencyLimit) as group (group)}
+                <option value={`parallel:${group}`}>After parallel block “{group}” joins</option>
+              {/each}
+            </select></label>
+            {#if section.startAfter}
+              <label>{section.startAfter.parallelGroup !== undefined ? "Join offset ms" : "Finish offset ms"} <input type="number" min={-FX_FINISH_OFFSET_MAX_MS}
+                max={FX_FINISH_OFFSET_MAX_MS} step="50" value={section.startAfter.offsetMs}
+                oninput={(e) => changeFinishOffset(i, e.currentTarget.value)} /></label>
+            {:else}
+              <label>Start ms <input type="number" min="0" max="60000" step="50"
+                value={section.startMs} oninput={(e) => changeAbsoluteStart(i, e.currentTarget.value)} /></label>
+            {/if}
           {/if}
           <label>Duration ms <input type="number" min="0" max="30000" step="50" bind:value={section.durationMs} /></label>
           <button type="button" aria-label={`Remove section ${i + 1}`} onclick={() => remove(i)}>×</button>
         </div>
         {#if section.startAfter}
-          <small data-fx-finish-help>Waits for that section's final replay. A negative offset overlaps its end;
-            a positive offset leaves a gap. The host sends only the resolved start time.</small>
+          <small data-fx-finish-help>Waits for {section.startAfter.parallelGroup !== undefined
+            ? `the longest lane of “${section.startAfter.parallelGroup}”` : "that section's final replay"}.
+            A negative offset overlaps its finish; a positive offset leaves a gap. The host sends only the resolved start time.</small>
         {/if}
+        {#if !managedLane}
         <div class="controls" data-fx-random-delay>
           <label>Random delay min ms <input type="number" min="0" max={FX_RANDOM_DELAY_MAX_MS} step="50"
             value={section.randomDelay?.minMs ?? ""}
@@ -1368,8 +1925,78 @@
           <label>Random delay max ms <input type="number" min="0" max={FX_RANDOM_DELAY_MAX_MS} step="50"
             value={section.randomDelay?.maxMs ?? ""}
             oninput={(e) => changeRandomDelay(i, "maxMs", e.currentTarget.value)} /></label>
-          <small>Optional. The host adds one shared random offset to Start for this run; every viewer gets the same concrete cue time.</small>
+          <small>Optional. The host adds one shared random offset to Start for this run;
+            {section.parallel ? " every lane first shares this one fork draw, and" : ""} every viewer gets the same concrete cue time.</small>
         </div>
+        {/if}
+        <div class="controls" data-fx-parallel>
+          <label>Parallel block <input data-fx-parallel-group-name list="fx-parallel-group-names"
+            maxlength={FX_PARALLEL_NAME_MAX_LENGTH} placeholder="e.g. two-sided-volley"
+            disabled={draft.persistent === true && section.parallel === undefined}
+            value={section.parallel?.group ?? ""}
+            onchange={(e) => changeParallelGroup(i, e.currentTarget.value)} /></label>
+          {#if section.parallel}
+            <label>Parallel lane <input data-fx-parallel-lane-name list="fx-parallel-lane-names"
+              maxlength={FX_PARALLEL_NAME_MAX_LENGTH} value={section.parallel.lane}
+              onchange={(e) => changeParallelLane(i, e.currentTarget.value)} /></label>
+            <small>{parallelLaneNamesOf(section.parallel.group).length}/{FX_PARALLEL_LANES.max} lanes.
+              Every lane's first section shares one host fork and random draw; later sections run serially
+              within that lane using their signed overlap/gap. A section that waits for this block starts
+              after its longest lane. Block members stay contiguous, and names never reach recipients.</small>
+          {:else}
+            <small>Optional, one-shot only. Give adjacent sections the same exact block and different lane names
+              to create a real fork/join; this is distinct from a simultaneous launch group.</small>
+          {/if}
+        </div>
+        {#if section.kind !== "wait"}
+          <div class="controls" data-fx-launch-group>
+            <label>Simultaneous launch group <input data-fx-launch-group-name
+              list="fx-launch-group-names" maxlength={FX_LAUNCH_GROUP_MAX_LENGTH}
+              placeholder="e.g. impact-burst"
+              disabled={section.parallel !== undefined ||
+                (draft.persistent === true && section.launchGroup === undefined)}
+              value={section.launchGroup ?? ""}
+              oninput={(e) => changeLaunchGroup(i, e.currentTarget.value)}
+              onblur={(e) => changeLaunchGroup(i, e.currentTarget.value, true)} /></label>
+            <small>One-shot sections with the same exact name share their absolute or finish-relative
+              start and one host random-delay draw. Joining aligns this section; editing Start, Finish offset,
+              or Random delay updates every member. Duration, replays and play chance remain per section.
+              This launches together; the persistent visual Playback sync group below synchronizes media phase instead.</small>
+          </div>
+          <div class="controls" data-fx-play-if>
+            {#if section.playIf?.kind !== "choice"}
+              <label title={draft.persistent ? "Conditional play is available on one-shot timelines" : undefined}>
+                Play chance % <input type="number" min="0" max="100" step="1"
+                  disabled={draft.persistent === true}
+                  value={section.playIf?.kind === "chance" ? section.playIf.percent : 100}
+                  oninput={(e) => changePlayChance(i, e.currentTarget.value)} /></label>
+            {/if}
+            <label>Random choice group <input data-fx-choice-group-name list="fx-choice-group-names"
+              maxlength={FX_CHOICE_NAME_MAX_LENGTH} placeholder="e.g. impact-color"
+              disabled={draft.persistent === true && section.playIf?.kind !== "choice"}
+              value={section.playIf?.kind === "choice" ? section.playIf.group : ""}
+              onchange={(e) => changeChoiceGroup(i, e.currentTarget.value)} /></label>
+            {#if section.playIf?.kind === "choice"}
+              <label>Choice option <input data-fx-choice-option-name list="fx-choice-option-names"
+                maxlength={FX_CHOICE_NAME_MAX_LENGTH} value={section.playIf.option}
+                onchange={(e) => changeChoiceOption(i, e.currentTarget.value)} /></label>
+              <label>Choice weight <input data-fx-choice-weight type="number"
+                min={FX_CHOICE_WEIGHT.min} max={FX_CHOICE_WEIGHT.max} step="1"
+                value={section.playIf.weight}
+                oninput={(e) => changeChoiceWeight(i, e.currentTarget.value)} /></label>
+              <small>{choiceOptionsOf(section.playIf.group).length}/{FX_CHOICE_OPTIONS.max} options.
+                The host samples this group once and includes every section in exactly one weighted option.
+                Weights are relative, option members share one weight, and names never reach recipients.
+                Timing and joins keep every option's would-be schedule.</small>
+            {:else}
+              <small>100 always plays; 0 keeps the section disabled. For 1–99 the host samples once per run,
+                then every viewer gets the same selected cue and all section replays follow that one decision.
+                Or name a random choice group on two or more options to select exactly one alternative.
+                These are host-random rules, not caller-supplied hit/miss outcomes. Local Preview takes the
+                deterministic eligible option; use Run to exercise host entropy.</small>
+            {/if}
+          </div>
+        {/if}
         {#if section.kind !== "wait" && section.kind !== "camera"}
           <div class="controls" data-fx-replay>
             <label>Section play count <input type="number" min="1" max="8" step="1" disabled={draft.persistent}
@@ -1858,6 +2485,18 @@
       <button type="button" data-fx-preview-stop onclick={stopPreview}>Stop preview</button>
     {/if}
   </div>
+  {#if activeRuns.length > 0}
+    <div class="active-runs" data-fx-active-runs aria-label="Runs started from this wizard">
+      {#each activeRuns as active (active.runId)}
+        <span data-fx-active-run={active.runId}>
+          <strong>{macros.find((macro) => macro._id === active.macroId)?.name ?? "Timeline"}</strong>
+          <small>{active.persistent ? "persistent" : "one-shot"}</small>
+          <button type="button" data-fx-cancel-run onclick={() => cancelRun(active.runId)}>Cancel run</button>
+        </span>
+      {/each}
+      <small>Cancellation is host-authoritative and reaches only this run's prior recipients. A finite cancellation is presentation-only and is not added to Undo.</small>
+    </div>
+  {/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if status}<p role="status" data-fx-status>{status}</p>{/if}
   {#if fitnessIssues.length > 0}
@@ -1974,6 +2613,10 @@
   .waypoints strong { min-width: 1.4em; }
   .placements { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; color: #cfe6d8; }
   .placements span { border: 1px solid #4f7a61; border-radius: 3px; padding: 1px 5px; }
+  .active-runs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+    border: 1px solid #7c6846; border-radius: 4px; padding: 5px; }
+  .active-runs > span { display: inline-flex; gap: 5px; align-items: center; }
+  .active-runs > small { flex-basis: 100%; color: #c8b993; }
   /* D-316: the checklist is a list of *people*, so it wraps as chips and shows each
      name with the world's own word for their role. */
   .audience-picker { display: flex; gap: 6px; flex-wrap: wrap; align-items: center;

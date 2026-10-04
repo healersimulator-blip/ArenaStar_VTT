@@ -13,8 +13,9 @@
  * applies unchanged. What it deliberately does **not** carry is lifecycle: no
  * `persistent`, no `audience`, no source/target binding. A preset is the look, not the
  * run; loading one leaves the timeline's own lifecycle fields exactly as the author
- * set them. A visual sync-group name may be part of that look, but such a preset can
- * only be loaded into a persistent draft. Nothing about a preset reaches the table
+ * set them. A visual playback sync-group name may be part of a persistent look; a
+ * simultaneous launch-group name may be part of a one-shot look. The Wizard keeps those
+ * lifecycle modes separate when loading. Nothing about a preset reaches the table
  * until the author saves and runs a timeline — where host authority lives.
  *
  * Presets live in the world (a `MacroDocument` of `kind: "fxPreset"`), so they survive
@@ -99,8 +100,12 @@ export function fxPresetSections(preset: FxPresetDefinition, mintId: () => strin
   });
   const remap = new Map(preset.sections.map((section, index) => [section.id, ids[index] ?? section.id]));
   return preset.sections.map((section, index) => ({ ...section, id: ids[index] ?? section.id,
-    ...(section.startAfter === undefined ? {} : { startAfter: { ...section.startAfter,
-      sectionId: remap.get(section.startAfter.sectionId) ?? section.startAfter.sectionId } }) }));
+    ...(section.parallel === undefined ? {} : { parallel: { ...section.parallel } }),
+    ...(section.playIf === undefined ? {} : { playIf: { ...section.playIf } }),
+    ...(section.startAfter === undefined ? {} : section.startAfter.sectionId === undefined
+      ? { startAfter: { ...section.startAfter } }
+      : { startAfter: { ...section.startAfter,
+          sectionId: remap.get(section.startAfter.sectionId) ?? section.startAfter.sectionId } }) }));
 }
 
 /**

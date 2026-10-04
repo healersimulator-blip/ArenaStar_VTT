@@ -132,6 +132,7 @@ function harness(listener: { userId?: string; scenes?: unknown[]; localAssets?: 
   });
   return {
     bus, player, reports, errors, requests, cameraWrites, spawned, mediaAcks, camera,
+    clearFx: fxLayer.clear,
     /** D-309: move the listening point by moving the view (the camera centre is the fallback). */
     panTo: (x: number, y: number) => { camera.x = x - 400; camera.y = y - 300; },
     fail: (hash: string) => fails.add(hash),
@@ -333,6 +334,30 @@ describe("local mute and reduced motion (D-295, SQ-16)", () => {
     expect(h.cameraWrites).toHaveLength(1); // the shake never wrote either
     expect(h.reports[0]?.entries.map((entry) => [entry.kind, entry.state, entry.reason]))
       .toEqual([["camera", "cut", "reduced-motion"], ["camera", "skipped", "reduced-motion"]]);
+  });
+
+  test("host cancellation clears an active one-shot and fences every pending timer, fetch, sound and camera", async () => {
+    const h = harness();
+    const camera: ResolvedFxSection = { id: "future-camera", kind: "camera", mode: "pan",
+      startMs: 700, durationMs: 300, toX: 100, toY: 100 };
+    h.send([
+      { id: "now", kind: "text", text: "Now", x: 50, y: 50, startMs: 0,
+        durationMs: 2_000 },
+      image(600), sound(650), camera,
+    ]);
+    await sleep(100);
+    expect(h.spawned.map((entry) => entry.id)).toEqual(["now"]);
+    expect(h.requests.sort()).toEqual(["aa".repeat(32), "bb".repeat(32)].sort());
+
+    h.bus.emit("fxEnd", { kind: "fx.end", runId: "run-1", sceneId: SCENE });
+    expect(h.clearFx).toHaveBeenCalledWith("run-1");
+    await Promise.all([h.resolveAsset("aa".repeat(32)), h.resolveAsset("bb".repeat(32))]);
+    await sleep(750);
+    expect(h.spawned.map((entry) => entry.id)).toEqual(["now"]); // no delayed image
+    expect(audios).toEqual([]); // no delayed sound element
+    expect(h.cameraWrites).toEqual([]); // no delayed camera claim
+    expect(h.mediaAcks).toEqual([]); // cancelled async work cannot report into a dead run
+    h.player.dispose();
   });
 
   test("a later persistent visual joins its host-resolved group phase without changing launch time", async () => {
@@ -591,6 +616,45 @@ describe("the table answers with what it actually did (D-308, SQ-13)", () => {
       expect(h.mediaAcks).toContainEqual(expect.objectContaining({ runId: "keep", state: "ready" }));
       expect(h.mediaAcks.some((ack) => ack.runId === "stop")).toBe(false);
     } finally { h.player.dispose(); }
+  });
+
+  test("stopping the final waiter abandons an unfinished image decode so its replacement starts fresh", async () => {
+    const before = Object.getOwnPropertyDescriptor(globalThis, "Image");
+    let rejectFirst: ((reason: Error) => void) | undefined;
+    let decodes = 0;
+    vi.stubGlobal("Image", class {
+      src = "";
+      decoding = "auto";
+      decode(): Promise<void> {
+        decodes++;
+        if (decodes > 1) return Promise.resolve();
+        return new Promise((_resolve, reject) => { rejectFirst = reject; });
+      }
+    });
+    const h = harness(); const hash = "aa".repeat(32);
+    try {
+      h.send([image(0, hash)], { persistent: true, runId: "stopped" });
+      await h.resolveAsset(hash);
+      expect(decodes).toBe(1);
+
+      h.bus.emit("fxEnd", { kind: "fx.end", runId: "stopped", sceneId: SCENE });
+      const cache = (h.player as unknown as { prefetched: Map<string, unknown> }).prefetched;
+      expect(cache.has(hash)).toBe(false);
+
+      h.send([image(0, hash)], { persistent: true, runId: "replacement" });
+      await sleep(100);
+      expect(decodes).toBe(2);
+      expect(h.spawned.map(({ runId }) => runId)).toEqual(["replacement"]);
+
+      rejectFirst?.(new Error("cancelled old decode"));
+      await sleep(20);
+      expect(h.spawned.map(({ runId }) => runId)).toEqual(["replacement"]);
+      expect(h.errors).toEqual([]);
+    } finally {
+      h.player.dispose();
+      if (before) Object.defineProperty(globalThis, "Image", before);
+      else Reflect.deleteProperty(globalThis, "Image");
+    }
   });
 
   test("a predecoded image URL survives run stop and is released with the scene cache", async () => {
