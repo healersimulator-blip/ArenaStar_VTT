@@ -5,7 +5,7 @@
   import type { ActorDocument, AssetManifest, MacroDocument, SceneDocument,
     UserDocument } from "../../core/documents";
   import { FX_AUDIENCE_PLAYERS_MAX, FX_FILTER_CHAIN_MAX, FX_FILTER_RANGES, FX_MASK_LIMITS,
-    FX_PLAYBACK_RATE_LIMITS, FX_POLYGON_POINTS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
+    FX_PLAYBACK_RATE_LIMITS, FX_POLYGON_POINTS, FX_RANDOM_DELAY_MAX_MS, FX_SCALE_LIMITS, FX_SPIN_LIMIT,
     fxAudiencePlayers, fxAuthoredFilters, fxFilterFields, fxMaskError, fxMaskFromCrosshair,
     resolveFxSequence,
     validateFxSequence, type FxAnchor,
@@ -200,7 +200,7 @@
   function add(kind: FxSection["kind"]): void {
     const id = `fx-${globalThis.crypto.randomUUID().slice(0, 8)}`;
     const startMs = Math.min(30_000, Math.max(0, ...draft.sections.map((s) =>
-      s.startMs + s.durationMs * (s.repeatCount ?? 1) +
+      s.startMs + (s.randomDelay?.maxMs ?? 0) + s.durationMs * (s.repeatCount ?? 1) +
       ((s.repeatCount ?? 1) - 1) * (s.repeatDelayMs ?? 0) - 250)));
     const durationMs = kind === "wait" ? 500 : 1000;
     const at = { kind: "point" as const, x: Math.round((scene?.width ?? 500) / 2), y: Math.round((scene?.height ?? 500) / 2) };
@@ -251,7 +251,9 @@
       : kind === "text" ? { id: before.id, kind, at, text: "A dramatic moment", startMs: before.startMs, durationMs: before.durationMs }
       : kind === "camera" ? cameraSection(before.id, before.startMs, Math.max(100, before.durationMs))
       : { id: before.id, kind, startMs: before.startMs, durationMs: before.durationMs };
-    draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? section : old) };
+    const timed = before.randomDelay === undefined ? section
+      : { ...section, randomDelay: { ...before.randomDelay } } as FxSection;
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? timed : old) };
   }
   /** Pan ⇄ shake ⇄ path is a real discriminator: the shapes share no destination field. */
   function changeCameraMode(index: number, mode: "pan" | "shake" | "path"): void {
@@ -262,7 +264,9 @@
           durationMs: Math.min(before.durationMs, 800) }
       : mode === "path" ? pathSection(before.id, before.startMs, Math.max(1_000, before.durationMs))
       : cameraSection(before.id, before.startMs);
-    draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? section : old) };
+    const timed = before.randomDelay === undefined ? section
+      : { ...section, randomDelay: { ...before.randomDelay } } as FxSection;
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index ? timed : old) };
   }
   /**
    * Waypoint editing. A path is a *tour*: at least two points that differ, and the
@@ -323,6 +327,31 @@
     const zoom = value.trim() === "" ? undefined : Number(value);
     draft = { ...draft, sections: draft.sections.map((old, i) => i === index
       ? { ...before, ...(zoom === undefined ? {} : { zoom }) } as FxSection : old) };
+  }
+
+  /**
+   * The range is atomic in the document. A blank/zero maximum removes it, while
+   * entering either bound first produces a valid inclusive pair immediately.
+   */
+  function changeRandomDelay(index: number, bound: "minMs" | "maxMs", value: string): void {
+    const before = draft.sections[index];
+    if (!before) return;
+    const text = value.trim();
+    if (bound === "maxMs" && (text === "" || Number(text) <= 0)) {
+      const { randomDelay: _range, ...fixed } = before;
+      void _range;
+      draft = { ...draft, sections: draft.sections.map((old, i) =>
+        i === index ? fixed as FxSection : old) };
+      return;
+    }
+    const parsed = text === "" ? 0 : Number(text);
+    const entered = Number.isFinite(parsed)
+      ? Math.round(Math.min(FX_RANDOM_DELAY_MAX_MS, Math.max(0, parsed))) : 0;
+    const prior = before.randomDelay;
+    const minMs = bound === "minMs" ? entered : Math.min(prior?.minMs ?? 0, entered);
+    const maxMs = bound === "maxMs" ? entered : Math.max(1, prior?.maxMs ?? entered, entered);
+    draft = { ...draft, sections: draft.sections.map((old, i) => i === index
+      ? { ...before, randomDelay: { minMs, maxMs } } as FxSection : old) };
   }
 
   /** Native speed is canonical absence; authored rates are clamped to the host contract. */
@@ -1200,6 +1229,15 @@
           <label>Start ms <input type="number" min="0" max="60000" step="50" bind:value={section.startMs} /></label>
           <label>Duration ms <input type="number" min="0" max="30000" step="50" bind:value={section.durationMs} /></label>
           <button type="button" aria-label={`Remove section ${i + 1}`} onclick={() => remove(i)}>×</button>
+        </div>
+        <div class="controls" data-fx-random-delay>
+          <label>Random delay min ms <input type="number" min="0" max={FX_RANDOM_DELAY_MAX_MS} step="50"
+            value={section.randomDelay?.minMs ?? ""}
+            oninput={(e) => changeRandomDelay(i, "minMs", e.currentTarget.value)} /></label>
+          <label>Random delay max ms <input type="number" min="0" max={FX_RANDOM_DELAY_MAX_MS} step="50"
+            value={section.randomDelay?.maxMs ?? ""}
+            oninput={(e) => changeRandomDelay(i, "maxMs", e.currentTarget.value)} /></label>
+          <small>Optional. The host adds one shared random offset to Start for this run; every viewer gets the same concrete cue time.</small>
         </div>
         {#if section.kind !== "wait" && section.kind !== "camera"}
           <div class="controls" data-fx-replay>

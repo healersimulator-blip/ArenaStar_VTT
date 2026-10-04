@@ -78,6 +78,51 @@ describe("versioned audiovisual timeline", () => {
       playbackRate: 2 } as never] }).ok).toBe(false);
   });
 
+  test("host samples one bounded random delay per section and sends only the shared concrete schedule", () => {
+    const jittered: FxSequence = { version: 1, sections: [
+      { kind: "text", id: "pulse", text: "Pulse", at: { kind: "source" }, startMs: 100,
+        durationMs: 300, randomDelay: { minMs: 100, maxMs: 300 },
+        repeatCount: 3, repeatDelayMs: 150 },
+      { kind: "sound", id: "beep", assetId: sound, startMs: 50, durationMs: 250,
+        randomDelay: { minMs: 10, maxMs: 20 } },
+      { kind: "wait", id: "rest", startMs: 0, durationMs: 200,
+        randomDelay: { minMs: 50, maxMs: 50 } },
+    ] };
+    expect(validateFxSequence(jittered).ok).toBe(true);
+    const draws = [0.5, 1, -10];
+    const resolved = resolveFxSequence(jittered, scene, source, undefined, () => "audio/ogg",
+      () => draws.shift() ?? Number.NaN);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.sections.map((section) => [section.id, section.startMs])).toEqual([
+      ["pulse", 300], ["pulse@2", 750], ["pulse@3", 1200],
+      ["beep", 70], ["rest", 50],
+    ]);
+    expect(resolved.sections.every((section) => !Object.hasOwn(section, "randomDelay")))
+      .toBe(true); // recipients receive one host decision, not a range to reroll
+    expect(jittered.sections[0]?.randomDelay).toEqual({ minMs: 100, maxMs: 300 });
+    const lower = resolveFxSequence(jittered, scene, source, undefined, () => "audio/ogg",
+      () => Number.NaN);
+    expect(lower.ok && lower.sections.map((section) => section.startMs)).toEqual([
+      200, 650, 1100, 60, 50,
+    ]); // malformed injected entropy clamps to each lower bound
+
+    const random = (value: unknown, patch: Record<string, unknown> = {}) => validateFxSequence(
+      visual({ randomDelay: value, ...patch })).ok;
+    expect(random({ minMs: 0, maxMs: 1 })).toBe(true);
+    expect(random({ minMs: 30_000, maxMs: 30_000 }, { startMs: 0, durationMs: 30_000 })).toBe(true);
+    for (const invalid of [
+      null, {}, { minMs: 0 }, { maxMs: 1 }, { minMs: 0, maxMs: 0 },
+      { minMs: -1, maxMs: 2 }, { minMs: 3, maxMs: 2 }, { minMs: 0.5, maxMs: 2 },
+      { minMs: 0, maxMs: 30_001 }, { minMs: 0, maxMs: 2, clientRolls: true },
+      { minMs: Number.NaN, maxMs: 2 },
+    ]) expect(random(invalid), JSON.stringify(invalid)).toBe(false);
+    expect(random({ minMs: 0, maxMs: 30_000 }, { startMs: 30_001, durationMs: 1 })).toBe(false);
+    expect(validateFxSequence({ version: 1, sections: [{ kind: "text", id: "late-replays",
+      text: "x", at: { kind: "source" }, startMs: 58_000, durationMs: 500,
+      randomDelay: { minMs: 0, maxMs: 1_001 }, repeatCount: 2 }] }).ok).toBe(false);
+  });
+
   test("bounded one-shot section replays expand into host-clock cues, distinct from motion cycles", () => {
     const replay: FxSequence = { version: 1, sections: [
       { kind: "text", id: "pulse", text: "Pulse", at: { kind: "source" },

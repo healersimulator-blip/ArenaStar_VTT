@@ -628,10 +628,23 @@ export function fxEase(easing: FxEasing | undefined, progress: number): number {
   return phase;
 }
 
+export interface FxRandomDelay {
+  /** Inclusive lower bound, added to this section's fixed `startMs`. */
+  minMs: number;
+  /** Inclusive upper bound. The host samples this once per run and section. */
+  maxMs: number;
+}
+
 interface FxBase {
   id: string;
+  /** Fixed position on the shared timeline. `randomDelay`, when present, is added once. */
   startMs: number;
   durationMs: number;
+  /**
+   * SQ-02: a host-owned random offset. Every recipient receives the same concrete
+   * `startMs`; neither the authored range nor a client-side random decision travels.
+   */
+  randomDelay?: FxRandomDelay;
   /** One-shot media replays; distinct from located-section `repeats`, which
    * controls motion cycles inside a SINGLE playback window. Waits/persistent
    * loops cannot use this. Host expands into bounded clock-aligned cues. */
@@ -691,6 +704,8 @@ export const FX_SCALE_LIMITS = { min: 0.05, max: 10 } as const;
 export const FX_SPIN_LIMIT = 3_600;
 /** SQ-02: bounded browser media speed; 1 is native speed. */
 export const FX_PLAYBACK_RATE_LIMITS = { min: 0.25, max: 4 } as const;
+/** SQ-02: one section may jitter by at most 30 seconds, still inside the 60-second timeline. */
+export const FX_RANDOM_DELAY_MAX_MS = 30_000;
 /**
  * A camera section claims the **viewer's own view** for its duration. It is not a
  * document change: the host resolves and authorizes the destination exactly as it
@@ -777,20 +792,22 @@ export interface FxSequence {
   persistent?: boolean;
 }
 
+type FxAuthoredTimingField = "repeatCount" | "repeatDelayMs" | "randomDelay";
+
 export type ResolvedFxSection =
-  | (Omit<Extract<FxSection, { kind: "image" }>, "at" | "to" | "mask" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; mime: string; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
-  | (Omit<Extract<FxSection, { kind: "text" }>, "at" | "to" | "mask" | "repeatCount" | "repeatDelayMs"> & { x: number; y: number; toX?: number; toY?: number; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
-  | (Omit<Extract<FxSection, { kind: "sound" }>, "repeatCount" | "repeatDelayMs" | "at" | "radius"> &
+  | (Omit<Extract<FxSection, { kind: "image" }>, "at" | "to" | "mask" | FxAuthoredTimingField> & { x: number; y: number; toX?: number; toY?: number; mime: string; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
+  | (Omit<Extract<FxSection, { kind: "text" }>, "at" | "to" | "mask" | FxAuthoredTimingField> & { x: number; y: number; toX?: number; toY?: number; followTokenId?: string; followToTokenId?: string; mask?: ResolvedFxMask })
+  | (Omit<Extract<FxSection, { kind: "sound" }>, FxAuthoredTimingField | "at" | "radius"> &
       { mime: string; x?: number; y?: number; radiusPx?: number;
         /** Host-computed per recipient (D-309): a sound-blocking wall stands between
          * that viewer's own listener and this source. */
         occluded?: boolean })
   /** A pan carries its **host-resolved** destination; a shake carries no anchor at all. */
-  | (Omit<FxCameraPanSection, "to" | "repeatCount" | "repeatDelayMs"> & { toX: number; toY: number })
+  | (Omit<FxCameraPanSection, "to" | FxAuthoredTimingField> & { toX: number; toY: number })
   /** A path carries its **host-resolved** waypoints, in order. */
-  | (Omit<FxCameraPathSection, "points" | "repeatCount" | "repeatDelayMs"> & { points: Array<{ x: number; y: number }> })
-  | Omit<FxCameraShakeSection, "repeatCount" | "repeatDelayMs">
-  | Omit<Extract<FxSection, { kind: "wait" }>, "repeatCount" | "repeatDelayMs">;
+  | (Omit<FxCameraPathSection, "points" | FxAuthoredTimingField> & { points: Array<{ x: number; y: number }> })
+  | Omit<FxCameraShakeSection, FxAuthoredTimingField>
+  | Omit<Extract<FxSection, { kind: "wait" }>, FxAuthoredTimingField>;
 
 const MAX_SECTIONS = 48;
 /** A timeline that moved the view eight times would be a slideshow, not an effect. */
@@ -843,11 +860,24 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
   let cameraCount = 0;
   for (const section of value.sections as unknown[]) {
     if (!isObject(section) || typeof section.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(section.id) || ids.has(section.id) ||
-      !inRange(section.startMs, 0, MAX_TIMELINE_MS) || !inRange(section.durationMs, 0, MAX_SECTION_MS) ||
-      section.startMs + section.durationMs > MAX_TIMELINE_MS) {
+      !inRange(section.startMs, 0, MAX_TIMELINE_MS) || !inRange(section.durationMs, 0, MAX_SECTION_MS)) {
       return { ok: false, error: "FX section IDs, start and duration must be unique and bounded" };
     }
     ids.add(section.id);
+    // Random timing is an authored range, never an invitation for each recipient to
+    // roll independently. Integer milliseconds make the host's sampled start exact.
+    const random = section.randomDelay;
+    if (random !== undefined && (!isObject(random) ||
+        Object.keys(random).length !== 2 || !Object.keys(random).every((key) => key === "minMs" || key === "maxMs") ||
+        !Number.isSafeInteger(random.minMs) || !Number.isSafeInteger(random.maxMs) ||
+        !inRange(random.minMs, 0, FX_RANDOM_DELAY_MAX_MS) ||
+        !inRange(random.maxMs, 1, FX_RANDOM_DELAY_MAX_MS) || random.minMs > random.maxMs)) {
+      return { ok: false, error: `FX random delay needs integer min/max milliseconds (0–${FX_RANDOM_DELAY_MAX_MS}) with max above zero` };
+    }
+    const randomDelayMax = random === undefined ? 0 : random.maxMs as number;
+    if (section.startMs + randomDelayMax + section.durationMs > MAX_TIMELINE_MS) {
+      return { ok: false, error: "FX section IDs, start and duration must be unique and bounded" };
+    }
     // A camera cue is not media: it has no replays (a view claim that repeated
     // itself would be a stuck frame), so its repeat fields are unknown fields.
     const repeatFields = section.kind === "wait" || section.kind === "camera"
@@ -857,7 +887,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
       section.kind === "image" ? ["assetId", "at", "to", "stretch", "tint", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg", "playbackRate"] :
       section.kind === "text" ? ["text", "color", "at", "to", "easing", "repeats", "scale", "opacity", "rotation", "fadeInMs", "fadeOutMs", "layer", "follow", "blend", "filter", "filterTo", "filters", "mask", "scaleTo", "spinDeg"] :
       section.kind === "camera" ? ["mode", "to", "easing", "zoom", "intensity", "points", "audience"] : [];
-    if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", ...fields, ...repeatFields].includes(key)) ||
+    if (Object.keys(section).some((key) => !["id", "kind", "startMs", "durationMs", "randomDelay", ...fields, ...repeatFields].includes(key)) ||
       (section.kind !== "wait" && section.durationMs === 0)) {
       return { ok: false, error: "unknown FX section field or zero-duration media" };
     }
@@ -899,7 +929,7 @@ export function validateFxSequence(value: unknown): { ok: true; sequence: FxSequ
         (section.repeatDelayMs !== undefined && (section.repeatCount === undefined ||
           !Number.isSafeInteger(section.repeatDelayMs) || !inRange(section.repeatDelayMs, 0, 30_000))) ||
         (value.persistent && section.repeatCount !== undefined) ||
-        section.startMs + repeatCount * section.durationMs +
+        section.startMs + randomDelayMax + repeatCount * section.durationMs +
           (repeatCount - 1) * (typeof section.repeatDelayMs === "number" ? section.repeatDelayMs : 0) > MAX_TIMELINE_MS ||
         (playbackCount += repeatCount) > MAX_PLAYBACKS) {
       return { ok: false, error: "FX replays require 2–8 one-shot plays, bounded pause and at most 64 total cues within 60 s" };
@@ -1059,15 +1089,22 @@ export function resolveFxSequence(
   source: TokenDocument | undefined,
   target: TokenDocument | undefined,
   mimeOf: (assetId: string) => string | undefined,
+  /** Host entropy. Omitted callers deterministically preview the lower bound. */
+  rng: () => number = () => 0,
 ): { ok: true; sections: ResolvedFxSection[] } | { ok: false; error: string } {
   const validated = validateFxSequence(sequence);
   if (!validated.ok) return validated;
   const sections: ResolvedFxSection[] = [];
   for (const section of sequence.sections) {
-    if (section.kind === "wait") { sections.push(section); continue; }
+    if (section.kind === "wait") {
+      const { repeatCount: _count, repeatDelayMs: _gap, randomDelay: _random, ...projected } = section;
+      void _count; void _gap; void _random;
+      sections.push(projected);
+      continue;
+    }
     if (section.kind === "camera" && section.mode === "shake") {
-      const { repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-      void _count; void _gap;
+      const { repeatCount: _count, repeatDelayMs: _gap, randomDelay: _random, ...projected } = section;
+      void _count; void _gap; void _random;
       sections.push(projected);
       continue;
     }
@@ -1089,8 +1126,9 @@ export function resolveFxSequence(
     if (section.kind === "sound") {
       const mime = mimeOf(section.assetId);
       if (!mime || !AUDIO_MIME.has(mime)) return { ok: false, error: `missing/unsupported sound: ${section.assetId}` };
-      const { repeatCount: _count, repeatDelayMs: _gap, at: _at, radius, ...projected } = section;
-      void _count; void _gap; void _at;
+      const { repeatCount: _count, repeatDelayMs: _gap, randomDelay: _random,
+        at: _at, radius, ...projected } = section;
+      void _count; void _gap; void _random; void _at;
       // The radius travels in **pixels**, like every other distance a client measures
       // against its own view: the host owns the scene's grid metric, and a client that
       // had to re-derive "60 ft" could disagree with the host that validated it.
@@ -1118,15 +1156,17 @@ export function resolveFxSequence(
         }
         if (points.every((point) => point.x === points[0]?.x && point.y === points[0]?.y))
           return { ok: false, error: "a camera path needs two different waypoints" };
-        const { points: _points, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-        void _points; void _count; void _gap;
+        const { points: _points, repeatCount: _count, repeatDelayMs: _gap,
+          randomDelay: _random, ...projected } = section;
+        void _points; void _count; void _gap; void _random;
         sections.push({ ...projected, points });
         continue;
       }
       const destination = anchor(section.to);
       if (!destination.ok) return destination;
-      const { to: _to, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-      void _to; void _count; void _gap;
+      const { to: _to, repeatCount: _count, repeatDelayMs: _gap,
+        randomDelay: _random, ...projected } = section;
+      void _to; void _count; void _gap; void _random;
       sections.push({ ...projected, toX: destination.x, toY: destination.y });
       continue;
     }
@@ -1238,8 +1278,9 @@ export function resolveFxSequence(
     if (section.kind === "text") {
       // The authored `mask` is dropped here and replaced by the resolved one: what
       // travels is a polygon, never the author's scene-unit numbers.
-      const { at: _anchor, to: _to, mask: _mask, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-      void _anchor; void _to; void _mask; void _count; void _gap;
+      const { at: _anchor, to: _to, mask: _mask, repeatCount: _count,
+        repeatDelayMs: _gap, randomDelay: _random, ...projected } = section;
+      void _anchor; void _to; void _mask; void _count; void _gap; void _random;
       sections.push({ ...projected, ...coords, ...(mask.mask ? { mask: mask.mask } : {}) });
       continue;
     }
@@ -1250,8 +1291,9 @@ export function resolveFxSequence(
     // speed on a still would be a valid-looking control that does nothing, so refuse it.
     if (section.playbackRate !== undefined && !mime.startsWith("video/"))
       return { ok: false, error: "FX playback rate is only available for video and sound" };
-    const { at: _anchor, to: _to, mask: _mask, repeatCount: _count, repeatDelayMs: _gap, ...projected } = section;
-    void _anchor; void _to; void _mask; void _count; void _gap;
+    const { at: _anchor, to: _to, mask: _mask, repeatCount: _count,
+      repeatDelayMs: _gap, randomDelay: _random, ...projected } = section;
+    void _anchor; void _to; void _mask; void _count; void _gap; void _random;
     sections.push({ ...projected, ...coords, ...(mask.mask ? { mask: mask.mask } : {}), mime });
   }
   // All authored anchors and media are preflighted before any playback cue is
@@ -1261,10 +1303,21 @@ export function resolveFxSequence(
   for (const [index, prepared] of sections.entries()) {
     const original = sequence.sections[index];
     if (!original) return { ok: false, error: "FX section lost during preflight" };
+    const range = original.randomDelay;
+    const draw = range === undefined ? 0 : rng();
+    // An injected RNG is still treated as untrusted input: NaN means the lower bound,
+    // while values outside [0, 1] clamp rather than escaping the validated timeline.
+    const unit = Number.isFinite(draw) ? Math.min(1, Math.max(0, draw)) : 0;
+    const randomDelayMs = range === undefined ? 0 : Math.min(range.maxMs,
+      range.minMs + Math.floor(unit * (range.maxMs - range.minMs + 1)));
+    // The range was stripped with the other author-only fields during preflight. Only
+    // this concrete host decision reaches clients or a durable instance.
+    const concrete: ResolvedFxSection = { ...prepared,
+      startMs: prepared.startMs + randomDelayMs };
     const count = original.repeatCount ?? 1;
     for (let play = 0; play < count; play++) {
-      expanded.push(play === 0 ? prepared : { ...prepared, id: `${prepared.id}@${play + 1}`,
-        startMs: prepared.startMs + play * (prepared.durationMs + (original.repeatDelayMs ?? 0)) });
+      expanded.push(play === 0 ? concrete : { ...concrete, id: `${concrete.id}@${play + 1}`,
+        startMs: concrete.startMs + play * (concrete.durationMs + (original.repeatDelayMs ?? 0)) });
     }
   }
   return { ok: true, sections: expanded };

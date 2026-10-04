@@ -1,6 +1,6 @@
 # FX Wizard Verification History
 
-Consolidated historical archive through D-395, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
+Consolidated historical archive through D-396, including the incremental trigger, macro and FX audience follow-ups below. D-373 remains the latest standalone verification report.
 
 **Recovery note:** the former archive body was unavailable after an overwrite. D-293–D-346 below are reconstructed from the preserved, detailed `DECISIONS.md` records, rather than copied from the original report bodies. D-347 is retained from its original standalone verification report. Existing status summaries and verification counts remain available in `MACROS_FX_WIZARD_IMPLEMENTATION_STATUS.md`.
 
@@ -56,6 +56,7 @@ Consolidated historical archive through D-395, including the incremental trigger
 - [D-393 archived verification report](#report-d393)
 - [D-394 archived verification report](#report-d394)
 - [D-395 archived verification report](#report-d395)
+- [D-396 archived verification report](#report-d396)
 
 <a id="report-d293-d319"></a>
 
@@ -4672,3 +4673,52 @@ The original two-viewer browser assertion could pass on the first “media in ha
 ### Remaining scope
 
 This closes the audited readiness/ownership/cancellation defects and one bounded SQ-02 field only. It does not complete random/group timing, clip windows, conditional lanes, generalized cancellation, cache quota/eviction, cross-browser codec/transparency evidence or the rest of SQ-02/SQ-13. Remaining MC/TR/A19–A40 work is unchanged. A41 still requires the pre-published hardware-GPU profile and a qualifying run; functional fallback Chromium evidence is not that acceptance. **Full A01–A41 parity is not established.**
+
+<a id="report-d396"></a>
+
+## D-396 — Host-resolved random section delay (2026-10-04)
+
+### Delivered scheduler contract
+
+This bounded SQ-02 increment adds one optional `randomDelay: { minMs, maxMs }` to every section kind. It is an inclusive integer-millisecond range, added to the section's fixed `startMs`; each bound is limited to 0–30,000 ms and a zero maximum is rejected as a no-op. Validation uses the maximum possible offset when checking the existing 60-second timeline. For replayed one-shot media, that worst-case check includes every duration and inter-play pause. The range therefore cannot turn a valid authored sequence into a concrete schedule outside the host's established bounds.
+
+The host is the sole random authority. `resolveFxSequence` completes anchor/media/schema preflight before drawing, then draws exactly once for each authored section carrying a range. It clamps malformed injected entropy to the lower bound and out-of-unit values to the range. Replay expansion happens after that draw, so all plays of one authored section share its offset. Per-viewer audience projection happens after resolution, so the GM and every entitled player receive the same concrete `startMs`; a client never rerolls. The authoring range is removed with replay/anchor controls and is absent from `ResolvedFxSection`, the network cue and durable state.
+
+That last boundary is separately defended on restore. A persistent run stores the sampled starts. `validateFxInstance` now fails closed if an imported/historical instance contains `randomDelay`, rather than accepting authoring state that could leak or be mistaken for a reconnect-time reroll. Script- and directory-fired timelines continue through the same host resolver, so there is no second random-timing implementation.
+
+### Authoring behavior
+
+The FX Wizard shows **Random delay min ms** and **Random delay max ms** on text, image/video, sound, camera and wait sections. Entering either side creates a valid atomic pair; clearing or setting the maximum to zero removes the field rather than storing a hidden no-op. Values are rounded/clamped to the core contract. Changing a section kind or camera mode keeps the range because this is section timing, not media/text behavior. New-section placement accounts for an existing section's maximum random offset, and presets retain the range with the rest of the authored section. Local on-canvas preview supplies local entropy to the same resolver; actual Save/Run still samples on the host.
+
+### Verification
+
+- Focused core/instance/preset/host batch: **318/318** (`fx` 56, `fxInstances` 4, `fxPresets` 5, HostSync 253). It pins inclusive/lower/upper/clamped draws, malformed and out-of-budget ranges, replay alignment, source immutability, author-field stripping, durable refusal, preset retention, one draw per section instead of per recipient, identical GM/two-player schedules and unchanged 750 ms media lead.
+- Full `corepack pnpm test`: **4,906 passed / 12 skipped**, **334 passing / 2 skipped files**, 124.97 seconds.
+- `corepack pnpm typecheck`: **69 components / 0 blocking issues / 1 existing ReplayPanel advisory**. ESLint and `git diff --check` pass.
+- Production preparation succeeded; the optional PF1e content-based starter remains absent and is skipped normally. `dist/index.html` is **4,137,597 raw / 1,181,976 gzip bytes**, below 6 MB; SHA-256 **`8ce68a1c8ea8459382944934a24d596aab883700f5c063823851da0c73b81ead`**.
+- Production `file://` Chromium **153.0.8010.0**, one worker, zero retries: `e2e/fx_sequence.spec.ts` **36/36 in 8.6 minutes** on that exact artifact. The new case drives the real controls, switches Text → Wait → Text without losing the range, saves/reloads, runs, and intercepts the real Pixi spawn boundary. It asserts an integer concrete start inside 250–450 ms and asserts the received section has no `randomDelay` property. The other 35 strengthened FX cases remain green, including two-viewer usable-media reporting.
+
+Commands used for the final evidence:
+
+```sh
+corepack pnpm exec vitest run tests/core/fx.test.ts tests/core/fxPresets.test.ts \
+  tests/core/fxInstances.test.ts tests/host/sync.test.ts
+corepack pnpm typecheck
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm test:fx:prepare
+corepack pnpm size
+sha256sum dist/index.html
+LD_LIBRARY_PATH=/tmp/al2023/lib \
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/tmp/chromium \
+  PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1 \
+  corepack pnpm exec playwright test --project=chromium --workers=1 --retries=0 \
+  --global-timeout=1200000 e2e/fx_sequence.spec.ts
+git diff --check
+```
+
+The Chromium executable and AL2023 libraries were npm-provisioned outside the repository because the standard Playwright browser is unavailable in this sandbox. This is functional production-artifact evidence, not cross-browser or A41 hardware-GPU acceptance.
+
+### Remaining scope
+
+D396 closes only per-section random delay. It does not implement group delay, clip windows, wait-until-finished negative overlap, conditional lanes, generalized cancellation or the rest of SQ-02. Cache quota/eviction and cross-browser codec/transparency evidence remain open, as do the previously listed MC/TR/A19–A40 capabilities. A41 still requires its pre-published hardware-GPU profile and qualifying run. **Full A01–A41 parity is not established.**

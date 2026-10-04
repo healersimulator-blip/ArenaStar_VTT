@@ -59,7 +59,9 @@ export function validateFxInstance(
       (doc.targetTokenId !== undefined && (!ID.test(doc.targetTokenId) || !scene.tokens.some((t) => t._id === doc.targetTokenId)))) return false;
   const sections: FxSection[] = [];
   for (const section of doc.sections) {
-    if (!section || typeof section !== "object") return false;
+    if (!section || typeof section !== "object" || Object.hasOwn(section, "randomDelay")) return false;
+    // Random ranges are authoring state. A durable instance stores the host's already
+    // sampled concrete start and must never reroll (or leak) a range on reconnect.
     if (section.kind === "wait") { sections.push(section); continue; }
     // A durable instance can never hold a camera cue (`validateFxSequence`
     // forbids camera sections in a persistent timeline), so fail closed rather

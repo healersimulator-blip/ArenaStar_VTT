@@ -2054,7 +2054,7 @@ const WALL_PICK_RADIUS = 12;
     const source = sourceTokenId ? scene.tokens.find((token) => token._id === sourceTokenId) : undefined;
     const target = targetTokenId ? scene.tokens.find((token) => token._id === targetTokenId) : undefined;
     const resolved = resolveFxSequence({ ...sequence, persistent: false }, scene, source, target,
-      (id) => current.gm.client.store.world.assetManifest[id]?.mime);
+      (id) => current.gm.client.store.world.assetManifest[id]?.mime, Math.random);
     if (!resolved.ok) return { ok: false, error: resolved.error };
     const runId = `preview-${globalThis.crypto.randomUUID()}`;
     fxPlayer.preview({ kind: "fx.start", runId, macroId: "preview", sceneId, sections: resolved.sections,

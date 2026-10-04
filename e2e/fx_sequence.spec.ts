@@ -30,6 +30,67 @@ test("a saved FX timeline is host-approved, renders below fog and removes its vi
   await expect.poll(active, { timeout: 5_000 }).toBe(0);
 });
 
+test("a random delay is authored once and reaches playback as one host-resolved cue time", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator("#gm-macros").click();
+  await page.locator("[data-macro-fx-tab]").click();
+  const wizard = page.locator("[data-fx-wizard]");
+  await wizard.locator("[data-fx-name]").fill("Jittered signal");
+  await wizard.getByRole("button", { name: "Text", exact: true }).click();
+  const section = wizard.locator("[data-fx-section]");
+  await section.getByLabel("Random delay min ms").fill("250");
+  await section.getByLabel("Random delay max ms").fill("450");
+  // This is section timing, not a text-only option: changing the step discriminator
+  // cannot silently discard the authored range.
+  await section.getByLabel("Step").selectOption("wait");
+  await expect(section.getByLabel("Random delay min ms")).toHaveValue("250");
+  await expect(section.getByLabel("Random delay max ms")).toHaveValue("450");
+  await section.getByLabel("Step").selectOption("text");
+  await section.getByLabel("Text", { exact: true }).fill("Shared clock");
+  await section.getByLabel("Duration ms").fill("300");
+  await wizard.locator("[data-fx-save]").click();
+  const saved = wizard.locator("[data-fx-macro-id]").filter({ hasText: "Jittered signal" });
+  await expect(saved).toBeVisible();
+  await wizard.getByRole("button", { name: "New", exact: true }).click();
+  await saved.getByRole("button", { name: "Edit" }).click();
+  await expect(section.getByLabel("Random delay min ms")).toHaveValue("250");
+  await expect(section.getByLabel("Random delay max ms")).toHaveValue("450");
+
+  // Observe the actual Pixi boundary. The saved range must have become an integer
+  // concrete start and must not be present in the recipient payload at all.
+  await page.evaluate(() => {
+    const stage = (globalThis as unknown as { __stage?: { getFxLayer: () => {
+      spawn: (...args: unknown[]) => void;
+    } } }).__stage;
+    if (!stage) throw new Error("FX stage missing");
+    const layer = stage.getFxLayer();
+    const spawn = layer.spawn.bind(layer);
+    const global = globalThis as unknown as { __randomDelayCues?: Array<{
+      startMs: number; hasAuthoredRange: boolean;
+    }> };
+    global.__randomDelayCues = [];
+    layer.spawn = (...args: unknown[]) => {
+      const cue = args[1] as { startMs: number; randomDelay?: unknown };
+      global.__randomDelayCues?.push({ startMs: cue.startMs,
+        hasAuthoredRange: Object.hasOwn(cue, "randomDelay") });
+      spawn(...args);
+    };
+  });
+  await wizard.locator("[data-fx-run]").click();
+  await expect.poll(() => page.evaluate(() =>
+    (globalThis as unknown as { __randomDelayCues?: unknown[] }).__randomDelayCues?.length ?? 0),
+  { timeout: 5_000, intervals: [50, 100] }).toBe(1);
+  const observed = await page.evaluate(() =>
+    (globalThis as unknown as { __randomDelayCues?: Array<{ startMs: number;
+      hasAuthoredRange: boolean }> }).__randomDelayCues?.[0] ?? null);
+  expect(observed).not.toBeNull();
+  expect(Number.isSafeInteger(observed?.startMs)).toBe(true);
+  expect(observed?.startMs).toBeGreaterThanOrEqual(250);
+  expect(observed?.startMs).toBeLessThanOrEqual(450);
+  expect(observed?.hasAuthoredRange).toBe(false);
+});
+
 test("destination, easing and repeat controls survive host save and edit, then play", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");

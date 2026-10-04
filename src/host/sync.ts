@@ -4897,7 +4897,10 @@ export class HostSync {
         (req.targetTokenId && (!target || !callerScene?.tokens.some((t) => t._id === target._id))))
       return forbidden("FX source/target is not visible to caller");
     const manifest = this.manifestSource();
-    const resolved = resolveFxSequence(macro.sequence, scene, source, target, (id) => manifest[id]?.mime);
+    // Random section timing is sampled once here, before per-viewer projection, so every
+    // recipient shares one host-clock schedule and never receives the authored range.
+    const resolved = resolveFxSequence(macro.sequence, scene, source, target,
+      (id) => manifest[id]?.mime, this.rng);
     if (!resolved.ok) return invalid(resolved.error);
     if (macro.sequence.persistent && (this.store.getAll("fxInstances").length >= 64 ||
         this.store.getAll("fxInstances").filter((entry) => entry.sceneId === scene._id).length >= 24))

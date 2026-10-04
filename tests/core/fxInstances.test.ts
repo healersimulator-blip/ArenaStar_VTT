@@ -63,6 +63,9 @@ describe("private durable FX records", () => {
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, playbackRate: 2 }] }, scene, manifest)).toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, assetId: videoHash,
       mime: "video/webm", playbackRate: 4.01 }] }, scene, manifest)).toBe(false);
+    expect(validateFxInstance({ ...instance, sections: [{ ...visual,
+      randomDelay: { minMs: 100, maxMs: 300 } } as typeof instance.sections[number]] }, scene, manifest))
+      .toBe(false); // durable cues keep the sampled start, never an authored reroll range
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, evil: "op" } as typeof instance.sections[number]] }, scene, manifest))
       .toBe(false);
     expect(validateFxInstance({ ...instance, sections: [{ ...visual, follow: true, followTokenId: "source" }] }, scene, manifest))

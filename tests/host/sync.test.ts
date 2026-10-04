@@ -1604,6 +1604,45 @@ describe("Macros / FX host authority and audience", () => {
         { kind: "brightness", strength: 1.1 }]);
   });
 
+  test("random section delays are sampled once by the host and shared as concrete recipient times", async () => {
+    let draws = 0;
+    const hostNow = 1_000_000;
+    const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
+      chunks: 1, visibility: "referenced" } }, undefined, () => { draws += 1; return 0.5; },
+    () => hostNow);
+    const jittered = fxMacro("shared-jitter");
+    const firstSection = jittered.sequence?.sections[0];
+    const secondSection = jittered.sequence?.sections[1];
+    if (!jittered.sequence || !firstSection || !secondSection)
+      throw new Error("missing fixture sequence");
+    jittered.sequence.sections[0] = { ...firstSection,
+      randomDelay: { minMs: 100, maxMs: 300 } };
+    jittered.sequence.sections[1] = { ...secondSection,
+      randomDelay: { minMs: 400, maxMs: 600 } };
+    h.gm.submit([{ kind: "create", coll: "macros", data: jittered }]);
+    await flushMicrotasks();
+    const first = await h.addPlayer(PLAYER_ID, "Rex");
+    const other = await h.addPlayer(OTHER_ID, "Ivy");
+    const received: ClientEvents["fx"][][] = [[], [], []];
+    h.gmBus.on("fx", (cue) => received[0]?.push(cue));
+    first.bus.on("fx", (cue) => received[1]?.push(cue));
+    other.bus.on("fx", (cue) => received[2]?.push(cue));
+
+    const before = draws;
+    h.gm.requestSequence("shared-jitter", "s1");
+    await flushMicrotasks();
+    expect(draws - before).toBe(2); // sections, not sessions
+    for (const cues of received) {
+      expect(cues).toHaveLength(1);
+      const cue = cues[0];
+      expect(cue?.kind).toBe("fx.start");
+      expect(cue?.sections.map((section) => section.startMs)).toEqual([200, 800]);
+      expect(cue?.sections.every((section) => !Object.hasOwn(section, "randomDelay"))).toBe(true);
+      expect(cue?.atHostTime).toBe(hostNow + 750);
+    }
+    expect(received[1]?.[0]?.sections).toEqual(received[2]?.[0]?.sections);
+  });
+
   test("multi-step timeline reaches entitled peers exactly once; forge is ignored", async () => {
     const hostNow = 1_000_000;
     const h = await setup({ [imageHash]: { name: "owned.png", mime: "image/png", size: 4,
