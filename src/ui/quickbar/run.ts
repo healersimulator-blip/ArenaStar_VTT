@@ -4,8 +4,10 @@
  * Every slot runs the **sheet's own** flow rather than a second implementation of the rules: an
  * attack is `resolveAttackFlow` (the same call the sheet's Resolve button makes, with the standard
  * action's first iterative and no situational toggles), the damage verb is the public roll card the
- * sheet's damage button makes, and an item slot is the `resolveCastFlow` call `PF1eItemWindow` makes
- * with its `source`, so a charge is spent and written. A slot that cannot run says why.
+ * sheet's damage button makes, an item slot is the `resolveCastFlow` call `PF1eItemWindow` makes
+ * with its `source`, so a charge is spent and written, and a **spell** slot (D-407) is the same flow
+ * the sheet's cast form uses — with the save and the condition taken from the tactical catalogue
+ * rather than from a form a hot bar does not have. A slot that cannot run says why.
  */
 import type { ClientSync } from "../../client/sync";
 import type { ActorDocument } from "../../core/documents";
@@ -14,10 +16,12 @@ import { worldSettingsFrom } from "../../core/worldSettings";
 import { consumableCastAuthored } from "../../packages/pf1e/consumables";
 import { pf1eAttackRollGroups } from "../../packages/pf1e/rollData";
 import { resolveCastFlow } from "../sheets/pf1eCastFlow";
-import { fireBoundItemCue, fxCastOutcome, fxItemCueNote } from "../sheets/fxItemCue";
+import { pf1eSpellEffectByName } from "../../packages/pf1e/spellEffects";
+import { castSpellCueNote, fireBoundItemCue, fxCastOutcome, fxItemCueNote } from "../sheets/fxItemCue";
 import { attackLineItemId, pf1eItemView } from "../sheets/pf1eItemsTab";
 import { resolveAttackFlow } from "../sheets/pf1eResolveFlow";
 import { pf1eSheetView } from "../sheets/pf1eSheetModel";
+import { pf1eSpellbookView } from "../sheets/pf1eSpellbook";
 import type { PF1eQuickbarEntry } from "./model";
 
 export interface PF1eQuickbarRunInput {
@@ -67,6 +71,71 @@ function attackCueNote(
   if (itemId === null) return "";
   return boundCueNote(client, actor, { _id: itemId },
     outcome === "miss" ? "failure" : "success", target, "attack");
+}
+
+/**
+ * D-407 — a hot-bar cast of a **prepared spell**. The catalogue supplies the mechanics the sheet's
+ * cast form would otherwise ask the player for (save, severity, the condition the effect delivers),
+ * and `resolveCastFlow` does everything else: the concentration gate from the row's Components line,
+ * the DC from the derived spell DC, the slot spend, the card and the condition delivery on a landed
+ * save. The bound *spell* cue (S5a) is fired after the flow commits, exactly as the sheet does it.
+ */
+async function runSpellSlot(input: {
+  client: ClientSync;
+  actor: ActorDocument;
+  view: ReturnType<typeof pf1eSheetView>;
+  target: ActorDocument;
+  targetView: ReturnType<typeof pf1eSheetView>;
+  entry: PF1eQuickbarEntry;
+}): Promise<PF1eQuickbarRunResult> {
+  const { client, actor, view, target, targetView, entry } = input;
+  const name = entry.label.replace(/ \(level \d+\)$/, "").trim();
+  const effect = pf1eSpellEffectByName(name);
+  if (effect === null) return { ok: false, error: `${name} has no authored tactical effect` };
+  const preparedIndex = entry.preparedIndex ?? null;
+  const prepared = preparedIndex === null
+    ? null : pf1eSpellbookView(actor, view.derived).prepared[preparedIndex] ?? null;
+  if (preparedIndex !== null && prepared === null)
+    return { ok: false, error: "the bound prepared row is gone — re-prepare and re-bind" };
+  if (prepared !== null && pf1eSpellEffectByName(prepared.name)?.id !== effect.id)
+    return { ok: false, error: `the bound row now holds ${prepared.name}, not ${effect.name}` };
+  const level = prepared?.level ?? entry.spellLevel ?? 0;
+  const outcome = await resolveCastFlow(client, client.user, {
+    casterActor: actor,
+    casterDerived: view.derived,
+    spell: {
+      name: effect.name,
+      level,
+      ...(preparedIndex !== null ? { preparedIndex } : {}),
+    },
+    spellEffectId: effect.id,
+    authored: {
+      saveType: effect.save?.type ?? "ref",
+      severity: effect.save?.severity ?? "none",
+      damageFormula: "",
+    },
+    targetName: target.name,
+    targetActor: target,
+    targetDerived: targetView.derived,
+    targetFeats: Array.isArray(targetView.authored.feats)
+      ? (targetView.authored.feats as string[])
+      : [],
+    castingTime: "standard",
+  });
+  if (!outcome.ok) return { ok: false, error: outcome.error };
+  if (outcome.lost) return { ok: false, error: `${effect.name} was lost before it resolved` };
+  const cue = castSpellCueNote({ client, spellName: effect.name, outcome: fxCastOutcome(outcome),
+    caster: actor, target });
+  if (outcome.pending) {
+    return { ok: true, note: `${effect.name} → ${target.name} — awaiting ${
+      outcome.pendingRollId ? "the target's save" : "completion"}` };
+  }
+  if (outcome.held) {
+    return { ok: true, note: `${effect.name} held for delivery — the charge is spent${cue}` };
+  }
+  return { ok: true, note: `${effect.name} → ${target.name} — DC ${String(outcome.dc)}, ${
+    effect.save === null ? "no save" : `${effect.save.type.toUpperCase()} save`}${
+    outcome.result.passed ? " made" : " failed"}${cue}` };
 }
 
 export async function runQuickbarEntry(
@@ -128,6 +197,10 @@ export async function runQuickbarEntry(
     };
   }
 
+  if (entry.kind === "spell") {
+    return runSpellSlot({ client, actor, view, target, targetView, entry });
+  }
+
   const itemId = entry.itemId;
   const item = itemId === null ? null : pf1eItemView(actor, itemId);
   if (item === null || item.consumable === null)
@@ -170,7 +243,9 @@ export async function runQuickbarEntry(
     return {
       ok: true,
       note: `${source.spellName} held for delivery — the charge is spent` +
-        boundCueNote(client, actor, { _id: item.item.id }, fxCastOutcome(outcome), target),
+        boundCueNote(client, actor, { _id: item.item.id }, fxCastOutcome(outcome), target) +
+        castSpellCueNote({ client, spellName: source.spellName, outcome: fxCastOutcome(outcome),
+          caster: actor, target }),
     };
   }
   return {
@@ -178,6 +253,8 @@ export async function runQuickbarEntry(
     note: `${source.spellName} from ${item.item.name} → ${target.name} — DC ${String(
       outcome.dc,
     )}, ${String(Math.max(0, source.charges - 1))} charge(s) left` +
-      boundCueNote(client, actor, { _id: item.item.id }, fxCastOutcome(outcome), target),
+      boundCueNote(client, actor, { _id: item.item.id }, fxCastOutcome(outcome), target) +
+      castSpellCueNote({ client, spellName: source.spellName, outcome: fxCastOutcome(outcome),
+        caster: actor, target }),
   };
 }

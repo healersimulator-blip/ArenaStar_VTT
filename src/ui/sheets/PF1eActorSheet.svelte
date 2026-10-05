@@ -102,7 +102,13 @@
   } from "../../core/documents";
   import { resolveAttackFlow, resolveManyshotFlow, resolveFirearmExplosionFlow } from "./pf1eResolveFlow";
   import { attackLineItemId } from "./pf1eItemsTab";
-  import { fireBoundItemCue, fxItemCueNote } from "./fxItemCue";
+  import {
+    castSpellCueNote,
+    fireBoundItemCue,
+    fxCastOutcome,
+    fxItemCueNote,
+  } from "./fxItemCue";
+  import { pf1eSpellEffectByName } from "../../packages/pf1e/spellEffects";
   import { resolveManeuverFlow } from "../combat/pf1eManeuverFlow";
   import { resolveAidAnotherFlow, resolveFeintFlow } from "../combat/pf1eAidFeintFlow";
   import type { PF1eDefenseChoice } from "../../packages/pf1e/resolve";
@@ -1340,6 +1346,9 @@
       }
     }
     if (name === "") name = `Level ${level} spell`;
+    // D-407: a spell the tactical catalogue knows carries its authored effect into the cast, so the
+    // flow can deliver the condition and this path can play the spell's bound cue.
+    const spellEffect = pf1eSpellEffectByName(name);
     const spell: PF1eCastFlowParams["spell"] = { name, level };
     if (slotLevel !== level) spell.slotLevel = slotLevel;
     if (d.spellMode === "prepared" && castPreparedIndex !== null)
@@ -1419,6 +1428,7 @@
         casterActor: current,
         casterDerived: casterView.derived,
         spell,
+        ...(spellEffect !== null ? { spellEffectId: spellEffect.id } : {}),
         authored,
         targetName: target.name,
         targetActor: target,
@@ -1464,6 +1474,12 @@
             }
           : {}),
       });
+      // D-407 (S5a): the committed cast is the moment a spell-bound cue names. Fired here, after
+      // the flow has committed, and only for a cast that actually resolved at the target: a lost
+      // spell, a pending save and a held charge are recognised by `fxCastOutcome` (the first is
+      // never reached, the last two play the failure branch, which is "nothing" unless bound).
+      const spellCueNote = castSpellCueNote({ client, spellName: name,
+        outcome: fxCastOutcome(outcome), caster: current, target });
       if (!outcome.ok) {
         castError = outcome.error;
       } else if (outcome.pending) {
@@ -1472,13 +1488,13 @@
           : "the casting has begun — it comes into effect just before your next turn";
       } else if (outcome.held) {
         castWarning =
-          "the touch attack missed — the charge is held; deliver it below";
+          "the touch attack missed — the charge is held; deliver it below" + spellCueNote;
       } else if (outcome.lost) {
         castWarning = [...outcome.gateNotes, ...outcome.warnings].join(" · ");
       } else {
         const bits: string[] = [...outcome.gateNotes, ...outcome.warnings];
         if (outcome.hpWriteError !== null) bits.push(outcome.hpWriteError);
-        castWarning = bits.join(" · ");
+        castWarning = bits.join(" · ") + spellCueNote;
       }
       // D-191: the provoke's own lines ride alongside whatever the cast reported —
       // the attack happened before the spell, so the GM reads both in one place.

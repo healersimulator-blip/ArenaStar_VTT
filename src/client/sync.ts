@@ -406,11 +406,15 @@ export class ClientSync {
     return requestId;
   }
 
-  /** Ask HostSync to apply or remove one keyed condition instance with a named GM Revert receipt. */
-  requestPF1eConditionAction(request: PF1eConditionActionRequest): string {
-    const requestId = globalThis.crypto.randomUUID();
-    this.send({ kind: "pf1e.condition", requestId, ...request });
-    return requestId;
+  /**
+   * Ask HostSync to apply or remove one keyed condition instance with a named GM Revert receipt.
+   * `requestId` may be supplied by a producer that needs its retry to be idempotent (D-407's
+   * spell-effect delivery derives it from the card and the condition).
+   */
+  requestPF1eConditionAction(request: PF1eConditionActionRequest, requestId?: string): string {
+    const id = requestId ?? globalThis.crypto.randomUUID();
+    this.send({ kind: "pf1e.condition", requestId: id, ...request });
+    return id;
   }
 
   /** F01 — GM delegates reroll window to a player (expires in 2 turns). */

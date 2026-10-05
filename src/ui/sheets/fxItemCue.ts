@@ -17,9 +17,10 @@
  *   reader could not run by hand is refused here exactly as it would be there.
  */
 import type { ClientSync } from "../../client/sync";
+import { pf1eSpellEffectByName } from "../../packages/pf1e/spellEffects";
 import type { ActorDocument, ItemDocument, MacroDocument, SceneDocument, TokenDocument } from "../../core/documents";
-import { fxBindingBranch, fxBindingFiresOn, fxBindingMatches,
-  type FxItemEvent, type FxItemOutcome } from "../../core/fxBinding";
+import { fxBindingBranch, fxBindingFiresOn, fxBindingMatches, fxSpellBindingBranch,
+  fxSpellBindingMatches, type FxItemEvent, type FxItemOutcome } from "../../core/fxBinding";
 
 export type { FxItemEvent, FxItemOutcome } from "../../core/fxBinding";
 
@@ -96,10 +97,10 @@ export type FxItemCueResult =
  * item window, the quickbar and the attack resolve all say the same thing. `unbound` says
  * nothing at all: an item with no binding is the normal case, not news.
  */
-export function fxItemCueNote(cue: FxItemCueResult): string {
+export function fxItemCueNote(cue: FxItemCueResult, subject: "item" | "spell" = "item"): string {
   if (cue.fired) return ` · ${cue.note}`;
-  if (cue.reason === "disabled") return " · the item's bound cue is disabled";
-  if (cue.reason === "no-branch") return " · the item has no cue for that outcome";
+  if (cue.reason === "disabled") return ` · the ${subject}'s bound cue is disabled`;
+  if (cue.reason === "no-branch") return ` · the ${subject} has no cue for that outcome`;
   return "";
 }
 
@@ -108,6 +109,70 @@ export function fxItemCueNote(cue: FxItemCueResult): string {
  * every reason is a sentence the caller can show, and `unbound` is the common, silent case (an
  * item with no binding is not a problem to report).
  */
+/**
+ * D-407 — the same cue contract for a **spell**: the timeline an author bound to a catalogue spell
+ * (`fxSpell`, the FX wizard's "Bind to a spell" panel) plays when that spell is cast. The committed
+ * moment is the cast, the recognition is `fxCastOutcome`'s, and the default branch is a landed
+ * effect: a made save, spell resistance, a lost spell, a held charge or a missed touch plays the
+ * failure branch — which is "nothing" unless the author bound one.
+ */
+export function fireBoundSpellCue(input: {
+  client: ClientSync;
+  /** The tactical-effect catalogue id (`entangle`). An unknown id fires nothing. */
+  spellId: string;
+  outcome: FxItemOutcome;
+  /** The caster's actor, for the source token anchor (the cue runs in their scene). */
+  casterActor: ActorDocument;
+  /** The cast's own target, when the flow has one: the cue's `target` anchor. */
+  targetActor?: ActorDocument | null;
+}): FxItemCueResult {
+  const { client, spellId } = input;
+  const macro = boundSpellCueFor(client, spellId);
+  if (macro === null) return { fired: false, reason: "unbound" };
+  const branch = fxSpellBindingBranch(macro, input.outcome === "failure" ? "failure" : "success");
+  if (branch === null)
+    return { fired: false, reason: macro.fxSpell?.enabled === false ? "disabled" : "no-branch" };
+  const scene = cueScene(client, input.casterActor._id);
+  if (scene === null) return { fired: false, reason: "no-scene" };
+  const source = tokenFor(scene, input.casterActor._id);
+  const target = input.targetActor ? tokenFor(scene, input.targetActor._id) : undefined;
+  client.requestSequence(branch, scene._id, source?._id, target?._id);
+  const branchName = (client.store.get("macros", branch) as MacroDocument | undefined)?.name ?? branch;
+  return { fired: true, macroId: branch, macroName: branchName, branch: input.outcome,
+    note: branch === macro._id
+      ? `bound spell cue "${branchName}" requested`
+      : `bound spell failure cue "${branchName}" requested` };
+}
+
+/**
+ * The note a **spell cast** adds when the cast named a catalogue spell: the cue lookup by the
+ * spell's *name*, which is what every cast call site has (a prepared row carries a name, not an id).
+ * A name the catalogue does not know plays nothing and says nothing — most spells have no authored
+ * tactical effect, and that is the normal case, not news.
+ */
+export function castSpellCueNote(input: {
+  client: ClientSync;
+  spellName: string;
+  outcome: FxItemOutcome;
+  caster: ActorDocument;
+  target?: ActorDocument | null;
+}): string {
+  const effect = pf1eSpellEffectByName(input.spellName);
+  if (effect === null) return "";
+  return fxItemCueNote(fireBoundSpellCue({ client: input.client, spellId: effect.id,
+    outcome: input.outcome, casterActor: input.caster, targetActor: input.target ?? null }), "spell");
+}
+
+/**
+ * The first timeline this reader can see that names that spell. Sorted by id, so two timelines bound
+ * to one spell (which the host refuses) could never make the choice depend on store order.
+ */
+export function boundSpellCueFor(client: ClientSync, spellId: string): MacroDocument | null {
+  return (client.store.getAll("macros") as readonly MacroDocument[])
+    .filter((macro) => macro.kind === "sequence" && fxSpellBindingMatches(macro, spellId))
+    .sort((a, b) => a._id.localeCompare(b._id))[0] ?? null;
+}
+
 export function fireBoundItemCue(input: {
   client: ClientSync;
   actor: ActorDocument;

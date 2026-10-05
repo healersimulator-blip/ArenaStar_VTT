@@ -21,7 +21,8 @@
     setItemUsesOp,
   } from "./pf1eItemsTab";
   import { resolveCastFlow } from "./pf1eCastFlow";
-  import { boundCueFor, fireBoundItemCue, fxCastOutcome, fxItemCueNote } from "./fxItemCue";
+  import { boundCueFor, castSpellCueNote, fireBoundItemCue, fxCastOutcome, fxItemCueNote }
+    from "./fxItemCue";
   import { observePF1eItem } from "./pf1eItemWindow";
   import TagEditor from "./TagEditor.svelte";
 
@@ -154,11 +155,17 @@
           note = `the charge is spent — the spell is held for delivery (DC ${outcome.dc})`;
           note += fxItemCueNote(fireBoundItemCue({ client, actor: held.actor, item: held.item,
             outcome: fxCastOutcome(outcome), targetActor: target }));
+          // D-407: the *spell's* own binding, when one exists, plays too — and only on its own
+          // recognised outcome, so a hit-scroll fires the cue the same way a prepared cast does.
+          note += castSpellCueNote({ client, spellName: source.spellName,
+            outcome: fxCastOutcome(outcome), caster: held.actor, target });
         } else {
           note = `${source.spellName} cast from ${view.item.name} — DC ${outcome.dc}, ${Math.max(0, source.charges - 1)} charge(s) left`;
           // A pending action has no committed target outcome and deliberately fires no success cue.
           note += fxItemCueNote(fireBoundItemCue({ client, actor: held.actor, item: held.item,
             outcome: fxCastOutcome(outcome), targetActor: target }));
+          note += castSpellCueNote({ client, spellName: source.spellName,
+            outcome: fxCastOutcome(outcome), caster: held.actor, target });
         }
       }
     } catch (err) {

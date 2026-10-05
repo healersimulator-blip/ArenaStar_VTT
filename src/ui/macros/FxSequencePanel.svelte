@@ -24,8 +24,10 @@
   import { FX_PRESET_LIMITS, fxPresetSections, validateFxPreset,
     type FxPresetDefinition } from "../../core/fxPresets";
   import { FX_ITEM_EVENT_CONTRACT, FX_ITEM_EVENTS, FX_RECOGNITION_MODES, fxBindingEvents,
-    validateFxItemBinding,
-    type FxItemBinding, type FxItemEvent, type FxRecognition } from "../../core/fxBinding";
+    validateFxItemBinding, validateFxSpellBinding,
+    type FxItemBinding, type FxItemEvent, type FxRecognition,
+    type FxSpellBinding } from "../../core/fxBinding";
+  import { PF1E_SPELL_EFFECTS } from "../../packages/pf1e/spellEffects";
   import type { Json } from "../../core/documents";
   import { rememberPlacement, type NamedPlacement, type RequestCrosshairPick } from "./crosshairPicker";
   import type { CrosshairShape } from "../../core/crosshair";
@@ -67,6 +69,11 @@
   let bindEnabled = $state(true);
   /** D-312: which committed moments fire it. `use` alone is the D-311 behaviour. */
   let bindEvents = $state<FxItemEvent[]>(["use"]);
+  // D-407: the spell binding (a spell row is not an item, so it cannot use the panel above).
+  let bindSpell = $state("");
+  let bindSpellFailure = $state("");
+  let bindSpellRecognition = $state<FxRecognition>("auto");
+  let bindSpellEnabled = $state(true);
   let scenes = $state<SceneDocument[]>([]);
   /**
    * D-316: the world's users, so a "chosen players" audience is picked from real names
@@ -218,6 +225,7 @@
     name = m.name;
     playerCallable = m.flags.core?.playerCallable === true;
     loadBinding(m);
+    loadSpellBinding(m);
     draft = { ...$state.snapshot(m.sequence ?? { version: 1, sections: [] }),
       persistent: m.sequence?.persistent === true };
     status = "Editing saved timeline";
@@ -229,6 +237,7 @@
     name = "";
     playerCallable = false;
     loadBinding(null);
+    loadSpellBinding(null);
     draft = { version: 1, audience: "scene", persistent: false, sections: [] };
     status = "";
     error = "";
@@ -1550,6 +1559,44 @@
       + `${bindItemName || "the item"} is used`
       + (playerCallable ? "" : ". Tick \"players may run this\" or a player's use will be refused");
   }
+  // ─── D-407: bind this timeline to a spell of the tactical catalogue ─────────
+  const boundSpells = PF1E_SPELL_EFFECTS;
+  const bindSpellName = $derived(boundSpells.find((effect) => effect.id === bindSpell)?.name ?? "");
+  /** Whether the timeline being edited already carries a spell binding (for the Remove button). */
+  const hasSpellBinding = $derived(
+    macros.find((macro) => macro._id === editing)?.fxSpell !== undefined);
+  function loadSpellBinding(macro: MacroDocument | null): void {
+    const binding = macro?.fxSpell;
+    bindSpell = binding?.spellId ?? "";
+    bindSpellFailure = binding?.onFailureId ?? "";
+    bindSpellRecognition = binding?.recognition ?? "auto";
+    bindSpellEnabled = binding?.enabled !== false;
+  }
+  function spellBindingDraft(): FxSpellBinding {
+    return { spellId: bindSpell,
+      ...(bindSpellFailure ? { onFailureId: bindSpellFailure } : {}),
+      ...(bindSpellRecognition !== "auto" ? { recognition: bindSpellRecognition } : {}),
+      ...(bindSpellEnabled ? {} : { enabled: false }) };
+  }
+  function saveSpellBinding(): void {
+    error = ""; status = "";
+    if (!editing) { error = "Save the timeline before binding it to a spell"; return; }
+    const checked = validateFxSpellBinding(spellBindingDraft());
+    if (!checked.ok) { error = checked.error; return; }
+    client.submit([{ kind: "update", ref: { coll: "macros", id: editing },
+      diff: { fxSpell: checked.binding as unknown as Json } }]);
+    status = `Spell binding submitted — "${name.trim() || "this timeline"}" will play when `
+      + `${bindSpellName || "the spell"} is cast`
+      + (playerCallable ? "" : ". Tick \"players may run this\" or a player's cast will be refused");
+  }
+  function removeSpellBinding(): void {
+    error = ""; status = "";
+    if (!editing) return;
+    client.submit([{ kind: "update", ref: { coll: "macros", id: editing }, diff: { "-=fxSpell": null } }]);
+    bindSpell = ""; bindSpellFailure = ""; bindSpellRecognition = "auto"; bindSpellEnabled = true;
+    status = "Spell binding removed — the cast plays nothing";
+  }
+
   function removeBinding(): void {
     error = ""; status = "";
     if (!editing) return;
@@ -1581,6 +1628,7 @@
       client.submit([{ kind: "create", coll: "macros", data: doc }]);
       editing = doc._id;
       loadBinding(doc); // a new timeline starts with no binding, never the previous one's
+      loadSpellBinding(doc);
       status = "Timeline submitted; use Run once it appears in the list";
     }
   }
@@ -2520,6 +2568,40 @@
     </li>
   {/each}</ul>
   {#if editing}
+    <!-- D-407: the timeline's spell binding. A prepared spell is a row on an actor, not an item, so
+         it cannot use the item panel below; the cast path fires this one after the cast commits. -->
+    <div class="binding" data-fx-spell-binding={editing}>
+      <h4>Bind to a spell</h4>
+      <div class="controls">
+        <label>Spell <select data-fx-spell-binding-spell bind:value={bindSpell}>
+          <option value="">— spell —</option>
+          {#each boundSpells as effect (effect.id)}
+            <option value={effect.id}>{effect.name}</option>
+          {/each}
+        </select></label>
+        <label>On a failed cast <select data-fx-spell-binding-failure bind:value={bindSpellFailure}>
+          <option value="">play nothing</option>
+          {#each otherTimelines as macro (macro._id)}
+            <option value={macro._id}>{macro.name}</option>
+          {/each}
+        </select></label>
+        <label>Recognition <select data-fx-spell-binding-recognition bind:value={bindSpellRecognition}>
+          {#each FX_RECOGNITION_MODES as mode (mode)}
+            <option value={mode}>{mode}</option>
+          {/each}
+        </select></label>
+        <label><input type="checkbox" data-fx-spell-binding-enabled bind:checked={bindSpellEnabled} />Enabled</label>
+        <button type="button" data-fx-spell-binding-save onclick={saveSpellBinding}>Save spell binding</button>
+        {#if hasSpellBinding}
+          <button type="button" data-fx-spell-binding-remove onclick={removeSpellBinding}>Remove spell binding</button>
+        {/if}
+      </div>
+      <small>Only spells with an authored <strong>tactical effect</strong> can be bound — the catalogue
+        ships {boundSpells.length} ({boundSpells.map((effect) => effect.name).join(", ")}). The cue is
+        requested <strong>after</strong> the cast commits, and the automatic recognition is the cast's
+        own: a made save, spell resistance, a lost spell, a held charge or a missed touch all mean the
+        effect did not land, so the failure branch (or nothing) plays instead.</small>
+    </div>
     <!-- D-311: the timeline's item binding. Authoring only — the item's own cast fires it. -->
     <div class="binding" data-fx-binding={editing}>
       <h4>Bind to an item</h4>

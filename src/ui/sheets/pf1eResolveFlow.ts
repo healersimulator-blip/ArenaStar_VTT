@@ -22,6 +22,10 @@
  * message; nothing is rolled or evaluated client-side.
  */
 import type { Op } from "../../core/ops";
+import { ACTION_CARD_VERSION, actionAsJson, deriveActionState, validateActionCard,
+  type ActionCard, type ActionTarget } from "../../core/action";
+import type { PF1ePoisonActionRequest } from "../../core/messages";
+import { pf1ePoisonDefinitionById } from "../../packages/pf1e/afflictions";
 import type { PermissionUser } from "../../core/ownership";
 import type { ActorDocument, MessageDocument } from "../../core/documents";
 import type { PF1eDerived, PF1eDerivedAttack } from "../../packages/pf1e/actor";
@@ -72,6 +76,11 @@ export interface ResolveFlowClient {
   ): Promise<string>;
   readonly store: { getAll(coll: "messages"): readonly unknown[] };
   submit(ops: Op[]): string;
+  /**
+   * D-405 rider delivery. Optional so existing fakes stay valid; an attack whose line names a
+   * poison profile delivers it through this call after the landed strike commits.
+   */
+  requestPF1ePoisonAction?(request: PF1ePoisonActionRequest): string;
 }
 
 export interface ResolveAttackFlowParams {
@@ -533,6 +542,7 @@ export async function resolveAttackFlow(
   let damageTotal = 0;
   let damageFormula = params.damageFormula;
   let combinedMult = 1;
+  let damageRollMessage: MessageDocument | null = null;
   if (prepared.roll.ok && prepared.roll.hits) {
     combinedMult =
       1 +
@@ -563,6 +573,7 @@ export async function resolveAttackFlow(
       return { ok: false, error: "the damage roll message carries no total" };
     }
     damageTotal = damageRoll.message.roll.total;
+    damageRollMessage = damageRoll.message;
     if (featDamageDelta !== 0) {
       damageTotal += featDamageDelta * combinedMult;
     }
@@ -803,9 +814,106 @@ export async function resolveAttackFlow(
     roll: null,
     flavor: "attack resolution",
   } as unknown as MessageDocument;
+  // D-405: the strike is an action card, so a poison coating on this line can ride the landed row.
+  const actionCard = attackActionCard(cardMessage._id, params, {
+    line, effectiveAttackFormula, result,
+    attackRollId: rollIdOf(attackRoll.message),
+    damageRoll: damageRollMessage,
+    confirmedCrit,
+  });
+  if (actionCard !== null) {
+    (cardMessage.system as Record<string, unknown>)["action"] = actionAsJson(actionCard);
+  }
   // F01 — atomic envelope: card + ledgerOps together so Reroll is inverse+new and Revert is inverse atomically.
   client.submit([{ kind: "create", coll: "messages", data: cardMessage }, ...ops]);
+  // The rider is a second host-validated request in the same session order: the card commits first,
+  // then the exposure attaches to its landed row (or defers to the victim's pending save).
+  if (
+    actionCard !== null &&
+    result.outcome !== "miss" &&
+    typeof line.poisonId === "string" &&
+    params.attackerActor !== undefined &&
+    typeof client.requestPF1ePoisonAction === "function"
+  ) {
+    const definition = pf1ePoisonDefinitionById(line.poisonId);
+    if (definition !== null && definition.delivery.includes("injury")) {
+      client.requestPF1ePoisonAction({
+        action: "expose", targetActorId: params.targetActor._id,
+        poisonId: definition.id, route: "injury", sourceActorId: params.attackerActor._id,
+        rider: { actionId: cardMessage._id, targetKey: "target" },
+      });
+    }
+  }
   return { ok: true, result, hpWriteError };
+}
+
+/** The host roll id a host-evaluated roll message carries in its core flags. */
+function rollIdOf(message: MessageDocument): string | null {
+  const flags = message.flags as { core?: { rollId?: unknown } } | undefined;
+  const rollId = flags?.core?.rollId;
+  return typeof rollId === "string" ? rollId : null;
+}
+
+/**
+ * D-405 — the attack resolution as an action card. Its evidence names the host roll messages the
+ * strike claims, so the host can promote the row from "reported" to verified and a poison rider can
+ * attach to a landed interaction. A card that cannot pass the client-side contract is dropped rather
+ * than risk the whole envelope (the strike's HP writes are worth more than the card).
+ */
+function attackActionCard(
+  id: string,
+  params: ResolveAttackFlowParams,
+  facts: {
+    line: PF1eDerivedAttack;
+    effectiveAttackFormula: string;
+    result: Extract<PF1eResolveResult, { ok: true }>;
+    attackRollId: string | null;
+    damageRoll: MessageDocument | null;
+    confirmedCrit: boolean;
+  },
+): ActionCard | null {
+  const { line, result } = facts;
+  if (facts.attackRollId === null) return null;
+  const target: ActionTarget = {
+    key: "target",
+    name: params.targetName,
+    ...(params.targetActor ? { actorId: params.targetActor._id } : {}),
+    state: "resolved",
+    outcome: result.outcome === "miss" ? "miss" : "hit",
+    check: {
+      kind: "attack", status: "resolved", formula: facts.effectiveAttackFormula,
+      dc: result.defenseAc, total: result.attackTotal, passed: result.outcome !== "miss",
+    },
+    ...(result.damage && result.damage.dealt > 0
+      ? { damage: { dealt: result.damage.dealt, ...(result.damage.drApplied > 0 ? { prevented: result.damage.drApplied } : {}) } }
+      : {}),
+    evidence: { adapter: "pf1e.attack.v1", payload: {
+      attackRollId: facts.attackRollId,
+      ...(facts.damageRoll !== null && typeof facts.damageRoll.roll?.total === "number" &&
+          rollIdOf(facts.damageRoll) !== null
+        ? { damageRollId: rollIdOf(facts.damageRoll) as string,
+            damageFormula: facts.damageRoll.roll.formula, damageRollTotal: facts.damageRoll.roll.total }
+        : {}),
+    } as unknown as import("../../core/documents").Json },
+  };
+  const card: ActionCard = {
+    v: ACTION_CARD_VERSION,
+    id,
+    revision: 0,
+    kind: "attack",
+    label: `${line.name}${facts.confirmedCrit ? " (critical)" : ""}`,
+    state: deriveActionState([target]),
+    source: {
+      name: params.attackerName,
+      ...(params.attackerActor ? { actorId: params.attackerActor._id } : {}),
+    },
+    notes: line.poisonId !== undefined ? [`coating: ${line.poisonId}`] : [],
+    targets: [target],
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  const checked = validateActionCard(card);
+  return checked.ok ? card : null;
 }
 
 /** P09/D-218 — the load-firearm provoke seam for the sheet's Reload button. Loading provokes `yes` (Table 7-2 via `load-firearm`). */

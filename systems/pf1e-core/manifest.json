@@ -3,7 +3,7 @@
  "name": "Pathfinder 1e Core",
  "version": "1.0.0",
  "type": "data",
- "description": "Seed content packs for the Pathfinder 1e integration: the spells the mass-battle engine can resolve (75 entries, 4 automated and 71 declared descriptive-only), the bestiary mirrors the unit profiles compile from, the six-class starter table, the equipment/armor/shield tables the resolver's own weapon and item tables mirror, and the feats that affect calculations. Character sheets and the tactical (hero-level) rules are in-repo UI, not a package script, so this package is data-only — declare code here only when a sandboxed module.js actually exists.",
+ "description": "Seed content packs for the Pathfinder 1e integration: the spells the mass-battle engine can resolve (75 entries, 4 automated and 71 declared descriptive-only), the bestiary mirrors the unit profiles compile from, the six-class starter table, the equipment/armor/shield tables the resolver's own weapon and item tables mirror, and the feats that affect calculations, the Core PF1e poison profiles (poison item documents whose system.pf1e.poison block is the immutable profile the affliction engine mirrors), and the tactical spell effects the hero-level cast flow delivers (spell item documents whose system.tacticalEffect block is the immutable effect the cast flow mirrors — Entangle today). Character sheets and the tactical (hero-level) rules are in-repo UI, not a package script, so this package is data-only — declare code here only when a sandboxed module.js actually exists.",
  "packs": [
   {
    "name": "PF1e Spells",
@@ -29,6 +29,11 @@
    "name": "PF1e Feats",
    "type": "items",
    "file": "packs/feats.json"
+  },
+  {
+   "name": "PF1e Poisons",
+   "type": "items",
+   "file": "packs/poisons.json"
   }
  ]
 }

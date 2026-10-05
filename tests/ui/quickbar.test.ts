@@ -42,6 +42,7 @@ function hero(over: {
   quickbar?: unknown;
   flags?: Record<string, unknown>;
   items?: Record<string, unknown>[];
+  spells?: Record<string, unknown>;
 } = {}): ActorDocument {
   return {
     _id: "a-hero",
@@ -67,6 +68,7 @@ function hero(over: {
         ],
         hp: 20,
         hpMax: 20,
+        ...(over.spells ?? {}),
       },
     },
     items: (over.items ?? [wand()]) as never,
@@ -252,5 +254,67 @@ describe("quickbarSlotNote", () => {
         derivedOf(drained),
       ),
     ).toBe("the bound item has no charges left");
+  });
+});
+
+describe("the hot-bar spell slot (D-407)", () => {
+  /** Int 16 prepared caster with one cached Entangle row (a name the catalogue authors). */
+  const druid = (over: Parameters<typeof hero>[0] = {}) => hero({
+    items: [],
+    spells: { abilities: { int: 16 }, spells: { keyAbility: "int", mode: "prepared",
+      casterLevel: 5, slotsPerDay: { 0: 3, 1: 3 }, prepared: [
+        { name: "Entangle", level: 1 },
+        { name: "Magic Missile", level: 1 },
+      ] } },
+    ...over,
+  });
+
+  test("only the catalogue's spells are offered, with the mechanics the catalogue authors", () => {
+    const actor = druid();
+    const candidates = quickbarCandidates(actor, derivedOf(actor));
+    const spells = candidates.filter((candidate) => candidate.kind === "spell");
+    // Magic Missile is prepared but unauthored, so the bar does not invent its save for it.
+    expect(spells.map((candidate) => candidate.label)).toEqual(["Entangle (level 1)"]);
+    expect(spells[0]?.detail).toContain("REF DC");
+    expect(spells[0]?.detail).toContain("Entangled");
+    const entangle = spells[0];
+    if (entangle === undefined) throw new Error("no spell candidate");
+    const entry = candidateToEntry(3, entangle);
+    expect(entry).toMatchObject({ slot: 3, kind: "spell", label: "Entangle (level 1)",
+      preparedIndex: 0, spellLevel: 1, itemId: null });
+    // The binding survives the round trip through the actor's flags.
+    const written = quickbarWriteOp(actor, [entry]);
+    expect(written.kind).toBe("update");
+    const reread = readQuickbar({ ...actor, flags: {
+      pf1e: { quickbar: [{ ...entry }] } } } as unknown as ActorDocument);
+    expect(reread[0]).toMatchObject({ kind: "spell", preparedIndex: 0, spellLevel: 1 });
+  });
+
+  test("a malformed spell entry reads as unbound, and a missing level never crashes the bar", () => {
+    const actor = hero({ quickbar: [{ slot: 1, kind: "spell", label: "Entangle" }] });
+    // `spellLevel`/`preparedIndex` are optional on read (a hand-edited slot), so this still reads.
+    expect(readQuickbar(actor)[0]).toMatchObject({ kind: "spell", preparedIndex: null, spellLevel: 0 });
+    expect(readQuickbar(hero({ quickbar: [{ slot: 1, kind: "spell", label: "  " }] }))).toEqual([]);
+    expect(readQuickbar(hero({ quickbar: [{ slot: 1, kind: "spell" }] }))).toEqual([]);
+  });
+
+  test("a stale spell binding is named: a re-prepared row, a gone row, an unauthored spell", () => {
+    const actor = druid();
+    const derived = derivedOf(actor);
+    const slot = (over: Record<string, unknown> = {}) => ({ slot: 1, kind: "spell" as const,
+      label: "Entangle (level 1)", attackIndex: 0, itemId: null, preparedIndex: 0, spellLevel: 1, ...over });
+    expect(quickbarSlotNote(actor, slot(), derived)).toBeNull();
+    // The row is gone (a shorter preparation list).
+    const emptied = hero({ spells: { spells: { mode: "prepared", prepared: [] } } });
+    expect(quickbarSlotNote(emptied, slot(), derivedOf(emptied)))
+      .toBe("the bound prepared row is gone — re-prepare and re-bind");
+    // The row now holds a different spell: the slot says so instead of casting the wrong one.
+    const swapped = druid({ spells: { spells: { mode: "prepared", casterLevel: 5,
+      prepared: [{ name: "Magic Missile", level: 1 }] } } });
+    expect(quickbarSlotNote(swapped, slot(), derivedOf(swapped)))
+      .toContain("now holds Magic Missile");
+    // A spell the catalogue stopped authoring is not silently rerolled either.
+    expect(quickbarSlotNote(actor, slot({ label: "Wish (level 9)" }), derived))
+      .toBe("the bound spell has no authored tactical effect");
   });
 });

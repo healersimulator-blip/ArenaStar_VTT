@@ -498,11 +498,21 @@ cure progress, or course state. Exposure is GM-only; Delay Poison and Neutralize
 validated source actor plus an available prepared spell row or spontaneous spell slot. Periodic saves,
 onset and expiration are host-scheduled from replicated world time and the affected creature's turn.
 
+An `expose` may name a **delivery rider** — the committed D-405 action card whose landed target row
+this poison rides on. The host re-reads the card, requires the named row to exist and its outcome to
+be landed (`hit`, `failedSave`, `affected`), checks that the caller controls the delivering actor,
+inherits the delivering action's source actor/item when the request names none, and attaches the
+outcome to that row as an `ActionRider`. When the victim is a player-owned actor the rider's save
+becomes a host pending roll (resolved through the ordinary `roll.pending` commit-reveal path) instead
+of a host-rolled save; when it is not, the host rolls the save immediately. Only landed interactions
+may carry a rider — a miss, a pending row, or a rider on an unrelated card is refused by name.
+
 ```ts
 // PF1ePoisonActionMsg (union):
 { kind: "pf1e.poison"; requestId: string; action: "expose"; targetActorId: DocId;
   poisonId: string; route?: "injury" | "contact" | "ingested" | "inhaled"; doseCount?: number;
-  sourceActorId?: DocId; sourceItemId?: DocId }
+  sourceActorId?: DocId; sourceItemId?: DocId;
+  rider?: { actionId: DocId; targetKey: string } }
 { kind: "pf1e.poison"; requestId: string; action: "delay-start" | "neutralize";
   targetActorId: DocId; sourceActorId: DocId;
   spellUse: { kind: "prepared"; index: number } | { kind: "slot"; level: number };
@@ -523,9 +533,18 @@ receipt in one transaction. Unsupported labels and stale application IDs are rej
 state change.
 
 ```ts
-{ kind: "pf1e.condition"; requestId: string; action: "apply"; actorId: DocId; condition: string }
+{ kind: "pf1e.condition"; requestId: string; action: "apply"; actorId: DocId; condition: string;
+  spell?: { effectId: string; actionId: DocId; targetKey: string } }
 { kind: "pf1e.condition"; requestId: string; action: "remove"; actorId: DocId; applicationId: string }
 ```
+
+D-407 adds the optional `spell` field for a condition a **landed cast** delivers: the client names
+the tactical-effect catalogue id and the action card row, and the host re-reads the card, re-checks
+the row's outcome against the same catalogue row, derives the source (spell id, card id, caster
+actor/item) and attaches a `condition` rider to that card. The field is refused on a `remove`, on an
+unknown effect, on a condition the effect does not apply, on a row that did not land, and on a card
+that is not a `cast` card; a non-GM caller must control the delivering actor. A producer that needs a
+retry to be idempotent passes its own `requestId` (the host digests it into the receipt id).
 
 ### pf1e.condition.result (0x55 · host → requester · ops)
 

@@ -163,6 +163,12 @@ export interface PF1eAttackEntry {
     /** Shots currently loaded (0 ⇒ the §2.9 ammo gate refuses). */
     loaded?: number;
   };
+  /**
+   * D-405 rider delivery: the id of the poison profile coating this weapon line
+   * (`systems/pf1e-core/packs/poisons.json`). The resolve flow delivers it as a rider of a landed
+   * strike; an unknown id is refused at delivery, never silently applied.
+   */
+  poisonId?: string;
   /** The line's weapon carries the broken condition (misfire, sunder, or a pre-broken item). */
   broken?: boolean;
 }
@@ -355,6 +361,8 @@ export interface PF1eActorSystem extends PF1eHealthAuthored {
 export interface PF1eDerivedAttack {
   name: string;
   ranged: boolean;
+  /** D-405 — the poison profile coating this line, when the authored row names one. */
+  poisonId?: string;
   /** Every iterative bonus in order, already including ability, size, and effect modifiers (A.2). */
   attackBonuses: number[];
   /** The full attack bonus of the first iterative, for display and for AoO reads. */
@@ -1413,6 +1421,10 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       }
       ammo = { capacity, loaded };
     }
+    const poisonId = typeof a.poisonId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(a.poisonId)
+      ? a.poisonId : undefined;
+    if (a.poisonId !== undefined && poisonId === undefined)
+      c.issues.push(`attacks[${idx}].poisonId is not a valid profile id — the coating is ignored`);
     return {
       name:
         typeof a.name === "string" && a.name !== ""
@@ -1445,6 +1457,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
       rangedTouch: a.touchAttack === true && ranged,
       ...(misfire !== undefined ? { misfire } : {}),
       ...(ammo !== undefined ? { ammo } : {}),
+      ...(poisonId !== undefined ? { poisonId } : {}),
       explain:
         `${bonus >= 0 ? "+" : ""}${bonus} = ${ranged ? `Dex ${fmt(eff.dex)}` : `Str ${fmt(ability)}${strMult !== 1 ? ` ×${strMult}` : ""}`}` +
         `, size ${fmt(sz.attackAc)}${toHit(ranged) !== 0 ? `, effects ${fmt(toHit(ranged))}` : ""}` +

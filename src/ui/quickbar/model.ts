@@ -7,22 +7,26 @@
  * same idea per **character**: five slots on the actor document (`flags.pf1e.quickbar`), each bound
  * to one of the actions the sheet already computes — an attack line (rolled against the selected
  * target through the sheet's own `resolveAttackFlow`), that line's damage (a public roll card, which
- * the D-261 apply verb can then land on whoever it hit), or a castable item (the wand/scroll/potion
- * path `PF1eItemWindow` uses, charges and all).
+ * the D-261 apply verb can then land on whoever it hit), a castable item (the wand/scroll/potion
+ * path `PF1eItemWindow` uses, charges and all), or — D-407 — a **prepared spell** the tactical
+ * spell-effect catalogue knows, which the same `resolveCastFlow` the sheet's cast form uses resolves.
  *
  * Slots live on the document, not in component state: binding a slot is an ordinary op, so it
- * replicates to the whole table and undoes like anything else. Spells are bound *through the item
- * that holds them* — the corpus authors no spell blocks (D-259), so a prepared-spell slot would
- * have to invent the save type and damage the sheet asks the caster for at cast time.
+ * replicates to the whole table and undoes like anything else. A spell slot was deferred by D-259
+ * precisely because a prepared row carries no save or damage; it is possible now only for the spells
+ * the catalogue authors (the save, the severity and the condition come from the effect, not from a
+ * form the player does not have on a hot bar).
  */
 import type { ActorDocument, Json } from "../../core/documents";
 import type { Op } from "../../core/ops";
 import { pf1eAttackRollGroups } from "../../packages/pf1e/rollData";
 import type { PF1eDerived } from "../../packages/pf1e/actor";
 import { pf1eItemView } from "../sheets/pf1eItemsTab";
+import { pf1eSpellbookView } from "../sheets/pf1eSpellbook";
+import { pf1eSpellEffectByName } from "../../packages/pf1e/spellEffects";
 
-/** The three things a player can put on a slot. */
-export type PF1eQuickbarKind = "attack" | "damage" | "item";
+/** The four things a player can put on a slot. */
+export type PF1eQuickbarKind = "attack" | "damage" | "item" | "spell";
 
 export interface PF1eQuickbarEntry {
   /** 1–5, the key the table presses. */
@@ -34,6 +38,14 @@ export interface PF1eQuickbarEntry {
   attackIndex: number;
   /** `item`: the item document that holds the spell. */
   itemId: string | null;
+  /**
+   * `spell` (D-407): the prepared row to expend, or `null`/absent for a spontaneous caster (the slot
+   * level is spent instead). The spell's identity is the label, resolved through the tactical
+   * catalogue at bind and run time. Optional so entries authored before D-407 stay readable.
+   */
+  preparedIndex?: number | null;
+  /** `spell`: the spell level, for the cast and for the DC. */
+  spellLevel?: number;
 }
 
 /** The five slots, in hotbar order. */
@@ -48,13 +60,21 @@ function readEntry(raw: unknown): PF1eQuickbarEntry | null {
   const slot = raw.slot;
   if (typeof slot !== "number" || !Number.isInteger(slot) || slot < 1 || slot > 5) return null;
   const kind = raw.kind;
-  if (kind !== "attack" && kind !== "damage" && kind !== "item") return null;
+  if (kind !== "attack" && kind !== "damage" && kind !== "item" && kind !== "spell") return null;
   const label = typeof raw.label === "string" && raw.label.trim() !== "" ? raw.label : null;
   if (label === null) return null;
   const attackIndex = typeof raw.attackIndex === "number" && Number.isInteger(raw.attackIndex) && raw.attackIndex >= 0 ? raw.attackIndex : 0;
   const itemId = typeof raw.itemId === "string" && raw.itemId !== "" ? raw.itemId : null;
   if (kind === "item" && itemId === null) return null;
-  return { slot, kind, label, attackIndex, itemId };
+  const preparedIndex = typeof raw.preparedIndex === "number" && Number.isInteger(raw.preparedIndex) &&
+    raw.preparedIndex >= 0 ? raw.preparedIndex : null;
+  const spellLevel = typeof raw.spellLevel === "number" && Number.isInteger(raw.spellLevel) &&
+    raw.spellLevel >= 0 && raw.spellLevel <= 9 ? raw.spellLevel : 0;
+  // The spell fields are written only for a spell binding, so an attack/item slot keeps the shape
+  // older worlds already stored (and the shapes their tests pin).
+  return kind === "spell"
+    ? { slot, kind, label, attackIndex, itemId, preparedIndex, spellLevel }
+    : { slot, kind, label, attackIndex, itemId };
 }
 
 /**
@@ -116,7 +136,7 @@ export function clearQuickbarSlot(
 
 /** One bindable thing, as the picker lists it. */
 export interface PF1eQuickbarCandidate {
-  /** stable id: `attack:<i>` · `damage:<i>` · `item:<itemId>` */
+  /** stable id: `attack:<i>` · `damage:<i>` · `item:<itemId>` · `spell:<preparedIndex>` */
   id: string;
   kind: PF1eQuickbarKind;
   label: string;
@@ -124,6 +144,10 @@ export interface PF1eQuickbarCandidate {
   detail: string;
   attackIndex: number;
   itemId: string | null;
+  /** `spell`: the prepared row to expend (absent for the other kinds). */
+  preparedIndex?: number;
+  /** `spell`: the spell level. */
+  spellLevel?: number;
 }
 
 /**
@@ -158,6 +182,25 @@ export function quickbarCandidates(
       });
     }
   });
+  // D-407: the prepared spells the tactical catalogue knows. A spell the catalogue does not
+  // author is not listed: a hot-bar cast must not invent the save the sheet would ask for.
+  const spellbook = pf1eSpellbookView(actor, derived);
+  spellbook.prepared.forEach((row, index) => {
+    const effect = pf1eSpellEffectByName(row.name);
+    if (effect === null) return;
+    out.push({
+      id: `spell:${String(index)}`,
+      kind: "spell",
+      label: `${effect.name} (level ${String(row.level)})`,
+      detail: `cast at the selected target — ${effect.save === null
+        ? "no save" : `${effect.save.type.toUpperCase()} DC from your spell DC`}`
+        + `, delivers ${effect.conditions.join(", ")}`,
+      attackIndex: 0,
+      itemId: null,
+      preparedIndex: index,
+      spellLevel: row.level,
+    });
+  });
   for (const item of actor.items ?? []) {
     const view = pf1eItemView(actor, item._id);
     const consumable = view?.consumable ?? null;
@@ -169,6 +212,7 @@ export function quickbarCandidates(
       detail: `cast at the selected target — DC ${String(consumable.saveDc)}, ${String(consumable.charges)} charge(s)`,
       attackIndex: 0,
       itemId: item._id,
+      spellLevel: consumable.spellLevel,
     });
   }
   return out;
@@ -185,6 +229,10 @@ export function candidateToEntry(
     label: candidate.label,
     attackIndex: candidate.attackIndex,
     itemId: candidate.itemId,
+    // Only a spell binding carries the spell fields; the other kinds keep their stored shape.
+    ...(candidate.kind === "spell"
+      ? { preparedIndex: candidate.preparedIndex ?? null, spellLevel: candidate.spellLevel ?? 0 }
+      : {}),
   };
 }
 
@@ -197,6 +245,18 @@ export function quickbarSlotNote(
   entry: PF1eQuickbarEntry,
   derived: PF1eDerived,
 ): string | null {
+  if (entry.kind === "spell") {
+    // The name is the binding's identity: a prepared row's *index* shifts as the caster re-prepares,
+    // so the note re-reads the spellbook and checks the row still names this spell.
+    const effect = pf1eSpellEffectByName(entry.label.replace(/ \(level \d+\)$/, ""));
+    if (effect === null) return "the bound spell has no authored tactical effect";
+    if (entry.preparedIndex === null) return null;
+    const row = pf1eSpellbookView(actor, derived).prepared[entry.preparedIndex ?? -1];
+    if (row === undefined) return "the bound prepared row is gone — re-prepare and re-bind";
+    if (pf1eSpellEffectByName(row.name)?.id !== effect.id)
+      return `the bound row now holds ${row.name}, not ${effect.name}`;
+    return null;
+  }
   if (entry.kind === "item") {
     const view = entry.itemId === null ? null : pf1eItemView(actor, entry.itemId);
     if (view === null) return "the bound item is gone";

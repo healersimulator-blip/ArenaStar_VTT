@@ -128,31 +128,12 @@ function readRemoval(raw: unknown): Result<PF1eConditionRemovalPolicy> {
       if (Object.keys(raw).some((key) => !["kind", "event"].includes(key)) || !isText(raw.event, 120))
         return err("event condition removal needs a non-empty event name");
       return okVal({ kind: "event", event: raw.event });
-    case "expiry": {
-      if (Object.keys(raw).some((key) => !["kind", "value", "unit", "boundary", "appliedAt", "expiresAt"].includes(key)))
-        return err("condition expiry has an unknown field");
-      if (typeof raw.value !== "number" || !Number.isSafeInteger(raw.value) || raw.value <= 0)
-        return err("condition expiry value must be a positive whole number");
-      if (!["round", "minute", "hour", "day"].includes(String(raw.unit)))
-        return err("condition expiry unit must be round, minute, hour or day");
-      if (!["round-start", "own-turn-start", "world-clock"].includes(String(raw.boundary)))
-        return err("condition expiry boundary is unsupported");
-      for (const field of ["appliedAt", "expiresAt"] as const) {
-        const value = raw[field];
-        if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
-          return err(`condition expiry ${field} must be a non-negative whole number`);
-      }
-      if ((raw.expiresAt as number) <= (raw.appliedAt as number))
-        return err("condition expiry must end after it starts");
-      return okVal({
-        kind: "expiry",
-        value: raw.value,
-        unit: raw.unit as "round" | "minute" | "hour" | "day",
-        boundary: raw.boundary as "round-start" | "own-turn-start" | "world-clock",
-        appliedAt: raw.appliedAt as number,
-        expiresAt: raw.expiresAt as number,
-      });
-    }
+    case "expiry":
+      // D7: the wire shape is fully specified (`value`/`unit`/`boundary`/`appliedAt`/`expiresAt`),
+      // but no host sweep consumes it yet. Accepting it would store "expires in 1 minute" on an
+      // application that then never expires — a silent lie — so the writer is refused by name until
+      // Phase 4 lands the sweep that reads it.
+      return err("condition removal kind \"expiry\" has no host sweep yet; Phase 4 will accept it");
     default:
       return err(`condition removal kind "${raw.kind}" is unsupported`);
   }
@@ -357,15 +338,19 @@ export function pf1eApplyConditionApplication(input: {
   if (!application.ok) return application;
   if (Object.hasOwn(current.value, id)) return err(`condition application "${id}" already exists`);
 
-  const next = { ...current.value, [id]: application.value };
-  // Pinned is mechanically more severe than Grappled and the two do not stack. Remove only
-  // this target actor's old Grappled application instances; other actors (including the source)
-  // are untouched. Legacy names remain read-compatible and are mechanically suppressed while
-  // Pinned is active.
+  const merged = { ...current.value, [id]: application.value };
+  // Pinned is mechanically more severe than Grappled and the two do not stack. Drop only this
+  // target actor's old Grappled application instances — a rebuild rather than a dynamic `delete`
+  // (the map is the actor's own condition block; other actors, including the source, are
+  // untouched). Legacy names remain read-compatible and are mechanically suppressed while Pinned
+  // is active.
   const removeIds = def.name === "Pinned"
     ? Object.values(current.value).filter((app) => app.condition === "Grappled").map((app) => app.id)
     : [];
-  for (const removeId of removeIds) delete next[removeId];
+  const removed = new Set(removeIds);
+  const next = removed.size > 0
+    ? Object.fromEntries(Object.entries(merged).filter(([key]) => !removed.has(key)))
+    : merged;
 
   const system = isRecord(input.actor.system) ? input.actor.system : {};
   const rawBlock = isRecord(system.pf1e) ? system.pf1e : {};

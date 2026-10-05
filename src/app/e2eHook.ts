@@ -68,6 +68,9 @@ import { cellCensus } from "../core/hexcrawl/cells";
 import { encounterTagsOf } from "../core/hexcrawl/tables";
 import { hexcrawlProfileOf } from "../core/hexcrawl/types";
 import { readWorldClock } from "../packages/pf1e/worldClock";
+import { validatePF1ePoisonTargetState } from "../packages/pf1e/afflictions";
+import { readPF1eConditionApplications } from "../packages/pf1e/conditionApplications";
+import { actionCardOf } from "../core/action";
 import { selectedEncounter } from "../ui/combat/encounters";
 import {
   readCombatantState,
@@ -529,6 +532,11 @@ export interface AppSurface {
       /** D-251: `"gm"` places a token (and actor) only the GM owns — a monster to be hidden by fog. */
       owner?: "all" | "gm";
       /**
+       * D-406: place the actor owned by exactly this user (a player-owned victim for the
+       * deferred-save path); mutually exclusive with `owner`.
+       */
+      ownerUserId?: string;
+      /**
        * §2.1: the token's own senses, authored in **feet** the way a stat block states them
        * (`sightFeet` absent = unlimited, `darkvisionFeet` absent = none), and a carried torch
        * in grid cells (`lightCells`) — the three fields the lighting gate reads. They are
@@ -656,6 +664,40 @@ export interface AppSurface {
     label: string;
     attackIndex: number;
     itemId: string | null;
+  }>;
+  /**
+   * D-406: the newest message whose `system.action` parses as a host-validated action card, with the
+   * message id — the readback a poison-rider spec asserts the rider rows on.
+   */
+  pf1eLastActionCard(): { messageId: string; action: unknown; pending: unknown } | null;
+  /**
+   * D-406: one actor's poison courses as the **host replica** holds them (validated block, seconds
+   * until the next scheduled save and the frequency end already resolved against the world clock).
+   */
+  pf1ePoisonState(actorId: string): {
+    courses: Array<{
+      id: string;
+      profile: string;
+      state: string;
+      doses: number;
+      nextSaveInSeconds: number | null;
+      frequencyEndsInSeconds: number | null;
+      cureProgress: number;
+      cureRequired: number;
+      consecutive: boolean;
+    }>;
+    delayPoison: { active: boolean; endsInSeconds: number | null };
+    queuedExposures: number;
+  } | null;
+  /** D-406: one actor's raw `system.pf1e.abilitiesDamage`, as the host replica holds it. */
+  pf1eAbilityDamage(actorId: string): Record<string, number>;
+  /** D-406: one actor's keyed condition applications, as the host replica holds them. */
+  pf1eConditionApps(actorId: string): Array<{
+    id: string;
+    condition: string;
+    sourceKind: string;
+    removal: string;
+    supported: boolean;
   }>;
   /** D-186: the public chat cards containing `needle`, for the resolution cards. */
   pf1eCardsContaining(needle: string): { count: number; first: string | null };
@@ -2769,8 +2811,9 @@ function appSurface(app: HostApp): AppSurface {
         const actorId = `a-${t.id}`;
         // Typed locals: the size is authored data the model has to read back
         // through `deriveFromDocuments`, not something this call hands it.
-        const ownership: Ownership =
-          t.owner === "gm" ? { default: 0, gm: 3 } : { default: 3 };
+        const ownership: Ownership = t.ownerUserId !== undefined
+          ? { default: 0, [t.ownerUserId]: 3 }
+          : t.owner === "gm" ? { default: 0, gm: 3 } : { default: 3 };
         const actorDoc: ActorDocument = {
           _id: actorId,
           type: "actor",
@@ -3325,6 +3368,63 @@ function appSurface(app: HostApp): AppSurface {
     pf1eQuickbar: (actorId) => {
       const actor = client.store.get("actors", actorId) as ActorDocument | undefined;
       return actor === undefined ? [] : readQuickbar(actor);
+    },
+    pf1eLastActionCard: () => {
+      const messages = client.store.getAll("messages") as MessageDocument[];
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message === undefined) continue;
+        const action = actionCardOf(message);
+        if (action !== null)
+          return { messageId: message._id, action, pending: message.system?.pendingRoll ?? null };
+      }
+      return null;
+    },
+    pf1ePoisonState: (actorId) => {
+      const actor = client.store.get("actors", actorId) as ActorDocument | undefined;
+      if (actor === undefined) return null;
+      const pf1e = (actor.system as { pf1e?: Record<string, unknown> } | undefined)?.pf1e;
+      const raw = pf1e?.afflictions;
+      if (raw === undefined) return null;
+      const validated = validatePF1ePoisonTargetState(raw, actorId);
+      if (!validated.ok) return null;
+      const state = validated.value;
+      const now = readWorldClock(client.store.getAll("settings"));
+      const inSeconds = (at: number | null): number | null =>
+        at === null ? null : Math.max(0, Math.round(at - now));
+      return {
+        courses: Object.values(state.courses).map((course) => ({
+          id: course.id,
+          profile: course.definition.name,
+          state: course.state,
+          doses: course.doseCount,
+          nextSaveInSeconds: inSeconds(course.nextAttemptAt),
+          frequencyEndsInSeconds: inSeconds(course.frequencyEndAt),
+          cureProgress: course.cureProgress,
+          cureRequired: course.definition.cure.successesRequired,
+          consecutive: course.definition.cure.consecutive,
+        })),
+        delayPoison: { active: state.delayPoison.active, endsInSeconds: inSeconds(state.delayPoison.endsAt) },
+        queuedExposures: state.queuedExposures.length,
+      };
+    },
+    pf1eAbilityDamage: (actorId) => {
+      const actor = client.store.get("actors", actorId) as ActorDocument | undefined;
+      const raw = (actor?.system as { pf1e?: { abilitiesDamage?: unknown } } | undefined)?.pf1e
+        ?.abilitiesDamage;
+      if (raw === null || typeof raw !== "object") return {};
+      return { ...(raw as Record<string, number>) };
+    },
+    pf1eConditionApps: (actorId) => {
+      const actor = client.store.get("actors", actorId) as ActorDocument | undefined;
+      if (actor === undefined) return [];
+      return readPF1eConditionApplications(actor.system).applications.map((application) => ({
+        id: application.id,
+        condition: application.condition,
+        sourceKind: application.source?.kind ?? "unknown",
+        removal: application.removal.kind,
+        supported: application.supported,
+      }));
     },
     pf1eCardsContaining: (needle) => {
       const hits = client.store

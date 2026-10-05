@@ -412,6 +412,7 @@ describe("vtt-mcp ↔ agent bridge (MCP plan §8 Phase 0)", () => {
       "token.list",
       "chat.read",
       "sheet.read",
+      "condition.read",
       "bestiary.search",
       "hexcrawl.cells",
       "hex.read",

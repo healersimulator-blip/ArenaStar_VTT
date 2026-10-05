@@ -3,7 +3,9 @@
 
   Five slots bound on the character's own document (`flags.pf1e.quickbar`), each running the sheet's
   own flow: an attack against the chosen target, the attack's damage as a public card (which the
-  apply verb can then land), or a castable item's spell. The GM's world-level macro hotbar is
+  apply verb can then land), a castable item's spell, or — D-407 — a **prepared spell** the tactical
+  spell-effect catalogue authors (a normal spell on the hot bar casts what the catalogue says it
+  casts: the save, the condition and the cue). The GM's world-level macro hotbar is
   untouched — these slots are *character* data, so a player sees the same five actions their
   character has on every replica, and binding one is an ordinary undoable op.
 

@@ -12198,3 +12198,162 @@ pass; full Vitest is **335 files / 4,960 tests passed** with 12 expected skips; 
 single-file artifact is **4,236,579 raw / 1,209,244 gzip bytes**, SHA-256
 **`3300da8724f0fb6b2a34b95301c03b401a008c8a1032408ca68a5eeb42535563`**; and the focused
 pending-roll Chromium suite is **3/3 passed**.
+
+
+## D-406 — Riders: poison and conditions attach to the interaction that delivered them (2026-10-05)
+
+The condition/effect review of PR #38/#39 asked for poison to be a **rider of a landed interaction**
+rather than a parallel flow, for standalone condition actions to stop being message-less, and for the
+rules defects the review found to be fixed. This slice does that on top of D-405's action card.
+
+**Card contract v2.** `ACTION_CARD_VERSION` is 2; version 1 stays readable and rider-free.
+`ActionTarget.riders` carries `{kind, label, state, save?, facts?, evidence?}` for secondary effects
+the recorded interaction delivered — a poison coating on a landed strike today. States are closed
+(`pending|applied|resisted|immune|queued|ended|expired`), a rider has at most 6 facts of 200
+characters, 6 riders per target, and an unresolved save may not carry a pass/fail result. FX projection
+carries rider state/facts/save only for host-verified targets.
+
+**Delivery.** An `expose` request may name `rider: {actionId, targetKey}`. The host re-reads the live
+card, requires the named row and a landed outcome (`hit`, `failedSave`, `affected`), requires the
+caller to control the delivering actor, inherits the delivering actor/item as the poison source when
+the request names none, and attaches the rider in the same host envelope that writes the mechanics.
+A client cannot attach a rider to a miss, a pending row, or an unrelated card. The attack resolution
+flow is the first producer: an attack line with a `poisonId` delivers the injury-route rider after a
+landed strike, and the sheet's attack editor exposes the profile as a select.
+
+**Deferred saves.** When the victim is player-owned, the rider's initial save becomes an ordinary host
+pending roll linked from the rider row (`save.pendingRollId`); the victim rolls it through the same
+commit-reveal path as any pending check, and only then does the host resolve the rider and write the
+course. A GM-owned victim's save is host-rolled immediately. "Player-owned" means an ownership entry
+other than `default`/the host's system user at level ≥ 1 — a GM-owned NPC is never deferred.
+Reverting the exposure restores the pre-exposure rider row, pending roll and mechanics.
+
+**Conditions.** A manual condition application is now a visible, Revertable action rather than a
+message-less write: the typed `pf1e.condition` path commits its actor diff, a chat record naming the
+acting client, the condition and the actor, and a private receipt in one envelope. A generic actor
+update may additionally add/remove **only** the caller's own `source.kind:"manual"` instances (no
+mechanics, no foreign attribution, existing instances immutable, poison state host-owned), and the
+host posts a GM-visible audit line naming the client and every changed condition; every other generic
+condition write is refused by name.
+
+**Rules fixes carried by the same slice.** Deafened takes the printed −4 on opposed Perception checks
+(shared with Blinded and never stacked — one penalty); Shaken/Frightened/Panicked/Sickened carry their
+skill penalty on the general `skills` mod key (ability checks remain caller-owned, as their notes now
+say); the `expiry` removal policy is refused by name until Phase 4 lands the sweep that consumes it;
+poison-owned conditions have one bookkeeping channel (the course's `activeEffectIds`), not an event
+label nothing reads; Panicked stays a deliberate GM-mediated simplification (its deny list refuses
+spellcasting wholesale and a GM adjudicates an escape spell), now stated in the definition's notes
+rather than implicit.
+
+**Poison data path.** The Core PF1e poison profiles are source data in
+`src/packages/pf1e/poisonCatalogue.ts`, validated at load by `validatePF1ePoisonDefinition`, and ship
+as the declared `PF1e Poisons` compendium pack (`systems/pf1e-core/packs/poisons.json`, `type: items`,
+each entry carrying its profile under `system.pf1e.poison`). No source file loads pack data at
+runtime (M18); `tests/packages/pf1eContentPacks.test.ts` pins the mirror to the shipped file,
+profile-for-profile, so editing one without the other fails the build.
+
+**Read surfaces and docs.** `condition.read` (58th agent tool, `world.read`) reports condition
+instances with their source and removal policy plus poison courses with doses, cure wording and the
+seconds until the next scheduled save and the frequency end. `ACTION_SYSTEM.md` documents the rider
+contract, `PROTOCOL.md` documents the `rider` field, and the plan's phases carry explicit
+landed/partial/remaining status rather than a header claim.
+
+**Evidence.** `corepack pnpm exec tsc --noEmit` exit 0 · `pnpm lint` exit 0 (the nine errors the review
+found in `src/host/sync.ts`, `conditionApplications.ts` and `pf1eAffliction.test.ts` are fixed) ·
+`pnpm test` **342 files / 5,018 tests: 5,006 passed, 12 skipped, 0 failed**, including the new
+`condition.read`, pack-mirror, Deafened, skill-penalty, expiry-refusal and rider host tests, and six
+repeated runs of the player-pending rider test (the review-visible flake was a fixed-number-of-flushes
+guess; the test now waits for the resolved state) · `pnpm build` + `size` **4,342,279 raw /
+1,237,964 gzip bytes**, SHA-256 `5e07353c4a10fb6e6d403030f7802ece8db7491b77fce77e8bd75222552bcbdb` ·
+the new executed browser spec `e2e/pf1e_poison.spec.ts` **2/2 passed** (a GM-owned victim: coated
+strike → applied rider → course/ability damage → named GM Revert restores both; a player-owned victim:
+pending rider save → the victim's own player rolls it from the card → mechanics land), and
+`e2e/pf1e_concentration.spec.ts` is green again. Open remainders are named in the plan: Phase 2's
+other producers (trip/overrun, Dirty Trick, grapple, Dying/Stable, first aid) still write the legacy
+path, Phase 3 card-level Revert UX, Phase 4 expiry, and a creature-derived poison fixture now that
+the formula path is exercised only by unit tests.
+
+## D-407 — Authored tactical spell effects deliver conditions on the landed cast (D-407, 2026-10-06)
+
+**Context.** The Entangle scene asked for a spell that applies its condition on a failed save and shows
+an FX cue only then. D-259 shipped no spell blocks because a prepared row carries only a name, a level
+and a Components line: the caster answered the save/severity questions on the cast form, and a hot-bar
+slot would have had to invent them. The D-405/D-406 rider work then made a *delivered* effect a card
+fact — but only for poison, and only from an attack.
+
+**Decision.** A spell's **tactical** half is authored source data, next to its mass-battle half:
+
+- `system.tacticalEffect` on a pack spell entry (`systems/pf1e-core/packs/spells.json`) mirrors one row
+  of the engine catalogue `src/packages/pf1e/spellEffects.ts` (`PF1E_SPELL_EFFECTS`), profile for
+  profile; `tests/packages/pf1eContentPacks.test.ts` pins the mirror, so editing either side alone
+  fails the build. No source file reads pack data at runtime (M18).
+- The row is deliberately minimal: a save (`type` + severity `negates`, or `null` for a save-less
+  spell), the canonical condition names it applies, and a rules citation. Duration, area re-saves and
+  the printed break-free action are **not** modeled and are named as unmodeled in the entry's
+  `automationNote` (they are plan slices S3/S4). `partial` is unauthorable for now for the same
+  reason: a row must not promise a lesser condition outcome the engine cannot implement.
+- `pf1eSpellEffectLanded(effect, outcome)` is the single predicate — `failedSave` for a spell with a
+  save, `affected` for one without — shared by the client producer and the host re-check, so a card and
+  the condition store cannot disagree about what "landed" meant.
+
+**Delivery.** `pf1e.condition` gained one optional field:
+
+```
+{ kind:"pf1e.condition", action:"apply", actorId, condition,
+  spell?: { effectId, actionId, targetKey } }
+```
+
+The client names the catalogue effect and the card row and nothing else. The host re-reads the card,
+requires a `cast` card, the target's own row, `state:"resolved"` and an outcome that lands **according
+to the effect's own save shape**, requires the check's save type to agree when one is present, requires
+the condition to be one the effect applies, and derives the source (`kind:"spell"`, the effect id, the
+card id, plus the caster actor and item) from the card rather than from the request. A non-GM caller
+must control the delivering actor; the GM may deliver any landed cast. The application carries a
+`removal` policy with the reason `delivered by <spell>`, the chat record names the spell
+("… applied Entangled on Orc via Entangle."), and a second delivery from the same card to the same
+target is refused. The condition rides the cast card as a `condition` rider (`ActionRiderKind` grew
+its second member in `src/core/action.ts`), with `pf1e.spellEffect.v1` evidence; the host re-derives
+that evidence on every card write, so a hand-edited rider is demoted to `reported`. Revert is the
+existing receipt: the application and the rider row leave together.
+
+**FX (S5a).** Two bindings now exist for a committed moment. `fxItem` (D-311) binds a timeline to an
+*item*; `fxSpell` binds one to a **spell** by catalogue id (a spell row is not an item document, so the
+item binding could not name it). The host validates a spell binding at authoring time (the catalogue
+must ship the spell, the cues must be timelines the author can read, one timeline per spell) and the
+FX wizard gained a "Bind to a spell" panel beside the item one. `castSpellCueNote` fires the bound cue
+from every committed cast path — the sheet's cast form (which previously played no cue at all), the
+item window and the hot bar — after the flow's write, with `fxCastOutcome`'s recognition: a made save,
+spell resistance, a lost spell, a held charge or a missed touch plays the failure branch (or nothing).
+The rider delivery note and the cue note both ride the flow's own warning line.
+
+**Hot-bar spells (S6, minimal).** The quickbar gained a fourth slot kind, `spell`: it offers the
+prepared rows whose names the catalogue authors (a spell the catalogue does not author is *not*
+offered — the bar does not invent a save), and running it is the same `resolveCastFlow` the sheet
+uses, with the save/severity taken from the effect. A stale binding is named ("the bound prepared row
+is gone", "the bound row now holds X"), never silently rerolled. Area targeting (S3), the round
+cadence/break-free action (S4) and the condition↔FX teardown on removal (S5b) remain deferred.
+
+**Panicked stays GM-mediated** (unchanged, per the 2026-10-05 ruling): the deny list still refuses
+casting while panicked and a GM adjudicates the escape spell.
+
+The cue's skip sentence is the spell's own ("the spell has no cue for that outcome"; the item path
+still says "the item…"), so a made save reads as a decision of the binding, not as an item note on a
+spell (§`fxItemCueNote`'s `subject`).
+
+**Evidence.** `corepack pnpm exec tsc --noEmit` exit 0 · `pnpm lint` exit 0 · `pnpm test` **342 files
+/ 5,046 tests: 5,034 passed, 12 skipped, 0 failed**, including the `pf1eSpellEffectRider` host suite
+(landed/failed-save/unshipped-effect/foreign-condition/foreign-row/foreign-save/retry-idempotency),
+the catalogue validator and pack-mirror pins, the cast-flow producer cases, the core spell-binding
+rule and the hot-bar spell-slot cases · `pnpm build` + `size` **4,360,575 raw / 1,242,368 gzip bytes**,
+SHA-256 `93b840f68f2cd747ee7f8a700cdfbdc1d423482298b8ac72d58f64beb6acccb0` · **e2e executed** (D-222's
+recipe: `@sparticuz/chromium` over `file://`), including the scene's own new spec
+`e2e/pf1e_entangle.spec.ts` **2/2** (a failed save: card row `failedSave`, `condition` rider
+`applied`, condition source `spell`, `bound spell cue "Creeping vines" requested`, the Pixi stage
+shows a cue and drains, and the card's Revert removes condition and rider together; a made save: no
+rider, no condition instance, `the spell has no cue for that outcome`, no FX). The specs around the
+slice are green as a set — `pf1e_poison` 2/2, `pf1e_inventory`, `pf1e_acceptance`, `parity`,
+`quickbar` (its `[data-slot]` selector, one of the review's pre-PR failures, is fixed), `pf1e_spell_slots`
+7/7, `fx_item_binding` — while `pf1e_cast_flow` (3), `pf1e_touch` (3), `pf1e_pending_cast` (1) and
+`pf1e_wizard_combat` (1) fail **identically at the base commit `95ba883`** (re-run in a clean worktree:
+the chat no longer prints the old "casts <spell>" narration line for a version-2 cast card), so they
+are pre-existing and not attributable to this slice.

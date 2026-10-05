@@ -228,6 +228,12 @@ export type PF1ePoisonActionMsg =
       doseCount?: number;
       sourceActorId?: DocId;
       sourceItemId?: DocId;
+      /**
+       * Delivery rider: the committed action card whose landed target this poison rides on. The
+       * host verifies the card, the target row, the landed outcome and the source actor before it
+       * attaches the exposure to that card (a player-owned victim gets a pending save row).
+       */
+      rider?: { actionId: DocId; targetKey: string };
     }
   | {
       kind: "pf1e.poison";
@@ -266,7 +272,13 @@ export type PF1ePoisonActionRequest = PF1ePoisonActionMsg extends infer M
 
 /** Manual condition state is changed only by this host-validated, Revertable action intent. */
 export type PF1eConditionActionMsg =
-  | { kind: "pf1e.condition"; requestId: string; action: "apply"; actorId: DocId; condition: string }
+  | { kind: "pf1e.condition"; requestId: string; action: "apply"; actorId: DocId; condition: string;
+      /**
+       * D-407 — the landed cast this condition rides. The client names the catalogue effect and the
+       * card row and nothing else: the host re-reads the row, re-checks its outcome against the same
+       * effect, derives the source (caster/item/card) and attaches the rider to the card itself.
+       */
+      spell?: { effectId: string; actionId: DocId; targetKey: string } }
   | { kind: "pf1e.condition"; requestId: string; action: "remove"; actorId: DocId; applicationId: string };
 
 export type PF1eConditionActionRequest = PF1eConditionActionMsg extends infer M

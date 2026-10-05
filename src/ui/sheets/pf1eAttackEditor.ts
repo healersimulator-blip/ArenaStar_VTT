@@ -10,6 +10,7 @@ export const ATTACK_TEXT_FIELDS = [
   ["name", "Name"],
   ["damageDice", "Weapon dice (NdM)"],
   ["damageType", "Damage type"],
+  ["poisonId", "Poison profile (delivered on a hit)"],
 ] as const;
 export const ATTACK_NUMBER_FIELDS = [
   ["damageBonus", "Authored damage bonus"],
@@ -106,6 +107,11 @@ function parseAttackValue(
           "Use NdM with 1–100 dice and 2–1000 sides. Put flat bonuses in the damage bonus field.",
         );
       return { value: `${count}d${sides}`, error: null };
+    }
+    if (field === "poisonId" && raw !== "") {
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(raw))
+        return bad("Poison profiles use ids from the installed pf1e-core pack.");
+      return { value: raw, error: null };
     }
     if (field === "firearm.generation" && raw !== "") {
       if (raw !== "early" && raw !== "advanced") return bad("Firearm generation must be early or advanced.");

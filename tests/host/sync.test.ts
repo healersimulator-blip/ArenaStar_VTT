@@ -2280,6 +2280,62 @@ describe("Macros / FX host authority and audience", () => {
     expect(h.hostStore.get("actors", "a-hero")?.items.map((entry) => entry._id)).toEqual(["wand"]);
   });
 
+  test("a bound spell cue names a catalogued spell and one timeline per spell (D-407)", async () => {
+    const h = await setup();
+    const sections = [{ kind: "text", id: "s", text: "vines", startMs: 0, durationMs: 600,
+      at: { kind: "point", x: 120, y: 120 }, color: "#ffffff", scale: 1 }];
+    const look = (id: string, name: string, patch: Record<string, unknown> = {}): MacroDocument =>
+      ({ _id: id, type: "macro", name, command: "", kind: "sequence", ownership: { default: 1 },
+        flags: {}, system: {}, sequence: { version: 1, audience: "scene", persistent: false,
+          sections }, fxSpell: { spellId: "entangle" }, ...patch }) as unknown as MacroDocument;
+    const refused: string[] = [];
+    h.gmBus.on("rejected", (event) => refused.push(event.detail));
+
+    // The spell must be one the shipped tactical-effect catalogue defines — an FX binding may not
+    // invent a spell, exactly as the item binding may not invent an item.
+    h.gm.submit([{ kind: "create", coll: "macros",
+      data: look("fx-wish", "Wish", { fxSpell: { spellId: "wish" } }) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-wish")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("tactical-effect catalogue");
+
+    // The failure cue must be a timeline, not a preset (the D-310 mixed-document rule).
+    h.gm.submit([{ kind: "create", coll: "macros", data: { _id: "spell-look", type: "macro",
+      name: "Vine look", command: "", kind: "fxPreset", ownership: { default: 1 },
+      flags: {}, system: {}, preset: { version: 1, sections } } as unknown as MacroDocument }]);
+    await flushMicrotasks();
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("fx-fizzle", "Fizzle",
+      { fxSpell: { spellId: "entangle", onFailureId: "spell-look" } }) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-fizzle")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("not a timeline");
+
+    // The good one lands; a second timeline on the same spell is refused (one spell, one cue).
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("fx-vines", "Vines") }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-vines")).toBeDefined();
+    h.gm.submit([{ kind: "create", coll: "macros", data: look("fx-vines-two", "More vines") }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-vines-two")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("already bound to that spell");
+
+    // Re-saving the bound timeline is ordinary (disable the cue, add the failure branch).
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "fx-vines" },
+      diff: { fxSpell: { spellId: "entangle", enabled: false, recognition: "failure",
+        onFailureId: "fx-vines" } } }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-vines")?.fxSpell).toMatchObject({ enabled: false });
+
+    // A player may not author a timeline at all, so they cannot bind one either.
+    const { client: player, bus: playerBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const playerRefused: string[] = [];
+    playerBus.on("rejected", (event) => playerRefused.push(`${event.reason}: ${event.detail}`));
+    player.submit([{ kind: "update", ref: { coll: "macros", id: "fx-vines" },
+      diff: { fxSpell: { spellId: "entangle" } } }]);
+    await flushMicrotasks();
+    expect(playerRefused.filter((entry) => entry.startsWith("forbidden"))).toHaveLength(1);
+  });
+
   test("phase binding: one cue per committed moment, and a swing does not answer a charge burn (D-312)", async () => {
     const h = await setup();
     const sections = [{ kind: "text", id: "s", text: "sparks", startMs: 0, durationMs: 600,

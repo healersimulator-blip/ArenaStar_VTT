@@ -90,6 +90,7 @@ import { tileTriggerElevationError, tileTriggerZoneError } from "../core/tileTri
 import { automationSourceTile, regionGeometryError } from "../core/regionGeometry";
 import { pf1eMovePlan } from "../packages/pf1e/movement";
 import {
+  buildPendingRoll,
   isPendingExpired,
   pendingPruneOps,
   pendingRollOfSystem,
@@ -121,6 +122,8 @@ import {
   validatePF1eConditionApplications,
 } from "../packages/pf1e/conditionApplications";
 import { pf1eConditionDef, conditionRefusalFor } from "../packages/pf1e/conditions";
+import { pf1eSpellEffectById, pf1eSpellEffectLanded, type PF1eSpellEffect }
+  from "../packages/pf1e/spellEffects";
 import { combinedTacticalEffects, resolveTacticalEffects } from "../packages/pf1e/effectOps";
 import {
   PF1E_POISON_FIXTURES,
@@ -159,8 +162,9 @@ import type { DocId, PeerId, TxId, UserId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { actionOpRef, actionStaleReason, extendActionReceipt, missingActionMessageDeletes,
   type ActionAudit } from "../core/actionRevert";
-import { actionAsJson, actionCardOf, actionFxContext, normalizeNewActionCard, resolveActionPendingTarget,
-  validateActionCard, type ActionCard, type ActionFxContext, type ActionTarget } from "../core/action";
+import { ACTION_CARD_VERSION, ACTION_RIDER_MAX, actionAsJson, actionCardOf, actionFxContext,
+  deriveActionState, normalizeNewActionCard, resolveActionPendingTarget, validateActionCard,
+  type ActionCard, type ActionFxContext, type ActionRider, type ActionTarget } from "../core/action";
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
@@ -184,7 +188,8 @@ import { validateMacroArgs, type MacroArgs } from "../core/macroArgs";
 import { macroItemReadable } from "../core/macroItems";
 import { buildPlayerMacro, canSaveWorldMacros, ownsPlayerMacro, playerMacroAuthoring, PLAYER_MACRO_LIMITS,
   validatePlayerMacroDraft } from "../core/playerMacros";
-import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError } from "../core/fxBinding";
+import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError, fxSpellBindingError }
+  from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
 import { getByTag, isPrototypeTokenTagRef, isWorldDocumentTagRef, isWorldTagRef, listTaggable, tagDataError, tagEditOps, tagRefKey,
@@ -1382,7 +1387,9 @@ export class HostSync {
       this.reject(session, txId, finalValidation.reason, finalValidation.error); return;
     }
     const userOps = prepared.paths.size ? prepared.ops : normalized.ops;
-    const commitOps = [...userOps, ...normalized.hostOps];
+    // Only the final validation's host ops are committed: the first pass exists to reject before
+    // movement preflight, and appending both would double-post the condition audit line.
+    const commitOps = [...userOps, ...normalized.hostOps, ...finalValidation.hostOps];
     const committed = this.commitOps(commitOps, session.user.id, txId, true, undefined, undefined,
       false, prepared.paths, prepared.triggers, prepared.at);
     if (!committed.ok) this.reject(session, txId, "invariant", committed.error);
@@ -1929,8 +1936,10 @@ export class HostSync {
           typeof marker.claimedBy === "string") return true;
       return actionCardOf(message)?.targets.some((target) => {
         if (target.provenance !== "host" || !isRecord(target.evidence?.payload)) return false;
-        return [target.evidence.payload.damageRollId, target.evidence.payload.srRollId,
-          target.evidence.payload.saveRollId].includes(rollId);
+        const payload = target.evidence.payload;
+        return [payload.damageRollId, payload.srRollId, payload.saveRollId,
+          ...(target.evidence.adapter === "pf1e.attack.v1" ? [payload.attackRollId] : [])]
+          .includes(rollId);
       }) === true;
     });
   }
@@ -2190,11 +2199,134 @@ export class HostSync {
     try {
       if (target.evidence?.adapter === "pf1e.pendingSave.v1")
         return this.pf1ePendingSaveEvidenceVerified(action, target, ops);
+      if (target.evidence?.adapter === "pf1e.attack.v1")
+        return this.pf1eAttackEvidenceVerified(action, target, by, reserved);
+      if ((target.riders?.length ?? 0) > 0) return this.pf1eRiderEvidenceVerified(action, target);
       return this.pf1eSpellTargetEvidenceVerified(action, target, ops, by, reserved);
     } catch {
       // Evidence can upgrade presentation authority only; malformed/unsupported state fails closed.
       return false;
     }
+  }
+
+  /**
+   * Versioned attack adapter: the reported strike is host-verified when every number on the row
+   * re-derives from the attack-roll message the submitting user's own host roll produced. The
+   * reported AC is the one consistency claim the host cannot rederive (it is the table's chosen
+   * defense), so the outcome must at least agree with that AC.
+   */
+  private pf1eAttackEvidenceVerified(
+    action: ActionCard, target: ActionTarget, by: UserId, reserved: ReadonlySet<string>,
+  ): boolean {
+    const evidence = target.evidence;
+    if (evidence?.adapter !== "pf1e.attack.v1" || !isRecord(evidence.payload) ||
+        action.kind !== "attack" || action.targets.length !== 1 || !action.source.actorId ||
+        action.source.itemId !== undefined || !target.actorId || target.state !== "resolved" ||
+        target.healing !== undefined || target.conditions !== undefined ||
+        (target.outcome !== "hit" && target.outcome !== "miss")) return false;
+    const check = target.check;
+    if (!check || check.kind !== "attack" || check.status !== "resolved" ||
+        typeof check.formula !== "string" || !Number.isSafeInteger(check.total) ||
+        !Number.isSafeInteger(check.dc) || (check.dc as number) < 1 ||
+        (target.outcome === "hit") !== ((check.total as number) >= (check.dc as number))) return false;
+    const payload = evidence.payload;
+    if (Object.keys(payload).some((key) =>
+      !["attackRollId", "damageRollId", "damageFormula", "damageRollTotal"].includes(key))) return false;
+    if (typeof payload.attackRollId !== "string") return false;
+    const source = this.store.get("actors", action.source.actorId) as ActorDocument | undefined;
+    const defender = this.store.get("actors", target.actorId) as ActorDocument | undefined;
+    if (!source || !defender) return false;
+    const attackRoll = this.hostRollEvidence(payload.attackRollId, by, reserved);
+    if (!attackRoll?.roll || attackRoll.roll.formula !== check.formula ||
+        attackRoll.roll.total !== check.total) return false;
+    const dealt = Math.max(0, Math.trunc(target.damage?.dealt ?? 0));
+    if (target.outcome === "miss") {
+      if (payload.damageRollId !== undefined || payload.damageFormula !== undefined ||
+          payload.damageRollTotal !== undefined || dealt !== 0) return false;
+    } else if (dealt > 0 || target.damage !== undefined) {
+      // The host cannot rederive mitigation (DR is a defender fact the card does not carry), so it
+      // proves the floor instead: the reported damage came from a host roll of the claimed formula
+      // and never exceeds that roll's own total.
+      if (typeof payload.damageRollId !== "string" || typeof payload.damageFormula !== "string" ||
+          !Number.isSafeInteger(payload.damageRollTotal)) return false;
+      const damageRoll = this.hostRollEvidence(payload.damageRollId, by, reserved);
+      if (!damageRoll?.roll || damageRoll.roll.formula !== payload.damageFormula ||
+          damageRoll.roll.total !== payload.damageRollTotal || dealt > (payload.damageRollTotal as number))
+        return false;
+    } else if (payload.damageRollId !== undefined) return false;
+    return true;
+  }
+
+  /**
+   * Re-derive a rider card's delivery facts from host state. The card never supplies a definition,
+   * DC, dose count or source it cannot prove: every poison rider must name the shipped profile, a
+   * landed interaction source, a recomputable base DC and the exact exposure DC the save is rolled
+   * against, and every condition rider must name a catalogue effect that applies that condition on
+   * the row's own outcome (D-407).
+   */
+  private pf1eRiderEvidenceVerified(action: ActionCard, target: ActionTarget): boolean {
+    if (action.v < 2 || action.kind !== "attack" && action.kind !== "cast" ||
+        !action.source.actorId || !target.actorId) return false;
+    const defenders = this.store.get("actors", target.actorId) as ActorDocument | undefined;
+    if (!defenders) return false;
+    for (const rider of target.riders ?? []) {
+      if (rider.kind === "condition") {
+        // D-407: the condition must be one the catalogue applies, on this row, on its own outcome.
+        const payload = rider.evidence?.adapter === "pf1e.spellEffect.v1" ? rider.evidence.payload : null;
+        if (!isRecord(payload) || Object.keys(payload).some((key) =>
+          !["effectId", "version", "condition", "actionId", "targetKey"].includes(key))) return false;
+        const effect = typeof payload.effectId === "string" && Number.isSafeInteger(payload.version)
+          ? pf1eSpellEffectById(payload.effectId, payload.version as number) : null;
+        if (!effect || typeof payload.condition !== "string" ||
+            !effect.conditions.includes(payload.condition)) return false;
+        if (payload.actionId !== action.id || payload.targetKey !== target.key) return false;
+        if (rider.state !== "applied" || !pf1eSpellEffectLanded(effect, target.outcome)) return false;
+        continue;
+      }
+      if (rider.kind !== "poison") return false;
+      const payload = rider.evidence?.adapter === "pf1e.poison.v1" ? rider.evidence.payload : null;
+      if (!isRecord(payload) || Object.keys(payload).some((key) => ![
+        "definitionId", "version", "baseDC", "route", "doseCount", "exposureId", "newCourseId",
+        "sourceActorId", "sourceItemId"].includes(key))) return false;
+      const { definitionId, version, baseDC, route, doseCount } = payload;
+      if (typeof definitionId !== "string" || !Number.isSafeInteger(version) ||
+          !Number.isSafeInteger(baseDC) || (baseDC as number) < 1 || (baseDC as number) > 99 ||
+          typeof route !== "string" || !Number.isSafeInteger(doseCount) || (doseCount as number) < 1 ||
+          (doseCount as number) > 100_000) return false;
+      const definition = PF1E_POISON_FIXTURES.find((entry) =>
+        entry.id === definitionId && entry.version === version);
+      if (!definition || !definition.delivery.includes(route as PF1ePoisonDefinition["delivery"][number]))
+        return false;
+      const sourceActorId = typeof payload.sourceActorId === "string" ? payload.sourceActorId : undefined;
+      const sourceItemId = typeof payload.sourceItemId === "string" ? payload.sourceItemId : undefined;
+      if (sourceActorId !== action.source.actorId || sourceItemId !== action.source.itemId) return false;
+      let expectedBase = definition.baseDC;
+      if (definition.dcSource === "creature-derived") {
+        const source = sourceActorId
+          ? this.store.get("actors", sourceActorId) as ActorDocument | undefined : undefined;
+        const hitDice = source ? this.poisonBlock(source).hitDice : undefined;
+        const conModifier = source ? deriveFromActorDocument(source).abilityMods.con : NaN;
+        const derived = source && Number.isSafeInteger(hitDice)
+          ? pf1eCreaturePoisonBaseDc(hitDice as number, conModifier) : null;
+        if (derived === null) return false;
+        expectedBase = derived;
+      }
+      if (baseDC !== expectedBase) return false;
+      const identity = pf1ePoisonDefinitionIdentity(definition);
+      const snapshot = this.poisonStateSnapshot(defenders);
+      if (!snapshot.ok || snapshot.state.delayPoison.active || this.poisonImmune(defenders)) return false;
+      const active = Object.values(snapshot.state.courses).find((course) =>
+        course.definitionIdentity === identity && (course.state === "active" || course.state === "onset"));
+      const expectedDc = pf1ePoisonExposureSaveDc(expectedBase, active?.doseCount ?? 0, doseCount as number);
+      if (rider.state === "pending") {
+        if (!rider.save || expectedDc === null || rider.save.dc !== expectedDc ||
+            rider.save.saveType !== definition.saveType || rider.save.total !== null ||
+            rider.save.passed !== undefined || rider.save.pendingRollId === undefined) return false;
+      } else if (rider.save !== undefined && rider.save.saveType !== definition.saveType) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /** Replace client-authored identity labels with names from the referenced host documents. */
@@ -2251,6 +2383,8 @@ export class HostSync {
           return { ok: false, error: "action cards change only through host lifecycle" };
         if (existing?.system.pf1ePoison !== undefined)
           return { ok: false, error: "poison action messages are host-owned and immutable" };
+        if (existing?.system.pf1eCondition !== undefined)
+          return { ok: false, error: "condition action messages are host-owned and immutable" };
         if (existing?.system.rollEvidence !== undefined)
           return { ok: false, error: "host roll evidence is immutable" };
       }
@@ -2268,6 +2402,8 @@ export class HostSync {
             key.startsWith("system.pendingRoll.") || key.startsWith("system.pendingRolls."));
         if (existing?.system.pf1ePoison !== undefined)
           return { ok: false, error: "poison action messages are host-owned and immutable" };
+        if (existing?.system.pf1eCondition !== undefined)
+          return { ok: false, error: "condition action messages are host-owned and immutable" };
         const existingRollEvidence = existing?.system.rollEvidence !== undefined;
         const introducesRollEvidence = isRecord(rootSystem) && Object.hasOwn(rootSystem, "rollEvidence");
         const changesRollEvidence = keys.some((key) => key === "system.rollEvidence" ||
@@ -2286,6 +2422,8 @@ export class HostSync {
         data.author = by;
         if (data.system.rollEvidence !== undefined)
           return { ok: false, error: "host roll evidence is host-owned" };
+        if (data.system.pf1eCondition !== undefined || data.system.pf1ePoison !== undefined)
+          return { ok: false, error: "host action messages are host-owned" };
         if (data.whisper === undefined) data.whisper = [];
         data.content = resolveInlineRolls(data.content, this.rng);
         // A structured action is not arbitrary chat metadata: validate the complete bounded
@@ -2305,7 +2443,10 @@ export class HostSync {
           for (const target of action.targets) {
             if (target.provenance !== "host" || target.state === "pending" ||
                 !isRecord(target.evidence?.payload)) continue;
-            for (const key of ["damageRollId", "srRollId", "saveRollId"] as const) {
+            const claimKeys = target.evidence?.adapter === "pf1e.attack.v1"
+              ? ["attackRollId", "damageRollId"] as const
+              : ["damageRollId", "srRollId", "saveRollId"] as const;
+            for (const key of claimKeys) {
               const rollId = target.evidence.payload[key];
               if (typeof rollId === "string") {
                 const rollMessage = this.claimableHostRollEvidenceMessage(rollId, by);
@@ -2348,20 +2489,35 @@ export class HostSync {
           }
           const pendingRolls = pendingRollsOfSystem(data.system);
           const linkedPending = pendingRolls.filter((pending) => pending.actionId !== undefined);
-          const pendingTargets = action.targets.filter((target) => target.check?.status === "pending");
+          const pendingChecks = action.targets.filter((target) => target.check?.status === "pending");
+          const pendingRiders = action.targets.flatMap((target) => (target.riders ?? [])
+            .filter((rider) => rider.state === "pending" && rider.save?.pendingRollId !== undefined)
+            .map((rider) => ({ target, rider })));
           const pendingIds = new Set(linkedPending.map((pending) => pending.id));
           const pendingTargetKeys = new Set(linkedPending.map((pending) => pending.targetKey));
-          if (linkedPending.length !== pendingRolls.length || linkedPending.length !== pendingTargets.length ||
+          if (linkedPending.length !== pendingRolls.length ||
+              linkedPending.length !== pendingChecks.length + pendingRiders.length ||
               pendingIds.size !== linkedPending.length || pendingTargetKeys.size !== linkedPending.length ||
               linkedPending.some((pending) => {
             const target = action.targets.find((candidate) => candidate.key === pending.targetKey);
-            return pending.v !== 1 || typeof pending.id !== "string" || pending.actionId !== action.id ||
-              pending.resolved !== false || pending.initiator?.actorId !== action.source.actorId ||
-              pending.initiator.tokenId !== (action.source.tokenId ?? null) || !target ||
-              target.check?.pendingRollId !== pending.id || pending.target?.actorId !== target.actorId ||
-              pending.target?.tokenId !== (target.tokenId ?? null) || pending.formula !== target.check.formula ||
-              pending.dc !== target.check.dc || pending.kind !== target.check.kind ||
-              pending.saveType !== target.check.saveType;
+            if (pending.v !== 1 || typeof pending.id !== "string" || pending.actionId !== action.id ||
+                pending.resolved !== false || pending.initiator?.actorId !== action.source.actorId ||
+                pending.initiator.tokenId !== (action.source.tokenId ?? null) || !target ||
+                pending.target?.actorId !== target.actorId ||
+                pending.target?.tokenId !== (target.tokenId ?? null)) return true;
+            if (target.check?.status === "pending" && target.check.pendingRollId === pending.id)
+              return pending.formula !== target.check.formula || pending.dc !== target.check.dc ||
+                pending.kind !== target.check.kind || pending.saveType !== target.check.saveType;
+            const rider = pendingRiders.find((entry) => entry.target === target &&
+              entry.rider.save?.pendingRollId === pending.id)?.rider;
+            if (!rider?.save || pending.kind !== "save" || pending.dc !== rider.save.dc ||
+                pending.saveType !== rider.save.saveType) return true;
+            const defender = target.actorId
+              ? this.store.get("actors", target.actorId) as ActorDocument | undefined : undefined;
+            if (!defender) return true;
+            const bonus = deriveFromActorDocument(defender).saves[rider.save.saveType];
+            const formula = `1d20${bonus === 0 ? "" : bonus > 0 ? `+${bonus}` : String(bonus)}`;
+            return pending.formula !== formula;
           })) return { ok: false, error: "pending roll/action linkage is invalid" };
         }
         if (
@@ -2475,6 +2631,18 @@ export class HostSync {
    * the run itself is an ordinary `fx.request` and goes through `prepareFx` as always.
    */
   private fxBindingError(macro: MacroDocument, user: SessionUser): string | null {
+    // D-407: the spell binding is validated beside the item binding — a catalogue spell and
+    // timelines the author can read, with one cue per spell.
+    const spellBinding = fxSpellBindingError(macro, {
+      catalogue: (spellId) => pf1eSpellEffectById(spellId) !== null,
+      macro: (id) => this.store.get("macros", id) as MacroDocument | undefined,
+      readable: (coll, doc) => can(user, "read", doc as BaseDocument, coll),
+      boundTimelines: (spellId) => (this.store.getAll("macros") as readonly MacroDocument[])
+        .filter((candidate) => candidate.kind === "sequence" &&
+          candidate.fxSpell?.spellId === spellId)
+        .map((candidate) => ({ id: candidate._id })),
+    });
+    if (spellBinding !== null) return spellBinding;
     return fxItemBindingError(macro, {
       actor: (id) => this.store.get("actors", id) as ActorDocument | undefined,
       macro: (id) => this.store.get("macros", id) as MacroDocument | undefined,
@@ -2501,8 +2669,9 @@ export class HostSync {
     user: SessionUser,
     ops: Op[],
   ):
-    | { ok: true }
+    | { ok: true; hostOps: Op[] }
     | { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
+    const hostOps: Op[] = [];
     // Scene-copy envelopes create the scene and its independently stored automation graphs
     // together. Preflight all automation refs against those staged scenes so neither the copy nor
     // its graphs can partially publish when their mutually bound documents are new to the store.
@@ -2739,8 +2908,12 @@ export class HostSync {
                 return { ok: false, reason: "invalid_schema", error: beforeApplications.error };
               if (!afterApplications.ok)
                 return { ok: false, reason: "invalid_schema", error: afterApplications.error };
-              if (JSON.stringify(beforeApplications.value) !== JSON.stringify(afterApplications.value))
-                return { ok: false, reason: "forbidden", error: "condition applications must use the host-validated pf1e.condition action path" };
+              // A caller may tag its own manual condition and may remove its own manual tag
+              // through a generic actor update. Everything else (mechanics from a source, a
+              // foreign attribution, editing an existing instance) stays on the keyed
+              // `pf1e.condition` action path. Because this path bypasses the action receipt, the
+              // host announces each such change to the log so the GM always sees who added what.
+              const conditionChanges: string[] = [];
               for (const [applicationId, application] of Object.entries(afterApplications.value)) {
                 const previous = beforeApplications.value[applicationId];
                 if (previous !== undefined) {
@@ -2754,7 +2927,18 @@ export class HostSync {
                     application.source.relationshipId !== undefined || application.source.groupId !== undefined ||
                     application.removal.kind !== "manual")
                   return { ok: false, reason: "forbidden", error: "new conditions must use a host-validated manual application source" };
+                conditionChanges.push(`added ${application.condition} [${applicationId}]`);
               }
+              for (const [applicationId, application] of Object.entries(beforeApplications.value)) {
+                if (afterApplications.value[applicationId] !== undefined) continue;
+                if (application.source.kind !== "manual" || application.source.id !== user.id ||
+                    application.source.actionId !== undefined)
+                  return { ok: false, reason: "forbidden", error: "only your own manual condition tag can be removed this way; use the pf1e.condition action" };
+                conditionChanges.push(`removed ${application.condition} [${applicationId}]`);
+              }
+              if (conditionChanges.length > 0)
+                hostOps.push(this.conditionAuditMessageOp(user.id, (doc as ActorDocument)._id,
+                  (doc as ActorDocument).name, conditionChanges));
               const beforeAfflictionsRaw = beforePf1e.afflictions;
               const afterAfflictionsRaw = afterPf1e.afflictions;
               const beforeAfflictions = beforeAfflictionsRaw === undefined
@@ -2882,7 +3066,56 @@ export class HostSync {
         }
       }
     }
-    return { ok: true };
+    return { ok: true, hostOps };
+  }
+
+  /**
+   * A generic actor update may tag/untag the caller's own manual condition (see the policy in
+   * `validateOps`). That path has no action receipt, so the host posts this log line naming the
+   * acting user, the actor and every condition identity it changed — the GM alert the manual
+   * path promises. The message is host-authored and immutable like other host-owned messages.
+   */
+  private conditionAuditMessageOp(by: UserId, actorId: DocId, actorName: string,
+    changes: readonly string[]): Op {
+    const author = this.store.get("users", by) as UserDocument | undefined;
+    const message: MessageDocument = {
+      _id: randomId(), type: "message", name: "Condition (manual)",
+      ownership: { default: OWNERSHIP_LEVELS.LIMITED },
+      flags: { core: { conditionAuditBy: by } },
+      system: { pf1eCondition: { kind: "audit", actorId, by, changes: [...changes] } as unknown as Json },
+      author: by,
+      content: `${author?.name ?? by} changed conditions on ${actorName}: ${changes.join("; ")}.`,
+      whisper: [], roll: null, flavor: "",
+    };
+    return { kind: "create", coll: "messages", data: message };
+  }
+
+  /**
+   * The visible record of one keyed condition action. The receipt remains the inverse authority;
+   * this message is the chat/log surface the GM reads (and the identity a future action card
+   * would project). It is committed in the same envelope as the state ops.
+   */
+  private conditionMessageOp(input: {
+    receiptId: string; action: "apply" | "remove"; actor: ActorDocument; condition: string;
+    applicationId: string; by: UserId;
+    /** D-407: the spell whose landed cast delivered the condition, when one did. */
+    via?: string;
+  }): Op {
+    const message: MessageDocument = {
+      _id: randomId(), type: "message",
+      name: `Condition: ${input.action} ${input.condition}`,
+      ownership: { default: OWNERSHIP_LEVELS.LIMITED },
+      flags: { core: { conditionReceiptId: input.receiptId } },
+      system: { pf1eCondition: { kind: "action", receiptId: input.receiptId, action: input.action,
+        actorId: input.actor._id, condition: input.condition, applicationId: input.applicationId,
+        by: input.by } as unknown as Json },
+      author: input.by,
+      content: `${(this.store.get("users", input.by) as UserDocument | undefined)?.name ?? input.by} ` +
+        `${input.action === "apply" ? "applied" : "removed"} ${input.condition} on ${input.actor.name}` +
+        `${input.via === undefined ? "" : ` via ${input.via}`}.`,
+      whisper: [], roll: null, flavor: "",
+    };
+    return { kind: "create", coll: "messages", data: message };
   }
 
   private embeddedCollName(ref: DocRef): CollectionName {
@@ -3491,9 +3724,11 @@ export class HostSync {
           ...(lastDoseSource?.actorId ? { actorId: lastDoseSource.actorId } : {}),
           ...(lastDoseSource?.itemId ? { itemId: lastDoseSource.itemId } : {}),
         },
-        removal: effect.removeOnCure && activeCourse
-          ? { kind: "event", event: "poison-cured" }
-          : { kind: "permanent" },
+        // D8: one channel owns "this effect ends with the course" — the course's
+        // `activeEffectIds`, which the cure/expiry transitions read and return as
+        // `effectIdsToRemove`. The application records how it is removed (an explicit host
+        // action), not a duplicate claim about a poison event no consumer reads.
+        removal: effect.removeOnCure && activeCourse ? { kind: "manual" } : { kind: "permanent" },
       });
       if (!applied.ok) return { ok: false, error: `Poison condition effect: ${applied.error}` };
       ops.push(...applied.value);
@@ -3558,6 +3793,305 @@ export class HostSync {
     const bonus = derived.saves[saveType];
     const total = d20 + bonus;
     return { d20, bonus, total, passed: total >= dc };
+  }
+
+  /** True when a player-owned victim should roll the exposure save themselves. */
+  private poisonSaveDeferred(target: ActorDocument): boolean {
+    try {
+      const worldSettings = worldSettingsFrom(this.store.getAll("settings"));
+      // The host's own (GM/system) ownership is not "a player": an NPC the GM owns has its save
+      // rolled by the host, never deferred back to the GM as if it were a player's roll.
+      const playerOwned = Object.entries(target.ownership ?? {}).some(([id, level]) =>
+        id !== "default" && id !== this.systemUserId && typeof level === "number" && level >= 1);
+      return shouldDeferToPlayer({ kind: "save", targetIsPlayerOwned: playerOwned,
+        worldSettings, isStrategic: false, isRiderSave: true });
+    } catch {
+      return false;
+    }
+  }
+
+  /** Validate a rider reference and return the landed card row it names. */
+  private poisonRiderContext(raw: { actionId: string; targetKey: string }, targetActorId: DocId):
+    { ok: true; value: { messageId: DocId; targetKey: string; card: ActionCard; targetIndex: number } } |
+    { ok: false; error: string } {
+    if (!isRecord(raw) || Object.keys(raw).some((key) => key !== "actionId" && key !== "targetKey") ||
+        typeof raw.actionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(raw.actionId) ||
+        typeof raw.targetKey !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(raw.targetKey))
+      return { ok: false, error: "Poison rider reference is malformed" };
+    const message = this.store.get("messages", raw.actionId) as MessageDocument | undefined;
+    const card = actionCardOf(message);
+    if (!message || !card) return { ok: false, error: "Poison rider action card does not exist" };
+    const targetIndex = card.targets.findIndex((target) => target.key === raw.targetKey);
+    const row = card.targets[targetIndex];
+    if (!row || row.actorId !== targetActorId)
+      return { ok: false, error: "Poison rider target does not match the exposure target" };
+    if (row.state !== "resolved" || !["hit", "failedSave", "affected"].includes(row.outcome))
+      return { ok: false, error: `Poison can ride only a landed interaction; that target is ${row.outcome}` };
+    if ((row.riders?.length ?? 0) >= ACTION_RIDER_MAX)
+      return { ok: false, error: "That action target already carries the maximum number of riders" };
+    return { ok: true, value: { messageId: message._id, targetKey: raw.targetKey, card, targetIndex } };
+  }
+
+  /**
+   * D-407 — validate a spell-effect rider reference and return the landed cast row it names plus
+   * the catalogue effect the caller claims. The card is the delivery record: the row must be the
+   * target's own, resolved and landed **according to the effect's own save shape** (a spell with a
+   * save lands only on `failedSave`, one without a save only on `affected`), the check's save type
+   * must agree with the catalogue, and a caller who is not the GM must control the delivering actor
+   * (checked by the caller alongside this, exactly like the poison rider).
+   */
+  private spellEffectRiderContext(raw: unknown, targetActorId: DocId, condition: string):
+    { ok: true; value: { messageId: DocId; targetKey: string; card: ActionCard; targetIndex: number;
+      effect: PF1eSpellEffect } } | { ok: false; error: string } {
+    if (!isRecord(raw) ||
+        Object.keys(raw).some((key) => !["effectId", "actionId", "targetKey"].includes(key)) ||
+        typeof raw.effectId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(raw.effectId) ||
+        typeof raw.actionId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(raw.actionId) ||
+        typeof raw.targetKey !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(raw.targetKey))
+      return { ok: false, error: "Spell effect rider reference is malformed" };
+    const effect = pf1eSpellEffectById(raw.effectId);
+    if (!effect) return { ok: false, error: "Spell effect is not in the host-validated catalogue" };
+    if (!effect.conditions.includes(condition))
+      return { ok: false, error: `${effect.name} does not apply ${condition}` };
+    const message = this.store.get("messages", raw.actionId) as MessageDocument | undefined;
+    const card = actionCardOf(message);
+    if (!message || !card) return { ok: false, error: "Spell effect action card does not exist" };
+    if (card.kind !== "cast") return { ok: false, error: "A spell effect rides a cast card only" };
+    const targetIndex = card.targets.findIndex((target) => target.key === raw.targetKey);
+    const row = card.targets[targetIndex];
+    if (!row || row.actorId !== targetActorId)
+      return { ok: false, error: "Spell effect row is not this target's" };
+    if (row.state !== "resolved" || !pf1eSpellEffectLanded(effect, row.outcome))
+      return { ok: false, error: `${effect.name} delivers only on a landed row; that target is ${row.outcome}` };
+    if (effect.save !== null && row.check?.saveType !== undefined && row.check.saveType !== effect.save.type)
+      return { ok: false, error: `${effect.name} was cast against a different save` };
+    if ((row.riders?.length ?? 0) >= ACTION_RIDER_MAX)
+      return { ok: false, error: "That action target already carries the maximum number of riders" };
+    return { ok: true, value: { messageId: message._id, targetKey: raw.targetKey, card, targetIndex, effect } };
+  }
+
+  /** Bounded display facts for a delivered condition; never machine-consumed. */
+  private conditionRiderFacts(effect: PF1eSpellEffect, condition: string, dc: number | null): string[] {
+    const facts = [`spell: ${effect.name}`];
+    if (effect.save !== null)
+      facts.push(`${effect.save.type.toUpperCase()} ${effect.save.severity}${dc === null ? "" : ` (DC ${dc})`}`);
+    facts.push(`condition: ${condition}`);
+    return facts;
+  }
+
+  /** Bounded display facts for the card; numbers are transcribed from the validated profile. */
+  private poisonRiderFacts(definition: PF1ePoisonDefinition, dc: number | null): string[] {
+    const facts: string[] = [];
+    if (dc !== null) facts.push(`${definition.saveType.toUpperCase()} DC ${dc}`);
+    facts.push(`delivery: ${definition.delivery.join("/")}`);
+    if (definition.frequency) {
+      const { interval, intervals } = definition.frequency;
+      facts.push(`${interval.value}/${interval.unit}${interval.value === 1 ? "" : "s"} for ${intervals ?? "unlimited"} interval${intervals === 1 ? "" : "s"}`);
+    } else {
+      facts.push("single exposure");
+    }
+    const effects = [...definition.effects.immediate, ...definition.effects.periodic].map((effect) =>
+      effect.kind === "damage"
+        ? `${effect.formula} ${effect.target === "hitPoints" ? "hp" : `${effect.ability?.toUpperCase() ?? "?"} ${effect.target === "abilityDamage" ? "damage" : "drain"}`}`
+        : `condition: ${effect.condition}`);
+    if (effects.length) facts.push([...new Set(effects)].join(", "));
+    facts.push(`cure: ${definition.cure.successesRequired} save${definition.cure.successesRequired === 1 ? "" : "s"}${definition.cure.consecutive ? " (consecutive)" : ""}`);
+    return facts.slice(0, 6);
+  }
+
+  private poisonRiderEvidencePayload(input: {
+    definition: PF1ePoisonDefinition; baseDC: number; route: string; doseCount: number;
+    exposureId: string; newCourseId: string; sourceActorId?: string; sourceItemId?: string;
+  }): Json {
+    return {
+      definitionId: input.definition.id,
+      version: input.definition.version,
+      baseDC: input.baseDC,
+      route: input.route,
+      doseCount: input.doseCount,
+      exposureId: input.exposureId,
+      newCourseId: input.newCourseId,
+      ...(input.sourceActorId !== undefined ? { sourceActorId: input.sourceActorId } : {}),
+      ...(input.sourceItemId !== undefined ? { sourceItemId: input.sourceItemId } : {}),
+    };
+  }
+
+  /** Append one rider to the delivering card and return the updated card plus its update op. */
+  private actionRiderAttachOps(input: {
+    context: { messageId: DocId; targetKey: string; card: ActionCard; targetIndex: number };
+    rider: ActionRider;
+  }): { ok: true; ops: Op[]; card: ActionCard } | { ok: false; error: string } {
+    const row = input.context.card.targets[input.context.targetIndex];
+    if (!row) return { ok: false, error: "Action rider target row disappeared" };
+    const riders = [...(row.riders ?? []), input.rider];
+    const targets = input.context.card.targets.map((target, index) =>
+      index === input.context.targetIndex ? { ...target, riders } : target);
+    const next: ActionCard = { ...input.context.card, v: ACTION_CARD_VERSION,
+      revision: input.context.card.revision + 1, state: deriveActionState(targets), targets,
+      updatedAt: Math.max(input.context.card.updatedAt, this.now()) };
+    const checked = validateActionCard(next);
+    if (!checked.ok) return { ok: false, error: `Action rider card is invalid: ${checked.error}` };
+    return { ok: true, card: next, ops: [{ kind: "update",
+      ref: { coll: "messages", id: input.context.messageId },
+      diff: { "system.action": actionAsJson(next) } }] };
+  }
+
+  /**
+   * Deferred delivery: the dose is offered but the initial save is the victim's own pending roll.
+   * No course exists until that roll resolves; the card revision, the pending save and the log
+   * line commit in one host receipt so GM Revert removes the offer cleanly.
+   */
+  private commitPF1ePoisonRiderPending(input: {
+    context: { messageId: DocId; targetKey: string; card: ActionCard; targetIndex: number };
+    target: ActorDocument; definition: PF1ePoisonDefinition; baseDC: number; route: string;
+    doseCount: number; dc: number; exposureId: string; newCourseId: string;
+    sourceActorId?: string; sourceItemId?: string; receiptId: string; requestId: string; by: UserId;
+  }): { ok: true; seq: number } | { ok: false; error: string } {
+    const sourceActorId = input.context.card.source.actorId;
+    if (sourceActorId === undefined)
+      return { ok: false, error: "The delivering action has no source actor to link a pending save to" };
+    const row = input.context.card.targets[input.context.targetIndex];
+    const pendingId = randomId();
+    const rider: ActionRider = {
+      kind: "poison", label: input.definition.name, state: "pending",
+      facts: this.poisonRiderFacts(input.definition, input.dc),
+      save: { saveType: input.definition.saveType, dc: input.dc, total: null, pendingRollId: pendingId },
+      evidence: { adapter: "pf1e.poison.v1", payload: this.poisonRiderEvidencePayload(input) },
+    };
+    const attached = this.actionRiderAttachOps({ context: input.context, rider });
+    if (!attached.ok) return attached;
+    const saveBonus = deriveFromActorDocument(input.target).saves[input.definition.saveType];
+    const pending = buildPendingRoll({
+      id: pendingId, actionId: input.context.messageId, targetKey: input.context.targetKey,
+      kind: "save", saveType: input.definition.saveType,
+      initiator: { actorId: sourceActorId, tokenId: input.context.card.source.tokenId ?? null,
+        name: input.context.card.source.name,
+        actionLabel: `Poison: ${input.definition.name} (DC ${input.dc})` },
+      target: { actorId: input.target._id, tokenId: row?.tokenId ?? null, name: input.target.name },
+      formula: `1d20${saveBonus === 0 ? "" : saveBonus > 0 ? `+${saveBonus}` : String(saveBonus)}`,
+      dc: input.dc,
+      modifiers: [{ label: input.definition.saveType.toUpperCase(), value: saveBonus, reason: "poison save" }],
+      turnNumber: this.currentTurnNumber(), rollMode: "roll",
+    });
+    const validated = validatePendingRoll(pending);
+    if (!validated.ok) return { ok: false, error: `Poison pending save is invalid: ${validated.error}` };
+    const message = this.store.get("messages", input.context.messageId) as MessageDocument;
+    const existing = pendingRollsOfSystem(message.system);
+    const nextPendings = [...existing, pending];
+    const diff: Record<string, Json> = { "system.action": actionAsJson(attached.card) };
+    if (nextPendings.length === 1) {
+      diff["system.pendingRoll"] = pending as unknown as Json;
+    } else {
+      diff["system.pendingRolls"] = nextPendings as unknown as Json;
+      if (message.system.pendingRoll !== undefined) diff["system.-=pendingRoll"] = null;
+    }
+    return this.commitPF1ePoisonEvent({
+      receiptId: input.receiptId, label: `Poison exposure: ${input.definition.name}`,
+      actorId: input.by, requestId: input.requestId, action: "expose",
+      ops: [{ kind: "update", ref: { coll: "messages", id: input.context.messageId }, diff }],
+      target: input.target,
+      summary: `${input.target.name} is exposed to ${input.definition.name}; the DC ${input.dc} ${input.definition.saveType.toUpperCase()} save is pending on the delivering action.`,
+      poisonId: input.definition.id,
+      pathChecks: [{ ref: { coll: "messages", id: input.context.messageId },
+        paths: ["system.action", "system.pendingRoll", "system.pendingRolls"] }],
+    });
+  }
+
+  /**
+   * The deferred exposure save resolved. Re-derive the exposure from live host state and refuse
+   * a stale offer (changed DC, new immunity, Delay Poison) instead of applying mechanics the
+   * player did not roll against. Everything commits in the caller's envelope and receipt.
+   */
+  private poisonRiderContinuation(input: {
+    target: ActorDocument; rider: ActionRider; receiptId: string; savePassed: boolean;
+  }): { ok: true; ops: Op[]; summary: string; courseId?: string; poisonId: string } | { ok: false; error: string } {
+    const payload = input.rider.evidence?.payload;
+    if (!isRecord(payload)) return { ok: false, error: "Poison rider evidence is missing" };
+    const { definitionId, version, baseDC, route, doseCount, exposureId, newCourseId } = payload;
+    if (typeof definitionId !== "string" || !Number.isSafeInteger(version) ||
+        !Number.isSafeInteger(baseDC) || (baseDC as number) < 1 || (baseDC as number) > 99 ||
+        typeof route !== "string" || !Number.isSafeInteger(doseCount) || (doseCount as number) < 1 ||
+        (doseCount as number) > 100_000 || typeof exposureId !== "string" ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(exposureId) || typeof newCourseId !== "string" ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(newCourseId))
+      return { ok: false, error: "Poison rider evidence is malformed" };
+    const definition = PF1E_POISON_FIXTURES.find((entry) =>
+      entry.id === definitionId && entry.version === version);
+    if (!definition) return { ok: false, error: "Poison profile is no longer in the host-validated pack" };
+    if (!definition.delivery.includes(route as PF1ePoisonDefinition["delivery"][number]))
+      return { ok: false, error: "Poison rider delivery route is not supported by the profile" };
+    const sourceActorId = typeof payload.sourceActorId === "string" ? payload.sourceActorId : undefined;
+    const sourceItemId = typeof payload.sourceItemId === "string" ? payload.sourceItemId : undefined;
+    if (definition.dcSource === "creature-derived") {
+      const source = sourceActorId
+        ? this.store.get("actors", sourceActorId) as ActorDocument | undefined : undefined;
+      const hitDice = source ? this.poisonBlock(source).hitDice : undefined;
+      const conModifier = source ? deriveFromActorDocument(source).abilityMods.con : NaN;
+      const derived = source && Number.isSafeInteger(hitDice)
+        ? pf1eCreaturePoisonBaseDc(hitDice as number, conModifier) : null;
+      if (derived === null || derived !== baseDC)
+        return { ok: false, error: "Poison source creature changed since the save was offered" };
+    } else if (definition.baseDC !== baseDC) {
+      return { ok: false, error: "Poison profile DC changed since the save was offered" };
+    }
+
+    const snapshot = this.poisonStateSnapshot(input.target);
+    if (!snapshot.ok) return { ok: false, error: snapshot.error };
+    const state = snapshot.state;
+    if (state.delayPoison.active)
+      return { ok: false, error: "Delay Poison is active now; re-deliver the exposure so it queues" };
+    if (this.poisonImmune(input.target))
+      return { ok: false, error: "The target is immune to poison now" };
+    const identity = pf1ePoisonDefinitionIdentity(definition);
+    const active = Object.values(state.courses).find((course) =>
+      course.definitionIdentity === identity && (course.state === "active" || course.state === "onset"));
+    const expectedDc = pf1ePoisonExposureSaveDc(baseDC as number, active?.doseCount ?? 0, doseCount as number);
+    if (expectedDc === null || expectedDc !== input.rider.save?.dc)
+      return { ok: false, error: "Poison exposure state changed since the save was offered; ask the GM to re-deliver it" };
+
+    const now = this.now();
+    const source = {
+      kind: sourceItemId ? "item" as const : sourceActorId ? "attack" as const : "environment" as const,
+      actionId: input.receiptId, sourceId: definition.id,
+      ...(sourceActorId ? { actorId: sourceActorId } : {}),
+      ...(sourceItemId ? { itemId: sourceItemId } : {}),
+    };
+    const exposure = { targetId: input.target._id, definition, newCourseId, exposureId,
+      route: route as PF1ePoisonDefinition["delivery"][number], doseCount: doseCount as number,
+      exposedAt: now, source, receiptId: input.receiptId };
+    const applied = applyPF1ePoisonExposureToTarget({ state, exposure,
+      savePassed: input.savePassed, resolvedAt: now });
+    if (!applied.ok) return { ok: false, error: applied.error };
+    let next = applied.value.state;
+    const ops: Op[] = [];
+    const resolution = applied.value.resolution;
+    const save = input.rider.save;
+    let courseId: string | undefined;
+    let summary: string;
+    if (resolution?.course && resolution.effects.length) {
+      const planned = this.poisonEffectPlan(input.target, resolution.course, resolution.effects,
+        "immediate", input.receiptId);
+      if (!planned.ok) return { ok: false, error: planned.error };
+      next = { ...next, courses: { ...next.courses, [planned.course.id]: planned.course } };
+      ops.push(...planned.ops);
+      courseId = planned.course.id;
+      summary = `${input.target.name} ${input.savePassed ? "resists" : "contracts"} ${definition.name}` +
+        `${save?.total !== null && save?.total !== undefined ? ` (${save.total} vs DC ${save.dc ?? "?"})` : ""}.` +
+        (planned.summary.length ? ` Effect: ${planned.summary.join(", ")}.` : "");
+    } else {
+      summary = `${input.target.name} resists ${definition.name}` +
+        `${save?.total !== null && save?.total !== undefined ? ` (${save.total} vs DC ${save.dc ?? "?"})` : ""}; no dose or effect was added.`;
+    }
+    ops.push(...this.poisonStateOps(input.target, state, next, snapshot.existed));
+    const bonus = deriveFromActorDocument(input.target).saves[definition.saveType];
+    ops.push(this.poisonMessageOp({
+      receiptId: input.receiptId, action: "exposure-save", target: input.target, summary,
+      ...(courseId ? { courseId } : {}), poisonId: definition.id,
+      ...(save?.total !== null && save?.total !== undefined
+        ? { roll: { d20: save.total - bonus, bonus, total: save.total,
+            dc: save.dc ?? 0, passed: input.savePassed } } : {}),
+    }));
+    return { ok: true, ops, summary, ...(courseId ? { courseId } : {}), poisonId: definition.id };
   }
 
   private poisonMessageOp(input: {
@@ -3683,6 +4217,7 @@ export class HostSync {
       return;
     }
     const user = session.user;
+    const isGM = user.role === "GM" || user.role === "ASSISTANT";
     if (!session.intentBucket.tryRemove()) {
       this.reject(session, requestId, "rate_limited", "condition action rate exceeded");
       return;
@@ -3696,7 +4231,7 @@ export class HostSync {
     }
     const common = ["kind", "requestId", "action", "actorId"];
     const expected = request.action === "apply"
-      ? [...common, "condition"] : [...common, "applicationId"];
+      ? [...common, "condition", "spell"] : [...common, "applicationId"];
     if (request.kind !== "pf1e.condition" ||
         Object.keys(request as unknown as Record<string, unknown>).some((key) => !expected.includes(key))) {
       this.reject(session, requestId, "invalid_schema", "PF1e condition action contains unknown fields");
@@ -3747,6 +4282,9 @@ export class HostSync {
     let applicationId: string;
     let condition: string;
     let ops: Op[];
+    /** D-407: the landed cast a spell-delivered condition rides, when there is one. */
+    let spellRider: { context: { messageId: DocId; targetKey: string; card: ActionCard;
+      targetIndex: number }; effect: PF1eSpellEffect } | null = null;
     if (request.action === "apply") {
       if (typeof request.condition !== "string" || request.condition.length > 80) {
         this.reject(session, requestId, "invalid_schema", "Condition name is invalid");
@@ -3765,16 +4303,69 @@ export class HostSync {
       }
       condition = def.name;
       applicationId = `condition-${randomId()}`;
+      // D-407 — a condition delivered by a landed cast rides that cast's card. The client names the
+      // catalogue effect and the card row; the host re-reads the row, re-checks the outcome against
+      // the same effect (never the client's claim) and derives the source from the card itself.
+      let spellSource: { kind: "spell"; id: string; actionId: DocId; actorId?: string;
+        itemId?: string } | null = null;
+      if (request.spell !== undefined) {
+        const checked = this.spellEffectRiderContext(request.spell, actor._id, def.name);
+        if (!checked.ok) {
+          this.reject(session, requestId, "invalid_schema", checked.error);
+          return;
+        }
+        const delivererId = checked.value.card.source.actorId;
+        if (!isGM) {
+          const deliverer = delivererId
+            ? this.store.get("actors", delivererId) as ActorDocument | undefined : undefined;
+          if (!deliverer || !can(user, "update", deliverer, "actors")) {
+            this.reject(session, requestId, "forbidden",
+              "You do not control the actor that delivered this spell effect");
+            return;
+          }
+        }
+        if (Object.values(current.value).some((application) =>
+          application.condition === def.name && application.source.kind === "spell" &&
+          application.source.actionId === checked.value.messageId)) {
+          this.reject(session, requestId, "invalid_schema",
+            "That card already delivered this condition to the target");
+          return;
+        }
+        spellRider = { context: checked.value, effect: checked.value.effect };
+        spellSource = { kind: "spell", id: checked.value.effect.id,
+          actionId: checked.value.messageId,
+          ...(delivererId !== undefined ? { actorId: delivererId } : {}),
+          ...(checked.value.card.source.itemId !== undefined
+            ? { itemId: checked.value.card.source.itemId } : {}) };
+      }
       const applied = pf1eApplyConditionApplication({
         actor, condition, id: applicationId,
-        source: { kind: "manual", id: user.id, actionId: receiptId },
-        removal: { kind: "manual" },
+        source: spellSource ?? { kind: "manual", id: user.id, actionId: receiptId },
+        removal: spellSource === null ? { kind: "manual" }
+          : { kind: "manual", reason: `delivered by ${spellRider?.effect.name ?? "a spell"}` },
       });
       if (!applied.ok) {
         this.reject(session, requestId, "invalid_schema", applied.error);
         return;
       }
       ops = applied.value;
+      if (spellRider !== null) {
+        const row = spellRider.context.card.targets[spellRider.context.targetIndex];
+        const rider: ActionRider = {
+          kind: "condition", label: condition, state: "applied",
+          facts: this.conditionRiderFacts(spellRider.effect, condition, row?.check?.dc ?? null),
+          evidence: { adapter: "pf1e.spellEffect.v1", payload: {
+            effectId: spellRider.effect.id, version: spellRider.effect.version, condition,
+            actionId: spellRider.context.messageId, targetKey: spellRider.context.targetKey,
+          } as unknown as Json },
+        };
+        const attached = this.actionRiderAttachOps({ context: spellRider.context, rider });
+        if (!attached.ok) {
+          this.reject(session, requestId, "invariant", attached.error);
+          return;
+        }
+        ops.push(...attached.ops);
+      }
     } else {
       if (typeof request.applicationId !== "string" ||
           !/^[A-Za-z0-9_-]{1,128}$/.test(request.applicationId)) {
@@ -3805,6 +4396,14 @@ export class HostSync {
       if (op.kind !== "update" || op.ref.coll !== "actors" || op.ref.id !== actor._id) continue;
       for (const key of Object.keys(op.diff)) paths.add(key.startsWith("-=") ? key.slice(2) : key);
     }
+    const messagePaths = new Set<string>();
+    for (const op of ops) {
+      if (op.kind !== "update" || op.ref.coll !== "messages") continue;
+      for (const key of Object.keys(op.diff)) messagePaths.add(key.startsWith("-=") ? key.slice(2) : key);
+    }
+    ops.push(this.conditionMessageOp({ receiptId, action: request.action, actor, condition,
+      applicationId, by: user.id,
+      ...(spellRider !== null ? { via: spellRider.effect.name } : {}) }));
     const audit: ActionAudit = {
       id: receiptId,
       label: `Condition ${request.action}: ${condition} (${actor.name})`.slice(0, 160),
@@ -3812,7 +4411,12 @@ export class HostSync {
         userId: user.id, requestId, action: request.action,
         targetActorId: actor._id, payload: expectedPayload, applicationId,
       },
-      ...(paths.size ? { pathChecks: [{ ref: { coll: "actors", id: actor._id }, paths: [...paths] }] } : {}),
+      pathChecks: [
+        ...(paths.size ? [{ ref: { coll: "actors" as const, id: actor._id }, paths: [...paths] }] : []),
+        ...(messagePaths.size && spellRider !== null
+          ? [{ ref: { coll: "messages" as const, id: spellRider.context.messageId }, paths: [...messagePaths] }]
+          : []),
+      ],
     };
     const committed = this.commitOps(ops, user.id, requestId, true, audit);
     if (!committed.ok) {
@@ -3848,7 +4452,7 @@ export class HostSync {
     }
     const common = ["kind", "requestId", "action", "targetActorId"];
     const fields: Record<string, readonly string[]> = {
-      expose: [...common, "poisonId", "route", "doseCount", "sourceActorId", "sourceItemId"],
+      expose: [...common, "poisonId", "route", "doseCount", "sourceActorId", "sourceItemId", "rider"],
       frequency: [...common, "courseId"],
       "delay-start": [...common, "sourceActorId", "spellUse"],
       "delay-end": common,
@@ -3867,7 +4471,9 @@ export class HostSync {
     }
     const isGM = user.role === "GM";
     const targetOwned = can(user, "update", target, "actors");
-    if (request.action === "expose" && !isGM) {
+    // An environmental/insistence exposure is the GM's call; a rider exposure rides the caller's own
+    // landed action, so the deliverer's control of the delivering source is the authorization.
+    if (request.action === "expose" && !isGM && request.rider === undefined) {
       this.reject(session, requestId, "forbidden", "Only a GM can create poison exposure events");
       return;
     }
@@ -3907,6 +4513,24 @@ export class HostSync {
       return;
     }
 
+    let riderContext: { messageId: DocId; targetKey: string; card: ActionCard; targetIndex: number } | null = null;
+    if (request.action === "expose" && request.rider !== undefined) {
+      const checked = this.poisonRiderContext(request.rider, target._id);
+      if (!checked.ok) {
+        this.reject(session, requestId, "invalid_schema", checked.error);
+        return;
+      }
+      riderContext = checked.value;
+      if (!isGM) {
+        const deliverer = riderContext.card.source.actorId
+          ? this.store.get("actors", riderContext.card.source.actorId) as ActorDocument | undefined : undefined;
+        if (!deliverer || !can(user, "update", deliverer, "actors")) {
+          this.reject(session, requestId, "forbidden",
+            "Only the delivering actor's owner or a GM can attach a poison rider");
+          return;
+        }
+      }
+    }
     const snapshot = this.poisonStateSnapshot(target);
     if (!snapshot.ok) {
       this.reject(session, requestId, "invalid_schema", snapshot.error);
@@ -3914,15 +4538,22 @@ export class HostSync {
     }
     const before = snapshot.state;
     const now = readWorldClock(this.store.getAll("settings"));
-    let next = before;
-    let ops: Op[] = [];
-    let actionLabel = "";
-    let summary = "";
+    let next: PF1ePoisonTargetState;
+    const ops: Op[] = [];
+    let actionLabel: string;
+    let summary: string;
     let courseId: string | undefined;
     let poisonId: string | undefined;
     let roll: { d20: number; bonus: number; total: number; dc: number; passed: boolean } | undefined;
+    let poisonPathChecks: { ref: DocRef; paths: readonly string[] }[] | undefined;
 
     if (request.action === "expose") {
+      // A rider inherits the delivering action's source identity when the caller names none.
+      const inheritSource = request.sourceActorId === undefined && request.sourceItemId === undefined;
+      const sourceActorId: string | undefined = inheritSource
+        ? riderContext?.card.source.actorId : request.sourceActorId;
+      const sourceItemId: string | undefined = inheritSource
+        ? riderContext?.card.source.itemId : request.sourceItemId;
       if (typeof request.poisonId !== "string" || typeof request.poisonId !== "string" ||
           !/^[A-Za-z0-9_-]{1,128}$/.test(request.poisonId)) {
         this.reject(session, requestId, "invalid_schema", "Poison profile ID is invalid");
@@ -3944,20 +4575,20 @@ export class HostSync {
         this.reject(session, requestId, "invalid_schema", "Invalid poison dose batch for this delivery route");
         return;
       }
-      if (request.sourceActorId !== undefined &&
-          (typeof request.sourceActorId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(request.sourceActorId))) {
+      if (sourceActorId !== undefined &&
+          (typeof sourceActorId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(sourceActorId))) {
         this.reject(session, requestId, "invalid_schema", "Poison source actor ID is invalid");
         return;
       }
-      if (request.sourceItemId !== undefined &&
-          (typeof request.sourceItemId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(request.sourceItemId) || !request.sourceActorId)) {
+      if (sourceItemId !== undefined &&
+          (typeof sourceItemId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(sourceItemId) || !sourceActorId)) {
         this.reject(session, requestId, "invalid_schema", "A poison source item requires a valid source actor");
         return;
       }
       let definition = fixture;
       if (fixture.dcSource === "creature-derived") {
-        const source = request.sourceActorId
-          ? this.store.get("actors", request.sourceActorId) as ActorDocument | undefined : undefined;
+        const source = sourceActorId
+          ? this.store.get("actors", sourceActorId) as ActorDocument | undefined : undefined;
         const sourcePf1e = source ? this.poisonBlock(source) : {};
         const hitDice = sourcePf1e.hitDice;
         const conModifier = source ? deriveFromActorDocument(source).abilityMods.con : NaN;
@@ -3972,22 +4603,22 @@ export class HostSync {
         }
         definition = { ...fixture, baseDC };
       }
-      const sourceActorForItem = request.sourceActorId
-        ? this.store.get("actors", request.sourceActorId) as ActorDocument | undefined : undefined;
-      if (request.sourceActorId && !sourceActorForItem) {
+      const sourceActorForItem = sourceActorId
+        ? this.store.get("actors", sourceActorId) as ActorDocument | undefined : undefined;
+      if (sourceActorId && !sourceActorForItem) {
         this.reject(session, requestId, "invalid_schema", "Poison source actor does not exist");
         return;
       }
-      if (request.sourceItemId && !sourceActorForItem?.items?.some((item) => item._id === request.sourceItemId)) {
+      if (sourceItemId && !sourceActorForItem?.items?.some((item) => item._id === sourceItemId)) {
         this.reject(session, requestId, "invalid_schema", "Poison source item is not carried by its source actor");
         return;
       }
       const source = {
-        kind: request.sourceItemId ? "item" as const : request.sourceActorId ? "attack" as const : "environment" as const,
+        kind: sourceItemId ? "item" as const : sourceActorId ? "attack" as const : "environment" as const,
         actionId: receiptId,
         sourceId: definition.id,
-        ...(request.sourceActorId ? { actorId: request.sourceActorId } : {}),
-        ...(request.sourceItemId ? { itemId: request.sourceItemId } : {}),
+        ...(sourceActorId ? { actorId: sourceActorId } : {}),
+        ...(sourceItemId ? { itemId: sourceItemId } : {}),
       };
       const exposureId = `exposure-${randomId()}`;
       const newCourseId = `course-${randomId()}`;
@@ -4002,6 +4633,20 @@ export class HostSync {
         ? pf1ePoisonExposureSaveDc(definition.baseDC, active?.doseCount ?? 0, doseCount) : null;
       if (!immune && !queued && dc === null) {
         this.reject(session, requestId, "invalid_schema", "Could not calculate poison exposure DC");
+        return;
+      }
+      if (riderContext !== null && dc !== null && this.poisonSaveDeferred(target)) {
+        const committed = this.commitPF1ePoisonRiderPending({
+          context: riderContext, target, definition, baseDC: definition.baseDC, route, doseCount, dc,
+          exposureId, newCourseId,
+          ...(sourceActorId !== undefined ? { sourceActorId } : {}),
+          ...(sourceItemId !== undefined ? { sourceItemId } : {}),
+          receiptId, requestId, by: user.id,
+        });
+        if (!committed.ok) {
+          this.reject(session, requestId, "invariant", committed.error);
+          return;
+        }
         return;
       }
       if (dc !== null) {
@@ -4040,6 +4685,29 @@ export class HostSync {
       courseId = resolution?.course?.id;
       poisonId = definition.id;
       actionLabel = `Poison exposure: ${definition.name}`;
+      if (riderContext !== null) {
+        // The card is the delivery record: attach the outcome (applied/resisted/immune/queued)
+        // with the same evidence a deferred save would have carried.
+        const riderState: ActionRider["state"] = immune ? "immune"
+          : applied.value.queued ? "queued" : roll?.passed ? "resisted" : "applied";
+        const riderRecord: ActionRider = {
+          kind: "poison", label: definition.name, state: riderState,
+          ...(roll ? { save: { saveType: definition.saveType, dc: roll.dc, total: roll.total, passed: roll.passed } } : {}),
+          facts: this.poisonRiderFacts(definition, dc),
+          evidence: { adapter: "pf1e.poison.v1", payload: this.poisonRiderEvidencePayload({
+            definition, baseDC: definition.baseDC, route, doseCount, exposureId, newCourseId,
+            ...(sourceActorId !== undefined ? { sourceActorId } : {}),
+            ...(sourceItemId !== undefined ? { sourceItemId } : {}),
+          }) },
+        };
+        const attached = this.actionRiderAttachOps({ context: riderContext, rider: riderRecord });
+        if (!attached.ok) {
+          this.reject(session, requestId, "invariant", attached.error);
+          return;
+        }
+        ops.push(...attached.ops);
+        poisonPathChecks = [{ ref: { coll: "messages", id: riderContext.messageId }, paths: ["system.action"] }];
+      }
     } else if (request.action === "delay-start") {
       if (!sourceActor) {
         this.reject(session, requestId, "invalid_schema", "Delay Poison has no source actor");
@@ -4116,6 +4784,7 @@ export class HostSync {
       receiptId, label: actionLabel, actorId: user.id, requestId, action: request.action,
       ops, target, summary, ...(courseId ? { courseId } : {}), ...(poisonId ? { poisonId } : {}),
       ...(roll ? { roll } : {}),
+      ...(poisonPathChecks ? { pathChecks: poisonPathChecks } : {}),
     });
     if (!committed.ok) {
       this.reject(session, requestId, "invariant", committed.error);
@@ -4173,7 +4842,6 @@ export class HostSync {
           const eventOps: Op[] = [];
           const result = resolved.value.resolution;
           let effectSummary: string[] = [];
-          let eventCourseId: string | undefined;
           if (result?.course && result.effects.length) {
             const effectPlan = this.poisonEffectPlan(actor, result.course, result.effects, "immediate", receiptId);
             if (!effectPlan.ok) break;
@@ -4181,7 +4849,7 @@ export class HostSync {
             effectSummary = effectPlan.summary;
             nextState = { ...nextState, courses: { ...nextState.courses, [effectPlan.course.id]: effectPlan.course } };
           }
-          eventCourseId = result?.course?.id;
+          const eventCourseId = result?.course?.id;
           const ops = [...eventOps, ...this.poisonStateOps(actor, state, nextState, snapshot.ok && snapshot.existed)];
           const summary = immune
             ? `${actor.name} is immune to ${exposure.definition.name}; queued exposure has no effect.`
@@ -4202,7 +4870,7 @@ export class HostSync {
         }
 
         if (state.delayPoison.active) continue;
-        let courses = Object.values(state.courses).sort((a, b) => a.id.localeCompare(b.id));
+        const courses = Object.values(state.courses).sort((a, b) => a.id.localeCompare(b.id));
         for (const originalCourse of courses) {
           let course = state.courses[originalCourse.id];
           while (course && (course.state === "onset" || course.state === "active") &&
@@ -4447,7 +5115,8 @@ export class HostSync {
           kind: doc.kind, name: doc.name, command: doc.command, ownership: doc.ownership,
           flags: doc.flags, system: doc.system, playerAuthoring: doc.playerAuthoring as unknown as Json,
           script: doc.script as unknown as Json ?? null, scriptState: doc.scriptState as unknown as Json ?? null,
-          sequence: null, summon: null, preset: null, fxItem: null, automation: null, composite: null,
+          sequence: null, summon: null, preset: null, fxItem: null, fxSpell: null,
+          automation: null, composite: null,
         } }];
       } else ops = [{ kind: "create", coll: "macros", data: doc }];
     }
@@ -7257,11 +7926,15 @@ export class HostSync {
         return false;
       })();
       const isStrategic = false; // tactical only — strategic never creates pending cards (F02)
+      const isRiderSave = actionCardOf(doc)?.targets.some((target) =>
+        target.riders?.some((rider) => rider.state === "pending" &&
+          rider.save?.pendingRollId === pending.id)) === true;
       const should = shouldDeferToPlayer({
         kind: pending.kind,
         targetIsPlayerOwned,
         worldSettings,
         isStrategic,
+        isRiderSave,
       });
       // If the world is auto, pending should not have existed — refuse unless GM.
       if (!should && !isGM) {
@@ -7400,6 +8073,7 @@ export class HostSync {
       return;
     }
     const action = actionCardOf(liveDoc);
+    let poisonContinuation: { ops: Op[]; audit: ActionAudit } | null = null;
     if (action && livePending.actionId !== undefined) {
       const transition = resolveActionPendingTarget(action, livePending, total, this.now());
       if (!transition.ok) {
@@ -7407,6 +8081,32 @@ export class HostSync {
         return;
       }
       pendingDiff["system.action"] = actionAsJson(transition.action);
+      // A rider save is a first-class continuation: the same envelope that resolves the card row
+      // also applies the poison mechanics, so the outcome is atomic and Revertable.
+      const riderEntry = livePending.id === undefined ? undefined
+        : action.targets.flatMap((target) => (target.riders ?? []).map((rider) => ({ target, rider })))
+          .find((entry) => entry.rider.state === "pending" &&
+            entry.rider.save?.pendingRollId === livePending.id);
+      if (riderEntry?.rider.evidence?.adapter === "pf1e.poison.v1" && livePending.target.actorId) {
+        const riderDc = riderEntry.rider.save?.dc ?? null;
+        const targetActor = this.store.get("actors", livePending.target.actorId) as ActorDocument | undefined;
+        if (!targetActor || riderDc === null) {
+          this.reject(session, String(msg.messageId), "invariant", "poison rider save lacks its target or DC");
+          return;
+        }
+        const applied = this.poisonRiderContinuation({ target: targetActor, rider: riderEntry.rider,
+          receiptId: `poison-${livePending.id}`, savePassed: total >= riderDc });
+        if (!applied.ok) {
+          this.reject(session, String(msg.messageId), "invariant", applied.error);
+          return;
+        }
+        poisonContinuation = { ops: applied.ops, audit: {
+          id: `poison-${livePending.id}`,
+          label: `Poison exposure save: ${targetActor.name}`.slice(0, 160),
+          system: { userId: session.user.id, requestId: String(msg.messageId),
+            action: "exposure-save", targetActorId: targetActor._id, payload: livePending.id ?? "legacy" },
+        } };
+      }
     }
     const ops: Op[] = [
       {
@@ -7416,12 +8116,14 @@ export class HostSync {
       },
       { kind: "create", coll: "messages", data: rollMessage },
       { kind: "create", coll: "messages", data: followUp },
+      ...(poisonContinuation?.ops ?? []),
     ];
     const committed = this.commitOps(
       ops,
       session.user.id,
       `pending-${String(msg.messageId)}-${livePending.id ?? "legacy"}`,
       false,
+      poisonContinuation?.audit,
     );
     if (!committed.ok) {
       this.reject(session, String(msg.messageId), "invariant", committed.error);

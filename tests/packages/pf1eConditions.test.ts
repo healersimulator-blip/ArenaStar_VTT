@@ -167,17 +167,22 @@ describe("pf1eConditions — exact mechanics (severity pairs are not conflated)"
     const frightened = payloadOf("Frightened");
     const panicked = payloadOf("Panicked");
     // Shaken and Frightened share the numbers (they differ in the forced flee, a note).
+    // The skill half of the fear penalty is the general `skills` mod key, which every skill
+    // derivation reads; ability checks have no key and stay caller-owned.
     expect(shaken?.mods).toEqual([
       { key: "attack", type: "morale", value: -2, source: "shaken" },
       { key: "saves", type: "morale", value: -2, source: "shaken" },
+      { key: "skills", type: "morale", value: -2, source: "shaken" },
     ]);
     expect(frightened?.mods).toEqual([
       { key: "attack", type: "morale", value: -2, source: "frightened" },
       { key: "saves", type: "morale", value: -2, source: "frightened" },
+      { key: "skills", type: "morale", value: -2, source: "frightened" },
     ]);
-    // Panicked: saves only — the print does not penalize its attack rolls.
+    // Panicked: saves and skills — the print does not penalize its attack rolls.
     expect(panicked?.mods).toEqual([
       { key: "saves", type: "morale", value: -2, source: "panicked" },
+      { key: "skills", type: "morale", value: -2, source: "panicked" },
     ]);
     expect(panicked?.denies).toContain("attack-melee");
     expect(shaken?.denies).toBeUndefined();
@@ -200,6 +205,8 @@ describe("pf1eConditions — exact mechanics (severity pairs are not conflated)"
     expect(resolved.mods.attack).toBe(-4);
     expect(resolved.mods.saves).toBe(-4);
     expect(resolved.mods.damage).toBe(-2);
+    // Skills: fear's morale −2 and sickened's untyped −2 both apply to every skill.
+    expect(resolved.mods.skills).toBe(-4);
     // …and the two fear conditions alone would give −2/−2, not −4/−4.
     const fearOnly = resolveEffects(
       readTacticalEffects({

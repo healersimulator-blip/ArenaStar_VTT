@@ -7,7 +7,8 @@
  * should name, and what happens when there is nothing to play.
  */
 import { describe, expect, test } from "vitest";
-import { boundCueFor, boundCuesFor, fireBoundItemCue, fxCastOutcome } from "../../src/ui/sheets/fxItemCue";
+import { boundCueFor, boundCuesFor, boundSpellCueFor, castSpellCueNote, fireBoundItemCue,
+  fireBoundSpellCue, fxCastOutcome } from "../../src/ui/sheets/fxItemCue";
 import type { ActorDocument, ItemDocument, MacroDocument, SceneDocument } from "../../src/core/documents";
 
 const spell = (): ItemDocument => ({ _id: "wand", type: "item", name: "Wand of Sparks",
@@ -16,6 +17,13 @@ const hero = (): ActorDocument => ({ _id: "a-hero", type: "actor", name: "Hero",
   ownership: { default: 0 }, flags: {}, system: {}, items: [spell()], effects: [] });
 const ogre = (): ActorDocument => ({ _id: "a-ogre", type: "actor", name: "Ogre",
   ownership: { default: 0 }, flags: {}, system: {}, items: [], effects: [] });
+
+const vines = (id: string, fxSpell?: MacroDocument["fxSpell"]): MacroDocument => ({
+  _id: id, type: "macro", name: id, command: "", kind: "sequence", ownership: { default: 1 },
+  flags: {}, system: {}, sequence: { version: 1, audience: "scene", persistent: false,
+    sections: [{ id: "s", kind: "image", assetId: "vine", at: { kind: "target" },
+      startMs: 0, durationMs: 4_000 }] },
+  ...(fxSpell ? { fxSpell } : {}) } as unknown as MacroDocument);
 
 const timeline = (id: string, fxItem?: MacroDocument["fxItem"]): MacroDocument => ({
   _id: id, type: "macro", name: id, command: "", kind: "sequence", ownership: { default: 1 },
@@ -172,5 +180,65 @@ describe("firing an item's bound cue (D-311)", () => {
     const burnOnly = client({ macros: [burn], scenes: [scene([{ id: "t", actorId: "a-hero" }])] });
     expect(fireBoundItemCue({ client: burnOnly, actor: hero(), item: { _id: "axe" },
       outcome: "success", event: "attack" })).toEqual({ fired: false, reason: "unbound" });
+  });
+});
+
+describe("the spell cue (D-407)", () => {
+  const world = { scenes: [scene([{ id: "t-hero", actorId: "a-hero" },
+    { id: "t-ogre", actorId: "a-ogre" }])] };
+
+  test("a landed cast plays the spell's own timeline, anchored on the caster and the target", () => {
+    const c = client({ ...world, macros: [vines("fx-vines", { spellId: "entangle" })] });
+    expect(boundSpellCueFor(c, "entangle")?.name).toBe("fx-vines");
+    const cue = fireBoundSpellCue({ client: c, spellId: "entangle", outcome: "success",
+      casterActor: hero(), targetActor: ogre() });
+    expect(cue).toMatchObject({ fired: true, macroId: "fx-vines", branch: "success" });
+    expect(c.requested).toEqual([{ macroId: "fx-vines", sceneId: "s1", source: "t-hero",
+      target: "t-ogre" }]);
+    expect(cue.fired && cue.note).toContain("bound spell cue");
+  });
+
+  test("a made save is a failure for recognition: nothing is bound, so nothing plays", () => {
+    const c = client({ ...world, macros: [vines("fx-vines", { spellId: "entangle" })] });
+    expect(fireBoundSpellCue({ client: c, spellId: "entangle", outcome: "failure",
+      casterActor: hero(), targetActor: ogre() })).toMatchObject({ fired: false, reason: "no-branch" });
+    expect(c.requested).toEqual([]);
+    // …unless the author bound a failure cue, which then plays instead.
+    const paired = client({ ...world, macros: [vines("fx-vines", { spellId: "entangle",
+      onFailureId: "fx-fizzle" })] });
+    expect(fireBoundSpellCue({ client: paired, spellId: "entangle", outcome: "failure",
+      casterActor: hero() })).toMatchObject({ fired: true, macroId: "fx-fizzle" });
+    expect(paired.requested).toEqual([{ macroId: "fx-fizzle", sceneId: "s1", source: "t-hero" }]);
+  });
+
+  test("an unbound or disabled spell plays nothing, and a name the catalogue lacks says nothing", () => {
+    const unbound = client({ ...world, macros: [vines("fx-other", { spellId: "sleep" })] });
+    expect(fireBoundSpellCue({ client: unbound, spellId: "entangle", outcome: "success",
+      casterActor: hero() })).toMatchObject({ fired: false, reason: "unbound" });
+    const off = client({ ...world, macros: [vines("fx-vines", { spellId: "entangle",
+      enabled: false })] });
+    expect(fireBoundSpellCue({ client: off, spellId: "entangle", outcome: "success",
+      casterActor: hero() })).toMatchObject({ fired: false, reason: "disabled" });
+    expect(off.requested).toEqual([]);
+    // The note helper is the call sites' entry point: by *name*, silent when unknown.
+    expect(castSpellCueNote({ client: unbound, spellName: "Magic Missile", outcome: "success",
+      caster: hero() })).toBe("");
+    expect(castSpellCueNote({ client: client({ ...world,
+      macros: [vines("fx-vines", { spellId: "entangle" })] }), spellName: "  eNtAnGlE ",
+      outcome: "success", caster: hero(), target: ogre() }))
+      .toContain("bound spell cue");
+    // A bound spell whose branch this outcome does not play names the *spell*, not an item.
+    expect(castSpellCueNote({ client: client({ ...world,
+      macros: [vines("fx-vines", { spellId: "entangle" })] }), spellName: "Entangle",
+      outcome: "failure", caster: hero(), target: ogre() }))
+      .toBe(" · the spell has no cue for that outcome");
+  });
+
+  test("the cast helper resolves the same spell by name, case-insensitively", () => {
+    const c = client({ ...world, macros: [vines("fx-vines", { spellId: "entangle" })] });
+    const note = castSpellCueNote({ client: c, spellName: "Entangle", outcome: "success",
+      caster: hero(), target: ogre() });
+    expect(note).toContain("bound spell cue \"fx-vines\" requested");
+    expect(c.requested).toHaveLength(1);
   });
 });

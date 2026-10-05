@@ -91,7 +91,8 @@ describe("host-authoritative source-addressed condition actions", () => {
     if (!receiptId) throw new Error("condition action acknowledgement missing");
     const receipt = receiptsOf(store).find((entry) => entry._id === receiptId);
     expect(receipt?.status).toBe("ready");
-    expect(receipt?.inverses).toHaveLength(1);
+    // The actor-keyed change and its player-visible chat/log record are one envelope.
+    expect(receipt?.inverses).toHaveLength(2);
     expect(receipt?.after[0]).toMatchObject({ hashMode: "paths" });
 
     const applied = actorOf(store, "target");
@@ -151,7 +152,7 @@ describe("host-authoritative source-addressed condition actions", () => {
     expect(Object.keys(apps).sort()).toEqual(["grapple-one", "grapple-two"]);
   });
 
-  test("unsupported conditions and direct client-authored application Ops are refused", async () => {
+  test("unsupported conditions are refused; a self-attributed manual tag is accepted with a GM audit line", async () => {
     const { store, gm, rejected } = await setup();
     const target = actorDoc("target");
     await seed(gm, target);
@@ -164,14 +165,22 @@ describe("host-authoritative source-addressed condition actions", () => {
     expect(((actorOf(store, "target").system as Record<string, unknown>).pf1e as Record<string, unknown>)
       .conditionApplications).toBeUndefined();
 
+    // D4 policy: a client may tag its own actor with a manual condition through a generic op,
+    // but the host must announce who added what to the GM-visible log.
     const forged = pf1eApplyConditionApplication({ actor: actorOf(store, "target"), condition: "Prone",
       id: "client-prone", source: { kind: "manual", id: GM_ID } });
     if (!forged.ok) throw new Error(forged.error);
-    const txId = gm.submit(forged.value);
+    gm.submit(forged.value);
     await flushMicrotasks();
-    expect(rejected.at(-1)).toMatchObject({ txId, reason: "forbidden" });
-    expect((actorOf(store, "target").system as Record<string, unknown>).pf1e)
-      .not.toHaveProperty("conditionApplications");
+    expect(rejected).toHaveLength(1);
+    const pf1e = (actorOf(store, "target").system as Record<string, unknown>).pf1e as Record<string, unknown>;
+    expect(pf1e.conditionApplications).toMatchObject({ "client-prone": { condition: "Prone" } });
+    const audits = [...store.getAll("messages")].filter((message) =>
+      (message.flags as Record<string, unknown>)?.core !== undefined &&
+      ((message.flags as Record<string, Record<string, unknown>>).core?.conditionAuditBy !== undefined));
+    expect(audits).toHaveLength(1);
+    expect(audits[0]?.content ?? "").toContain(GM_ID);
+    expect(audits[0]?.content ?? "").toContain("Prone");
   });
 
   test("a later edit to the same application makes its original Revert stale", async () => {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ActionCard, ActionTarget } from "../../core/action";
+  import type { ActionCard, ActionRider, ActionTarget } from "../../core/action";
   import type { PendingRoll } from "../../packages/pf1e/pendingRoll";
   import { isPendingExpired } from "../../packages/pf1e/pendingRoll";
 
@@ -25,6 +25,24 @@
     const id = target.check?.pendingRollId;
     if (!id) return null;
     return pendingRolls.find((pending) => pending.id === id) ?? null;
+  }
+
+  function pendingForRider(rider: ActionRider): PendingRoll | null {
+    const id = rider.save?.pendingRollId;
+    if (!id) return null;
+    return pendingRolls.find((pending) => pending.id === id) ?? null;
+  }
+
+  function riderStateLabel(rider: ActionRider): string {
+    switch (rider.state) {
+      case "applied": return "applied";
+      case "resisted": return "resisted";
+      case "immune": return "immune";
+      case "queued": return "queued (Delay Poison)";
+      case "ended": return "ended";
+      case "expired": return "save expired";
+      default: return "save pending";
+    }
   }
 
   function outcomeLabel(target: ActionTarget): string {
@@ -139,6 +157,46 @@
             </div>
           {/if}
 
+          {#if (target.riders?.length ?? 0) > 0}
+            <div class="riders" data-action-riders>
+              {#each target.riders ?? [] as rider, riderIndex (riderIndex)}
+                {@const riderPending = pendingForRider(rider)}
+                {@const riderExpired = riderPending ? isPendingExpired(riderPending, currentTurn) : false}
+                {@const riderRollable = riderPending ? canRoll(riderPending) && !riderExpired : false}
+                <div class="rider" data-action-rider={rider.kind} data-rider-state={rider.state}>
+                  <span class="rider-kind">{rider.kind}</span>
+                  <span class="rider-label" data-rider-label>{rider.label}</span>
+                  {#if rider.save}
+                    <span class="rider-save" data-rider-save={rider.save.saveType}>
+                      {rider.save.saveType.toUpperCase()}{rider.save.dc !== null ? ` DC ${rider.save.dc}` : ""}
+                    </span>
+                    {#if rider.state === "pending" && riderPending}
+                      {#if riderPending.resolved && riderPending.total !== null}
+                        <span class="total" data-rider-total>{riderPending.total}</span>
+                      {:else if riderExpired}
+                        <span class="muted">roll expired</span>
+                      {:else}
+                        <button type="button" class="roll" data-rider-roll={riderPending.id ?? "legacy"}
+                          disabled={!riderRollable}
+                          title={riderRollable ? `Roll ${riderPending.formula} on the host` : "Only the owning player or GM may roll"}
+                          onclick={() => onRoll(riderPending)}>Roll — {riderPending.formula}</button>
+                      {/if}
+                    {:else if rider.save.total !== null}
+                      <span class="total" data-rider-total>{rider.save.total}</span>
+                    {/if}
+                  {/if}
+                  <span class="rider-state" data-rider-state-label>{riderStateLabel(rider)}</span>
+                  {#if rider.facts?.length}
+                    <details class="rider-facts" data-rider-facts>
+                      <summary>facts</summary>
+                      <ul>{#each rider.facts as fact, factIndex (factIndex)}<li>{fact}</li>{/each}</ul>
+                    </details>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+
           {#if target.damage}
             <div class="effect" data-action-damage>damage {target.damage.dealt}
               {#if target.damage.prevented !== undefined} · prevented {target.damage.prevented}{/if}</div>
@@ -202,6 +260,14 @@
     cursor: pointer; }
   .roll:disabled { opacity: .45; cursor: not-allowed; }
   .effect { color: #c2cdd2; font-size: .8rem; }
+  .riders { display: flex; flex-direction: column; gap: 3px; }
+  .rider { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; border-left: 2px solid #6a5b2e;
+    background: #1a2318; border-radius: 3px; padding: 3px 6px; font-size: .8rem; color: #c8d6c4; }
+  .rider-kind { text-transform: uppercase; font-size: .68rem; letter-spacing: .04em; color: #cdbd7f; }
+  .rider-label { font-weight: 650; }
+  .rider-save { color: #aab7bd; }
+  .rider-state { color: #9baab1; font-style: italic; }
+  .rider-facts { color: #9baab1; font-size: .75rem; }
   .notes { color: #9baab1; font-size: .78rem; }
   .notes summary { cursor: pointer; }
   .notes ul, ul.notes { margin: 3px 0 0; padding-left: 18px; }

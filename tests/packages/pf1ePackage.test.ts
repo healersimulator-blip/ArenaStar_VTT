@@ -205,6 +205,7 @@ describe("PF1e package manifests + packs (§1.1)", () => {
       "packs/classes.json",
       "packs/equipment.json",
       "packs/feats.json",
+      "packs/poisons.json",
     ]);
 
     const battles = validatePackageManifest(battlesManifest);
@@ -425,6 +426,7 @@ describe("installing the built zips", () => {
       "packs/classes.json",
       "packs/equipment.json",
       "packs/feats.json",
+      "packs/poisons.json",
       "packs/spells.json",
     ]);
   });

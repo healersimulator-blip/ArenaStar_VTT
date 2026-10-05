@@ -122,6 +122,13 @@ class FakeClient implements ResolveFlowClient {
     return "tx";
   }
 
+  /** D-405 — recorded rider deliveries, in request order. */
+  poisonRequests: Array<Record<string, unknown>> = [];
+  requestPF1ePoisonAction(request: Record<string, unknown>): string {
+    this.poisonRequests.push(request);
+    return `poison-${this.poisonRequests.length}`;
+  }
+
   private record(
     rollId: string,
     formula: string,
@@ -552,4 +559,41 @@ describe("resolve flow helpers", () => {
     expect(card.content).toContain("Goblin is unconscious and dying");
     expect(card.content).toContain("✓ verified");
   });
+  test("a landed strike is a version-2 action card whose evidence names the host rolls", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 11, total: 20 }, { total: 7 }];
+    const outcome = await resolveAttackFlow(client, owner, params());
+    expect(outcome.ok).toBe(true);
+    const create = client.submitted[0]?.[0];
+    if (create?.kind !== "create") throw new Error("expected a create op");
+    const card = (create.data as MessageDocument).system.action as Record<string, unknown>;
+    expect(card).toMatchObject({ v: 2, kind: "attack", state: "resolved" });
+    const target = (card.targets as Record<string, unknown>[])[0];
+    expect(target).toMatchObject({
+      state: "resolved", outcome: "hit",
+      check: { kind: "attack", status: "resolved", formula: "1d20 + 9", total: 20, dc: 16 },
+      damage: { dealt: 2, prevented: 5 },
+      evidence: { adapter: "pf1e.attack.v1", payload: { attackRollId: "r0", damageRollId: "r1",
+        damageFormula: "1d8 + 6", damageRollTotal: 7 } },
+    });
+  });
+
+  test("a poisoned weapon delivers its rider after a landed strike, never on a miss", async () => {
+    const line = { ...swordLine(), poisonId: "greenblood-oil" };
+    const attackerActor = actor("attacker", { abilities: { str: 16 }, hp: 20, hpMax: 20 });
+    const client = new FakeClient();
+    client.script = [{ die: 11, total: 20 }, { total: 7 }];
+    await resolveAttackFlow(client, owner, params({ line, attackerActor }));
+    expect(client.poisonRequests).toEqual([{
+      action: "expose", targetActorId: "goblin", poisonId: "greenblood-oil", route: "injury",
+      sourceActorId: "attacker", rider: { actionId: expect.any(String), targetKey: "target" },
+    }]);
+
+    const miss = new FakeClient();
+    miss.script = [{ die: 1, total: 2 }, { total: 7 }];
+    const missed = await resolveAttackFlow(miss, owner, params({ line, attackerActor }));
+    expect(missed).toMatchObject({ ok: true, result: { outcome: "miss" } });
+    expect(miss.poisonRequests).toEqual([]);
+  });
+
 });

@@ -1394,23 +1394,40 @@
       "druid": 1,
       "hunter": 1,
       "ranger": 1,
-      "shaman": 1,
-      "witch": 1
+      "shaman": 1
      },
      "school": "transmutation",
      "components": {
       "verbal": true,
       "somatic": true,
+      "focus": "a divine focus (DF)",
       "note": "Only the verbal and somatic components this pack's corpus verifies are listed; a printed material or focus line, where the spell has one, is R02 work. Nothing in the sim reads components."
      },
      "castingTime": "1 standard",
-     "range": "medium (100 ft. + 10 ft./level)",
-     "area": "40-ft. square/level",
-     "duration": "1 round/level",
-     "savingThrow": "Reflex negates",
-     "spellResistance": true,
+     "range": "long (400 ft. + 40 ft./level)",
+     "area": "plants in a 40-ft.-radius spread",
+     "duration": "1 min./level (D)",
+     "savingThrow": "Reflex partial",
+     "spellResistance": false,
      "automation": "descriptive",
-     "automationNote": "a per-square area that restrains for rounds; the mass resolver has no prone/restrained state that persists per model, and D-1 deleted the old scatter-area version of exactly this spell."
+     "automationNote": "Mass-battle side: descriptive — the battle resolver has no per-square area that restrains for rounds, and D-1 deleted the old scatter-area version of exactly this spell. Tactical side: the save and the condition ship as `system.tacticalEffect` (mirrored by src/packages/pf1e/spellEffects.ts), so a cast resolved through the hero-level flow applies Entangled to a target whose Reflex save failed. Still table-adjudicated and deliberately not modeled: the difficult-terrain half of the printed \"Reflex partial\" line, the end-of-the-caster's-turn re-save for a creature that saved but remains in the area, the move-action break-free (Strength or Escape Artist against the spell DC), and the requirement that plants be present.",
+     "tacticalEffect": {
+      "id": "entangle",
+      "version": 1,
+      "name": "Entangle",
+      "source": {
+       "title": "PRPG Core Rulebook p.278 (Entangle)",
+       "citation": "Reflex partial, see text; a creature that fails its save gains the entangled condition. The printed difficult-terrain half of \"partial\" is named as unmodeled in the pack's automationNote.",
+       "url": "https://www.aonprd.com/SpellDisplay.aspx?ItemName=Entangle"
+      },
+      "save": {
+       "type": "ref",
+       "severity": "negates"
+      },
+      "conditions": [
+       "Entangled"
+      ]
+     }
     },
     "items": [],
     "effects": []

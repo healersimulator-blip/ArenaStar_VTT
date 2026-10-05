@@ -267,11 +267,13 @@ describe("Core PF1e poison profiles and exposure rules", () => {
     expect(current.frequencyEndAt).toBe(48);
     expect(third.value.effects).toHaveLength(1); // one effect for this failed exposure, not one per dose
 
+    const spiderFrequency = spider.frequency;
+    if (spiderFrequency === null) throw new Error("fixture has no frequency");
     const odd: PF1ePoisonDefinition = {
       ...spider,
       id: "odd-duration-venom",
       name: "Odd duration venom",
-      frequency: { ...spider.frequency!, intervals: 5 },
+      frequency: { ...spiderFrequency, intervals: 5 },
     };
     const oddFirst = expose({ definition: odd, newCourseId: "odd-course", exposureId: "odd-1" });
     const oddSecond = applyPF1ePoisonExposure({
@@ -307,7 +309,7 @@ describe("Core PF1e poison profiles and exposure rules", () => {
   });
 
   test("exact poison identities stay separate; Delay Poison pauses without backfill and queues in order", () => {
-    let stateResult = emptyPF1ePoisonTargetState("target");
+    const stateResult = emptyPF1ePoisonTargetState("target");
     expect(stateResult.ok).toBe(true);
     if (!stateResult.ok) return;
     let state = stateResult.value;

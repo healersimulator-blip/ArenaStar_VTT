@@ -64,6 +64,7 @@ describe("the catalogue after Phase 1 (§5)", () => {
         "token.list",
         "chat.read",
         "sheet.read",
+        "condition.read",
         "bestiary.search",
         "hexcrawl.cells",
         "hex.read",
@@ -77,7 +78,7 @@ describe("the catalogue after Phase 1 (§5)", () => {
         "strategic.report",
       ]),
     );
-    expect(READ_TOOLS).toHaveLength(20);
+    expect(READ_TOOLS).toHaveLength(21);
   });
 
   test("every tool declares a capability, and the identity probe declares none", () => {
@@ -503,6 +504,24 @@ describe("documents, chat and sheets (§5.3–5.4)", () => {
     if (refused.kind !== "result") return;
     expect(refused.result.isError).toBe(true);
     expect(refused.result.content[0]?.text).toContain("may not read the chat");
+  });
+
+  test("condition.read explains source, removal and the poison save clock", async () => {
+    const read = await call("condition.read", { actorId: "a-vex" });
+    expect(read.kind).toBe("result");
+    if (read.kind !== "result") return;
+    const body = read.result.content[0]?.text ?? "";
+    expect(body).toContain("Grappled [grapple-one] — source spell: Hold Person; removal: spell end or escape (source-owned)");
+    expect(body).toContain("poison Greenblood oil [course-one] — active, 1 dose(s), next save in 6s, frequency ends in 24s; cure 0/1 saves; effect 1 CON damage");
+    // The machine body is the report itself, not prose a model has to re-parse.
+    expect(read.result.structuredContent).toMatchObject({
+      actorId: "a-vex", poison: { courses: [{ profile: "Greenblood oil", nextSaveInSeconds: 6 }] },
+    });
+
+    const missing = await call("condition.read", { actorId: "a-nope" });
+    expect(missing.kind).toBe("result");
+    if (missing.kind !== "result") return;
+    expect(missing.result.isError).toBe(true);
   });
 
   test("sheet.read prints the numbers a model acts on, and refuses a stranger", async () => {

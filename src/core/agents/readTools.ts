@@ -822,6 +822,66 @@ const sheetRead: ToolDefinition = {
   },
 };
 
+const conditionRead: ToolDefinition = {
+  name: "condition.read",
+  description:
+    "An actor's condition instances and poison state: which source supplied each condition, how it is removed, how many doses of which poison are active and when the next save is due. Complements sheet.read (which lists names only).",
+  args: {
+    properties: {
+      actorId: {
+        type: "string",
+        description: "Actor id (see document.list actors, or a token's actorId)",
+      },
+    },
+    required: ["actorId"],
+  },
+  capability: "world.read",
+  run(args, ctx): ToolOutcome {
+    const actorId = str(args["actorId"]);
+    if (!actorId) return refusal("condition.read needs an actorId");
+    const report = ctx.view.conditions(actorId);
+    if (!report)
+      return refusal(
+        `no condition state for actor "${actorId}" — document.list actors names the ones you may see`,
+      );
+    const lines: string[] = [`${report.name} [${report.actorId}]`];
+    if (report.conditions.length === 0) lines.push("  conditions: none");
+    for (const condition of report.conditions) {
+      const source = condition.source === null ? "source unknown"
+        : condition.source.label === condition.source.kind
+          ? `source ${condition.source.kind}`
+          : `source ${condition.source.kind}: ${condition.source.label}`;
+      const legacy = condition.legacy ? ", legacy name" : "";
+      const supported = condition.supported ? "" : ", mechanics unsupported";
+      lines.push(`  ${condition.condition} [${condition.id}] — ${source}; removal: ${condition.removal}${legacy}${supported}`);
+    }
+    const poison = report.poison;
+    if (poison.courses.length === 0 && !poison.delayPoison.active && poison.queuedExposures === 0) {
+      lines.push("  poison: none active");
+    } else {
+      if (poison.delayPoison.active) {
+        lines.push(`  Delay Poison: active${poison.delayPoison.endsInSeconds === null ? "" : ` (ends in ${poison.delayPoison.endsInSeconds}s)`}` +
+          `${poison.queuedExposures > 0 ? `; ${poison.queuedExposures} queued exposure(s)` : ""}`);
+      } else if (poison.queuedExposures > 0) {
+        lines.push(`  queued exposures: ${poison.queuedExposures}`);
+      }
+      for (const course of poison.courses) {
+        const timing: string[] = [];
+        if (course.nextSaveInSeconds !== null) timing.push(`next save in ${course.nextSaveInSeconds}s`);
+        if (course.frequencyEndsInSeconds !== null) timing.push(`frequency ends in ${course.frequencyEndsInSeconds}s`);
+        lines.push(
+          `  poison ${course.profile} [${course.id}] — ${course.state}, ${course.doseCount} dose(s)` +
+          `${timing.length > 0 ? `, ${timing.join(", ")}` : ""}` +
+          `; cure ${course.cureProgress}/${course.cureRequired}${course.consecutive ? " consecutive" : ""} saves` +
+          `${course.effects.length > 0 ? `; effect ${course.effects.join(", ")}` : ""}`,
+        );
+      }
+    }
+    for (const issue of report.issues) lines.push(`  ⚠ ${issue}`);
+    return text(lines.join("\n"), report as unknown as Json);
+  },
+};
+
 const bestiarySearch: ToolDefinition = {
   name: "bestiary.search",
   description:
@@ -1092,6 +1152,7 @@ export const READ_TOOLS: readonly ToolDefinition[] = [
   tokenList,
   chatRead,
   sheetRead,
+  conditionRead,
   bestiarySearch,
   hexcrawlCells,
   hexRead,

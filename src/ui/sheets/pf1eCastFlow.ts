@@ -45,7 +45,7 @@
  */
 import type { PF1eItemCastSource } from "../../packages/pf1e/consumables";
 import type { Op } from "../../core/ops";
-import { actionAsJson, deriveActionState, type ActionArea, type ActionCard,
+import { ACTION_CARD_VERSION, actionAsJson, deriveActionState, type ActionArea, type ActionCard,
   type ActionTarget } from "../../core/action";
 import type { PermissionUser } from "../../core/ownership";
 import type {
@@ -115,12 +115,24 @@ import {
   spendCombatantAction,
 } from "../../packages/pf1e/combatState";
 import { actionRefusal } from "../../packages/pf1e/actions";
+import {
+  pf1eSpellEffectById,
+  pf1eSpellEffectLanded,
+  type PF1eSpellEffect,
+} from "../../packages/pf1e/spellEffects";
+import type { PF1eConditionActionRequest } from "../../core/messages";
 
 /** The structural slice of ClientSync the flow needs (tests fake exactly this). */
 export interface CastFlowClient {
   roll(formula: string, mode?: "roll", to?: string[], flavor?: string): string;
   readonly store: { getAll(coll: "messages"): readonly unknown[] };
   submit(ops: Op[]): string;
+  /**
+   * D-407 — a landed cast delivers its authored tactical effect. Optional so existing fakes stay
+   * valid; the request names the card row the condition rides and the host re-reads it before
+   * anything is applied. The optional request id keeps a retry idempotent.
+   */
+  requestPF1eConditionAction?(request: PF1eConditionActionRequest, requestId?: string): string;
 }
 
 export interface PF1eCastFlowParams {
@@ -208,6 +220,13 @@ export interface PF1eCastFlowParams {
    * swift/free/quickened cast. Without both, swift usage is the GM's call.
    */
   combatantId?: string;
+  /**
+   * D-407 — the authored tactical effect this cast delivers (`pf1eSpellEffectById`). The cast form
+   * pins it when the spell is one the catalogue models; absent means the table's own reading and
+   * no condition is delivered. The effect's save/severity are the caster's form defaults, never
+   * host-invented, and the host re-checks the card row against the same catalogue row.
+   */
+  spellEffectId?: string;
   /**
    * Plan §1.3 (G-04, `consumables.ts`): cast **from an item** — a wand, scroll, potion or
    * staff. Three things change and nothing else does:
@@ -400,12 +419,86 @@ function castActionTargetBase(params: PF1eCastFlowParams): Pick<ActionTarget, "k
   };
 }
 
+/**
+ * D-407 — the conditions a landed cast will deliver, decided from the card row the cast is about to
+ * record and the authored effect it names. `null` when the cast names no effect, the effect is
+ * unknown, the client cannot deliver one, or the row's outcome does not land it (a made save, spell
+ * resistance). The row predicate is the shared `pf1eSpellEffectLanded`, so the client producer and
+ * the host re-check cannot disagree about what "landed" meant.
+ */
+export interface PF1eSpellEffectDelivery {
+  /** The catalogue row, or null when `effectId` is not one the catalogue knows (reported by `note`). */
+  effect: PF1eSpellEffect | null;
+  effectId: string;
+  /** The conditions to deliver, in catalogue order. */
+  conditions: readonly string[];
+  /** One sentence for the public narrative, or null when the outcome needs no line. */
+  note: string | null;
+}
+
+function plannedSpellEffectDelivery(
+  client: CastFlowClient,
+  params: PF1eCastFlowParams,
+  row: ActionTarget,
+): PF1eSpellEffectDelivery | null {
+  if (params.spellEffectId === undefined) return null;
+  const effectId = params.spellEffectId;
+  const effect = pf1eSpellEffectById(effectId);
+  if (effect === null) {
+    return { effect: null, effectId, conditions: [], note:
+      `unknown spell effect "${effectId}" — no condition was delivered` };
+  }
+  if (!pf1eSpellEffectLanded(effect, row.outcome)) {
+    if (row.outcome === "saved" || row.outcome === "resisted") {
+      return { effect, effectId, conditions: [], note:
+        `${effect.name}: ${params.targetName} avoided it — no condition applied` };
+    }
+    // A save-less row for an effect the catalogue says allows one: the cast form and the authored
+    // spell disagree, and the honest answer is to name it rather than deliver nothing in silence.
+    if (effect.save !== null && row.outcome === "affected") {
+      return { effect, effectId, conditions: [], note:
+        `${effect.name}: ${effect.save.type.toUpperCase()} ${
+          effect.save.severity} per the catalogue, but this cast asked for no save — no condition applied` };
+    }
+    return null;
+  }
+  if (typeof client.requestPF1eConditionAction !== "function") {
+    return { effect, effectId, conditions: [], note:
+      `${effect.name}: apply ${effect.conditions.join(", ")} manually — this client cannot deliver it` };
+  }
+  return { effect, effectId, conditions: [...effect.conditions], note:
+    `${effect.name}: delivering ${effect.conditions.join(", ")} to ${params.targetName}` };
+}
+
+/**
+ * Ask the host to apply one condition per catalogue entry, each as a **rider** of the cast card the
+ * request names. The host re-reads the row, re-checks the outcome against the same catalogue row and
+ * derives the source (caster, item, card) itself; nothing here is trusted as a mechanic. The request
+ * id is deterministic per card and condition, so a retry cannot double-apply.
+ */
+function requestSpellEffectDelivery(
+  client: CastFlowClient,
+  params: PF1eCastFlowParams,
+  delivery: PF1eSpellEffectDelivery,
+  cardId: string,
+): void {
+  if (delivery.effect === null || typeof client.requestPF1eConditionAction !== "function") return;
+  delivery.conditions.forEach((condition, index) => {
+    client.requestPF1eConditionAction?.({
+      action: "apply",
+      actorId: params.targetActor._id,
+      condition,
+      spell: { effectId: delivery.effectId, actionId: cardId, targetKey: params.targetActor._id },
+    }, `speffect-${cardId}-${String(index)}`);
+  });
+}
+
 /** One canonical card constructor for immediate and deferred cast resolution. */
 function castActionCard(params: PF1eCastFlowParams, id: string, targets: ActionTarget[],
   notes: readonly string[] = [], state: ActionCard["state"] = deriveActionState(targets)): ActionCard {
   const now = Date.now();
   return {
-    v: 1,
+    v: ACTION_CARD_VERSION,
     id,
     revision: 0,
     kind: "cast",
@@ -1618,9 +1711,15 @@ export async function resolveCastFlow(
     touchCardLine,
   );
   const cardId = globalThis.crypto.randomUUID();
-  const action = castActionCard(params, cardId, [resolvedCastActionTarget(params, {
+  const targetRow = resolvedCastActionTarget(params, {
     dc, saveBonus, saveTotal, result: target, evidence,
-  })], [...gateNotes, ...warnings]);
+  });
+  // D-407 — the authored tactical effect rides this cast. The note is written before the card
+  // renders so the public narrative says what is being delivered; the request itself is issued
+  // after the commit, the same order the poison rider uses (`resolveAttackFlow`).
+  const spellDelivery = plannedSpellEffectDelivery(client, params, targetRow);
+  if (spellDelivery !== null && spellDelivery.note !== null) warnings.push(spellDelivery.note);
+  const action = castActionCard(params, cardId, [targetRow], [...gateNotes, ...warnings]);
   const cardMessage: MessageDocument = {
     _id: cardId,
     type: "message",
@@ -1636,6 +1735,7 @@ export async function resolveCastFlow(
   };
   // The visible card and its mechanical writes are one intent: neither may commit alone.
   client.submit([{ kind: "create", coll: "messages", data: cardMessage }, ...ops]);
+  if (spellDelivery !== null) requestSpellEffectDelivery(client, params, spellDelivery, cardId);
   return {
     ok: true,
     lost: false,
