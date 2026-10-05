@@ -40,6 +40,9 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "roll.reroll":
     case "roll.revert":
     case "action.revert":
+    case "pf1e.poison":
+    case "pf1e.condition":
+    case "pf1e.condition.result":
     case "roll.delegate":
     case "roll.apply":
     case "automation.request":
@@ -140,6 +143,9 @@ export function channelFor(kind: MsgName): ChannelName {
     case "roll.reroll":
     case "roll.revert":
     case "action.revert":
+    case "pf1e.poison":
+    case "pf1e.condition":
+    case "pf1e.condition.result":
     case "roll.delegate":
     case "fog.put":
     case "fog.get":

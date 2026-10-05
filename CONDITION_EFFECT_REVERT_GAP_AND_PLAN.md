@@ -1,11 +1,14 @@
 # Condition & effect Revert — capability gap, dependency map and implementation plan
 
-**Status:** analysis + plan, written 2026-10-05 against `main` `167c4e6` (D-405 / PR #37). Nothing
-in §4 is implemented. No `DECISIONS.md` entry is written until a slice lands (operating rule 1 and
-this repo's "no fake claims" convention); the decision points that need a ruling first are listed in
-§6. The one landed artifact is Phase 0's characterization test,
-`tests/host/effectRevertScope.test.ts` — 4 tests that pin today's behaviour so every later slice has
-a red→green target.
+**Status:** Implementation in progress (2026-10-05) on `arena/01a10b30-arenastar-vtt`.
+- **Phase 0:** Landed characterization tests in `tests/host/effectRevertScope.test.ts`. R1–R7 decisions resolved.
+- **Phase 1:** Landed canonical id-keyed condition applications (`actor.system.pf1e.conditionApplications`), mechanics integration with `PF1E_CONDITIONS` including Deafened, source tracking, and non-destructive legacy array reconciliation.
+- **Phase 2 & Phase 6:** Landed host-authoritative manual condition actions (`pf1e.condition`, `0x54`/`0x55`), host-owned condition Revert receipts, and Core PF1e poison state machine (`pf1e.poison`, `0x52`/`0x53`) covering exposure saves, multiple-dose stacking, DC scaling, duration extensions (with round-down per dose), consecutive vs nonconsecutive cure streaks, onset, Delay Poison pausing, and neutralizations. Generic client Ops directly mutating condition applications or poison state are rejected by the host.
+
+**Revision summary:** separates undoability from rules execution; makes the canonical condition
+instance/mechanics layer a prerequisite; removes the incorrect timed-Prone proposal; and expands
+Phase 6 into a host-authoritative PF1e Core poison/save/dose state machine. It does not claim that the
+current condition library or any poison behavior is complete.
 
 **Question this answers.** After PR #37 shipped the Action System (D-405), the question was whether a
 GM can revert a condition the way they can revert hit points — `entangled`, `grappled`, `sickened`,
@@ -25,6 +28,16 @@ plan (§4) with explicit non-goals (§5) and the decisions that need a call (§6
 `DECISIONS.md` D-012 (array diff semantics), D-142/D-144 (effect apply path and the condition
 library), D-405 (what an action card may and may not carry).
 
+**PF1e rules anchors used in this revision:** [Conditions, CRB p.565](https://aonprd.com/Rules.aspx?ID=413),
+[Trip/Overrun, CRB p.201](https://aonprd.com/Rules.aspx?ID=44),
+[Dirty Trick, APG p.321](https://aonprd.com/Rules.aspx?ID=441),
+[Grapple, CRB p.199](https://aonprd.com/Rules.aspx?ID=191),
+[Afflictions, CRB p.555](https://aonprd.com/Rules.aspx?ID=417),
+[Poison, CRB p.557](https://aonprd.com/Rules.aspx?ID=420), and Paizo’s
+[PF1e poison FAQ](https://paizo.com/blog/i-drank-what-an-faq-on-poison) (initial-save, timing and
+multiple-dose clarifications). The default poison implementation in this plan is Core Rulebook PF1e,
+not the optional Pathfinder Unchained progression-track variant.
+
 ---
 
 ## 0. Verdict in one screen
@@ -39,7 +52,9 @@ library), D-405 (what an action card may and may not carry).
 
 So the user-visible summary is: **`Ctrl+Z` is the only way to undo a condition today, and only while
 it is the newest undoable change.** The machinery for a _named, per-action_ condition revert exists
-and is proven to work (§1.3); the producers simply never hand it a condition.
+and is proven to work (§1.3); the producers simply never hand it a condition. Separately, a reversible
+name is not proof that its PF1e modifiers/actions are mechanically active; Phase 1 now closes that
+rules-resolution gap before Phase 2 wires producers to Revert.
 
 ---
 
@@ -74,6 +89,15 @@ and the action card's bounded `conditions: { applied, removed }` **text** (`src/
 rejected outright on a pending target at `:284–285`) — but that field is a report, not a write: D-405
 guarantees a client-authored card never changes HP, conditions, inventory or permissions.
 
+**Rules-execution caveat (new G-A9):** Home A is not mechanically equivalent to Home B today.
+`derivePF1eActor` resolves numeric modifiers/flags/denials from `input.effects`; it appends authored
+Home-A names to the derived condition-name list afterward. It does not call `pf1eConditionPayload`
+for every string in `system.pf1e.conditions`. A maneuver can therefore write a visible `Prone` or
+`Entangled` label without automatically applying the library payload; only the consumers that
+explicitly inspect that name get its effect. The existing condition library is also a supported
+subset: `pf1eDirtyTrick` permits **Deafened**, but `PF1E_CONDITIONS` has no Deafened definition.
+Phases 1–2 below now require mechanics and state to agree, not merely a reversible label.
+
 ### 1.3 The evidence (Phase 0, landed)
 
 `tests/host/effectRevertScope.test.ts` (4 tests, passing) drives the real `HostSync` over the
@@ -96,6 +120,9 @@ cases with public-path tests over a real maneuver card.
 
 Reproduce: `corepack pnpm exec vitest run tests/host/effectRevertScope.test.ts`
 (environment notes in Appendix A).
+
+These tests prove the inverse machinery, not that Home-A condition names invoke their PF1e payloads;
+that separate derivation gap is recorded in G-A9 and Phase 1.
 
 The two revert _surfaces_ were **executed** in the same pass (Chromium 153 over
 `file://dist/index.html`, `--workers=1`): `e2e/action_revert.spec.ts` 3/3 (GM Revert restores a
@@ -138,7 +165,13 @@ the producer work (spells, afflictions, movement maneuvers) that would otherwise
 | **G-A5** | **Maneuver durations are computed and discarded.** `pf1eDirtyTrick` returns `durationRounds` and the removal rule ("move action"), but the planner writes only the name — nothing expires, nothing records when it should.                                                                                                                                    | `src/packages/pf1e/maneuvers.ts:578–620`, `pf1eManeuver.ts:146–160`                                                                                      | conditions accumulate until a human edits them; a Revert has no "expiry" peer to interact with                                                                                                                        |
 | **G-A6** | **Movement maneuvers are not world writes at all.** Bull rush / drag / reposition return note-only plans; the push is "the caller's map concern" (a separate drag). Trip/overrun's prone is a write.                                                                                                                                                          | `pf1eManeuver.ts:108–119, 161–182`                                                                                                                       | there is nothing atomic to revert: the card and the map move can diverge silently                                                                                                                                     |
 | **G-A7** | **Spell outcomes never touch conditions or effects.** `runSpellEffect` writes HP, the SR round-ledger and slots; a deferred save creates an explicit pending "spell effect" row that says _no damage or condition is inferred_. 71 of the 75 shipped spell entries are `automation: "descriptive"`.                                                           | `pf1eCastFlow.ts:547–736`; deferred row `:1531–1539` (`:1537` “no damage or condition is inferred from the card”); `systems/pf1e-core/packs/spells.json` | the largest producer family is absent, so the revert contract must be frozen before it arrives (`ACTION_SYSTEM.md:141–143` names the missing host-owned continuation, and `:172` makes it an explicit next extension) |
-| **G-A8** | **Afflictions (poison, disease) have no model at all.** "poison" exists only as an effect _source type_ and in mitigation prose; `trample` has no tactical implementation (deferred to P6 in the stat-block adapter) while the strategic profile resolves it in the pool.                                                                                     | `effects.ts:128,412`; `mitigation.ts:24,26,360,622`; `statBlock.ts:25–26`; `schema.ts:139–141,237–239,381–383`; `combatEngine.ts:671–700`                | new producers will need the same "apply → expire → revert" contract; building them first would repeat G-A1 three more times                                                                                           |
+| **G-A8** | **Afflictions (poison, disease) have no model at all.** "poison" exists only as an effect _source type_ and in mitigation prose. Separately, `trample` has no tactical implementation (Phase 7); the strategic profile resolves it in the pool.                                                                                                  | `effects.ts:128,412`; `mitigation.ts:24,26,360,622`; `statBlock.ts:25–26`; `schema.ts:139–141,237–239,381–383`; `combatEngine.ts:671–700`                | new producers will need the same "apply → expire → revert" contract; building them first would repeat G-A1 three more times                                                                                           |
+
+Additional rules-review gaps that the first table did not separate:
+
+- **G-A9 — condition labels are not a canonical mechanical resolver.** Home-A names are appended to the readout, while the derivation resolves condition mechanics from effect payloads. The condition library is incomplete for a condition the Dirty Trick planner already allows (`Deafened`). Phase 1 must close this before a Revert test can be called a rules test.
+- **G-A10 — no condition-application identity or source lifecycle.** A `string[]` cannot distinguish simultaneous applications, track the specific source/action that expires or is removed, or represent a grapple relationship. Name-level deduplication/removal can erase a still-live source.
+- **G-A11 — the proposed ledger path has a privacy and durable-revert conflict.** `RollLedger` stores raw `ledgerOps`/`ledgerInverses` on `MessageDocument.system`; normal public message projection does not strip them. A receipt also hashes the whole message post-image, so ledger edits/pruning make the receipt stale. Phase 3 must fix both before promising player-visible card controls or receipt fallback after the ledger window.
 
 ---
 
@@ -157,12 +190,14 @@ the producer work (spells, afflictions, movement maneuvers) that would otherwise
 | item state           | `actor.items[i].system.*` (broken, hp)          | array element + object field | field yes, element no                                   |
 | action record        | `message.system.action.targets[].conditions`    | bounded names, report-only   | n/a (never a write)                                     |
 
-**Consequence for the plan:** the only home that supports fine-grained, revert-friendly removal today
-is the **id-keyed record** — which is exactly the shape the combatant home already uses. Any slice
-that wants surgical condition reverts should either (a) accept whole-array granularity and lean on the
-ledger's _per-path_ gate, or (b) move/duplicate condition state into an id-keyed record. Option (b) is
-a core-document contract change (`actor.effects` is listed in D-012's embedded collections) and must
-be decided, not smuggled in.
+**Consequence for the plan:** the condition array and actor-effects array are both coarse whole-value
+writes; the combatant effect record is already id-keyed. New source-bound condition applications
+should therefore live in a separately keyed map (proposed: `system.pf1e.conditionApplications[id]`),
+not by turning the legacy string array into an undocumented string/object union. The legacy
+`system.pf1e.conditions: string[]` remains readable; new writers use the keyed map after every reader
+has a normalizer. This is an explicit persisted-document contract change and must be decided, typed,
+validated, projected and round-tripped before it is written. Do not duplicate a condition's mechanical
+payload in multiple homes.
 
 ### 3.2 Producer inventory (who writes what, through which envelope)
 
@@ -231,11 +266,20 @@ its own schedule.
 ### 3.6 Authority, projection and privacy
 
 Writes stay host-authorized (`can(user, "update", actor)`; combatant home: `can(user, "update",
-combat)`), the GM Revert is host-gated to `role === "GM"`, receipts are private (never projected),
-and the module/script tiers cannot reach effects at all. **Nothing in this plan needs a new
-authority path** — it needs producers to route existing authorized ops through existing audited
-envelopes. That also keeps D-405's boundary intact: the action card reports, the receipt/ledger
-reverts, and FX still cannot write.
+combat)`), and Revert stays host-gated to `role === "GM"`. The host—not a client—constructs audit
+receipts and validates poison-save outcomes. The module/script tiers cannot write condition or poison
+state; D-405 action cards remain bounded reports and FX remains presentation-only.
+
+**Ledger warning:** private `actionReceipts` are not projected, but F01 ledgers are embedded in public
+chat messages. `src/core/projection.ts` currently passes ordinary visible messages through as full
+documents/updates; a ledger containing exact condition/effect-array inverse ops can therefore disclose
+state. Before adding condition ledgers, either move inverse data to the private host receipt and expose
+only a safe summary/opaque receipt ID, or implement and test an explicit player projection that strips
+all inverse/forward ops and pre-images. The receipt's post-image check also currently hashes the whole
+message; later host ledger updates or pruning must not make an otherwise-valid durable receipt stale.
+A card revert and a receipt revert must be one host transaction and one authoritative state, not two
+independent inverse copies. `ChatPanel` prioritizes `ActionCard` for structured messages, so its
+ledger/Revert controls must be implemented there rather than assumed to appear through `RollCard`.
 
 ### 3.7 Tests, coverage and docs to touch
 
@@ -251,388 +295,508 @@ reverts, and FX still cannot write.
 
 ### 3.8 The families the question names — what each needs from this contract
 
-| Family                                                                 | Exists today                                                                                                                                        | Missing for "applied → expired → revertible"                                                                                                                       | Plan phase        |
-| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------- |
-| **Bull rush / drag / reposition**                                      | full CMB/CMD check + aftermath notes (`maneuvers.ts`, D-199/D-208)                                                                                  | the forced move is not a world write: planner returns `ops: []` and the push is a separate drag, so there is no atomic action and no receipt                       | 7                 |
-| **Trip / overrun**                                                     | prone write on the margin rule                                                                                                                      | envelope only (ledger or audit)                                                                                                                                    | 1                 |
-| **Dirty trick**                                                        | six named conditions; duration (`1 + ⌊margin/5⌋`, Greater `1d4 + ⌊…⌋`) computed and dropped; removal rule is a note                                 | envelope, then duration persistence + expiry                                                                                                                       | 1, then 3–4       |
-| **Grapple family** (initial/maintain/pin/tie-up/escape/release/damage) | replacement semantics (`Pinned` replaces `Grappled`) written as whole-array diffs; damage is note-only                                              | envelope for every branch; a decision on whether damage belongs to the same card                                                                                   | 1 (+2 for reroll) |
-| **Disarm / steal / sunder**                                            | check + notes; item writes are the sheet's own editor                                                                                               | item-write integration (out of scope for this plan; named so it is not mistaken for done)                                                                          | —                 |
-| **Trample**                                                            | strategic: profile fields + pool resolution (`schema.ts`, `combatEngine.ts:671–700`); tactical: none, explicitly deferred in the stat-block adapter | tactical resolution (Reflex half, damage, move-through) **and** the envelope; strategic side keeps checkpoint undo, unaffected                                     | 7                 |
-| **Poison / disease**                                                   | source-type enum + mitigation prose only (`effects.ts:128,412`)                                                                                     | a payload (onset, frequency, save DC, cure), an infliction producer (attack rider, trap, automation), a scheduler (turn tick and/or clock sweep), and the envelope | 6                 |
-| **Spells**                                                             | damage/SR/save/HP pipeline; 71/75 entries descriptive; the deferred effect row is explicitly pending (`ACTION_SYSTEM.md:141`)                       | a host-verifiable continuation that can commit buff/debuff **effects** and conditions in the same intent as the card, with inverse capture                         | 5                 |
-| **Concentration / pending casts**                                      | pending-save/concentration flow writes a linked action row and HP                                                                                   | the resolution envelope must carry the continuation's effect ops too (otherwise the gap reappears one level deeper)                                                | 5                 |
+| Family | Exists today | Missing for a rules-correct, reversible action | Plan phase |
+| --- | --- | --- | --- |
+| **Trip / overrun** | success writes a `Prone` name | canonical mechanical condition instance + atomic receipt. Prone has **no general turn timer**; it remains until the creature stands or another rule changes it | 1–2 |
+| **Dirty trick** | six permitted names; correct 1 + margin / Greater d4 + margin duration is calculated but discarded | canonical payload (including Deafened), evaluated duration, source/action identity, move/standard-action early removal, expiry at the correct boundary, atomic receipt | 1, 2, 4 |
+| **Grapple family** | name-level `Grappled`/`Pinned` replacements | per-grapple relationship IDs; break/release only the matching relationship; preserve unrelated grapples; include required pull to adjacent space on a nonadjacent initial grapple; pinned escape remains legal | 1–2 |
+| **Bull rush / drag / reposition** | check + notes; movement is a separate map action | host-planned, collision/wall/zone-validated token movement + card + any condition ops in one receipt | 7 |
+| **Poison** | `source.kind: "poison"` only | initial exposure save, onset, periodic saves, 1/2/N-save cure rules (consecutive or not), dose stacks, DC/duration adjustment, source-bound effects, and per-event Revert | 6 |
+| **Disease** | no model | separate source-verified disease profile; do not assume poison cadence/dose rules are disease rules | explicitly deferred unless separately scoped |
+| **Spells** | damage/SR/save/HP pipeline; descriptive pack entries and explicit pending effect row | host-verifiable continuation that commits per-target conditions/effects with the action, preserving spell duration and resistance/immunity rules | 5 |
+| **Trample** | strategic profile/pool resolution; no tactical resolution | identify and transcribe the intended PF1e trample rule before coding; then movement, target choice/save, damage and the action receipt | 7 |
+| **Disarm / steal / sunder** | check + notes; item writes are a separate sheet concern | item transaction/revert integration is outside this condition plan; do not imply the item consequence is atomic | out of scope |
 
----
+## 4. Revised implementation plan
 
-## 4. Implementation plan
+The dependency order is now explicit: first make condition state mechanically real and source-aware;
+then route producers through one host-owned transaction; then expose a privacy-safe ledger view. Only
+after those contracts are stable do we add expiry, spells, poison cadence and tactical movement. The
+plan does not equate “reversible string in chat” with “PF1e condition implemented.”
 
-Phases are ordered by _dependency_, not by size. **Phases 1–2 close the gap the question is actually
-about** (a named revert for conditions that exist today). Phases 3–4 make conditions that carry
-durations behave like state with a lifecycle, so the revert decision has something sane to interact
-with. Phases 5–7 extend the frozen contract to the producer families the question names — spells,
-afflictions, movement maneuvers and trample. Phase 8 is surfaces and documentation. Phase 5 is the
-largest single slice; phases 6 and 7 each start with a _transcription_ task, because neither poison
-nor tactical trample has verified rule text in this repo yet.
+Conventions for every phase:
 
-Conventions every phase follows:
-
-- The mechanism is reused, never duplicated: an action gets a receipt (`commitOps` with an audit) or a
-  ledger (`system.rollLedger`) — never a third revert path.
-- Producers keep their pure planners; the flow only decides _which envelope_ carries the ops.
-- Every refusal is named (the repo's convention, e.g. "ledger stale — effects changed since"), and
-  every phase ends with the standard gates in Appendix A.
-- Docs land with the slice, not after it: the item line in `PF1e_Unified_TODO.md`, a `DECISIONS.md`
-  entry per slice, and `ACTION_SYSTEM.md` where the authority story changes.
+- The host creates the audit identity and commits the action card, rules state and mechanical Ops
+  atomically. A client cannot submit an `ActionAudit`, trusted save result, DC or dose count.
+- `conditionApplications`/affliction instances own source and expiry state. Their derived effects are
+  recomputed from the versioned rules definition; action cards report, and never apply, mechanics.
+- One private receipt is authoritative for inverse Ops. A card-level control delegates to that host
+  receipt; it never carries a second, player-readable copy of pre-images.
+- A later expiry/save/replacement is a later world event. Revert refuses rather than time-travelling
+  over that event, with a useful refusal reason.
+- Every rules number is tied to a source fixture; unsupported entries are visibly refused/reported,
+  not silently represented as a condition label.
 
 ### Phase 0 — Characterization and contract freeze _(partly landed)_
 
-**Landed:** `tests/host/effectRevertScope.test.ts` (4 tests) pins the four behaviours in §1.3 — ordinary
-intent + Undo; audited envelope + named Revert; the library path both ways; whole-document staleness
-refusing an unrelated HP edit.
+**Landed:** `tests/host/effectRevertScope.test.ts` (4 characterization tests) pins ordinary Undo,
+named Revert, the effect-library path and whole-document stale refusal. Keep these tests; they show what
+the rollback machinery does, not that every condition currently receives its mechanics.
 
-**Remaining:** record the rulings in §6 (R1–R5) as `DECISIONS.md` entries, because phases 1–7 branch on
-them. Two of them (R1, R4) are load-bearing: getting them wrong means re-doing Phases 1–3.
+**Remaining before production work:** decide R1–R7 in §6 and add characterization for (a) legacy
+Home-A labels versus effect-derived mechanics, (b) the Pinned escape action, (c) Deafened’s absence
+from the supported definition table, (d) public projection of `rollLedger`, and (e) receipt staleness
+after a card ledger update/prune. Record baseline behavior honestly; do not weaken assertions to make a
+later implementation pass.
 
-**Acceptance.** Test file green in `pnpm test`; the decisions exist with alternatives and consequences;
-no production code touched. **No e2e** (nothing user-visible changes).
+**Acceptance:** focused tests green; R1–R7 and their alternatives/consequences recorded in this plan
+(no `DECISIONS.md` implementation entry yet); no production code changed. No browser e2e is needed in
+this phase.
 
-### Phase 1 — Give the existing condition producers a revert envelope
+### Phase 1 — Canonical condition instances and mechanical resolution
 
-_Closes G-A1 and G-A2's first half. This is the direct answer to "can a GM revert entangled/grappled/sickened"._
+**1a. Persisted shape and compatibility.** Add a validated, id-keyed
+`actor.system.pf1e.conditionApplications` map. Each new application has a stable ID, canonical
+condition key, host-owned source (`actionId`, source kind/ID and optional relationship/group ID), and
+an explicit duration/removal policy or `none`. It is an instance, not a unique name. Retain legacy
+`system.pf1e.conditions: string[]` as a read-compatible legacy input; normalize it to permanent,
+source-unknown applications for reads without destructively rewriting old worlds. New writers stop
+adding strings. Add the schema/type/validation/export-import/replica round-trip story before emitting
+map entries; path deletion must be addressable by application ID.
 
-**1a. Maneuvers.** `pf1eManeuverFlow.ts` `post()` (`:399`) currently posts the card and the condition ops
-as two separate envelopes. Submit them as **one** transaction (audited envelope or ledger card per R1),
-built from the same `plan.ops` array, with the card's `system.action` recording the maneuver outcome.
-Every branch keeps its existing ops: trip/overrun prone, dirty trick's condition set, the whole grapple
-family (initial, maintain, pin, tie-up, escape/break/reverse, release).
+Do not count lifetime exposures as active condition instances. When the same condition is supplied by
+multiple sources, retain each source instance; derive the effective rule result from all live sources
+and the PF1e interaction rule. A conflict is explicit and condition-specific (for example, Pinned and
+Grappled do not stack; fear effects do not simply sum); do not apply a global “latest wins” policy.
 
-_Invariants to pin:_ one seq, one transaction — a refused commit posts **no** card and writes **no**
-condition (no orphan card, no half-applied maneuver); the ops in the card/receipt are byte-equal to
-the ops submitted; `plan.ops` stays the single source.
+**1b. One rules-resolution path.** Extend the tactical derivation so active application instances
+resolve through the same validated `PF1E_CONDITIONS` payload/stacking path as other PF1e effects,
+exactly once. Keep the displayed condition-name list as a projection of active instances plus legacy
+names; it is not a second mechanical source. Ensure the Effects tab’s condition entry point creates a
+condition application rather than a conflicting second copy in `actor.effects`; non-condition buffs
+remain ordinary effects. Unknown/unsupported legacy labels stay visible with an issue; a new operation
+cannot claim success for an unsupported condition.
 
-**1b. Dying tick and first aid.** `pf1eDyingTick.ts:61` and `pf1eFirstAid.ts:52` write home A `Stable`
-(two sites in `CombatPanel.svelte:529,690`). Same envelope treatment — these are small, batch them with 1a.
+Complete the specific condition subset required by these producers, including Deafened because Dirty
+Trick allows it. Add the missing initiative, sound-based Perception, opposed Perception and verbal
+spell-failure consequences through their correct consumers. Audit action exceptions before putting
+`denies` in a payload: a pinned creature must still be able to attempt its escape; a prone creature’s
+crossbow exception must not be mistaken for permission to use every ranged weapon. State which other
+catalogue entries remain out of scope; do not call the 27-entry library a complete PF1e condition
+catalogue.
 
-**1c. Effects tab.** `PF1eActorSheet.svelte:2082` (combatant home) and `:2092` (actor home) apply/edit/remove
-through `effectOps.ts` with plain `client.submit`. The combatant home is already id-keyed, so its removal is a
-legal `-=flags.core.effects.<id>` diff; the actor home is a wholesale array diff (G-A3).
+**Acceptance/tests:** applying `Prone`, `Grappled`, `Pinned`, `Shaken`, `Entangled` and `Deafened`
+changes the expected derived/action behavior; removing one source leaves a second source in force;
+Pinned escape and Dirty Trick early removal remain legal; Pinned replaces the target’s Grappled
+application without removing the grappler’s; legacy strings still round-trip and derive once; unknown
+legacy names are not fabricated into rules. Add unit tests for mixed legacy/new data and source
+removal, plus a sheet/host integration path.
 
-**Acceptance criteria.**
+### Phase 2 — Atomic host transactions for existing producers and named Revert
 
-| #   | Given / When / Then                                                                                                                                                                         |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1.1 | GM trips a target through the sheet → the World actions panel offers the maneuver with Revert; pressing it restores the exact previous `system.pf1e.conditions` array                       |
-| 1.2 | the same for a dirty trick (Entangled/Blinded/Shaken per the margin), a grapple initial check (both combatants), and an escape (both lose Grappled/Pinned)                                  |
-| 1.3 | a player-triggered maneuver is revertible by the GM and _not_ by the player (the panel is absent; the host refuses a forged intent with the existing GM-only refusal)                       |
-| 1.4 | an unrelated later HP edit on the same actor → Revert refuses with the named staleness reason and leaves both state and receipt untouched (the §1.3 case-4 behaviour, now on a public path) |
-| 1.5 | an AoO-damaged trip that fails writes **no** condition and posts no revertible condition entry                                                                                              |
-| 1.6 | Undo still works on the same write (no regression of the global path)                                                                                                                       |
+This is the first user-visible rollback slice. Replace the current two-submit maneuver path with a
+typed host-owned action intent. The client sends the requested maneuver and bounded context; the host
+re-reads current actors/encounter, revalidates the check inputs/ownership/visibility, builds the
+condition-instance and movement Ops, normalizes the D-405 action record, creates the audit itself and
+commits all changes in one `commitOps` envelope. Never accept client-created audit metadata.
 
-**Tests.** `tests/ui/pf1eManeuverFlow.test.ts` (envelope shape, one-transaction invariant, every branch
-table); `tests/ui/pf1eDyingTick.test.ts` + `pf1eFirstAid.test.ts` (envelope); `tests/host/sync.test.ts`
-under `durable GM Revert for world actions` — a new case "reverting a maneuver envelope restores the
-condition list" plus the stale-refusal case; `e2e/action_revert.spec.ts` grows from 3 to 5 specs (trip →
-chip disappears after Revert; player maneuver → GM-only panel).
+Route trip/overrun, Dirty Trick, all grapple branches, Dying/Stable transitions, first aid, and manual
+condition apply/edit/remove through that path. A successful initial grapple that starts nonadjacent
+must include the required target move to an adjacent open space in the same transaction; a failed
+check/no adjacent space commits neither grapple condition nor movement. A failed/rejected action posts
+no misleading card. Releasing/escaping clears only the relevant grapple relationship. Keep prone until
+stood up; Phase 4 must not add an automatic Prone expiry.
 
-**Risk.** Merging the two submits changes op ordering on the wire; the card create must be validated in
-the same preflight as the condition ops (D-405's card contract and the chat-visibility preflight are the
-two consumers to re-run).
+**Acceptance:** GM Revert restores the exact prior mechanical state (including affected sources and
+movement) for a trip, Dirty Trick, initial grapple/pin/escape, and first-aid/dying action; re-derivation
+matches the pre-action actor; player-triggered actions are revertible only by the GM; malformed/forged
+requests are rejected atomically; staleness follows R2 (same-instance edits refuse, unrelated paths do
+not spuriously block a keyed application); global Undo still works.
 
-### Phase 2 — F01 ledger coverage for condition ops
+**Tests:** pure planner table for every outcome; HostSync integration for exact receipt contents and
+one-sequence atomicity; no orphan action card on refusal; same-condition-instance stale case and an
+unrelated HP-path edit allowed under R2 (legacy array writes remain whole-array stale); grapple
+relationship/multiple-grappler cases; player/GM permission matrix; Chromium `action_revert` and the
+relevant maneuver acceptance specs. Phase 2 proves reversible mechanics only for the supported
+condition slice from Phase 1.
 
-_Closes G-A2's second half: the roll card's own Revert/Reroll for condition-bearing actions (F01's
-promised clause)._
+### Phase 3 — F01 card UX backed by the private receipt
 
-**2a. Ledger-bearing condition cards.** The maneuvers built in Phase 1 also attach
-`system.rollLedger` (`buildRollLedger` + `captureLedgerInverses` before submit), with `turnNumber` from
-`tacticalLedgerTurn` and `ledgerOps` = the condition ops. Then the card advertises Revert within the
-2-round window and Reroll where a recompute is possible.
+Do not attach the current raw `ledgerOps`/`ledgerInverses` to a public chat message. Change the ledger
+contract for these actions to carry only safe roll/action summary, window/status and an opaque receipt
+ID. The host resolves that ID and performs the same receipt transaction used by the World actions
+panel. It is one inverse store, not a receipt plus an independent copy of the inverse. Update
+`PF1e_Unified_TODO.md`/F01 to state this authority explicitly if its old inline-ops wording must change.
 
-**2b. Reroll semantics.** `planDamageDeltaReroll` refuses non-HP ledgers by name today (correctly). Options
-for condition-bearing ledgers, per family: **(i)** keep the refusal (Revert only, manual re-roll);
-**(ii)** revert-then-apply-manual; **(iii)** semantic recompute — the flow already _has_ a pure planner
-that takes the die, so a reroll can re-run `planTrip`/`planDirtyTrick`/`planGrapple*` with the new face
-and swap the ops. Recommend **(iii) only where a planner is die-parameterised** (trip, overrun, dirty
-trick, grapple checks — all are), and (i) as the default elsewhere, with the refusal string naming the
-family. This keeps the ledger honest: it never fabricates an effect, it re-derives one.
+Before enabling card controls, fix the receipt/message coupling: a durable receipt must survive the
+host’s own ledger status update and two-round prune, while still refusing any unrecognized mutation.
+Use an explicit host-owned mutable-presentation-field allowlist or a separate append-only action-card
+reference that is not part of the mechanical post-image hash. Do not simply ignore the whole message
+hash. Revert, reroll status and card status update in one host commit; a card-level Revert delegates to
+the receipt and cannot double-apply it. Ensure `ActionCard.svelte` renders the safe controls when
+`ChatPanel` selects it ahead of legacy `RollCard`.
 
-**Acceptance criteria.**
+Initially ship **Revert**, not semantic condition Reroll. Add a family-specific Reroll only when the
+host can rederive from the original verified check context and prove every affected input/document is
+unchanged; a planner accepting a new die face alone is insufficient. For a reroll that changes a trip
+from hit to miss, remove only that action’s Prone application; for a changed Dirty Trick margin,
+replace that application/duration, never union outcomes.
 
-| #   | Given / When / Then                                                                                                                                             |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2.1 | a trip card rerolled from hit to miss removes the prone condition and the ledger records both dies                                                              |
-| 2.2 | a dirty trick card rerolled to a larger margin replaces the condition with the new margin's set (no union of old and new)                                       |
-| 2.3 | a reroll outside the 2-round window refuses with the existing window string; a revert past the window still works from the receipt if R1 chose the receipt path |
-| 2.4 | a ledger Reroll on a family with no recompute contract refuses **by name** and still offers Revert                                                              |
-| 2.5 | pruning leaves the card's text/history intact after the window (`pruneOpsForWindow`)                                                                            |
+**Acceptance/tests:** no inverse/pre-image or hidden effect leaks in GM/player snapshots, live diffs or
+player-authored views; card Revert and World actions Revert reach one host path; two consecutive presses
+cannot apply twice; Revert still works after ledger pruning/card-control changes; an edit to the same
+application/receipt path refuses while unrelated paths follow R2; ActionCard controls render in a real
+public message; unsupported rerolls refuse by family name.
 
-**Tests.** `tests/packages/rollLedger.test.ts` — the "non-HP ledger is refused by name" case is
-deliberately rewritten (it is the red test for 2b); add condition swap, margin replacement, window, and
-prune cases. `tests/host/sync.test.ts` roll-revert path; `e2e/roll_ledger.spec.ts` condition card spec.
+### Phase 4 — Source-correct duration and expiry scheduler
 
-**Decision dependency:** R1 (does the maneuver get receipt, ledger, or both — the phase-1 card may need
-both anyway) and R2 (per-path vs whole-document staleness for array homes).
+A condition has no universal duration merely because it has a name. Only an application whose source
+rule says it expires receives a timer. Persist the actual evaluated duration (including the Greater
+Dirty Trick d4 face), time unit and start/expiry boundary—not a formula string and not only prose.
 
-### Phase 3 — Timed conditions in the names-only home
+Round-duration effects must expire at the PF1e rule boundary anchored to application (initiative
+count/turn boundary), not unconditionally at the affected creature’s turn end. Minutes/hours/days use
+the replicated world clock with one expiry authority; a duration must not be both decremented by a
+turn tick and independently expired by a clock sweep. If the present combat model cannot represent the
+required initiative boundary, decide and document that limitation before adding the timer; do not
+silently substitute a target-turn-end house rule.
 
-_Closes G-A5 (durations computed and dropped) and part of G-A4._
+Dirty Trick records both its duration and early-removal rule: target spends a move action normally or
+a standard action with Greater Dirty Trick. The host validates and commits that action, removing only
+the corresponding application. Prone does not auto-expire; grapple applications end on their own
+validated release/escape/replacement events; Fatigued/Exhausted and health-state conditions use their
+own rest/health rules, not a generic round TTL.
 
-Today a dirty-trick condition never expires: `maneuvers.ts:578–620` computes `durationRounds`
-(1 + ⌊margin/5⌋, Greater 1d4 + ⌊…⌋) and the removal rule, and the planner throws it away. Options:
+Expiry is an idempotent host event that removes one application ID, emits an expiry reason/card or
+log, and leaves unrelated applications intact. It is later than the originating action: after expiry
+or replacement, the original Revert refuses as stale with a reason such as `condition expired at
+round/clock boundary ...`; no time travel. Keep tactical condition state separate from the strategic
+pool/hero overlay.
 
-- **A — keep names-only** and let the GM remove it by hand (`conditionSetOps`); cheapest, honest, but the
-  tracker will lie about a 2-round Blind.
-- **B — compact timed entries**: allow `system.pf1e.conditions` entries to be `string | { name; rounds?;
-sourceId?; note? }`, with a read-normalizer so every existing consumer keeps working (`actor.ts:1509`,
-  badges, automation filters, action-deny) and writers emit objects only for timed state. This is the same
-  read-normalization discipline as `worldClock` (`:204`).
-- **C — route maneuver conditions through home B** (payload effects with `ttl`), reserving names-only for
-  untimed state. Reuses the expiry machinery wholesale, but the effects array is a wholesale diff, so
-  unrelated effect edits make the ledger path stale more often, and grapple replacement semantics move
-  into payload space.
+**Acceptance/tests:** application after/before the target’s initiative has the correct full duration;
+Dirty Trick expires at the correct anchored boundary and can be removed early with the correct action
+cost; Prone survives turn/round advancement until stood up; two same-name applications expire
+independently; turn and world-clock entry points cannot double-tick; stale Revert identifies expiry;
+replay/re-entry expires once.
 
-Recommend **B**, with C as the long-term target only if R4 wants one home; the normalizer is a small pure
-function that Phase 4 and the spells phase both reuse.
+### Phase 5 — Host-verifiable spell effect continuation
 
-**Slices.** 3a — normalizer + writer for trip/overrun ("prone until your next turn") and dirty trick
-(duration + removal rule); 3b — readers (derivation, denies, badges show `(2 rounds)`); 3c — the maneuver
-card spells out the duration and the trigger that ends it; 3d — grapple's replacement semantics stay
-atomic inside one array write (Pinned replaces Grappled, never both).
+Use `ACTION_SYSTEM.md` as the authority boundary: one verified target/check resolution commits the
+per-target action transition and its exact condition/effect Ops atomically. The host resolves target,
+area, source actor/item, save, SR, immunity/resistance and outcome from current state and host-owned
+roll evidence; it never trusts a client-supplied success, DC or condition list. `ActionCard.conditions`
+remains report-only. A condition application stores the spell/action source and the spell-defined
+duration/expiry rule.
 
-**Acceptance.** Applying a Greater dirty trick stores `rounds: 1d4+⌊margin/5⌋`; every existing
-reader/report still sees the name; a names-only legacy array round-trips unchanged through every path
-(no migration, no version bump — the P0 rule); the card states the exact expiry trigger.
+Start with a small cited spell set, including a multi-target/area case and a save-negates versus
+save-partial distinction. Deferred player saves, touch/concentration, charges and expiry must enter
+the same per-target executor exactly once. Do not upgrade a descriptive compendium entry to automated
+until a pure rules fixture and host/browser acceptance exist. Do not promise generic PF1e spell
+continuations from one Entangle example.
 
-**Tests.** `tests/packages/pf1eConditions.test.ts` (normalizer table, legacy passthrough),
-`pf1eManeuverFlow` duration cases, `pf1eActor` derivation with mixed entries, sync round-trip.
+### Phase 6 — Core PF1e poison application, saves, stacking and Revert
 
-### Phase 4 — Expiry scheduler (turn tick + world clock)
+This phase is required for the poison behavior requested by the user. Its default is the **Core
+Rulebook affliction/poison system**, not a generic condition TTL and not the optional Unchained
+progression track. Start with an exact transcription/fixtures from CRB pp.555–557 and the selected
+poison entries before implementing a producer. The schema must represent each fact below; no
+“assume Fort/one save/one dose” shortcut.
 
-_Closes the other half of G-A4/G-A5; makes reverts and expiry interact deterministically._
+**6a. Immutable poison definition (source data).** A versioned profile contains:
 
-**4a. Turn tick.** Extend the combatant effect tick (`core/combat.ts:291` `tickEffects`) or the flow that
-calls it with the same call for timed **condition entries**: decrement at the owner's turn end, expire at
-0, and report the expiry (badge + chat note). Precedent and shape: `duration: null` persists; sustain vs
-lapse semantics already exist for effects (`combatState.ts`).
+- poison identity and rules citation;
+- delivery route (`injury`, `contact`, `ingested`, `inhaled`; any special exposure trigger/volume);
+- initial exposure save ability and DC source (fixed stat-block DC or a host-derived formula such as
+  a creature poison DC), with the unadjusted `baseDC` kept separately;
+- onset (including none) and the first-effect/first-periodic-save boundary;
+- frequency interval and finite number of intervals or an explicit unbounded/once-only schedule;
+- effect on each failed ongoing save (HP/ability damage, condition application, and whether effects
+  accumulate, replace, or are initial/secondary as the poison entry specifies);
+- cure policy: `successesRequired: N` **and** `consecutive: true|false`, plus any source-verified
+  magic/other cure. Preserve the entry’s wording: `Cure 2 saves` and `Cure 2 consecutive saves` are
+  distinct profiles; do not infer the flag from the number alone;
+- Core poison dose-stacking policy and supported target-side immunity/prevention/pausing interactions.
+  The host checks immunity; *delay poison* pauses active courses and queues new exposure saves in
+  order; *neutralize poison* is a validated cure. If any interaction is deferred, expose that support
+  boundary instead of silently applying the baseline poison flow;
+- An Unchained track is a separate opt-in rules variant and is not inferred from a CRB poison
+  definition.
 
-**4b. World clock.** `pf1eClockSweepOps` (`worldClock.ts:204`) already sweeps effect durations on time
-advance — teach it the normalized timed entries so a condition with a minute/hour basis expires on the
-same boundary.
+**6b. Authoritative course, dose batches and exposure DC.** Store poison as a target-owned, id-keyed
+affliction course, not `conditions: ["Poisoned"]`. Keep an exact poison-definition identity (source,
+version and mechanics—not just a display name), target, active dose count, onset/frequency/end
+boundaries, cure progress, last resolved attempt ID, source-owned active effect IDs, and state (`onset`,
+`active`, `cured`, `expired`). Preserve each dose-event record and its source/action, source actor/item/
+ability, delivery route, timestamp, dose count, initial-save DC/result and receipt ID so several
+attackers or items can contribute doses without losing provenance. Similar entries with different save DC
+or frequency are separate afflictions even if their names match (Paizo FAQ §7). Distinct poison
+identities never share doses, DCs, schedules or cure counters. Active dose count excludes successful
+initial saves and doses whose course was cured or ran its frequency to completion.
 
-**4c. Revert interaction (R3).** Decide and pin: reverting a card whose condition has **already expired**
-(or been replaced by a later grapple) is refused as stale; the plan should surface _which_ later write
-blocked it rather than only "changed after this run" — even if the refusal stays fail-closed.
+The dose/DC calculation must distinguish the **ongoing save** from the **save to resist a new
+exposure**. If `n` doses are currently active, an ongoing save uses `baseDC + 2 × (n − 1)` (one dose
+is the base DC). A new exposure bringing `m` doses of the same poison is resisted at the DC for the
+candidate combined stack, `baseDC + 2 × max(0, n + m − 1)`. Injury/contact exposure contributes at
+most one dose per qualifying exposure; simultaneous ingested/inhaled exposure can deliver multiple
+doses and uses the single higher-DC initial save required by the Paizo FAQ. If that save succeeds,
+none of the candidate doses are added, there is no dose-duration extension or effect from that
+exposure, and any pre-existing course/cure progress remains unchanged. If it fails, add all `m`
+doses; the ongoing DC is then `baseDC + 2 × (n + m − 1)`. This captures the FAQ’s rule that the new
+exposure save is increased by currently active doses, while the failed new dose increases subsequent
+saves too. Do not roll one independent save per dose in a simultaneous inhaled/ingested batch.
 
-**Acceptance.** Trip → advance to the end of the victim's turn → prone expires with a visible note; a
-1-minute poisoned-by-proxy effect expires when the clock crosses the boundary; no expiry fires twice
-(idempotent re-entry); a revert after expiry refuses with a reason that names expiry as the blocker;
-strategic mirror unchanged (a tactical expiry never silently rewrites the pool).
+On a failed initial save, each additional dose extends the original total frequency duration by half
+that original duration; this applies only when the initial save against the new dose/batch fails. For
+an unpoisoned target exposed to `m` simultaneous doses, the first dose establishes the base course and
+`m − 1` doses add extensions; if a course already has `n > 0` doses, all `m` failed new doses extend
+its end. Extend from the current course end, do not restart or shorten elapsed duration. Keep the
+original base duration so repeated exposures do not compound from an already-extended value. The CRB
+three-dose Medium spider venom example remains a required fixture: base DC 14/frequency 1 round for
+4 rounds becomes DC 18 for 8 rounds, and one successful cure ends all three doses. Preserve a
+fractional half-duration if the scheduler can represent it; otherwise **round down the per-dose
+extension** in the poison’s frequency unit (`floor(baseDuration / 2)` for each additional dose). For
+example, a 5-round base adds 2 rounds per additional dose. A later failed dose joins the exact poison
+course and changes DC/end time, but does not silently restart its already-running onset or frequency
+schedule; preserve each exposure timestamp so any source-specific onset exception is explicit and
+tested.
 
-**Tests.** `tests/packages/pf1eTurnBoundaries.test.ts` (tick ladder, expire-once, null-persists),
-`pf1eWorldClock.test.ts` (minute/hour boundaries with timed entries), `tests/core/combat` equivalents;
-e2e: apply → advance → chip disappears; revert-after-expiry refusal reason.
+Exposure saves never count as successful cure saves. A successful later exposure save explicitly
+leaves the existing course and cure progress unchanged. **Any failed save against the same poison
+identity resets an existing consecutive-cure streak**, including a failed initial save against a newly
+added dose; it does not erase successes for a nonconsecutive cure. A different poison identity does
+not affect this course’s cure progress.
 
-### Phase 5 — Spells: the host-verifiable effect continuation
+**6c. Initial effects, onset and scheduled saves.** Implement the PF1e event order, not a generic
+“failed save → add Poisoned label” shortcut:
 
-_Closes G-A7. The largest slice; must not start before R1/R4 are recorded._
+1. **Exposure/initial save.** The host validates the delivery and dose batch, computes the initial DC
+   above, and resolves one source-authorized initial save. Success resists only that exposure and
+   creates no dose. Failure contracts/adds the dose batch. With **no onset and a frequency**, the
+   target suffers the poison’s effect for that failed exposure save immediately (once for a
+   simultaneous multi-dose save), then enters the periodic schedule. With an **onset and a frequency**,
+   a failed initial save causes no effect yet; a new course enters onset and begins additional saves
+   only after it elapses. Adding a dose to an already-running same-poison course does not restart its
+   onset/frequency schedule. If the profile has **no frequency**, apply its one-time effect exactly
+   once immediately on contraction, or after onset if present, then end it as specified by the Core
+   affliction rules; do not apply the initial-failure effect a second time.
+2. **Ongoing/frequency save.** At every source-defined frequency, resolve one save for the active
+   poison course—not one per stacked dose. For `1/round`, make it at the affected creature’s turn
+   (at any point during that turn); if the creature delays, resolve it immediately rather than
+   delaying the poison save (Paizo FAQ §3). Other frequency units and onset use the profile’s
+   replicated world/combat clock boundary. Host re-reads the target’s current save bonus, exact active
+   dose count and poison definition; computes the DC; validates the roller/commit-reveal result; and
+   re-reads state after async work. A stable `(poisonInstanceId, attemptIndex)` makes resolution
+   idempotent. A successful periodic save applies no poison effect and advances cure progress. A failed
+   periodic save applies exactly the profile-defined effect once (including initial/secondary effects,
+   accumulation/replacement rules); it resets cure progress only as specified by the cure policy.
+3. **Cure/end.** `successesRequired: N` plus `consecutive: true|false` represents one success, multiple
+   consecutive successes and multiple nonconsecutive successes without conflating them. For a
+   consecutive cure, a failed cure save resets the streak; for a nonconsecutive cure, it does not erase
+   earned successes. Cure success ends all active doses of that exact poison course and stops every
+   future save. A source-verified magic cure such as *neutralize poison* uses its own host-validated
+   operation and is atomic with course/effect removal. A finite frequency also ends the course when
+   its stated duration runs out. Do not heal HP/ability damage already caused: CRB affliction rules
+   leave that damage to be healed normally after cure. Remove only source-owned ongoing condition/effect
+   instances that the poison entry says end with it.
 
-`ACTION_SYSTEM.md:141–143` is the contract this phase implements, and `:172` already lists it as a next
-extension: a host-owned continuation that re-derives defenses/resistances on the host before applying
-HP/effects. `pf1eCastFlow.ts`'s deferred-save row (`:1531–1539`) currently says exactly that no condition
-is inferred — this phase gives that row an executor.
+Keep the cure counter semantics explicit for exposure versus periodic attempts. In particular, the
+Paizo FAQ says a successful save against a new dose does not count toward curing the poison already in
+the target; it is not a scheduled cure save. Do not let a generic “save succeeded” handler advance it.
+The affliction definition must state whether special initial/secondary effects change on later failures.
+For timed onset/frequency, preserve due times and finite remaining occurrences so a dose addition,
+delay action, clock sweep or replay cannot double-tick or reset the wrong boundary. While *delay
+poison* is active, pause existing courses without banking missed periodic saves; record new exposure
+events in order without resolving their initial saves. When it ends, resolve those initial saves in
+order, recalculating the active dose stack after each result, then resume the source-defined frequency
+schedule. This is a typed poison interaction, not a generic timestamp shift.
 
-**5a. Contract.** A cast intent whose card carries the effect ops, host-verified end-to-end: target in
-the resolved area, save outcome from the host roll record, SR/injury/regen interactions, condition
-immunity (`conditionRefusalFor`), source kind `spell`, effect payload built by a **pure** planner
-(`src/packages/pf1e/spellEffects.ts`, new) that maps a spell + outcome + margin to `EffectRequest`s — no
-invented numbers, every entry citing its verified text as `pf1eConditionPayload` does.
+A pending save may use the existing player-pending-roll UI, but it needs a poison-specific host
+adapter: action/target/attempt identity, save ability, current dose-adjusted DC, and outcome are
+host-derived; the client cannot author the cure counter, dose count or effect Ops. Each resolved
+attempt, immediate damage/condition Ops and poison-course update commit in one host envelope with one
+visible action/roll card. Exposure, periodic save, magic cure and source-owned condition removal are
+separate typed intents, not generic client-supplied document Ops.
 
-**5b. Commit.** The effect ops join the same envelope as the damage/HP/slot writes (the cast flow already
-commits HP through `pf1eSheetEdit`, `:709`), so the card is revertible and (where the planner is
-die-parameterised) rerollable under Phases 1–2's rules. The action row's final state resolves from
-`pending` to `resolved` in the same commit — no dangling pending row.
+**6d. Revert semantics (R5).** Each failed exposure/dose-addition (including its immediate effect,
+if any) is an audited event; each periodic save/effect is a later audited event; cure/neutralize is
+another event. Revert of an exposure restores only that exposure’s immediate dose/course change and
+its immediate effect Ops, and is allowed only while its post-image is still current. A later save,
+dose, cure or expiry makes it stale and must be named—not silently rewound. Reverting a periodic-save
+card restores that one attempt’s state and its exact immediate effects, subject to the same stale gate.
+Reverting a cure can restore the active course only if no later event depends on it; it never heals
+damage from earlier saves. This is event undo, not retroactive reversal of an entire timeline.
 
-**5c. Deferred saves, touch, concentration, charges.** The pending/concentration/touch continuations
-(`:1711/:2193/:2340/:2475/:2689`) resolve through the same executor when their roll lands; the timeline
-ordering (roll → effect commit) is the host's, not the client's.
+**6e. Acceptance and fixtures.** `tests/packages/pf1eAffliction.test.ts` plus host integration and
+`e2e/pf1e_poison.spec.ts` must cover:
 
-**5d. Pack upgrades.** Only after the executor exists: upgrade spell entries from `descriptive` to
-`automated` in small, verified batches (Entangle, Grease, Haste/Bless-style buffs first — each already
-has a `condition`/keyword trace in the pack), each with its SRD citation. 71 descriptive entries stay
-descriptive until their batch lands; the `automationNote` is the honest backlog marker.
+- exposure-save success (no new dose/effect/extension) and failure; no-onset immediate effect; onset
+  suppressing effects until its first post-onset failed save; one-shot/no-frequency affliction;
+- `Greenblood oil` (DC 13, 1/round for 4 rounds, 1 Con damage, Cure 1 save) from the Paizo FAQ;
+  `Giant Octopus` poison (DC 19, 1/round for 6 rounds, 1d3 Strength damage, Cure 2 saves) from
+  [Archives of Nethys](https://aonprd.com/MonsterDisplay.aspx?ItemName=Giant%20Octopus), with the
+  unqualified two-save cure represented as nonconsecutive; `Wyvern` poison (DC 17, 1/round for 6
+  rounds, 1d4 Con damage, Cure 2 consecutive saves) from
+  [Archives of Nethys](https://aonprd.com/MonsterDisplay.aspx?ItemName=Wyvern);
+- one-success cure; two consecutive successes with a failure resetting the count; a Giant Octopus
+  success/failure/success sequence curing after the second success; successful exposure save neither
+  advances nor erases cure progress; failed same-poison re-exposure resetting an existing consecutive
+  streak; another poison identity leaving that streak untouched;
+- ongoing saves at exact onset/frequency boundaries, including a delayed turn; finite frequency ends
+  uncured; duplicate/replayed attempt applies no second save/effect/cure;
+- repeated injury/contact exposures: DC for the new initial save rises by +2 per active dose; success
+  does not extend/add a dose; failure adds the dose, applies the effect once, raises subsequent DC by
+  +2, resets a consecutive cure streak and extends by half the original duration; three active spider
+  doses yield DC 18/eight rounds; an odd-duration fixture confirms per-dose round-down;
+- simultaneous multi-dose ingestion/inhalation: one initial save at the higher candidate-stack DC;
+  failure adds all doses and one effect for that failed save; success resists all; cure ends every dose;
+- different definitions with the same display name but different DC/frequency remain separate; distinct
+  poison IDs never share DC/cure/duration state; poison entries with initial/secondary effects advance
+  the right effect; source-owned temporary conditions end only when the definition says so;
+- HP/ability damage remains after cure; poison immunity blocks exposure/effects; *delay poison* pauses
+  an active cadence without backfilled saves and resolves queued exposures in order exactly once;
+  supported *neutralize poison* path is atomic;
+  bad/forged DC, dose count, cure progress, outcome and duplicate attempt ID are rejected;
+- Revert exposure before a later tick; refusal after a subsequent tick; Revert one tick without
+  changing another poison; rollback/replay and combat/world-clock race cases.
 
-**Acceptance.** Entangle on a failed save applies a real payload effect in the same envelope as the card,
-the target's AC/speed derivation changes, the card is revertible by the GM and the revert restores the
-prior effects array; a successful save applies nothing; a mind-affecting debuff on an immune target is
-refused by name; a deferred save resolved by the player's roll commits the effect exactly once; a
-`descriptive` entry still shows the "no automation" note and writes nothing (D-405's honest-cards rule).
+### Phase 7 — Atomic forced movement and tactical trample
 
-**Tests.** `tests/ui/pf1eCastFlow.test.ts` (op-carrying save, success/fail/immune, deferred resolution,
-exactly-once); new `tests/packages/pf1eSpellEffects.test.ts` (fixture-cited mapping); host revert test over
-a cast card; `e2e/pf1e_cast_flow.spec.ts` extension + a revert spec; size gate (this phase is the one most
-likely to add UI, so the 6 MB budget is checked per PR).
+Bull rush/drag/reposition become validated world-position Ops (existing host movement, walls/zones,
+speed and permission policy) plus card and any condition Ops in one receipt. The successful initial
+grapple’s required pull-to-adjacent movement is handled in Phase 2, not left as a separate drag.
 
-### Phase 6 — Afflictions: poison (and disease, if scoped)
+For trample, first decide which PF1e source is intended (monster special ability versus a feat/mounted
+action); they are not interchangeable. Transcribe movement, eligible targets/size, target choice,
+attack/save, damage and path interaction from that source before coding. Do not encode “Reflex half”
+from memory as the entire trample rule. If the source/rules scope is not funded, explicitly re-defer
+it and correct the import advisory. Strategic mass-battle trample/checkpoint undo remains untouched.
 
-_Closes G-A8's poison half. **Starts with a transcription task**, because the repo has no verified poison
-rule text: `PF1e_Unified_TODO.md` has zero `poison`/`disease` hits and the code has only the source-type
-label. The honest plan is R02 discipline first: transcribe onset/frequency/save/cure from the canonical
-text into a fixture, then encode._
-
-**6a. Payload.** A new effect payload kind `affliction` (or a `flags.pf1e.affliction` block) carrying
-onset, frequency (rounds), save DC/type, cure condition, and track effects; `effectOps`' source kind
-`poison` (`effects.ts:128,412`) is already reserved for it.
-**6b. Infliction.** An authored `poison` block on attack lines (rider on a hit — the attack flow already
-owns the rider seam), a new automation step in the closed action set (the reference audited producer),
-and a GM sheet control for traps. Each infliction is **one audited action**.
-**6c. Cadence.** Frequency saves resolve on the owner's turn boundary through Phase 4's scheduler or the
-clock sweep, applying the track's damage/conditions and logging a card; cure/neutralize removes the
-payload and any conditions it owns.
-**6d. Revert semantics (R5).** An affliction is a state machine: the honest scope is "revert the
-infliction event and the ops it committed", not "unwind every later save". Later frequency-save damages
-are later actions with their own receipts. The plan pins this in the docs so nobody promises time travel.
-
-**Acceptance.** A poisoned target's first frequency save fires on schedule with a named card; the
-infliction action is revertible within its receipt; the cure is revertible; no damage double-applies;
-`source.kind: "poison"` is carried on every op; an onset-delayed poison applies nothing before its onset.
-
-**Tests.** new `tests/packages/pf1eAffliction.test.ts` (fixture-cited onset/frequency/cure), flow tests,
-host revert, `e2e/pf1e_poison.spec.ts`.
-
-### Phase 7 — Movement maneuvers and tactical trample
-
-_Closes G-A6 and the tactical half of G-A8's trample._
-
-**7a. Atomic forced movement.** Bull rush / drag / reposition become real world writes: token position
-ops (the same path the drag tool uses) + card + any condition ops in one envelope, so Revert restores
-positions too. Requires a verified movement write path from the flow (today the flow returns notes and
-"the caller's map concern" moves the token separately).
-**7b. Tactical trample.** Only after 7a: consume the authored `trample*` fields (currently routed to P6
-by `statBlock.ts:25–27`), model the move-through, the target's Reflex save for half, damage to each
-target in the path, and commit damage + position + card in one audited action. Reconcile the stat-block
-deferral text in the same PR (and note that the firearm entries at `:26–28` now understate P09's landed
-work — an import-advisory string, not a rule).
-**7c. Alternatively re-defer explicitly.** If trample is still out of scope, the phase's deliverable is
-the honest re-deferral: update the deferral text and `PF1e_Unified_TODO.md`, so "not modelled" does not
-read as "not present".
-
-**Acceptance.** A bull rush card's push + prone is one revertible action (Revert restores both position
-and condition); a trample either behaves the same way (save, damage, path) or is re-deferred with the
-docs updated; a movement-during-revert race refuses deterministically (the M08 precedent).
-
-**Tests.** pure trample planner cases; movement-race test; `e2e` bull-rush replay.
+**Acceptance/tests:** Revert restores exactly prior positions and condition instances; host rejects
+movement through invalid terrain/space; action/card/state are atomic; tests cover the chosen sourced
+trample rule or verify the explicit re-deferral.
 
 ### Phase 8 — Surfaces, agents and documentation
 
-**8a. Surfaces.** Wherever a GM looks for an action, Revert must be reachable: the World actions panel
-(exists), the maneuver/cast/roll cards (a Revert affordance on the card that owns a ledger or a receipt —
-the ActionCard gets one only if R1 chose it), and a "conditions" line in the RollCard breakdown.
-Player-visible: the condition and its duration, never a Revert control.
-**8b. Read tools.** `src/core/agents/readTools.ts` exposes active conditions with source/duration so an
-agent can answer "what is on the goblin".
-**8c. Docs.** `PF1e_Unified_TODO.md`'s F01 clause becomes checkable (add the acceptance line the
-dashboard can see); `ACTION_SYSTEM.md` gains a pointer from the pending row to the executor; the
-`statBlock.ts` deferral map is reconciled; `DECISIONS.md` gets the per-slice entries; `DEVIATIONS.md`
-untouched unless a rule's _meaning_ changes (this plan changes no rule).
+GM Revert remains GM-only and reachable from the World actions panel and the relevant ActionCard.
+Players see only condition/effect name, source information permitted by projection, duration/removal
+rule and the normal save result—not Revert controls, raw ledger Ops, private pre-images or hidden
+conditions. Read tools expose active condition/poison instance, source and due/expiry information
+without leaking evidence/seeds. `PF1e_Unified_TODO.md`, `ACTION_SYSTEM.md`, the spell/poison pack
+status, coverage dashboard, `DECISIONS.md`, source deferral notes and `DEVIATIONS.md` are updated with
+evidence; any explicit house-rule/Unchained behavior is named rather than silently substituted.
 
-**Acceptance.** A GM can find and press Revert for a maneuver without reading docs; the coverage
-dashboard (`node scripts/coverage.mjs --check`) passes with the new item; no doc claims coverage the
-tests do not back.
+**Acceptance:** a GM can find/revert supported actions; a player-visible card has no raw inverses;
+source/duration/save state is readable; the coverage dashboard passes; docs distinguish implemented,
+source-verified, deferred and descriptive behavior.
 
 ### Sequencing summary
 
-| Phase | Closes             | Depends on                | Size (relative) | Touches                                                  |
-| ----- | ------------------ | ------------------------- | --------------- | -------------------------------------------------------- |
-| 0     | —                  | —                         | S (landed)      | tests + DECISIONS                                        |
-| 1     | G-A1, half of G-A2 | R1                        | M               | maneuver/dying/first-aid flows, sync tests, e2e          |
-| 2     | G-A2               | R1, R2, phase 1           | M               | rollLedger, RollCard, host roll-revert                   |
-| 3     | G-A5               | R4                        | M               | conditions normalizer, planners, readers                 |
-| 4     | G-A4               | phase 3, R3               | M               | core/combat tick, worldClock                             |
-| 5     | G-A7               | phases 1–3, R4            | **L**           | cast flow, pending cast, new pure planner, pack upgrades |
-| 6     | G-A8 (poison)      | phases 4–5, R5            | L               | new affliction module + data + UI                        |
-| 7     | G-A6, trample      | phases 1–4, transcription | M               | movement writes, trample, statBlock                      |
-| 8     | —                  | all                       | S               | UI, read tools, docs                                     |
+| Phase | Purpose | Depends on | Touches |
+| --- | --- | --- | --- |
+| 0 | Characterization + R1–R7 decisions | — | tests/docs only; characterization portion landed |
+| 1 | Condition instance schema + mechanics/legacy resolver | 0, R4 | `actor.ts`, conditions/effects, documents, validation, readers |
+| 2 | Existing producers in one host-audited transaction | 1, R1–R3 | maneuvers, Dying/first aid, HostSync, receipts, E2E |
+| 3 | F01 card UX through private receipt | 2, R1–R3 | roll ledger, projection, ActionCard, host revert |
+| 4 | Source-correct expiry and early removal | 1, R3–R4 | combat boundaries, world clock, condition applications |
+| 5 | Host-verified spell continuation | 1, 2, 4 | cast flow, pending rolls, pure spell effect data |
+| 6 | Core poison exposure/save/dose/cure/revert | 1, 2, 4, R5, R7 | affliction store, poison data, scheduler, host save path |
+| 7 | Forced movement + sourced tactical trample | 1–2, transcription | movement host path, trample, statblock advisories |
+| 8 | UX/read tools/docs/coverage | relevant prior phase | UI, agents, docs |
 
-Interlocks: 1 and 2 are one design; 3 must precede 4 (nothing to tick otherwise) and should precede 5
-(payload durations); 5 must precede 6c (the executor and cadence share the commit shape); 7a's movement
-write is a prerequisite for 7b but not for anything else.
+Interlocks: Phase 1 precedes every new condition writer. Phase 2 precedes any claim that a producer
+is named-Revertable. Phase 3 can ship card-level Revert UX only after raw ledger data is private and
+receipt/card staleness is solved. Phase 4 uses the Phase 1 application IDs; it does not expire
+conditions that have no source-defined timer. Phase 6 depends on the condition, host-receipt and
+scheduler foundations (Phases 1, 2 and 4), not the generic card ledger (Phase 3) or spell catalog
+(Phase 5); poison card-level Revert waits for Phase 3. Dedicated host-verified poison adapters for
+*delay poison* and *neutralize poison* are part of Phase 6; broader spell automation remains Phase 5.
+Phase 7 movement is separate from the condition rules work.
 
 ---
 
 ## 5. Explicit non-goals
 
-- **No new revert mechanism.** Receipts and the ledger already exist and are proven; this plan only feeds
-  them. A third mechanism (per-condition undo, a condition trash bin) is not proposed.
-- **No rule changes and no `DEVIATIONS.md` entries.** Every slice is an authority/pipeline change; the
-  numbers come from the already-verified modules (`maneuvers.ts`, `conditions.ts`, `firearms.ts`, …).
-  Where a rule is not verified yet (poison, trample), the phase starts with transcription, not encoding.
-- **No unsticking of the 2-round window or the prune.** F01's contract is explicit: the ledger prunes, it
-  does not become a 50-round time machine. Long-lived undo stays the receipt path.
-- **No player-facing Revert.** The host's GM-only gate is a security property, not a policy default to
-  relax; delegated _rerolls_ stay the player-facing verb (F01).
-- **No FX writes.** D-405's boundary holds: FX render and anchor, never mutate.
-- **No core document shape changes smuggled in.** `actor.effects` / `system.pf1e.conditions` shapes change
-  only if R4 decides it, in a slice that owns the migration story (and per P0: no version bump invented).
-- **No reversal of the strategic scale.** Mass battles keep checkpoint/pool undo; this plan never makes a
-  tactical revert rewrite pool columns (M08's hero overlay remains the only bridge, on its own schedule).
-- **No item/economy/consumable ledger coverage** beyond what a condition-bearing action needs (F01's
-  `ledgerOps` may include them where a flow already writes them; nothing new is promised).
-- **No compendium/import undo.** Bulk imports are not per-action edits.
+- **No third revert mechanism.** Use the existing host receipt as the only inverse source. The card is
+  a safe presentation/UX alias; it never stores a second inverse or has separate authority.
+- **No undocumented PF1e variants.** The default is Core Rulebook PF1e. Unchained poison progression
+  tracks or house-rule mechanics require an explicit world/ruleset choice and their own fixtures.
+- **No claim of a complete condition catalog.** Implement the named subset with tests; refuse or
+  visibly mark unsupported mechanical conditions instead of creating cosmetic conditions that appear
+  rules-supported.
+- **No generic duration for all conditions.** A source application gets only its source-defined
+  duration/removal condition. In particular Prone is not “until next turn.”
+- **No player-facing Revert.** The host’s GM-only gate remains a security property. A player may roll a
+  delegated save/reroll only through an explicitly authorized host flow.
+- **No FX writes.** FX render/anchor only; never mutate HP, conditions, poison state or permissions.
+- **No schema change by accident.** The keyed application/affliction collections and legacy reader
+  path are explicit persisted-contract work with validation, export/import and compatibility tests.
+- **No lifetime poison exposure counter.** Dose adjustment applies only to active doses of the same
+  poison course; successful initial saves, unrelated poisons, and cured/expired courses do not inflate
+  future DCs.
+- **No retroactive healing when poison ends.** Curing a poison ends its future effects; previously
+  committed HP/ability damage is healed normally unless another explicit healing action does so.
+- **No rollback of the strategic mass-battle pool.** Strategic checkpoint undo and the hero bridge
+  retain their existing contracts.
+- **No item/economy/import undo** beyond the exact operation required by a supported poison/maneuver
+  producer.
 
 ---
 
 ## 6. Decisions needed before the branching phases
 
-R1 and R4 gate Phases 1–5. Each is written as a `DECISIONS.md` entry when ruled on.
+R1–R4 gate Phases 1–4; R5 and R7 gate poison; R6 scopes later breadth. Record each decision before the
+implementation slice that depends on it.
 
-**R1 — Which envelope carries a condition action?**
-(a) _Audited receipt only_ (`commitOps` + `newActionAudit`): out-of-band, no window, GM-only, survives
-pruning, invisible to players; the maneuver card stays a report. (b) _F01 ledger only_: the card owns the
-ops, Revert/Reroll live on the card, 2-round window, players see the card. (c) _Both_: the receipt is the
-durable undo; the ledger is the in-window UX. — **Recommendation: (c)**, matching the attack flow (which
-already has a receipt path for world actions and a ledger for cards) and F01's own model; the cost is one
-extra preflight per action. Decision must also state which of receipt/ledger is authoritative when both
-exist (recommend: the receipt is the truth, the ledger is pruned UX; a card revert that cannot recompute
-falls back to the receipt when the window has passed).
+**R1 — Which store is authoritative for Revert?**
+(a) Audited `actionReceipts` only; (b) F01 ledger only; (c) both as independent copies. **Recommend a
+private receipt as the single inverse source**; card controls hold an opaque receipt ID and delegate to
+the same host handler. This best matches durable GM Revert and avoids a second authority. If F01
+requires a two-round card window, the host enforces that window before delegating; after it, the World
+actions panel remains available. Never serialize inverse Ops/pre-images on a public message.
 
-**R2 — Staleness semantics for array homes.**
-(a) _Keep fail-closed_ (today): any later write to the document blocks the receipt, any later write to the
-path blocks the ledger; safest, but a stray HP edit blocks a grapple revert. (b) _Per-path for the ledger,
-whole-doc for the receipt_ (current, keep). (c) _Impact-aware carve-outs_: treat condition ops as an
-independent path and let an HP-only change pass — requires the ledger to record the condition array's
-post-image separately (it already records per-path post-images) and works only for the ledger. —
-**Recommendation: (b) as the contract, plus the one carve-out (c) for the ledger**, and for the receipt
-keep whole-document (it is the last-ditch mechanism; false refusals there are recoverable by hand, false
-successes are not).
+The decision must also define the action card’s lifecycle. Recommend an append-only public report
+marked `reverted`, with presentation metadata outside the receipt’s mechanical post-image hash. If
+keeping a message ref in the receipt, specify a narrow host-owned mutable-field rebase/allowlist so
+ledger updates/pruning do not invalidate the receipt but arbitrary edits still do. Prove the 2-round
+prune/fallback case in HostSync tests before claiming it works.
 
-**R3 — Reverting an already-expired or replaced condition.**
-(a) _Refuse as stale_ (today's machinery, fail-closed). (b) _Allow the whole-document restore_ when the
-post-image mismatch is exactly the expiry the revert would also undo — powerful, but it reverses later
-world decisions and breaks the "no new dependents" guarantee's spirit. (c) _Refuse, but with a reason that
-names the blocking change_ ("stale: the condition expired at turn 7"). — **Recommendation: (a) + (c)**:
-same behavior, better diagnosis; no silent time travel.
+**R2 — Staleness granularity.**
+(a) Whole document for every receipt; (b) per-path/instance for condition operations; (c) impact-aware
+merge. Recommend fail-closed per-application-ID path for new keyed condition records and whole-document
+for legacy arrays. An unrelated HP edit should not block a ledger alias for a different application
+ID, but editing/removing/replacing that same instance must make Revert stale. Never overwrite a newer
+condition or poison course.
 
-**R4 — How do timed conditions live in the names-only home?**
-(a) names-only, manual removal; (b) compact timed entries with a read-normalizer (Phase 3's
-recommendation); (c) route maneuver conditions into payload effects (`actor.effects`/combatant record) and
-reserve names-only for untimed state. **Recommendation: (b) now, (c) only if/when the effects array gains
-per-element addressing** — otherwise (c) makes the ledger's staleness more brittle (whole-array diff) and
-moves grapple bookkeeping into payload space for no reader benefit.
+**R3 — Expired/replaced state.**
+(a) Restore it anyway; (b) refuse silently as generic stale; (c) refuse and report the later host event.
+Recommend (c): no time travel, with the condition instance/poison attempt and expiry/replacement reason
+named. Preserve ordinary fail-closed post-image checks.
 
-**R5 — What does "revert a poison" mean?**
-(a) _Event undo only_: the infliction action and its immediate ops; frequency-save damage is later actions.
-(b) _Unwind the track_: the receipt also reverses every cadence write since (needs those writes to be
-children of the receipt — a much larger contract). **Recommendation: (a)**, with an explicit "cure
-affliction" action (itself revertible) as the user-facing fix for a bad poison.
+**R4 — Condition persistence and mechanics.**
+(a) Continue writing names only; (b) change `conditions` to a union of strings/objects; (c) add a
+separate keyed `conditionApplications` record and normalize legacy names into the resolver. Recommend
+(c): new state is source-aware and path-addressable; old string arrays remain readable, no writer emits
+new strings after migration, and the resolver applies mechanics exactly once. This requires an
+explicit persisted-schema/version/compatibility decision, not an implicit type widening.
 
-**R6 — Do Phases 5–7 belong in the near-term plan, and who owns the P6/P7 overlap?**
-Trample's tactical fields are routed to P6 by `statBlock.ts:25–27`, firearms deferral text is stale vs P09
-(D-202/D-215/D-218/D-219), and the spell continuation is listed in `ACTION_SYSTEM.md:172`. —
-**Recommendation:** land Phases 0–2 (the asked-for revert) as the next PRs; then decide 5 vs 6 vs 7 by the
-usual source-of-truth priority (P6's own remaining items are already closed per `PF1e_Unified_TODO.md`
-§8 — mounted/firearm consumers are the live tails), and fix the stat-block/doc texts regardless of which
-phase follows, so the docs stop implying the gap is only the fields' consumers.
+**R5 — Meaning of “Revert poison.”**
+(a) Revert one exposure/dose event and its immediate Ops; (b) unwind every later periodic save/damage
+as a poison-wide time machine. Recommend (a): each exposure, scheduled save and cure is its own
+idempotent audited event. A later save/dose makes the earlier receipt stale. Reverting a cure can
+restore the course only if no later event depends on it; prior damage is never silently healed.
+
+**R6 — Breadth sequencing and trample source.**
+Keep Phases 0–4 as the immediate condition/revert foundation. Poison is then an independent sourced
+rules slice, not blocked on automating all 75 spell entries. Trample needs a decision on monster
+special ability versus mounted/feat rules before it is scheduled; the tactical and strategic versions
+remain distinct.
+
+**R7 — Poison rules contract, timing and variant (resolved).**
+Use PF1e Core affliction/poison rules plus the Paizo poison FAQ; do not silently use or mix in
+Unchained progression tracks. `Cure` encodes a positive `successesRequired` plus a `consecutive`
+flag; preserve whether the exact source says `N saves` or `N consecutive saves` (Greenblood Oil,
+Giant Octopus and Wyvern pin one-save, unqualified two-save and explicitly consecutive two-save
+handling). Exposure saves are separate from frequency/cure saves: a successful exposure adds no dose,
+effect, duration or cure success. The Core FAQ’s active-dose DC, failed-exposure extension,
+simultaneous ingested/inhaled save, no-onset effect timing and turn-delay rule are encoded above.
+Cure requirements do not change with dose count; one completed cure ends all same-poison doses.
+
+**Confirmed rulings:** any failed save against the same poison identity—including a failed initial
+save to resist a new dose—resets a consecutive-cure streak; it does not erase nonconsecutive cure
+successes, and a different poison identity does not affect the streak. When half of the original
+frequency duration is fractional and the scheduler cannot represent the fraction, round down each
+additional-dose extension separately (`floor(baseDuration / 2)`). Disease is a separate future rules
+profile, not an alias for poison.
 
 ---
 
@@ -651,6 +815,7 @@ Per-slice gates, in the repo's order of strictness:
 ```bash
 corepack pnpm exec vitest run <touched test files>            # focused, while iterating
 corepack pnpm exec vitest run tests/host/sync.test.ts -t "<revert case name>"
+corepack pnpm exec vitest run tests/packages/pf1eAffliction.test.ts
 corepack pnpm test                                            # full suite (baseline 335 files / 4,960 tests)
 corepack pnpm typecheck && corepack pnpm lint
 corepack pnpm build && corepack pnpm size                     # single-file ≤ 6 MB raw budget
@@ -672,12 +837,14 @@ typecheck/lint/build/size values, and the executed e2e names — no claim withou
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
 | submit path for maneuver actions | `src/ui/combat/pf1eManeuverFlow.ts:399` (`post`)                                                                                                             | the two-envelope split that G-A1 is about                             |
 | plan shapes                      | `src/ui/combat/pf1eManeuver.ts` `conditionOps:47`, `conditionSetOps:61`, planners `:94–395`                                                                  | carries the ops; must stay pure                                       |
-| condition library                | `src/packages/pf1e/conditions.ts` (`pf1eConditionPayload:511`, `pf1eConditionRequest:521`, refusal)                                                          | the only verified condition source                                    |
+| condition library                | `src/packages/pf1e/conditions.ts` (`pf1eConditionPayload:511`, `pf1eConditionRequest:521`, refusal)                                                          | definitions/payloads; add Deafened and explicit supported-subset tests |
+| condition applications           | proposed `actor.system.pf1e.conditionApplications[id]` + `src/packages/pf1e/actor.ts` derivation                                                         | canonical source-aware state; legacy `conditions: string[]` reader     |
+| poison profile/course            | proposed `src/packages/pf1e/afflictions.ts` + host save handler                                                                                           | exposure, dose/DC, cadence, cure and attempt identity                  |
 | effect ops                       | `src/packages/pf1e/effectOps.ts:124,290`                                                                                                                     | actor vs combatant homes, `MAX_EFFECTS`                               |
 | effect payloads                  | `src/packages/pf1e/effects.ts:128,412`                                                                                                                       | source kinds incl. `poison`                                           |
 | pure maneuver rules              | `src/packages/pf1e/maneuvers.ts:578` (`pf1eDirtyTrick`)                                                                                                      | duration/removal text that G-A5 drops                                 |
-| combat tick                      | `src/core/combat.ts:291` (`tickEffects`)                                                                                                                     | Phase 4a's hook                                                       |
-| world clock                      | `src/packages/pf1e/worldClock.ts:204` (`pf1eClockSweepOps`)                                                                                                  | Phase 4b's hook                                                       |
+| combat tick                      | `src/core/combat.ts:291` (`tickEffects`)                                                                                                                     | Phase 4 scheduler hook                                                |
+| world clock                      | `src/packages/pf1e/worldClock.ts:204` (`pf1eClockSweepOps`)                                                                                                  | Phase 4 scheduler hook                                                |
 | ledger                           | `src/packages/pf1e/rollLedger.ts` (`buildRollLedger:80`, `captureLedgerInverses:150`, `ledgerStaleReason:178`, `planDamageDeltaReroll:237`, `revertOps:302`) | F01's contract                                                        |
 | receipts                         | `src/core/actionRevert.ts:38,103`; `src/host/sync.ts:2808,3258`                                                                                              | the durable mechanism                                                 |
 | roll ledger builder in the UI    | `src/ui/sheets/pf1eResolveFlow.ts`                                                                                                                           | the only ledger producer today                                        |

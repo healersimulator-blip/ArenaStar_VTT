@@ -3440,9 +3440,9 @@ function appSurface(app: HostApp): AppSurface {
           canSpeak: spec.canSpeak !== false,
           hasFreeHand: spec.hasFreeHand !== false,
           componentsInHand: spec.componentsInHand !== false,
-          deafened: conditions.includes("deafened"),
-          grappled: conditions.includes("grappled"),
-          pinned: conditions.includes("pinned"),
+          deafened: conditions.some((condition) => condition.toLocaleLowerCase("en-US") === "deafened"),
+          grappled: conditions.some((condition) => condition.toLocaleLowerCase("en-US") === "grappled"),
+          pinned: conditions.some((condition) => condition.toLocaleLowerCase("en-US") === "pinned"),
         },
         armor:
           spec.armorChance === undefined

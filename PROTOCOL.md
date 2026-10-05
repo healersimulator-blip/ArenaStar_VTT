@@ -489,6 +489,55 @@ interface JournalTriggerMsg {
 }
 ```
 
+### pf1e.poison (0x53 · client → host · ops)
+
+Core PF1e poison intent. The host verifies the target/profile/delivery, derives the current save bonus
+and dose-adjusted DC, supplies randomness, and atomically commits course state, effects, spell cost,
+chat summary and a private GM Revert receipt. A client cannot send a save result, DC, effect Ops,
+cure progress, or course state. Exposure is GM-only; Delay Poison and Neutralize Poison require a
+validated source actor plus an available prepared spell row or spontaneous spell slot. Periodic saves,
+onset and expiration are host-scheduled from replicated world time and the affected creature's turn.
+
+```ts
+// PF1ePoisonActionMsg (union):
+{ kind: "pf1e.poison"; requestId: string; action: "expose"; targetActorId: DocId;
+  poisonId: string; route?: "injury" | "contact" | "ingested" | "inhaled"; doseCount?: number;
+  sourceActorId?: DocId; sourceItemId?: DocId }
+{ kind: "pf1e.poison"; requestId: string; action: "delay-start" | "neutralize";
+  targetActorId: DocId; sourceActorId: DocId;
+  spellUse: { kind: "prepared"; index: number } | { kind: "slot"; level: number };
+  courseId?: string }
+{ kind: "pf1e.poison"; requestId: string; action: "delay-end"; targetActorId: DocId }
+```
+
+The `frequency` variant is deliberately not a client command; the host rejects it. `courseId` is
+required for `neutralize` (and omitted for `delay-start`) even though the compact example above
+shows it optional across the combined spell-source variants.
+
+### pf1e.condition (0x54 · client → host · ops)
+
+Manual condition application/removal uses an intent, never client-created condition documents or
+receipt metadata. The host checks actor permission and the supported condition catalog, assigns the
+application/source/receipt IDs, and commits the keyed condition change with a private GM Revert
+receipt in one transaction. Unsupported labels and stale application IDs are rejected without a
+state change.
+
+```ts
+{ kind: "pf1e.condition"; requestId: string; action: "apply"; actorId: DocId; condition: string }
+{ kind: "pf1e.condition"; requestId: string; action: "remove"; actorId: DocId; applicationId: string }
+```
+
+### pf1e.condition.result (0x55 · host → requester · ops)
+
+Private acknowledgement sent after the condition state and Revert receipt commit. It contains the
+host-assigned application/receipt IDs and commit sequence; the condition itself arrives only through
+normal projected world Ops.
+
+```ts
+{ kind: "pf1e.condition.result"; requestId: string; action: "apply" | "remove";
+  actorId: DocId; applicationId: string; receiptId: DocId; seq: number }
+```
+
 ### macro.result (0x3b · host → caller and GMs · ops)
 
 Other GMs see bounded execution traces, errors and JSON return values. The player caller sees only a generic completed/failed status: script output and logs are never a hidden-data read channel.

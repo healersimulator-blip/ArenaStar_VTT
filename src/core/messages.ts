@@ -72,6 +72,11 @@ export const MsgKind = {
   "macros.invoke": 0x4f,
   // TR-12 (D-383) — a journal page's \`@Tile[…]{}` link fires the graphs on its anchor
   "journal.trigger": 0x50,
+  // PF1e Core poison course actions: host-derived saves, doses, pause and cure; never raw Ops.
+  "pf1e.poison": 0x53,
+  // Source-addressed condition edits are host-audited and use the private Revert receipt.
+  "pf1e.condition": 0x54,
+  "pf1e.condition.result": 0x55,
   // D-394 — permitted personal macro authoring in the GM world (not execution).
   "macros.save": 0x51,
   // SQ-02 — private acknowledgement naming the exact host-approved run a requester may cancel.
@@ -205,6 +210,78 @@ export interface RollApplyMsg {
 export interface ActionRevertMsg {
   kind: "action.revert";
   receiptId: DocId;
+}
+
+/**
+ * Host-authoritative Core PF1e poison actions. The request names intent/source documents only;
+ * dose count, save DC/result, course state, effect Ops and receipt identity are host-derived.
+ */
+export type PF1ePoisonActionMsg =
+  | {
+      kind: "pf1e.poison";
+      requestId: string;
+      action: "expose";
+      targetActorId: DocId;
+      poisonId: string;
+      route?: "injury" | "contact" | "ingested" | "inhaled";
+      /** GM-authorized simultaneous ingested/inhaled batch size; injury/contact are host-forced to one. */
+      doseCount?: number;
+      sourceActorId?: DocId;
+      sourceItemId?: DocId;
+    }
+  | {
+      kind: "pf1e.poison";
+      requestId: string;
+      action: "frequency";
+      targetActorId: DocId;
+      courseId: string;
+    }
+  | {
+      kind: "pf1e.poison";
+      requestId: string;
+      action: "delay-start";
+      targetActorId: DocId;
+      sourceActorId: DocId;
+      spellUse: { kind: "prepared"; index: number } | { kind: "slot"; level: number };
+    }
+  | {
+      kind: "pf1e.poison";
+      requestId: string;
+      action: "neutralize";
+      targetActorId: DocId;
+      sourceActorId: DocId;
+      spellUse: { kind: "prepared"; index: number } | { kind: "slot"; level: number };
+      courseId: string;
+    }
+  | {
+      kind: "pf1e.poison";
+      requestId: string;
+      action: "delay-end";
+      targetActorId: DocId;
+    };
+
+export type PF1ePoisonActionRequest = PF1ePoisonActionMsg extends infer M
+  ? M extends PF1ePoisonActionMsg ? Omit<M, "kind" | "requestId"> : never
+  : never;
+
+/** Manual condition state is changed only by this host-validated, Revertable action intent. */
+export type PF1eConditionActionMsg =
+  | { kind: "pf1e.condition"; requestId: string; action: "apply"; actorId: DocId; condition: string }
+  | { kind: "pf1e.condition"; requestId: string; action: "remove"; actorId: DocId; applicationId: string };
+
+export type PF1eConditionActionRequest = PF1eConditionActionMsg extends infer M
+  ? M extends PF1eConditionActionMsg ? Omit<M, "kind" | "requestId"> : never
+  : never;
+
+/** Private caller acknowledgement; authoritative condition state arrives in the committed ops. */
+export interface PF1eConditionActionResultMsg {
+  kind: "pf1e.condition.result";
+  requestId: string;
+  action: "apply" | "remove";
+  actorId: DocId;
+  applicationId: string;
+  receiptId: DocId;
+  seq: number;
 }
 
 /** F01 — GM delegates a reroll window to a player (expires in 2 turns). */
@@ -778,6 +855,9 @@ export type WireMessage =
   | RollRerollMsg
   | RollRevertMsg
   | ActionRevertMsg
+  | PF1ePoisonActionMsg
+  | PF1eConditionActionMsg
+  | PF1eConditionActionResultMsg
   | RollDelegateMsg
   | RollApplyMsg
   | AutomationRequestMsg

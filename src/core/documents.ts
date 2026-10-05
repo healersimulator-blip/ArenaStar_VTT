@@ -519,7 +519,14 @@ export interface ActionReceiptDocument extends BaseDocument {
   /** Apply in this order; earlier commits follow later commits in the array. */
   inverses: import("./ops").Op[];
   /** Post-images of every changed document, for fail-closed stale detection. */
-  after: Array<{ ref: DocRef; hash: string | null }>;
+  after: Array<{
+    ref: DocRef;
+    /** Whole-document digest for legacy/default receipts; null when keyed paths are watched. */
+    hash: string | null;
+    /** Path-level checks are opt-in and used only when inverse Ops are path-addressable. */
+    hashMode?: "paths";
+    pathHashes?: Array<{ path: string; hash: string | null }>;
+  }>;
 }
 
 export interface MessageDocument extends BaseDocument {

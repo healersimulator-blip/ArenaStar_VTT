@@ -194,6 +194,15 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
       return { kind: "roll.revert", messageId: "m1" };
     case "action.revert":
       return { kind: "action.revert", receiptId: "receipt-1" };
+    case "pf1e.poison":
+      return { kind: "pf1e.poison", requestId: "request-01", action: "expose",
+        targetActorId: "actor-1", poisonId: "greenblood-oil" };
+    case "pf1e.condition":
+      return { kind: "pf1e.condition", requestId: "condition-01", action: "apply",
+        actorId: "actor-1", condition: "Prone" };
+    case "pf1e.condition.result":
+      return { kind: "pf1e.condition.result", requestId: "condition-01", action: "apply",
+        actorId: "actor-1", applicationId: "condition-app-1", receiptId: "condition-receipt-1", seq: 1 };
     case "roll.delegate":
       return { kind: "roll.delegate", messageId: "m1", playerId: "u1" };
     case "roll.apply":

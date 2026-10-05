@@ -68,8 +68,8 @@ function defOf(name: string) {
 }
 
 describe("pf1eConditions — coverage and validation (E03)", () => {
-  test("the library covers the 26 canonical combat conditions plus Staggered", () => {
-    expect(PF1E_CONDITION_NAMES).toHaveLength(27);
+  test("the library covers its 27 existing combat conditions plus Deafened", () => {
+    expect(PF1E_CONDITION_NAMES).toHaveLength(28);
     for (const required of [
       "Flat-Footed",
       "Prone",
@@ -81,6 +81,7 @@ describe("pf1eConditions — coverage and validation (E03)", () => {
       "Stunned",
       "Dazed",
       "Dazzled",
+      "Deafened",
       "Shaken",
       "Frightened",
       "Panicked",
@@ -245,6 +246,7 @@ describe("pf1eConditions — exact mechanics (severity pairs are not conflated)"
       "standard",
       "full-round",
       "swift",
+      "allow:escape-grapple",
     ]);
   });
 
@@ -264,7 +266,7 @@ describe("pf1eConditions — exact mechanics (severity pairs are not conflated)"
     expect(blinded?.mods).toEqual([
       { key: "ac", type: "untyped", value: -2, source: "blinded" },
     ]);
-    expect(blinded?.flags).toEqual({ deniedDexToAc: true });
+    expect(blinded?.flags).toEqual({ deniedDexToAc: true, blinded: true });
     const entangled = payloadOf("Entangled");
     expect(entangled?.mods).toEqual([
       { key: "attack", type: "untyped", value: -2, source: "entangled" },

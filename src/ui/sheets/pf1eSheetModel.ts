@@ -23,6 +23,7 @@ import type {
   PF1eSlotLedgerView,
 } from "../../packages/pf1e/spellSlots";
 import { normalizePF1eSystem } from "../../packages/pf1e/statBlock";
+import { readPF1eConditionApplications } from "../../packages/pf1e/conditionApplications";
 
 export function isPF1eActor(doc: BaseDocument): doc is ActorDocument {
   const block = doc.system.pf1e;
@@ -96,6 +97,7 @@ export function pf1eSheetView(actor: ActorDocument, ctx?: PF1eSheetContext) {
     ctx?.combat ?? null,
     ctx?.combatantId ?? null,
   );
+  const conditionReadout = readPF1eConditionApplications(actor.system);
   return {
     authored: normalizePF1eSystem(actor.system.pf1e).system,
     // §1.3: the actor document's own items and the table's encumbrance rule ride the
@@ -104,9 +106,14 @@ export function pf1eSheetView(actor: ActorDocument, ctx?: PF1eSheetContext) {
       effects: effects.effects,
       ...(ctx?.settings != null ? encumbranceOptionsOf(ctx.settings) : {}),
     }),
-    effectErrors: effects.rejected.map((e) => `${e.id}: ${e.error}`),
-    /** Active effect list for the Effects tab (embedded + referenced, collision-safe). */
-    effects: effects.effects,
+    effectErrors: [
+      ...effects.rejected.map((e) => `${e.id}: ${e.error}`),
+      ...conditionReadout.issues,
+    ],
+    /** Active non-condition effect list; conditions have their own source-aware panel. */
+    effects: effects.effects.filter((effect) => !effect.id.startsWith("condition:")),
+    conditionApplications: conditionReadout.applications,
+    conditionNames: conditionReadout.names,
   };
 }
 
