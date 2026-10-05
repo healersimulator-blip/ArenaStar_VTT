@@ -1454,9 +1454,9 @@
                   canSpeak: !castCannotSpeak,
                   hasFreeHand: !castNoFreeHand,
                   componentsInHand: !castNoComponentsInHand,
-                  deafened: castDeafened,
-                  grappled: castGrappled,
-                  pinned: castPinned,
+                  deafened: castDeafened || d.deafened,
+                  grappled: castGrappled || d.conditions.some((c) => c.toLocaleLowerCase("en-US") === "grappled"),
+                  pinned: castPinned || d.conditions.some((c) => c.toLocaleLowerCase("en-US") === "pinned"),
                 },
                 castingTime: castTime as PF1eCastingTime,
                 declarations,
@@ -2094,6 +2094,38 @@
     if (result.ops.length) pending.add(client.submit(result.ops));
   }
 
+  function applyCondition(condition: string): void {
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    if (!client.user) {
+      error = "A signed-in user is required to apply a condition.";
+      return;
+    }
+    error = "";
+    pending.add(client.requestPF1eConditionAction({
+      action: "apply", actorId: current._id, condition,
+    }));
+  }
+
+  function removeCondition(applicationId: string): void {
+    const current = client.store.get("actors", doc._id) as ActorDocument | undefined;
+    if (!current) {
+      error = "Actor is no longer available.";
+      return;
+    }
+    if (!client.user) {
+      error = "A signed-in user is required to remove a condition.";
+      return;
+    }
+    error = "";
+    pending.add(client.requestPF1eConditionAction({
+      action: "remove", actorId: current._id, applicationId,
+    }));
+  }
+
   function toggleEffect(effectId: string, disabled: boolean): void {
     const current = client.store.get("actors", doc._id) as
       ActorDocument | undefined;
@@ -2169,9 +2201,13 @@
     const offOps = bus.on("ops", (event) => {
       if (event.reconciled) pending.delete(event.reconciled);
     });
+    const offConditionAction = bus.on("conditionActionResult", (event) => {
+      if (pending.delete(event.requestId)) error = "";
+    });
     return () => {
       offRejected();
       offOps();
+      offConditionAction();
     };
   });
 </script>
@@ -3589,10 +3625,14 @@
     </p>
     <PF1eEffectsTab
       effects={view.effects}
+      conditionApplications={view.conditionApplications}
+      conditionNames={view.conditionNames}
       effectErrors={view.effectErrors}
       {editable}
       linkedCombatant={linked.combat !== null && linked.combatantId !== null}
       onApply={applyEffect}
+      onConditionApply={applyCondition}
+      onConditionRemove={removeCondition}
       onToggle={toggleEffect}
       onRemove={removeEffect}
     />

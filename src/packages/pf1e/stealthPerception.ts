@@ -122,6 +122,10 @@ export interface StealthSubjectFacts {
   grounded?: boolean | undefined;
   /** Wind direction relative to observer: "upwind" (scent range ×2), "downwind" (scent range ×0.5), or "neutral". */
   windRelation?: "upwind" | "downwind" | "neutral" | undefined;
+  /** This check can only notice the subject by hearing (Deafened automatically fails it). */
+  requiresHearing?: boolean | undefined;
+  /** This check can only notice the subject by sight (Blinded automatically fails it). */
+  requiresVision?: boolean | undefined;
 }
 
 /** Facts about the observing creature. */
@@ -136,6 +140,10 @@ export interface ObserverPerceptionFacts {
   environment?: PerceptionEnvironment | undefined;
   /** Through a closed door? (+5 DC). */
   throughDoor?: boolean | undefined;
+  /** PF1e condition facts used only when this check depends on the affected sense. */
+  blinded?: boolean | undefined;
+  dazzled?: boolean | undefined;
+  deafened?: boolean | undefined;
 }
 
 /** Calculated DC breakdown for detecting a stealthed subject. */
@@ -245,10 +253,16 @@ export function evaluateDetection(
 ): DetectionResult {
   const breakdown = calculatePerceptionDc(subject, observer);
   const dc = breakdown.totalPerceptionDc;
-  const pTotal = observer.perceptionTotal;
+  const opposedPerceptionPenalty = observer.blinded === true ? -4 : 0;
+  const sightPenalty = observer.dazzled === true && subject.requiresVision === true ? -1 : 0;
+  const pTotal = observer.perceptionTotal + opposedPerceptionPenalty + sightPenalty;
   const margin = pTotal - dc;
   const senses = observer.senses ?? [{ kind: "normal", rangeFt: null }];
   const notes: string[] = [];
+  if (opposedPerceptionPenalty !== 0)
+    notes.push("Blinded: −4 on this opposed Perception check.");
+  if (sightPenalty !== 0)
+    notes.push("Dazzled: −1 on this sight-based Perception check.");
 
   // Check special non-visual sensory modes first:
   // 1. Tremorsense: automatically senses location of anything grounded within range. Bypasses Stealth & Invisibility.
@@ -350,6 +364,37 @@ export function evaluateDetection(
         }
       }
     }
+  }
+
+  // Deafened and blinded only auto-fail checks that require their lost sense; other senses above
+  // (tremorsense, blindsight, blindsense, scent) have already had their independent resolution.
+  if (observer.deafened === true && subject.requiresHearing === true) {
+    notes.push("Deafened: automatically fails this Perception check because it requires hearing.");
+    return {
+      awareness: "none",
+      detected: false,
+      bypassedBySense: null,
+      dc,
+      perceptionTotal: pTotal,
+      margin: pTotal - dc,
+      targetingMissChance: 0.5,
+      isTargetable: false,
+      notes,
+    };
+  }
+  if (observer.blinded === true && subject.requiresVision === true) {
+    notes.push("Blinded: automatically fails this Perception check because it requires sight.");
+    return {
+      awareness: "none",
+      detected: false,
+      bypassedBySense: null,
+      dc,
+      perceptionTotal: pTotal,
+      margin: pTotal - dc,
+      targetingMissChance: 0.5,
+      isTargetable: false,
+      notes,
+    };
   }
 
   // 5. Standard Perception vs Stealth check

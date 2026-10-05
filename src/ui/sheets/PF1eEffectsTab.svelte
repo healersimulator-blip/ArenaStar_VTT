@@ -13,20 +13,26 @@
     PF1E_CONDITION_NAMES,
     conditionRefusalFor,
     pf1eConditionDef,
-    pf1eConditionRequest,
   } from "../../packages/pf1e/conditions";
+  import type { PF1eConditionApplicationView } from "../../packages/pf1e/conditionApplications";
   import { resolveTacticalEffects } from "../../packages/pf1e/effectOps";
 
   let {
     effects,
+    conditionApplications = [],
+    conditionNames = [],
     effectErrors = [],
     editable,
     linkedCombatant,
     onApply,
+    onConditionApply,
+    onConditionRemove,
     onToggle,
     onRemove,
   }: {
     effects: readonly PF1eActiveEffect[];
+    conditionApplications?: readonly PF1eConditionApplicationView[];
+    conditionNames?: readonly string[];
     effectErrors?: readonly string[];
     editable: boolean;
     /** A linked encounter combatant exists — the combat-timed home is offered. */
@@ -38,6 +44,8 @@
       target: "actor" | "combatant";
       effectId?: string;
     }) => void;
+    onConditionApply: (condition: string) => void;
+    onConditionRemove: (applicationId: string) => void;
     onToggle: (effectId: string, disabled: boolean) => void;
     onRemove: (effectId: string) => void;
   } = $props();
@@ -82,16 +90,7 @@
       conditionError = refusal;
       return;
     }
-    const request = pf1eConditionRequest(conditionName);
-    if (!request.ok) {
-      conditionError = request.error;
-      return;
-    }
-    onApply({
-      name: request.value.name,
-      payload: request.value.payload,
-      target: "actor",
-    });
+    onConditionApply(def.name);
     conditionName = "";
   }
 </script>
@@ -132,6 +131,44 @@
       {/each}
     </ul>
   {/if}
+
+  <section aria-label="Active conditions" data-pf1e-condition-applications>
+    <h4>Active conditions</h4>
+    {#if conditionApplications.length === 0}
+      <p class="note">No active condition applications.</p>
+    {:else}
+      <ul class="condition-list">
+        {#each conditionApplications as application (application.id)}
+          <li data-pf1e-condition-app={application.id}>
+            <strong>{application.condition}</strong>
+            <span class="note">
+              {application.legacy
+                ? "legacy · permanent"
+                : `${application.source?.kind ?? "unknown source"}${application.source?.id ? ` · ${application.source.id}` : ""}`}
+              {#if application.removal.kind === "expiry"}
+                · expires {application.removal.value} {application.removal.unit}{application.removal.value === 1 ? "" : "s"}
+              {:else if application.removal.kind === "manual"}
+                · removed by an explicit action
+              {:else if application.removal.kind === "event"}
+                · removed on {application.removal.event}
+              {:else}
+                · permanent
+              {/if}
+              {#if !application.supported} · mechanics unsupported{/if}
+            </span>
+            {#if editable && !application.legacy}
+              <button type="button" onclick={() => onConditionRemove(application.id)}>Remove condition</button>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    {#if conditionNames.length > 0}
+      <p class="note" data-pf1e-condition-projection>
+        Effective condition names: {conditionNames.join(", ")}
+      </p>
+    {/if}
+  </section>
 
   {#if editable}
     <div class="condition-row" data-pf1e-condition-apply>

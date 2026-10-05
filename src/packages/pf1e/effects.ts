@@ -151,6 +151,10 @@ export type PF1eEffectPayload = {
     flatFooted?: boolean;
     deniedDexToAc?: boolean;
     cannotAoO?: boolean;
+    /** Condition facts consumed by the Perception/casting adapters. */
+    blinded?: boolean;
+    dazzled?: boolean;
+    deafened?: boolean;
   };
   /** SRD condition name for display and immunity checks; its *mechanics* are in `mods`. */
   condition?: string;
@@ -362,6 +366,9 @@ export function validateEffectPayload(raw: unknown): Result<PF1eEffectPayload> {
               ? { deniedDexToAc: true }
               : {}),
             ...(payloadFlags.cannotAoO === true ? { cannotAoO: true } : {}),
+            ...(payloadFlags.blinded === true ? { blinded: true } : {}),
+            ...(payloadFlags.dazzled === true ? { dazzled: true } : {}),
+            ...(payloadFlags.deafened === true ? { deafened: true } : {}),
           },
         }
       : {}),
@@ -555,6 +562,9 @@ export interface ResolvedEffects {
   flatFooted: boolean;
   deniedDexToAc: boolean;
   cannotAoO: boolean;
+  blinded: boolean;
+  dazzled: boolean;
+  deafened: boolean;
   requiresConcentration: boolean;
   conditions: readonly string[];
   /** `key → human-readable breakdown`, so the UI can explain every number it shows. */
@@ -589,6 +599,9 @@ export function resolveEffects(
   let flatFooted = false;
   let deniedDexToAc = false;
   let cannotAoO = false;
+  let blinded = false;
+  let dazzled = false;
+  let deafened = false;
   let requiresConcentration = false;
 
   for (const e of active) {
@@ -608,6 +621,9 @@ export function resolveEffects(
     flatFooted = flatFooted || p.flags?.flatFooted === true;
     deniedDexToAc = deniedDexToAc || p.flags?.deniedDexToAc === true;
     cannotAoO = cannotAoO || p.flags?.cannotAoO === true;
+    blinded = blinded || p.flags?.blinded === true;
+    dazzled = dazzled || p.flags?.dazzled === true;
+    deafened = deafened || p.flags?.deafened === true;
     requiresConcentration = requiresConcentration || p.concentration === true;
     if (p.condition !== undefined) conditions.push(p.condition);
   }
@@ -634,6 +650,9 @@ export function resolveEffects(
     flatFooted,
     deniedDexToAc,
     cannotAoO,
+    blinded,
+    dazzled,
+    deafened,
     requiresConcentration,
     conditions,
     breakdown: {},

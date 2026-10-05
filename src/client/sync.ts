@@ -34,6 +34,9 @@ import type {
   RollChallengeMsg,
   OpsMsg,
   RejectedMsg,
+  PF1ePoisonActionRequest,
+  PF1eConditionActionRequest,
+  PF1eConditionActionResultMsg,
   RollMode,
   SimControlAction,
   SimDeltaMsg,
@@ -96,6 +99,8 @@ export interface ClientEvents {
   automationTrace: AutomationTraceMsg;
   /** Host-allocated Tagger rules on exact scene or world-document refs (GM/assistant only). */
   taggerRulesResult: TaggerRulesResultMsg;
+  /** Host-validated keyed condition application/removal committed with a private Revert receipt. */
+  conditionActionResult: PF1eConditionActionResultMsg;
   /** Host-validated atomic prefab placement (GM only). */
   prefabResult: PrefabResultMsg;
   /** Source-free host result for an authorized summon or dismissal. */
@@ -394,6 +399,20 @@ export class ClientSync {
     this.send({ kind: "action.revert", receiptId });
   }
 
+  /** Ask HostSync to resolve one Core PF1e poison operation; mechanics/results never travel here. */
+  requestPF1ePoisonAction(request: PF1ePoisonActionRequest): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "pf1e.poison", requestId, ...request });
+    return requestId;
+  }
+
+  /** Ask HostSync to apply or remove one keyed condition instance with a named GM Revert receipt. */
+  requestPF1eConditionAction(request: PF1eConditionActionRequest): string {
+    const requestId = globalThis.crypto.randomUUID();
+    this.send({ kind: "pf1e.condition", requestId, ...request });
+    return requestId;
+  }
+
   /** F01 — GM delegates reroll window to a player (expires in 2 turns). */
   rollDelegate(messageId: DocId, playerId: UserId): void {
     this.send({ kind: "roll.delegate", messageId, playerId });
@@ -597,6 +616,9 @@ export class ClientSync {
         return;
       case "tagger.rules.result":
         this.bus.emit("taggerRulesResult", msg);
+        return;
+      case "pf1e.condition.result":
+        this.bus.emit("conditionActionResult", msg);
         return;
       case "prefab.result":
         this.bus.emit("prefabResult", msg);

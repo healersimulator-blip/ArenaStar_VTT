@@ -79,7 +79,7 @@ export const PF1E_CONDITIONS: readonly PF1eConditionDef[] = [
     build: () => ({
       condition: "Blinded",
       mods: [mod("ac", -2, "blinded")],
-      flags: { deniedDexToAc: true },
+      flags: { deniedDexToAc: true, blinded: true },
     }),
     notes: [
       "all opponents have total concealment (50% miss chance) against the blinded creature — P5 targeting/geometry",
@@ -130,9 +130,26 @@ export const PF1E_CONDITIONS: readonly PF1eConditionDef[] = [
     build: () => ({
       condition: "Dazzled",
       mods: [mod("attack", -1, "dazzled")],
+      flags: { dazzled: true },
     }),
     notes: [
-      "the −1 sight-based Perception penalty has no skill-check mod key — caller-owned",
+      "the −1 sight-based Perception penalty is applied only to sight-dependent checks by the Perception consumer",
+    ],
+  },
+  {
+    name: "Deafened",
+    summary:
+      "Cannot hear: automatically fails checks requiring hearing, takes −4 on initiative checks, and has a 20% chance to spoil spells with verbal components.",
+    mindAffecting: false,
+    fear: false,
+    build: () => ({
+      condition: "Deafened",
+      mods: [mod("initiative", -4, "deafened")],
+      flags: { deafened: true },
+    }),
+    notes: [
+      "automatically fails checks that require hearing — the sensory/Perception consumer owns this, not a blanket Perception penalty",
+      "20% verbal-component spell spoilage is resolved by the casting flow",
     ],
   },
   {
@@ -379,11 +396,11 @@ export const PF1E_CONDITIONS: readonly PF1eConditionDef[] = [
       condition: "Pinned",
       mods: [mod("ac", -4, "pinned")],
       flags: { deniedDexToAc: true, cannotAoO: true },
-      denies: [...NO_MOVE_ACTIONS, "standard", "full-round", "swift"],
+      denies: [...NO_MOVE_ACTIONS, "standard", "full-round", "swift", "allow:escape-grapple"],
     }),
     notes: [
-      "'does not stack with grappled' — apply Pinned alone (the apply path is per-payload; the GM drops Grappled)",
-      "escape attempts (CMB or Escape Artist) stay allowed — P05's maneuver check",
+      "'does not stack with grappled' — the canonical resolver suppresses Grappled mechanics while a Pinned source remains",
+      "escape attempts (CMB or Escape Artist) stay allowed — the action gate exempts escape-grapple from Pinned's standard-action denial",
       "no somatic/material spell components — C03's component flow",
     ],
   },

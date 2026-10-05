@@ -48,6 +48,12 @@ import {
   type ResolvedEffects,
 } from "./effects";
 import {
+  resolvePF1eConditionEffects,
+  validatePF1eConditionApplications,
+  type PF1eConditionApplication,
+} from "./conditionApplications";
+import { validatePF1ePoisonTargetState, type PF1ePoisonTargetState } from "./afflictions";
+import {
   readPF1eHealth,
   type PF1eHealthAuthored,
   type PF1eHealthReadout,
@@ -282,7 +288,14 @@ export interface PF1eActorSystem extends PF1eHealthAuthored {
   };
   feats?: string[];
   traits?: string[];
+  /** Explicit typed defenses used by host resolution; current supported entry: "poison". */
+  immunities?: string[];
+  /** Read-compatible legacy condition labels; new writers use conditionApplications. */
   conditions?: string[];
+  /** Source-aware active conditions keyed by stable application ID. */
+  conditionApplications?: Record<string, PF1eConditionApplication>;
+  /** Host-authoritative target-owned Core PF1e poison courses and Delay Poison state. */
+  afflictions?: PF1ePoisonTargetState;
   hp?: number;
   hpMax?: number;
   nonlethalDamage?: number;
@@ -431,6 +444,11 @@ export interface PF1eDerived extends Pick<
   conditions: string[];
   flatFooted: boolean;
   deniedDexToAc: boolean;
+  blinded: boolean;
+  dazzled: boolean;
+  deafened: boolean;
+  /** The condition-specific penalty for opposed Perception checks (Blinded: −4). */
+  opposedPerceptionPenalty: number;
   immuneMindAffecting: boolean;
   denies: ReadonlySet<string>;
   grants: ReadonlySet<string>;
@@ -565,6 +583,19 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
   if (raw === undefined || raw === null) return okVal({});
   if (!isRecord(raw)) return err("system.pf1e must be an object");
   const o = raw as Record<string, unknown>;
+  if (o.conditions !== undefined &&
+      (!Array.isArray(o.conditions) || o.conditions.some((name) => typeof name !== "string")))
+    return err("system.pf1e.conditions must be an array of legacy condition-name strings");
+  if (o.immunities !== undefined &&
+      (!Array.isArray(o.immunities) || o.immunities.some((entry) =>
+        typeof entry !== "string" || entry.trim() === "" || entry.length > 80)))
+    return err("system.pf1e.immunities must be an array of non-empty defense labels");
+  const conditionApplications = validatePF1eConditionApplications(o.conditionApplications);
+  if (!conditionApplications.ok) return err(conditionApplications.error);
+  if (o.afflictions !== undefined) {
+    const afflictions = validatePF1ePoisonTargetState(o.afflictions);
+    if (!afflictions.ok) return err(afflictions.error);
+  }
   if (
     o.acMode !== undefined &&
     o.acMode !== "published" &&
@@ -918,7 +949,9 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     c.issues.push(`grit.current ${String(gritCurrentUnclamped)} exceeds grit.max ${String(gritMax)} — clamped to max`);
   }
   const attrs = isRecord(input.attributes) ? input.attributes : {};
-  const effects = input.effects ?? [];
+  const conditionResolution = resolvePF1eConditionEffects(sys, input.effects ?? []);
+  c.issues.push(...conditionResolution.readout.issues);
+  const effects = conditionResolution.effects;
   const resolved: ResolvedEffects = resolveEffects(effects);
 
   // 1. Ability scores, then typed modifiers *on the scores* (bull's strength and friends), then
@@ -1488,9 +1521,7 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     conHpPerDie !== 0 && hitDice > 0 ? hpMax + conHpAdjustment : hpMax;
   const dr = readNumber(sys.dr, "dr", c);
   const spellResistance = readNumber(sys.spellResistance, "spellResistance", c);
-  const authoredConditions = Array.isArray(sys.conditions)
-    ? sys.conditions.filter((x): x is string => typeof x === "string")
-    : [];
+  const authoredConditions = conditionResolution.readout.names;
   // 9c. Ability-damage thresholds (CRB p.555): damage ≥ score ⇒ unconscious until it heals
   //     below the score; Constitution damage ≥ score kills outright.
   const thresholdConditions: string[] = [];
@@ -1610,6 +1641,10 @@ export function derivePF1eActor(input: DeriveInput): PF1eDerived {
     conditions,
     flatFooted,
     deniedDexToAc: deniedDex,
+    blinded: resolved.blinded,
+    dazzled: resolved.dazzled,
+    deafened: resolved.deafened,
+    opposedPerceptionPenalty: resolved.blinded ? -4 : 0,
     immuneMindAffecting: resolved.immuneMindAffecting,
     denies: resolved.denies,
     grants: resolved.grants,

@@ -32,6 +32,7 @@ import type { PermissionUser } from "../../core/ownership";
 import { can } from "../../core/permissions";
 import { err, okVal, type Result } from "../../core/result";
 import { actorItemEffects } from "./itemChanges";
+import { resolvePF1eConditionEffects } from "./conditionApplications";
 import {
   effectFlagsFor,
   readTacticalEffect,
@@ -503,7 +504,8 @@ export function combinedTacticalEffects(
       for (const e of referenced.effects) combined.set(e.id, e);
     }
   }
-  return { effects: [...combined.values()], rejected };
+  const resolvedConditions = resolvePF1eConditionEffects(actor.system, [...combined.values()]);
+  return { effects: resolvedConditions.effects, rejected };
 }
 
 /**

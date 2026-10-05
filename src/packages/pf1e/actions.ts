@@ -479,7 +479,7 @@ export function readActionLedger(raw: unknown): PF1eActionLedger {
 
 /** What a spend attempts to consume. `action` names the table row for diagnostics. */
 export type PF1eActionSpend =
-  | { kind: "standard"; action?: string }
+  | { kind: "standard"; action?: string; rangedWeaponKind?: "crossbow" | "other" }
   /** `asStandard` spends the standard slot instead of the move slot (move substitution). */
   | { kind: "move"; asStandard?: boolean; action?: string }
   | { kind: "full-round"; action?: string }
@@ -519,9 +519,21 @@ export function actionRefusal(
       "action" in spend && typeof spend.action === "string"
         ? spend.action
         : null;
+    const pinnedEscapeException =
+      action !== null && denied.has(`allow:${action}`);
+    const proneCrossbowException =
+      action === "attack-ranged" &&
+      spend.kind === "standard" &&
+      spend.rangedWeaponKind === "crossbow";
     if (action !== null && denied.has(action))
       return `an active effect denies this action (${action})`;
-    if (denied.has(spend.kind))
+    if (
+      denied.has("ranged-attack") &&
+      (action === "attack-ranged" || action === "ranged-attack") &&
+      !proneCrossbowException
+    )
+      return "an active effect denies ranged attacks except crossbows while prone";
+    if (denied.has(spend.kind) && !pinnedEscapeException)
       return `an active effect denies this action (${spend.kind})`;
   }
   const restricted = ledger.restriction === "single-standard-or-move";
