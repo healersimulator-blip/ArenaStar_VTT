@@ -52,6 +52,9 @@ import type {
   AgentImportPlan,
   AgentMessageRow,
   AgentPackageRow,
+  AgentAfflictionCourseRow,
+  AgentConditionInstance,
+  AgentConditionReport,
   AgentSceneDetail,
   AgentSceneSummary,
   AgentSheet,
@@ -152,6 +155,8 @@ import {
   startWithSurprise,
 } from "../packages/pf1e/combatState";
 import { readRollApplications } from "../packages/pf1e/rollApply";
+import { readPF1eConditionApplications } from "../packages/pf1e/conditionApplications";
+import { validatePF1ePoisonTargetState, type PF1ePoisonCourse } from "../packages/pf1e/afflictions";
 import {
   appendFogMask,
   fogMaskLog,
@@ -955,6 +960,71 @@ export function agentWorldView(
         .find((row): row is ActorDocument => row._id === actorId);
       if (!actor || !isPF1eActor(actor as BaseDocument)) return null;
       return sheetOf(actor);
+    },
+    conditions(actorId): AgentConditionReport | null {
+      const actor = store
+        .getAll("actors")
+        .find((row): row is ActorDocument => row._id === actorId);
+      if (!actor || !isPF1eActor(actor as BaseDocument)) return null;
+      const readout = readPF1eConditionApplications(actor.system);
+      // The label resolves the source's display name from this replica only; a source this session
+      // cannot see stays an id, never a fabricated name.
+      const label = (kind: string, id: string | undefined): string => {
+        if (id === undefined) return kind;
+        const named = (store.get("actors", id) ?? store.get("items", id)) as
+          { name?: string } | undefined;
+        return named?.name ?? id;
+      };
+      const conditions: AgentConditionInstance[] = readout.applications.map((application) => ({
+        id: application.id,
+        condition: application.condition,
+        source: application.source === null
+          ? null
+          : { kind: application.source.kind, label: label(application.source.kind, application.source.id) },
+        removal: application.removal.kind,
+        legacy: application.legacy,
+        supported: application.supported,
+      }));
+      const now = thisView?.clockSeconds() ?? readWorldClock(store.getAll("settings"));
+      const raw = (actor.system.pf1e as { afflictions?: unknown } | undefined)?.afflictions;
+      const validated = raw === undefined ? null : validatePF1ePoisonTargetState(raw, actor._id);
+      const courses: AgentAfflictionCourseRow[] = [];
+      let delayPoison = { active: false, endsInSeconds: null as number | null };
+      let queuedExposures = 0;
+      let issues = [...readout.issues];
+      if (validated !== null && !validated.ok) {
+        issues = [...issues, validated.error];
+      } else if (validated?.ok) {
+        const state = validated.value;
+        const inSeconds = (at: number | null): number | null =>
+          at === null ? null : Math.max(0, Math.round(at - now));
+        const effectLabel = (course: PF1ePoisonCourse): string[] =>
+          course.definition.effects.periodic.length > 0
+            ? course.definition.effects.periodic.map((effect) =>
+              effect.kind === "damage"
+                ? `${effect.formula} ${effect.target === "hitPoints" ? "HP" : `${effect.ability?.toUpperCase() ?? "?"} ${effect.target === "abilityDamage" ? "damage" : "drain"}`}`
+                : effect.condition)
+            : [];
+        for (const course of Object.values(state.courses)) {
+          courses.push({
+            id: course.id,
+            profile: course.definition.name,
+            state: course.state,
+            doseCount: course.doseCount,
+            nextSaveInSeconds: inSeconds(course.nextAttemptAt),
+            frequencyEndsInSeconds: inSeconds(course.frequencyEndAt),
+            cureProgress: course.cureProgress,
+            cureRequired: course.definition.cure.successesRequired,
+            consecutive: course.definition.cure.consecutive,
+            effects: effectLabel(course),
+          });
+        }
+        delayPoison = { active: state.delayPoison.active,
+          endsInSeconds: inSeconds(state.delayPoison.endsAt) };
+        queuedExposures = state.queuedExposures.length;
+      }
+      return { actorId: actor._id, name: actor.name, conditions, issues, poison: {
+        courses, delayPoison, queuedExposures } };
     },
     async bestiary(query: string, limit: number): Promise<AgentBestiaryHit[]> {
       const source = options.compendia;

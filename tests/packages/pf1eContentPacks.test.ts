@@ -52,6 +52,8 @@ import {
   PRECREATED_PF1E_UNITS,
 } from "../../src/packages/pf1e/schema";
 import { PF1E_MASS_SPELLS } from "../../src/packages/massBattlePf1e";
+import { PF1E_POISON_CATALOGUE } from "../../src/packages/pf1e/poisonCatalogue";
+import { PF1E_SPELL_EFFECTS } from "../../src/packages/pf1e/spellEffects";
 import {
   parsePackSpellOrder,
   spellRangeFeet,
@@ -80,6 +82,9 @@ type PackFile = {
 function readPack(file: string): PackFile {
   return JSON.parse(readFileSync(join(packsDir, file), "utf8")) as PackFile;
 }
+
+const isRecord = (value: unknown): value is Block =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** A `system` sub-block. Absent is a failure, so the tests below can stay readable. */
 const block = (system: Block, key: string): Block => {
@@ -636,6 +641,56 @@ describe("pf1e-core content packs (M15/M16/M18)", () => {
     }
   });
 
+  test("the poison pack carries exactly the in-repo catalogue, profile for profile", () => {
+    const pack = readPack("poisons.json");
+    expect(pack.name).toBe("PF1e Poisons");
+    expect(pack.type).toBe("items");
+    const mirrored = new Map(
+      PF1E_POISON_CATALOGUE.map((row) => [str(row as Block, "id"), row]),
+    );
+    expect(pack.entries.length).toBe(mirrored.size);
+    for (const entry of pack.entries) {
+      const poison = block(block(entry.data.system, "pf1e"), "poison");
+      const mirror = mirrored.get(entry.id);
+      expect(mirror, `no catalogue row for pack entry ${entry.id}`).toBeDefined();
+      // The shipped content and the engine's catalogue are one artifact: a hand-edit to either
+      // without the other fails here, the same way the massBattle mirror is pinned.
+      expect(poison).toEqual(mirror);
+      // Every profile is findable by its own name — the pack exists to be searched.
+      expect(entry.name).toBe(str(poison, "name"));
+    }
+  });
+
+  test("a spell entry's tacticalEffect block mirrors the catalogue row profile for profile (D-407)", () => {
+    const pack = readPack("spells.json");
+    const byId = new Map(PF1E_SPELL_EFFECTS.map((row) => [row.id, row]));
+    let carried = 0;
+    for (const entry of pack.entries) {
+      const system = entry.data.system;
+      if (!isRecord(system) || system.tacticalEffect === undefined) continue;
+      // The block is content the code also ships: a hand-edit to either side fails here, exactly
+      // as the poison catalogue and the mass-battle mirror are pinned.
+      const mirror = byId.get(entry.id);
+      expect(mirror, `no catalogue row for ${entry.id}`).toBeDefined();
+      expect(system.tacticalEffect).toEqual(mirror);
+      const effect = system.tacticalEffect;
+      expect(isRecord(effect) ? str(block(effect, "source"), "title").length : 0)
+        .toBeGreaterThan(20);
+      carried += 1;
+    }
+    // And the pin is not vacuous: every catalogue row is actually shipped on a spell entry.
+    expect(carried).toBe(PF1E_SPELL_EFFECTS.length);
+    for (const row of PF1E_SPELL_EFFECTS) {
+      const entry = pack.entries.find((e) => e.id === row.id);
+      expect(entry, `no pack spell for catalogue row ${row.id}`).toBeDefined();
+      // The narrative the block justifies stays descriptive: no massBattle payload is invented
+      // for a hero-level effect (the M15 automation split).
+      const system = entry?.data.system;
+      expect(isRecord(system) ? system.massBattle : undefined).toBeUndefined();
+      expect(isRecord(system) ? system.automation : undefined).toBe("descriptive");
+    }
+  });
+
   test("the shipped packs index and search, and stay out of the base HTML (M18)", () => {
     const parsed = readdirSync(packsDir)
       .filter((f) => f.endsWith(".json"))
@@ -648,9 +703,10 @@ describe("pf1e-core content packs (M15/M16/M18)", () => {
       null,
       null,
       null,
+      null,
     ]);
     const packs = parsed.flatMap((p) => (p.ok ? [p.value] : []));
-    expect(packs.length).toBe(5);
+    expect(packs.length).toBe(6);
     // The by-id lookup the panel uses, and the search the GM types into.
     const spellPack = packs.find((p) => p.name === "PF1e Spells");
     expect(spellPack).toBeDefined();

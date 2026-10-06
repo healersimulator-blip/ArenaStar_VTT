@@ -11,6 +11,7 @@ import { paginate } from "../../src/core/agents/paging";
 import type {
   AgentClock,
   AgentCombatTurn,
+  AgentConditionReport,
   AgentFogOps,
   AgentFogState,
   AgentStrategicOrders,
@@ -371,6 +372,31 @@ export const HEX_SUMMARY: AgentHexSummary = {
   travel: { speedPerDay: 24, pace: "normal" },
 };
 
+/**
+ * The condition/poison read surface fixture: one keyed Grappled instance with a spell source and
+ * a cure-based removal, plus an active Greenblood oil course with a scheduled save.
+ */
+const CONDITION_REPORT: AgentConditionReport = {
+  actorId: "a-vex",
+  name: "Vex",
+  conditions: [{
+    id: "grapple-one", condition: "Grappled",
+    source: { kind: "spell", label: "Hold Person" },
+    removal: "spell end or escape (source-owned)",
+    legacy: false, supported: true,
+  }],
+  issues: [],
+  poison: {
+    courses: [{
+      id: "course-one", profile: "Greenblood oil", state: "active", doseCount: 1,
+      nextSaveInSeconds: 6, frequencyEndsInSeconds: 24, cureProgress: 0,
+      cureRequired: 1, consecutive: false, effects: ["1 CON damage"],
+    }],
+    delayPoison: { active: false, endsInSeconds: null },
+    queuedExposures: 0,
+  },
+};
+
 function page<T>(rows: readonly T[], options: PageOptions) {
   return paginate(rows, options);
 }
@@ -492,6 +518,7 @@ export function fakeView(
       };
     },
     sheet: (actorId) => (actorId === "a-vex" ? SHEET : null),
+    conditions: (actorId) => (actorId === "a-vex" ? CONDITION_REPORT : null),
     bestiary: async (query: string, limit: number) =>
       query === ""
         ? []

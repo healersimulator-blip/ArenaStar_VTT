@@ -12,13 +12,21 @@
  */
 import type { Json, MessageDocument } from "./documents";
 
-export const ACTION_CARD_VERSION = 1 as const;
+export const ACTION_CARD_VERSION = 2 as const;
+/**
+ * Version 1 remains readable (cards committed before riders existed); writers emit 2. The
+ * parser accepts both, a v1 card may not carry riders, and nothing loosens a closed field.
+ */
+export const ACTION_CARD_VERSION_LEGACY = 1 as const;
 export const ACTION_TARGET_MAX = 64;
 export const ACTION_NOTE_MAX = 32;
 /** Conditions are projected to FX, so their cardinality/text budget is intentionally tighter. */
 export const ACTION_CONDITION_MAX = 16;
 export const ACTION_CONDITION_NAME_MAX = 80;
 export const ACTION_EVIDENCE_JSON_MAX = 4_096;
+export const ACTION_RIDER_MAX = 6;
+export const ACTION_RIDER_FACT_MAX = 6;
+export const ACTION_RIDER_FACT_LENGTH_MAX = 200;
 /** ASCII JSON from a schema-maximal FX projection remains below this regression budget. */
 export const ACTION_FX_CONTEXT_JSON_MAX = 256_000;
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -101,6 +109,39 @@ export interface ActionEvidence {
   payload: Json;
 }
 
+/**
+ * A rider is a secondary effect delivered by the interaction the card records: a poison course on a
+ * landed attack or spell, or a condition a spell applied to a target that failed its save. It carries its own save and, while that save is pending,
+ * its own pending-roll identity — a target may therefore have a resolved attack check and a
+ * pending rider save at the same time. Mechanics are applied by the host; the card reports them.
+ */
+export type ActionRiderKind = "poison" | "condition";
+/**
+ * `queued` is Delay Poison, `immune` never rolled a save, `ended` is a cured/expired course, and
+ * `expired` is a save whose 2-round window closed without a result (never a failed save).
+ */
+export type ActionRiderState = "pending" | "applied" | "resisted" | "immune" | "queued" | "ended" | "expired";
+
+export interface ActionRiderSave {
+  saveType: "fort" | "ref" | "will";
+  dc: number | null;
+  total: number | null;
+  passed?: boolean;
+  /** Present only while `state === "pending"`; links one host pending-roll record. */
+  pendingRollId?: string;
+}
+
+export interface ActionRider {
+  kind: ActionRiderKind;
+  label: string;
+  state: ActionRiderState;
+  save?: ActionRiderSave;
+  /** Bounded display facts (target, frequency, effect). Never machine-consumed. */
+  facts?: string[];
+  /** Host-side continuation input; recognized adapters only. */
+  evidence?: ActionEvidence;
+}
+
 export interface ActionTarget {
   /** Stable within this action; never inferred from a display name. */
   key: string;
@@ -115,6 +156,8 @@ export interface ActionTarget {
   provenance?: "host" | "reported";
   evidence?: ActionEvidence;
   check?: ActionCheck;
+  /** Secondary effects this interaction delivered; version-2 cards only. */
+  riders?: ActionRider[];
   damage?: { dealt: number; prevented?: number };
   healing?: { applied: number };
   conditions?: { applied?: string[]; removed?: string[] };
@@ -122,7 +165,8 @@ export interface ActionTarget {
 }
 
 export interface ActionCard {
-  v: typeof ACTION_CARD_VERSION;
+  /** Writers emit {@link ACTION_CARD_VERSION}; version-1 cards stay readable and rider-free. */
+  v: typeof ACTION_CARD_VERSION | typeof ACTION_CARD_VERSION_LEGACY;
   /** Equal to the containing chat message id after host normalization. */
   id: string;
   /** Increments on every authoritative pending-result transition; FX can deduplicate it. */
@@ -165,6 +209,14 @@ export interface ActionFxContext {
     state?: ActionTargetState;
     outcome?: ActionTargetOutcome;
     check?: Pick<ActionCheck, "kind" | "status" | "dc" | "total" | "saveType" | "passed" | "automatic">;
+    /** Present only for host-verified targets; `evidence`/pending identities are omitted. */
+    riders?: Array<{
+      kind: ActionRiderKind;
+      label: string;
+      state: ActionRiderState;
+      facts?: string[];
+      save?: Pick<ActionRiderSave, "saveType" | "dc" | "total" | "passed">;
+    }>;
     damage?: { dealt: number; prevented?: number };
     healing?: { applied: number };
     conditions?: { applied?: string[]; removed?: string[] };
@@ -243,6 +295,68 @@ function checkError(value: unknown): string | null {
   return null;
 }
 
+const RIDER_KINDS: readonly ActionRiderKind[] = ["poison", "condition"];
+const RIDER_STATES: readonly ActionRiderState[] = ["pending", "applied", "resisted", "immune", "queued", "ended", "expired"];
+
+function riderSaveError(value: unknown): string | null {
+  if (!object(value) || !exactKeys(value, ["saveType", "dc", "total", "passed", "pendingRollId"]) ||
+      !["fort", "ref", "will"].includes(String(value.saveType)) ||
+      !(value.dc === null || finite(value.dc)) || !(value.total === null || finite(value.total)) ||
+      (value.passed !== undefined && typeof value.passed !== "boolean") ||
+      (value.pendingRollId !== undefined && !validId(value.pendingRollId)))
+    return "action rider save is malformed";
+  if (value.total === null && value.passed !== undefined)
+    return "an unresolved rider save cannot carry a pass/fail result";
+  if (value.total !== null && typeof value.passed !== "boolean")
+    return "a resolved rider save needs a pass/fail result";
+  return null;
+}
+
+function riderError(value: unknown): string | null {
+  if (!object(value) || !exactKeys(value, ["kind", "label", "state", "save", "facts", "evidence"]) ||
+      !(RIDER_KINDS as readonly unknown[]).includes(value.kind) || !validText(value.label) ||
+      !(RIDER_STATES as readonly unknown[]).includes(value.state)) return "action rider is malformed";
+  const state = value.state as ActionRiderState;
+  if (value.evidence !== undefined) {
+    const error = evidenceError(value.evidence);
+    if (error) return error;
+  }
+  if (value.save !== undefined) {
+    const error = riderSaveError(value.save);
+    if (error) return error;
+    const save = value.save as ActionRiderSave;
+    if (state === "pending") {
+      if (save.total !== null || save.passed !== undefined || save.pendingRollId === undefined)
+        return "a pending rider needs a pending-roll id and no save result";
+    } else {
+      if (save.pendingRollId !== undefined) return "only a pending rider may carry a pending-roll id";
+      if (state === "resisted" && save.passed !== true)
+        return "a resisted rider save must be recorded as passed";
+      if (state === "applied" && save.passed !== false)
+        return "an applied rider needs a failed save (or no save at all)";
+    }
+  } else if (state === "pending") {
+    return "a pending rider needs a save to await";
+  }
+  if (value.facts !== undefined &&
+      (!Array.isArray(value.facts) || value.facts.length > ACTION_RIDER_FACT_MAX ||
+        value.facts.some((fact) => !validText(fact, ACTION_RIDER_FACT_LENGTH_MAX))))
+    return `action rider facts need at most ${ACTION_RIDER_FACT_MAX} bounded strings`;
+  return null;
+}
+
+function ridersError(value: unknown, version: number): string | null {
+  if (value === undefined) return null;
+  if (version < 2) return "action riders require an action card version 2";
+  if (!Array.isArray(value) || value.length > ACTION_RIDER_MAX)
+    return `action target supports at most ${ACTION_RIDER_MAX} riders`;
+  for (const rider of value) {
+    const error = riderError(rider);
+    if (error) return error;
+  }
+  return null;
+}
+
 function boundedEvidenceJson(value: unknown, depth = 0, seen = new WeakSet<object>()): value is Json {
   if (value === null || typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
@@ -268,8 +382,8 @@ function evidenceError(value: unknown): string | null {
   return null;
 }
 
-function targetError(value: unknown): string | null {
-  if (!object(value) || !exactKeys(value, ["key", "name", "label", "actorId", "tokenId", "state", "outcome", "provenance", "evidence", "check",
+function targetError(value: unknown, version: number): string | null {
+  if (!object(value) || !exactKeys(value, ["key", "name", "label", "actorId", "tokenId", "state", "outcome", "provenance", "evidence", "check", "riders",
     "damage", "healing", "conditions", "notes"]) || !validId(value.key) || !validText(value.name) ||
       (value.label !== undefined && !validText(value.label)) ||
       (value.actorId !== undefined && !validId(value.actorId)) || (value.tokenId !== undefined && !validId(value.tokenId)) ||
@@ -280,7 +394,15 @@ function targetError(value: unknown): string | null {
     const error = evidenceError(value.evidence);
     if (error) return error;
   }
+  {
+    const error = ridersError(value.riders, version);
+    if (error) return error;
+  }
   if (value.state === "pending" && value.outcome !== "pending") return "a pending action target needs pending outcome";
+  if (value.state === "pending" && value.riders !== undefined)
+    return "riders attach only to a resolved interaction";
+  if (value.state !== "resolved" && value.riders !== undefined)
+    return "riders attach only to a resolved interaction";
   if (value.state === "pending" &&
       (value.damage !== undefined || value.healing !== undefined || value.conditions !== undefined))
     return "a pending action target cannot carry committed mechanics";
@@ -330,9 +452,14 @@ function targetError(value: unknown): string | null {
   return null;
 }
 
-/** State derived from target rows. Terminal action-level failures/cancellation remain explicit. */
+/**
+ * State derived from target rows. A pending rider save keeps the card `pending` even though the
+ * delivering interaction itself resolved: the outcome is not final until the rider is rolled.
+ * Terminal action-level failures/cancellation remain explicit.
+ */
 export function deriveActionState(targets: readonly ActionTarget[], fallback: ActionState = "resolved"): ActionState {
-  if (targets.some((target) => target.state === "pending")) return "pending";
+  if (targets.some((target) => target.state === "pending" ||
+      target.riders?.some((rider) => rider.state === "pending"))) return "pending";
   const expired = targets.filter((target) => target.state === "expired").length;
   if (expired === targets.length && targets.length > 0) return "expired";
   if (expired > 0) return "partial";
@@ -343,7 +470,8 @@ export function validateActionCard(value: unknown):
   { ok: true; action: ActionCard } | { ok: false; error: string } {
   const bad = (error: string) => ({ ok: false as const, error });
   if (!object(value) || !exactKeys(value, ["v", "id", "revision", "kind", "label", "state", "source", "sceneId",
-    "area", "targets", "notes", "createdAt", "updatedAt"]) || value.v !== ACTION_CARD_VERSION || !validId(value.id) ||
+    "area", "targets", "notes", "createdAt", "updatedAt"]) ||
+      (value.v !== ACTION_CARD_VERSION && value.v !== ACTION_CARD_VERSION_LEGACY) || !validId(value.id) ||
       !safeNonNegative(value.revision) || !(KINDS as readonly unknown[]).includes(value.kind) || !validText(value.label) ||
       !(STATES as readonly unknown[]).includes(value.state) || (value.sceneId !== undefined && !validId(value.sceneId)) ||
       !safeNonNegative(value.createdAt) || !safeNonNegative(value.updatedAt) || value.updatedAt < value.createdAt)
@@ -360,7 +488,7 @@ export function validateActionCard(value: unknown):
     return bad(`action card needs at most ${ACTION_TARGET_MAX} targets`);
   const keys = new Set<string>();
   for (const target of value.targets) {
-    const error = targetError(target);
+    const error = targetError(target, value.v as number);
     if (error) return bad(error);
     const key = (target as ActionTarget).key;
     if (keys.has(key)) return bad(`action target key ${key} is duplicated`);
@@ -392,9 +520,31 @@ export function normalizeNewActionCard(action: ActionCard, messageId: string, at
 }
 
 /**
- * Resolve exactly the target linked by a pending roll. This is pure so HostSync, tests and future
- * non-chat action executors share one outcome rule. The pending payload is structural to avoid a
- * core→PF1e dependency.
+ * Every pending-roll identity a card owns: target checks plus rider saves. The host's linkage
+ * validation and the expiry sweep use this so a rider save is a first-class pending roll without
+ * being mistaken for the target's own check.
+ */
+export function actionPendingRollIds(action: ActionCard): string[] {
+  const ids: string[] = [];
+  for (const target of action.targets) {
+    if (target.check?.pendingRollId !== undefined) ids.push(target.check.pendingRollId);
+    for (const rider of target.riders ?? [])
+      if (rider.state === "pending" && rider.save?.pendingRollId !== undefined)
+        ids.push(rider.save.pendingRollId);
+  }
+  return ids;
+}
+
+function resolvedRider(rider: ActionRider, total: number, passed: boolean): ActionRider {
+  const save: ActionRiderSave = { ...(rider.save as ActionRiderSave), total, passed };
+  delete save.pendingRollId;
+  return { ...rider, state: passed ? "resisted" : "applied", save };
+}
+
+/**
+ * Resolve exactly the target (or rider save) linked by a pending roll. This is pure so HostSync,
+ * tests and future non-chat action executors share one outcome rule. The pending payload is
+ * structural to avoid a core→PF1e dependency.
  */
 export function resolveActionPendingTarget(action: ActionCard, pending: {
   id?: string;
@@ -407,7 +557,21 @@ export function resolveActionPendingTarget(action: ActionCard, pending: {
     return { ok: false, error: "pending roll is not linked to this action" };
   const index = action.targets.findIndex((target) => target.key === pending.targetKey);
   const target = action.targets[index];
-  if (!target || target.state !== "pending" || target.check?.status !== "pending")
+  if (!target) return { ok: false, error: "action target is not pending" };
+  const riderIndex = target.riders?.findIndex((rider) =>
+    rider.state === "pending" && rider.save?.pendingRollId !== undefined &&
+    rider.save.pendingRollId === pending.id) ?? -1;
+  if (riderIndex >= 0) {
+    const riderDc = pending.dc;
+    if (riderDc === null) return { ok: false, error: "a rider save needs a DC" };
+    const riders = (target.riders as ActionRider[]).map((rider, position) =>
+      position === riderIndex ? resolvedRider(rider, total, total >= riderDc) : rider);
+    const targets = action.targets.map((entry, position) =>
+      position === index ? { ...entry, riders } : entry);
+    return { ok: true, action: { ...action, revision: action.revision + 1,
+      state: deriveActionState(targets), targets, updatedAt: Math.max(action.updatedAt, Math.trunc(at)) } };
+  }
+  if (target.state !== "pending" || target.check?.status !== "pending")
     return { ok: false, error: "action target is not pending" };
   if (pending.id !== undefined && target.check.pendingRollId !== pending.id)
     return { ok: false, error: "pending roll does not match the action target" };
@@ -432,6 +596,24 @@ export function expireActionPendingTarget(action: ActionCard, pending: {
   id?: string; actionId?: string; targetKey?: string;
 }, at: number): ActionCard {
   if (pending.actionId !== action.id || !pending.targetKey) return action;
+  const expiredRider = (target: ActionTarget): ActionTarget | null => {
+    const index = target.riders?.findIndex((rider) => rider.state === "pending" &&
+      rider.save?.pendingRollId !== undefined && rider.save.pendingRollId === pending.id) ?? -1;
+    if (index < 0) return null;
+    const riders = (target.riders as ActionRider[]).map((rider, position) => {
+      if (position !== index) return rider;
+      const save = { ...(rider.save as ActionRiderSave) };
+      delete save.pendingRollId;
+      return { ...rider, state: "expired" as const, save };
+    });
+    return { ...target, riders };
+  };
+  if (action.targets.some((target) => (target.riders ?? []).some((rider) =>
+      rider.state === "pending" && rider.save?.pendingRollId === pending.id))) {
+    const targets = action.targets.map((target) => expiredRider(target) ?? target);
+    return { ...action, revision: action.revision + 1, state: deriveActionState(targets), targets,
+      updatedAt: Math.max(action.updatedAt, Math.trunc(at)) };
+  }
   const targets: ActionTarget[] = action.targets.map((target) => {
     if (target.key !== pending.targetKey || target.state !== "pending" ||
         (pending.id !== undefined && target.check?.pendingRollId !== pending.id)) return target;
@@ -493,6 +675,16 @@ export function actionFxContext(action: ActionCard): ActionFxContext {
           ...(target.check.passed !== undefined ? { passed: target.check.passed } : {}),
           ...(target.check.automatic !== undefined ? { automatic: target.check.automatic } : {}),
         } } : {}),
+        ...(verified && target.riders !== undefined ? { riders: target.riders.map((rider) => ({
+          kind: rider.kind,
+          label: rider.label,
+          state: rider.state,
+          ...(rider.facts !== undefined ? { facts: [...rider.facts] } : {}),
+          ...(rider.save !== undefined ? { save: {
+            saveType: rider.save.saveType, dc: rider.save.dc, total: rider.save.total,
+            ...(rider.save.passed !== undefined ? { passed: rider.save.passed } : {}),
+          } } : {}),
+        })) } : {}),
         ...(verified && target.damage !== undefined ? { damage: { ...target.damage } } : {}),
         ...(verified && target.healing !== undefined ? { healing: { ...target.healing } } : {}),
         ...(verified && target.conditions !== undefined ? { conditions: {

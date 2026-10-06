@@ -253,14 +253,19 @@ export function evaluateDetection(
 ): DetectionResult {
   const breakdown = calculatePerceptionDc(subject, observer);
   const dc = breakdown.totalPerceptionDc;
-  const opposedPerceptionPenalty = observer.blinded === true ? -4 : 0;
+  // Both Blinded and Deafened impose −4 on opposed Perception checks (AoN Conditions: "takes a –4
+  // penalty on ... opposed Perception skill checks"). They do not stack: same penalty, whichever
+  // sense is lost, and the printed rules give one −4 either way.
+  const opposedPerceptionPenalty = observer.blinded === true || observer.deafened === true ? -4 : 0;
   const sightPenalty = observer.dazzled === true && subject.requiresVision === true ? -1 : 0;
   const pTotal = observer.perceptionTotal + opposedPerceptionPenalty + sightPenalty;
   const margin = pTotal - dc;
   const senses = observer.senses ?? [{ kind: "normal", rangeFt: null }];
   const notes: string[] = [];
-  if (opposedPerceptionPenalty !== 0)
-    notes.push("Blinded: −4 on this opposed Perception check.");
+  if (observer.blinded === true && observer.deafened === true)
+    notes.push("Blinded and Deafened: −4 on this opposed Perception check (one penalty, not two).");
+  else if (opposedPerceptionPenalty !== 0)
+    notes.push(`${observer.blinded === true ? "Blinded" : "Deafened"}: −4 on this opposed Perception check.`);
   if (sightPenalty !== 0)
     notes.push("Dazzled: −1 on this sight-based Perception check.");
 

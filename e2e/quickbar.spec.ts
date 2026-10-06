@@ -195,7 +195,7 @@ test.describe("per-character quickbar (§2.2/G-10b)", () => {
     if (!gmCamera) throw new Error("no GM camera");
     await clickWorld(host, { x: 150, y: 150 }, gmCamera);
     await expect(host.locator('[data-quickbar-actor="a-hero"]')).toBeVisible();
-    await expect(host.locator("[data-slot]")).toHaveCount(5);
+    await expect(host.locator("[data-quickbar-slot]")).toHaveCount(5);
     // the hero's slots were bound by the *player*: the binding is the actor's, so the GM reads it
     await expect(host.locator('[data-quickbar-slot="2"]')).toContainText("Greataxe");
 

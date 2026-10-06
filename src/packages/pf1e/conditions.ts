@@ -258,10 +258,12 @@ export const PF1E_CONDITIONS: readonly PF1eConditionDef[] = [
       mods: [
         mod("attack", -2, "frightened", "morale"),
         mod("saves", -2, "frightened", "morale"),
+        mod("skills", -2, "frightened", "morale"),
       ],
     }),
     notes: [
       "the forced-flee behavior (movement away from the source) is caller-owned — morale subsystem/L05",
+      "ability checks have no mod key — that half of the penalty is caller-owned",
     ],
   },
   {
@@ -342,7 +344,10 @@ export const PF1E_CONDITIONS: readonly PF1eConditionDef[] = [
     fear: true,
     build: () => ({
       condition: "Panicked",
-      mods: [mod("saves", -2, "panicked", "morale")],
+      mods: [
+        mod("saves", -2, "panicked", "morale"),
+        mod("skills", -2, "panicked", "morale"),
+      ],
       denies: [
         "standard",
         "swift",
@@ -355,6 +360,7 @@ export const PF1E_CONDITIONS: readonly PF1eConditionDef[] = [
     }),
     notes: [
       "the forced flee, dropped items and cornered-cowering are caller-owned behaviors",
+      "deliberate GM-mediated simplification: the deny list refuses spellcasting wholesale, so a GM who wants a cornered Panicked creature to use an escape spell adjudicates it rather than the payload encoding the escape exception",
     ],
   },
   {
@@ -431,9 +437,11 @@ export const PF1E_CONDITIONS: readonly PF1eConditionDef[] = [
       mods: [
         mod("attack", -2, "shaken", "morale"),
         mod("saves", -2, "shaken", "morale"),
+        // The `skills` key is the general skill modifier every skill derivation reads.
+        mod("skills", -2, "shaken", "morale"),
       ],
     }),
-    notes: ["skill/ability check penalties have no mod keys — caller-owned"],
+    notes: ["ability checks have no mod key — that half of the penalty is caller-owned"],
   },
   {
     name: "Sickened",
@@ -447,9 +455,10 @@ export const PF1E_CONDITIONS: readonly PF1eConditionDef[] = [
         mod("attack", -2, "sickened"),
         mod("damage", -2, "sickened"),
         mod("saves", -2, "sickened"),
+        mod("skills", -2, "sickened"),
       ],
     }),
-    notes: ["skill/ability check penalties have no mod keys — caller-owned"],
+    notes: ["ability checks have no mod key — that half of the penalty is caller-owned"],
   },
   {
     name: "Stable",

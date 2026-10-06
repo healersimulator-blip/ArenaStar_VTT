@@ -440,6 +440,12 @@ export interface MacroDocument extends BaseDocument {
    * binding — the item side needs no rule of its own.
    */
   fxItem?: import("./fxBinding").FxItemBinding;
+  /**
+   * D-407: the spell this timeline is bound to, by tactical-effect catalogue id. Stored on the
+   * timeline for the same reason `fxItem` is — the ordinary macro projection decides who may
+   * discover the binding, and a spell row is not an item document to hang it on.
+   */
+  fxSpell?: import("./fxBinding").FxSpellBinding;
   /** D-310: a named bundle of authored FX sections — an authoring aid, never runnable. */
   preset?: import("./fxPresets").FxPresetDefinition;
   /** A versioned, multi-section audiovisual timeline; legacy macros omit it. */

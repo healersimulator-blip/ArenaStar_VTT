@@ -31,6 +31,12 @@ export interface AgentWorldView {
   document(coll: string, id: string): AgentDocument | null;
   messages(options: PageOptions & { since?: number }): Page<AgentMessageRow>;
   sheet(actorId: string): AgentSheet | null;
+  /**
+   * The actor's condition *instances* and poison state — which source supplied each condition, how
+   * it ends, and when the next poison save is due. The sheet reports names; this reports the state a
+   * model needs to reason about removal and timing (plan Phase 8).
+   */
+  conditions(actorId: string): AgentConditionReport | null;
   /** Optional: only a replica with the compendium runtime can answer it. */
   bestiary?(query: string, limit: number): Promise<AgentBestiaryHit[]>;
   packages?(): AgentPackageRow[];
@@ -805,6 +811,45 @@ export interface AgentSheet {
   /** Only the skills the creature is trained in or that an effect moved — not all 40 rows. */
   skills: Array<{ name: string; bonus: number }>;
   feats: string[];
+}
+
+/** One keyed condition instance, projected: ids the caller may address, never raw Ops. */
+export interface AgentConditionInstance {
+  id: string;
+  condition: string;
+  source: { kind: string; label: string } | null;
+  removal: string;
+  legacy: boolean;
+  supported: boolean;
+}
+
+/** One active poison course, with the timing facts its next save depends on. */
+export interface AgentAfflictionCourseRow {
+  id: string;
+  profile: string;
+  state: string;
+  doseCount: number;
+  /** Seconds until the next scheduled save, when one is scheduled. */
+  nextSaveInSeconds: number | null;
+  /** Seconds until the frequency ends, when the profile is finite. */
+  frequencyEndsInSeconds: number | null;
+  cureProgress: number;
+  cureRequired: number;
+  consecutive: boolean;
+  effects: string[];
+}
+
+export interface AgentConditionReport {
+  actorId: string;
+  name: string;
+  conditions: AgentConditionInstance[];
+  /** Legacy labels without mechanics are reported, never given invented behavior. */
+  issues: string[];
+  poison: {
+    courses: AgentAfflictionCourseRow[];
+    delayPoison: { active: boolean; endsInSeconds: number | null };
+    queuedExposures: number;
+  };
 }
 
 export interface AgentBestiaryHit {

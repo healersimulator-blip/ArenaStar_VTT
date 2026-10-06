@@ -7,6 +7,7 @@ import type {
   MessageDocument,
 } from "../../src/core/documents";
 import type { Op } from "../../src/core/ops";
+import type { PF1eConditionActionRequest } from "../../src/core/messages";
 import type { PermissionUser } from "../../src/core/ownership";
 import { deriveFromDocuments } from "../../src/packages/pf1e/actor";
 import {
@@ -74,6 +75,8 @@ function combat(round: number, flags: FlagStore = {}): CombatDocument {
  */
 class FakeClient implements CastFlowClient {
   messages: MessageDocument[] = [];
+  /** D-407 — every condition delivery the flow asked for, in order. */
+  conditionRequests: Array<{ request: PF1eConditionActionRequest; requestId?: string }> = [];
   settings: unknown[] = [];
   scenes: unknown[] = [];
   submitted: Op[][] = [];
@@ -97,6 +100,11 @@ class FakeClient implements CastFlowClient {
   submit(ops: Op[]): string {
     this.submitted.push(ops);
     return "tx";
+  }
+
+  requestPF1eConditionAction(request: PF1eConditionActionRequest, requestId?: string): string {
+    this.conditionRequests.push({ request, ...(requestId !== undefined ? { requestId } : {}) });
+    return requestId ?? "condition-tx";
   }
 
   private record(
@@ -228,7 +236,7 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     const cardOp = cardBatch?.[0];
     if (cardOp?.kind !== "create" || cardOp.coll !== "messages") throw new Error("missing action card");
     expect((cardOp.data as MessageDocument).system.action).toMatchObject({
-      v: 1, id: cardOp.data._id, kind: "cast", label: "Magic Missile", state: "resolved",
+      v: 2, id: cardOp.data._id, kind: "cast", label: "Magic Missile", state: "resolved",
       source: { actorId: "wizard" }, targets: [{ actorId: "ogre", outcome: "failedSave",
         check: { kind: "save", dc: 14, total: 1, passed: false },
         evidence: { adapter: "pf1e.spellTarget.v1", payload: {
@@ -671,5 +679,82 @@ describe("cast resolution card (D-156)", () => {
     expect(card.content).toContain("REF save");
     expect(card.content).toContain("[[7|2d6]] damage dealt");
     expect(card.content).toContain("ogre 20 → 13 HP");
+  });
+
+  test("a landed save-less cast delivers the catalogued condition to the card row (D-407)", async () => {
+    const client = new FakeClient();
+    // Entangle is Reflex, so the ogre rolls a save: a 1 fails it.
+    client.script = [{ die: 1 }];
+    const p = params({
+      spell: { name: "Entangle", level: 1, preparedIndex: 0 },
+      authored: { saveType: "ref", severity: "negates", damageFormula: "" },
+      spellEffectId: "entangle",
+    });
+    const res = await resolveCastFlow(client, owner, p);
+    expect(res.ok).toBe(true);
+    if (!res.ok || res.lost || res.held || res.pending) return;
+    expect(res.result.passed).toBe(false);
+    // The card the flow wrote carries the row the delivery names.
+    const cardBatch = client.submitted[0];
+    const cardOp = cardBatch?.[0];
+    if (cardOp?.kind !== "create") throw new Error("card create missing");
+    const card = (cardOp.data as MessageDocument).system.action as { id: string;
+      targets: Array<{ key: string; outcome: string }> };
+    expect(card.targets[0]).toMatchObject({ key: "ogre", outcome: "failedSave" });
+    // One request, naming the catalogue effect and the card row — nothing else is client-supplied.
+    expect(client.conditionRequests).toEqual([{
+      request: { action: "apply", actorId: "ogre", condition: "Entangled",
+        spell: { effectId: "entangle", actionId: card.id, targetKey: "ogre" } },
+      requestId: `speffect-${card.id}-0`,
+    }]);
+    // The public narrative says what is being delivered before the host answers.
+    expect(res.warnings).toContain("Entangle: delivering Entangled to ogre");
+  });
+
+  test("a made save asks for nothing and says so (D-407)", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 20 }];
+    const p = params({
+      spell: { name: "Entangle", level: 1, preparedIndex: 0 },
+      authored: { saveType: "ref", severity: "negates", damageFormula: "" },
+      spellEffectId: "entangle",
+    });
+    const res = await resolveCastFlow(client, owner, p);
+    expect(res.ok).toBe(true);
+    if (!res.ok || res.lost || res.held || res.pending) return;
+    expect(res.result.passed).toBe(true);
+    expect(client.conditionRequests).toEqual([]);
+    expect(res.warnings).toContain("Entangle: ogre avoided it — no condition applied");
+  });
+
+  test("a cast form that disagrees with the catalogue is named, not silently ignored (D-407)", async () => {
+    const client = new FakeClient();
+    const p = params({
+      spell: { name: "Entangle", level: 1, preparedIndex: 0 },
+      // The caster left the form at "no save": the row lands as `affected`, and the catalogue's
+      // Reflex save means the condition is not delivered — the flow says so.
+      authored: { saveType: "ref", severity: "none", damageFormula: "" },
+      spellEffectId: "entangle",
+    });
+    const res = await resolveCastFlow(client, owner, p);
+    expect(res.ok).toBe(true);
+    if (!res.ok || res.lost || res.held || res.pending) return;
+    expect(client.conditionRequests).toEqual([]);
+    expect(res.warnings.join(" ")).toContain("asked for no save — no condition applied");
+  });
+
+  test("an unknown effect id is named, never delivered (D-407)", async () => {
+    const client = new FakeClient();
+    client.script = [{ die: 1 }];
+    const p = params({
+      spell: { name: "Entangle", level: 1, preparedIndex: 0 },
+      authored: { saveType: "ref", severity: "negates", damageFormula: "" },
+      spellEffectId: "no-such-spell",
+    });
+    const res = await resolveCastFlow(client, owner, p);
+    expect(res.ok).toBe(true);
+    if (!res.ok || res.lost || res.held || res.pending) return;
+    expect(client.conditionRequests).toEqual([]);
+    expect(res.warnings.join(" ")).toContain('unknown spell effect "no-such-spell"');
   });
 });

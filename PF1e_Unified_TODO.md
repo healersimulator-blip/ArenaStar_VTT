@@ -1512,6 +1512,27 @@ Two user-requested tactical/strategic features that sit on top of the landed P0�
 5. **Delegation UI.** `RollCard`'s `→ Player` button opens a player picker from `client.store.getAll("users")`; GM pick writes `pendingReroll` onto the card's `system.rollLedger` via an `update` Op on `messages` (same permission gate). The named player's card shows the delegated Reroll.
 6. **Tests + e2e.** `tests/packages/rollLedger.test.ts` (ledger build/invert/prune, 2-round window, stale-target refusal, permission refusal, multi-target damage ledger), `tests/ui/rollCard.test.ts` (render links, dropdown counts, button disablement at `T+3`), `e2e/roll_ledger.spec.ts` (non-strategic game only: attack at a dummy → card shows initiator/target links that center+outline; Fireball damage reroll → old HP reverted then new HP applied; Revert → dead model revived at pre-card HP; Player Reroll → GM grants → player sees button → player rerolls → same revert-then-reapply; window closes after 3 rounds; area link draws fading cone/sphere that is gone after `fadeSec+1`).
 
+**Progress (2026-10-05, D-406).** Phase 1 and the manual-condition half of Phase 2 are landed:
+conditions are keyed, source-aware instances; a manual apply/remove commits state, its chat record and
+a private GM Revert receipt in one host envelope (and the generic-op path may only add/remove the
+caller's own manual tag, with a GM audit line). Core PF1e poison is landed as a **rider of landed
+interactions** — a coated strike attaches an `applied`/`resisted` rider, a player-owned victim's save
+is a host pending roll the victim rolls from the card, and the exposure's Revert restores ability
+damage and course — with pack data, a `condition.read` agent surface and an executed browser spec
+(`e2e/pf1e_poison.spec.ts`). The maneuver/health producers named below (trip/overrun, Dirty Trick,
+grapple, Dying/Stable, first aid) remain Phase 2b and are **not** yet Revertable by name; phase status
+lives in `CONDITION_EFFECT_REVERT_GAP_AND_PLAN.md` §4.
+
+**Progress (2026-10-06, D-407).** The **spell** side of the same contract landed: authored tactical
+spell effects (`packages/pf1e/spellEffects.ts` + `system.tacticalEffect` on the spell pack, mirror-
+pinned), a client producer in the cast flow that delivers a catalogue condition on a **landed cast**
+(`pf1e.condition` with `spell: {effectId, actionId, targetKey}`, host re-read of the card row,
+`condition` rider kind, Revert-stable), a spell-keyed FX binding (`fxSpell`, wizard panel, cue fired
+post-commit from the sheet/item/hot-bar cast paths) and a `spell` quickbar slot. The scene's remaining
+halves are named: area casting, the RAW break-free/re-save cadence, and condition↔FX teardown. The
+scene's own browser spec (`e2e/pf1e_entangle.spec.ts`, both save branches) is executed and green. See
+`DECISIONS.md` D-407.
+
 **Known gap (2026-10-05, documented not closed).** The _condition/effect_ half of F01 is unmet: `ledgerOps` has never carried a condition or effect op, every maneuver card is still two plain envelopes, and `planDamageDeltaReroll` refuses a non-HP ledger by name — so a trip/dirty-trick/grapple card cannot be reverted or rerolled the way an attack card can. The mechanisms themselves are field-agnostic and already restore conditions under global Undo and under an audited receipt (proven by `tests/host/effectRevertScope.test.ts`); no producer hands them one. Full evidence, dependency map (spells, poison, bull rush, trample, both condition homes, tick/expiry) and the phased plan: **`CONDITION_EFFECT_REVERT_GAP_AND_PLAN.md`** (§4 phases 1–2 close this clause; the doc also flags the open decisions that must precede them). This note changes no checkbox and no rule.
 
 ### F02 — Strategic simultaneous combat (all combatants, initiative as damage order)

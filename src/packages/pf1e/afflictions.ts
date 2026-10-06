@@ -7,6 +7,7 @@
 import { DAY_SECONDS, HOUR_SECONDS, MINUTE_SECONDS, SECONDS_PER_ROUND } from "../../core/clock";
 import { err, okVal, type Result } from "../../core/result";
 import type { PF1eAbilityKey } from "./actor";
+import { PF1E_POISON_CATALOGUE } from "./poisonCatalogue";
 
 export const PF1E_POISON_RULESET = "core-pf1e" as const;
 
@@ -1336,112 +1337,63 @@ export function upsertPF1ePoisonCourse(
   return okVal({ ...state, courses: { ...state.courses, [course.id]: course } });
 }
 
-const abilityEffect = (ability: PF1eAbilityKey, formula: string): PF1ePoisonEffect => ({
-  kind: "damage", target: "abilityDamage", ability, formula,
-});
+/**
+ * The Core PF1e poison catalogue: immutable profiles validated at load. The rows are source data in
+ * `poisonCatalogue.ts`, mirroring the shipped `systems/pf1e-core/packs/poisons.json` content pack
+ * (no source file loads pack data at runtime — M18). A malformed or duplicated row is reported in
+ * {@link PF1E_POISON_CATALOGUE_ERRORS} and excluded from the catalogue, so the host refuses an
+ * exposure it cannot verify rather than running on a half-valid profile.
+ */
+const PF1E_POISON_ROWS: unknown = PF1E_POISON_CATALOGUE;
+
+interface PF1ePoisonPackLoad {
+  readonly definitions: readonly PF1ePoisonDefinition[];
+  readonly errors: readonly string[];
+}
+
+function loadPF1ePoisonCatalogue(rows: unknown): PF1ePoisonPackLoad {
+  if (!Array.isArray(rows)) return { definitions: [], errors: ["poison catalogue: rows must be an array"] };
+  const entries = rows;
+  const definitions: PF1ePoisonDefinition[] = [];
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  entries.forEach((entry, index) => {
+    const checked = validatePF1ePoisonDefinition(entry);
+    if (!checked.ok) {
+      errors.push(`poison catalogue[${index}]: ${checked.error}`);
+      return;
+    }
+    if (seen.has(checked.value.id)) {
+      errors.push(`poison catalogue[${index}]: duplicate poison id ${checked.value.id}`);
+      return;
+    }
+    seen.add(checked.value.id);
+    definitions.push(checked.value);
+  });
+  return { definitions, errors };
+}
+
+const POISON_CATALOGUE_LOAD = loadPF1ePoisonCatalogue(PF1E_POISON_ROWS);
+
+/** Catalogue rows that failed validation (empty is the only acceptable value in tests). */
+export const PF1E_POISON_CATALOGUE_ERRORS: readonly string[] = POISON_CATALOGUE_LOAD.errors;
 
 /**
  * Source fixtures required by the plan. These are Core PF1e profiles, not Unchained tracks. The
  * Greenblood data follows Paizo's poison FAQ; Giant Octopus and Wyvern follow their Bestiary entries.
  */
-export const PF1E_POISON_FIXTURES: readonly PF1ePoisonDefinition[] = [
-  {
-    id: "greenblood-oil",
-    version: 1,
-    name: "Greenblood oil",
-    ruleset: PF1E_POISON_RULESET,
-    source: {
-      title: "I Drank What? An FAQ on Poison",
-      citation: "Paizo PF1e poison FAQ, Greenblood oil example",
-      url: "https://paizo.com/blog/i-drank-what-an-faq-on-poison",
-    },
-    delivery: ["injury"],
-    baseDC: 13,
-    dcSource: "fixed-stat-block",
-    saveType: "fort",
-    onset: null,
-    frequency: { interval: { value: 1, unit: "round" }, intervals: 4, firstSave: "at-onset" },
-    effects: {
-      immediate: [abilityEffect("con", "1")],
-      periodic: [abilityEffect("con", "1")],
-      oneShot: [abilityEffect("con", "1")],
-    },
-    cure: { successesRequired: 1, consecutive: false },
-  },
-  {
-    id: "giant-octopus-poison",
-    version: 1,
-    name: "Giant octopus poison",
-    ruleset: PF1E_POISON_RULESET,
-    source: {
-      title: "Archives of Nethys — Giant Octopus",
-      citation: "Bestiary p. 219; Poison: DC 19, 1/round for 6 rounds, 1d3 Strength, Cure 2 saves",
-      url: "https://aonprd.com/MonsterDisplay.aspx?ItemName=Giant%20Octopus",
-    },
-    delivery: ["injury"],
-    baseDC: 19,
-    dcSource: "fixed-stat-block",
-    saveType: "fort",
-    onset: null,
-    frequency: { interval: { value: 1, unit: "round" }, intervals: 6, firstSave: "at-onset" },
-    effects: {
-      immediate: [abilityEffect("str", "1d3")],
-      periodic: [abilityEffect("str", "1d3")],
-      oneShot: [abilityEffect("str", "1d3")],
-    },
-    cure: { successesRequired: 2, consecutive: false },
-  },
-  {
-    id: "wyvern-poison",
-    version: 1,
-    name: "Wyvern poison",
-    ruleset: PF1E_POISON_RULESET,
-    source: {
-      title: "Archives of Nethys — Wyvern",
-      citation: "Bestiary; Poison: DC 17, 1/round for 6 rounds, 1d4 Constitution, Cure 2 consecutive saves",
-      url: "https://aonprd.com/MonsterDisplay.aspx?ItemName=Wyvern",
-    },
-    delivery: ["injury"],
-    baseDC: 17,
-    dcSource: "fixed-stat-block",
-    saveType: "fort",
-    onset: null,
-    frequency: { interval: { value: 1, unit: "round" }, intervals: 6, firstSave: "at-onset" },
-    effects: {
-      immediate: [abilityEffect("con", "1d4")],
-      periodic: [abilityEffect("con", "1d4")],
-      oneShot: [abilityEffect("con", "1d4")],
-    },
-    cure: { successesRequired: 2, consecutive: true },
-  },
-  {
-    id: "medium-spider-venom",
-    version: 1,
-    name: "Medium spider venom",
-    ruleset: PF1E_POISON_RULESET,
-    source: {
-      title: "Pathfinder Core Rulebook",
-      citation: "CRB p. 557; Medium spider venom, dose-stacking example (DC 14; 1/round for 4 rounds)",
-    },
-    delivery: ["injury"],
-    baseDC: 14,
-    dcSource: "fixed-stat-block",
-    saveType: "fort",
-    onset: null,
-    frequency: { interval: { value: 1, unit: "round" }, intervals: 4, firstSave: "at-onset" },
-    effects: {
-      immediate: [abilityEffect("str", "1d2")],
-      periodic: [abilityEffect("str", "1d2")],
-      oneShot: [abilityEffect("str", "1d2")],
-    },
-    cure: { successesRequired: 1, consecutive: false },
-  },
-];
+export const PF1E_POISON_FIXTURES: readonly PF1ePoisonDefinition[] = POISON_CATALOGUE_LOAD.definitions;
+
+/** Exact-profile lookup by pack id (optionally a pinned version); null when the pack lacks it. */
+export function pf1ePoisonDefinitionById(id: string, version?: number): PF1ePoisonDefinition | null {
+  return PF1E_POISON_FIXTURES.find((definition) =>
+    definition.id === id && (version === undefined || definition.version === version)) ?? null;
+}
 
 /** Fail closed if a fixture drifts from the validated immutable profile contract. */
 export function validatePoisonFixtures(): readonly string[] {
-  return PF1E_POISON_FIXTURES.flatMap((fixture) => {
+  return [...PF1E_POISON_CATALOGUE_ERRORS, ...PF1E_POISON_FIXTURES.flatMap((fixture) => {
     const result = validatePF1ePoisonDefinition(fixture);
     return result.ok ? [] : [`${fixture.id}: ${result.error}`];
-  });
+  })];
 }

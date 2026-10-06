@@ -162,7 +162,7 @@ describe("pendingRoll: build + window", () => {
       kind: "save", saveType: "ref", initiator: init, target, formula: "1d20+5", dc: 17,
       modifiers: [], turnNumber: 1 });
     const action: ActionCard = {
-      v: 1, id: "card-1", revision: 0, kind: "cast", label: "Entangle", state: "pending",
+      v: 2, id: "card-1", revision: 0, kind: "cast", label: "Entangle", state: "pending",
       source: { name: "Goblin", actorId: "a-init" },
       targets: [{ key: "target", name: "Valeros", actorId: "a-tgt", state: "pending", outcome: "pending",
         check: { kind: "save", status: "pending", formula: "1d20+5", dc: 17, total: null,

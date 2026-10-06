@@ -168,7 +168,7 @@ describe("scripts/buildStarterWorlds.mjs", () => {
       expect((await listPackages(db, first.worldId)).length).toBe(2);
 
       // ── G-45: the starter world's own compendium, through the reader's index ──────
-      // The starter ships `pf1e-core` alone (5 packs, 162 hand-authored entries). Its shapes are
+      // The starter ships `pf1e-core` alone (6 packs, 166 hand-authored entries). Its shapes are
       // NOT the converter's: spells state a school and no `spell` keyword, the equipment pack
       // authors `table` as a string key with rows as an *object*, and the bestiary/classes packs
       // are the only actors. This is the check that the reader is not tuned to one producer.
@@ -178,10 +178,11 @@ describe("scripts/buildStarterWorlds.mjs", () => {
         "PF1e Classes",
         "PF1e Equipment",
         "PF1e Feats",
+        "PF1e Poisons",
         "PF1e Spells",
       ]);
       const starterIndex = buildCompendiumIndex(starterCompendia.map((c) => c.pack));
-      expect(starterIndex.counts).toEqual({ packs: 5, entries: 162 });
+      expect(starterIndex.counts).toEqual({ packs: 6, entries: 166 });
       const starterKinds = new Map<string, number>();
       for (const e of starterIndex.entries) {
         starterKinds.set(e.facets.kind, (starterKinds.get(e.facets.kind) ?? 0) + 1);
@@ -192,6 +193,7 @@ describe("scripts/buildStarterWorlds.mjs", () => {
         Feat: 33, // PF1e Feats — `feat` keyword + a feat category
         Table: 8, // PF1e Equipment — `table` string + rows object
         Class: 6, // PF1e Classes — `hd` + `babProgression`
+        Item: 4, // PF1e Poisons — item documents with a system.pf1e.poison profile
       });
       // Levels and schools come from the core spell pack's own records.
       expect(starterIndex.facetOptions.levels.map((o) => o.value)).toEqual(

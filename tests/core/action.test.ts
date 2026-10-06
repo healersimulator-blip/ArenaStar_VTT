@@ -30,7 +30,7 @@ const target = (key: string, outcome: "pending" | "saved" | "failedSave" = "pend
 
 function action(targets: ActionTarget[] = [target("one"), target("two")]): ActionCard {
   return {
-    v: 1,
+    v: 2,
     id: "action-1",
     revision: 0,
     kind: "cast",
@@ -232,5 +232,93 @@ describe("action card contract", () => {
     if (!distant.area) throw new Error("area fixture missing");
     distant.area.origin.x = 1_000_001;
     expect(validateActionCard(distant)).toEqual({ ok: false, error: "action area is malformed" });
+  });
+});
+
+describe("action card riders (v2)", () => {
+  const delivered = (): ActionCard => {
+    const landed = target("one", "saved");
+    landed.riders = [{
+      kind: "poison",
+      label: "Giant octopus poison",
+      state: "pending",
+      facts: ["Fort DC 19", "1/round for 6 rounds", "1d3 Str"],
+      save: { saveType: "fort", dc: 19, total: null, pendingRollId: "poison-save" },
+      evidence: { adapter: "pf1e.poison.v1", payload: { definitionId: "giant-octopus-poison", version: 1 } },
+    }];
+    const card = action([landed]);
+    card.state = deriveActionState(card.targets);
+    return card;
+  };
+
+  test("a delivered rider keeps the card pending while its save is unrolled", () => {
+    const card = delivered();
+    expect(card.state).toBe("pending");
+    expect(validateActionCard(card)).toEqual(expect.objectContaining({ ok: true }));
+  });
+
+  test("rolling the rider save resolves the rider and leaves the landed target resolved", () => {
+    const result = resolveActionPendingTarget(delivered(), {
+      id: "poison-save", actionId: "action-1", targetKey: "one", kind: "save", dc: 19,
+    }, 12, 200);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.action.state).toBe("resolved");
+    expect(result.action.targets[0]).toMatchObject({ state: "resolved", outcome: "saved",
+      check: { status: "resolved", total: 22, passed: true }, riders: [{
+        state: "applied", save: { total: 12, passed: false },
+      }] });
+    expect(result.action.targets[0]?.riders?.[0]?.save).not.toHaveProperty("pendingRollId");
+    expect(validateActionCard(result.action).ok).toBe(true);
+  });
+
+  test("a resisted save records the pass and a closed window expires without inventing one", () => {
+    const passed = resolveActionPendingTarget(delivered(), {
+      id: "poison-save", actionId: "action-1", targetKey: "one", kind: "save", dc: 19,
+    }, 25, 200);
+    expect(passed.ok).toBe(true);
+    if (!passed.ok) return;
+    expect(passed.action.targets[0]?.riders?.[0]).toMatchObject({ state: "resisted",
+      save: { total: 25, passed: true } });
+
+    const expired = expireActionPendingTarget(delivered(), {
+      id: "poison-save", actionId: "action-1", targetKey: "one",
+    }, 300);
+    expect(expired.state).toBe("resolved");
+    expect(expired.targets[0]?.riders?.[0]).toMatchObject({ state: "expired", save: { total: null } });
+    expect(validateActionCard(expired).ok).toBe(true);
+  });
+
+  test("version-1 cards cannot carry riders and rider invariants are enforced", () => {
+    const legacy = delivered();
+    legacy.v = 1;
+    expect(validateActionCard(legacy)).toEqual({ ok: false, error: "action riders require an action card version 2" });
+
+    const badPass = delivered();
+    const rider = badPass.targets[0]?.riders?.[0];
+    if (!rider?.save) throw new Error("rider fixture missing");
+    rider.state = "resisted";
+    rider.save.total = 20;
+    rider.save.passed = false;
+    delete rider.save.pendingRollId;
+    expect(validateActionCard(badPass)).toEqual({
+      ok: false, error: "a resisted rider save must be recorded as passed",
+    });
+  });
+
+  test("FX projection carries rider state only for host-verified targets", () => {
+    const card = delivered();
+    expect(actionFxContext(card).targets[0]).toMatchObject({
+      verified: true, riders: [{ kind: "poison", state: "pending",
+        save: { saveType: "fort", dc: 19, total: null } }],
+    });
+    expect(JSON.stringify(actionFxContext(card))).not.toContain("pendingRollId");
+    expect(JSON.stringify(actionFxContext(card))).not.toContain("pf1e.poison.v1");
+
+    const reported = delivered();
+    if (reported.targets[0]) reported.targets[0].provenance = "reported";
+    expect(actionFxContext(reported).targets[0]).toEqual({
+      key: "one", name: "one", actorId: "actor-one", tokenId: "token-one", verified: false,
+    });
   });
 });

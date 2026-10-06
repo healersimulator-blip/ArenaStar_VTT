@@ -309,6 +309,23 @@ ledger/Revert controls must be implemented there rather than assumed to appear t
 
 ## 4. Revised implementation plan
 
+### Status — 2026-10-05 (D-406)
+
+| Phase | Status | What landed / what remains |
+| --- | --- | --- |
+| 0 | **Landed (characterization)** | `effectRevertScope.test.ts`; R1–R7 decided in §6. |
+| 1 | **Landed** | Canonical keyed `conditionApplications` with source/removal, legacy-name normalization, one mechanical resolution; `stealthPerception`/`actions` consumers read the payload flags. |
+| 2 | **Split — 2a landed, 2b remaining** | 2a: manual condition apply/remove through one host envelope with a receipt, a chat record and the generic-op policy (own manual tags only, GM audit line). 2b: trip/overrun, Dirty Trick, grapple branches, Dying/Stable, first aid still write the legacy path. |
+| 3 | **Remaining** | No card-level Revert control; the GM Revert panel works for every audited action today. |
+| 4 | **Remaining — one trap closed** | `removal: {kind:"expiry"}` is *refused by name* until the sweep exists (D-407 note below), so nothing promises an expiry nobody consumes (see D-406). |
+| 5 | **Partial** | The pending-rider continuation (host re-derivation + evidence) exists for poison; generic spell-effect continuation is still deliberately pending. |
+| 6 | **Landed (core)** | Affliction engine, host saves/cadence/dose/DC, Delay/Neutralize, rider delivery on landed interactions, player-deferred saves, Revert, pack data + read surface + browser spec. Remaining: a `creature-derived` fixture (formula path is unit-tested only) and card-level Revert UX (Phase 3). |
+| 7 | **Remaining** | Forced movement/trample untouched. |
+| 8 | **Partial** | `condition.read` + `ACTION_SYSTEM.md`/`PROTOCOL.md`/`DECISIONS.md`/this status; coverage dashboard and `DEVIATIONS.md` pass still to be re-run with the next slice. |
+
+Phase 2's original body is kept below and split as **2a** (condition producers, landed) and **2b**
+(maneuver/health producers, remaining) so a reader cannot mistake the header for the whole phase.
+
 The dependency order is now explicit: first make condition state mechanically real and source-aware;
 then route producers through one host-owned transaction; then expose a privacy-safe ledger view. Only
 after those contracts are stable do we add expiry, spells, poison cadence and tactical movement. The
@@ -383,6 +400,10 @@ legacy names are not fabricated into rules. Add unit tests for mixed legacy/new 
 removal, plus a sheet/host integration path.
 
 ### Phase 2 — Atomic host transactions for existing producers and named Revert
+
+**2a (landed, D-406):** manual condition apply/remove already commits one envelope — conditions,
+chat record and private receipt — with the generic-op policy above; its Revert path is exercised in
+`tests/host/pf1eConditionAction.test.ts`. **2b (remaining):** the maneuver/health producers below.
 
 This is the first user-visible rollback slice. Replace the current two-submit maneuver path with a
 typed host-owned action intent. The client sends the requested maneuver and bounded context; the host
@@ -736,6 +757,14 @@ Phase 7 movement is separate from the condition rules work.
 
 R1–R4 gate Phases 1–4; R5 and R7 gate poison; R6 scopes later breadth. Record each decision before the
 implementation slice that depends on it.
+
+**Decision record (D-406, 2026-10-05):** R1 = (a) private `actionReceipts` as the single inverse
+source, with the card (when it exists) delegating; R2 = (b) per-path for keyed applications, legacy
+arrays whole-document; R3 = (c) refuse and report the later event; R4 = (c) separate keyed
+`conditionApplications` with legacy normalization, persisted under `system.pf1e` and validated on
+every host write (the persisted-schema decision this item required); R5 = (a) per-exposure events;
+R6 = keep the phase order, poison before trample; R7 unchanged (resolved). Each decision is embodied
+by tests in the same files named in §4's status table; DECISIONS.md D-406 records the whole package.
 
 **R1 — Which store is authoritative for Revert?**
 (a) Audited `actionReceipts` only; (b) F01 ledger only; (c) both as independent copies. **Recommend a

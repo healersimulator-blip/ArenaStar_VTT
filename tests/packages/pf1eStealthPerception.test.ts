@@ -184,6 +184,24 @@ describe("C07 — Sensory Modes & Awareness Behavior", () => {
     expect(res.targetingMissChance).toBe(0.5); // Retains total concealment
   });
 
+  test("Blinded and Deafened each take −4 on the opposed Perception check, never stacking", () => {
+    const subject: StealthSubjectFacts = { stealthRoll: 20, distanceFt: 10 };
+    const base = evaluateDetection(subject, { perceptionTotal: 24 });
+    // +4 over the DC, so the −4 lands exactly on the boundary and a 1-point margin still fails.
+    const dc = base.dc;
+    const flat = evaluateDetection(subject, { perceptionTotal: dc });
+    const blinded = evaluateDetection(subject, { perceptionTotal: dc, blinded: true });
+    const deafened = evaluateDetection(subject, { perceptionTotal: dc, deafened: true });
+    const both = evaluateDetection(subject, { perceptionTotal: dc, blinded: true, deafened: true });
+    expect(base.detected).toBe(true);
+    expect(flat.detected).toBe(true);
+    expect(blinded.detected).toBe(false);
+    expect(deafened.detected).toBe(false);
+    expect(both.detected).toBe(false);
+    expect(both.notes.join(" ")).toContain("one penalty, not two");
+    expect(deafened.notes.join(" ")).toContain("Deafened: −4 on this opposed Perception check.");
+  });
+
   test("Scent detects presence within 30 ft, but cannot pinpoint beyond 5 ft", () => {
     const subject: StealthSubjectFacts = {
       stealthRoll: 35,

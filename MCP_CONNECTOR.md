@@ -76,7 +76,7 @@ and forget this file, and the suite fails.
 
 <!-- BEGIN GENERATED TOOLS -->
 
-**57 tools**, each naming the one capability it needs. Scan the table, then read the tool you want.
+**58 tools**, each naming the one capability it needs. Scan the table, then read the tool you want.
 
 | Tool | Capability |
 |---|---|
@@ -92,6 +92,7 @@ and forget this file, and the suite fails.
 | `token.list` | `world.read` |
 | `chat.read` | `chat.read` |
 | `sheet.read` | `world.read` |
+| `condition.read` | `world.read` |
 | `bestiary.search` | `world.read` |
 | `hexcrawl.cells` | `hexcrawl.read` |
 | `hex.read` | `hexcrawl.read` |

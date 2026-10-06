@@ -129,6 +129,115 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 
 const isId = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
 
+/**
+ * D-407 — binding a timeline to a **spell**, not an item. A prepared spell is a row on the actor, not
+ * an item document, so the item binding cannot name it; the catalogue id from
+ * `packages/pf1e/spellEffects` is the key. The committed moment is the cast itself, and the automatic
+ * recognition is the same one the item binding uses for a use: a made save, spell resistance, a lost
+ * spell, a held charge or a missed touch all mean the effect did not land, so `onFailureId` (or
+ * nothing) plays instead of the spell's own cue.
+ */
+export interface FxSpellBinding {
+  /** Catalogue id (`entangle`), validated against the shipped tactical-effect catalogue. */
+  spellId: string;
+  /** The cue a **failed** cast plays instead. */
+  onFailureId?: DocId;
+  /** Author override of the automatic recognition. Default `auto`. */
+  recognition?: FxRecognition;
+  /** Manual disable (default true): the spell plays no cue, whatever the outcome. */
+  enabled?: boolean;
+}
+
+/** Every field a spell binding may carry — anything else is refused by name. */
+export const FX_SPELL_BINDING_KEYS = ["spellId", "onFailureId", "recognition", "enabled"] as const;
+
+/** Validate the authored shape of a spell binding, refusing an unknown field by name. */
+export function validateFxSpellBinding(
+  value: unknown,
+): { ok: true; binding: FxSpellBinding } | { ok: false; error: string } {
+  const invalid = (error: string) => ({ ok: false as const, error });
+  if (!isObject(value)) return invalid("an FX spell binding needs a spell");
+  const stray = Object.keys(value).filter((key) => !(FX_SPELL_BINDING_KEYS as readonly string[]).includes(key));
+  if (stray.length > 0) return invalid(`an FX spell binding carries no ${stray.join("/")} field`);
+  if (!isId(value.spellId)) return invalid("an FX spell binding needs the spell it belongs to");
+  if (value.onFailureId !== undefined && !isId(value.onFailureId))
+    return invalid("an FX spell binding's failure cue must name a timeline");
+  if (value.recognition !== undefined &&
+      !(FX_RECOGNITION_MODES as readonly string[]).includes(String(value.recognition)))
+    return invalid("an FX spell binding's recognition is auto, success or failure");
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean")
+    return invalid("an FX spell binding's enabled must be a boolean");
+  if (value.recognition === "failure" && value.onFailureId === undefined)
+    return invalid("forcing the failure cue needs a bound failure timeline to play");
+  const binding: FxSpellBinding = { spellId: value.spellId };
+  if (typeof value.onFailureId === "string") binding.onFailureId = value.onFailureId;
+  if (typeof value.recognition === "string") binding.recognition = value.recognition as FxRecognition;
+  if (typeof value.enabled === "boolean") binding.enabled = value.enabled;
+  return { ok: true, binding };
+}
+
+/**
+ * The spell binding a timeline carries, or `null`. Malformed reads as *no* binding, the same
+ * fail-closed rule the item binding uses: the host refuses to store one, so a document that carries
+ * one anyway has been hand-edited and must not play a cue out of it.
+ */
+export function fxSpellBindingOf(macro: MacroDocument): FxSpellBinding | null {
+  if (macro.fxSpell === undefined) return null;
+  const checked = validateFxSpellBinding(macro.fxSpell);
+  return checked.ok ? checked.binding : null;
+}
+
+/** Does this timeline name that spell? */
+export function fxSpellBindingMatches(macro: MacroDocument, spellId: string): boolean {
+  const binding = fxSpellBindingOf(macro);
+  return binding !== null && binding.spellId === spellId;
+}
+
+/**
+ * Which timeline a committed cast plays. `null` means "play nothing" (a disabled binding, or an
+ * unrecognised failure with no failure cue bound); the default branch is the timeline the binding is
+ * stored on, so a binding never has to repeat its own id.
+ */
+export function fxSpellBindingBranch(macro: MacroDocument, outcome: "success" | "failure"): DocId | null {
+  const binding = fxSpellBindingOf(macro);
+  if (binding === null || binding.enabled === false) return null;
+  const recognition = binding.recognition ?? "auto";
+  if (recognition === "success") return macro._id;
+  if (recognition === "failure") return binding.onFailureId ?? null;
+  return outcome === "success" ? macro._id : binding.onFailureId ?? null;
+}
+
+/** What the host must be able to see for a spell binding: a catalogue spell and readable timelines. */
+export interface FxSpellBindingLookup {
+  /** Whether the shipped tactical-effect catalogue defines that spell id. */
+  catalogue(spellId: string): boolean;
+  macro(id: DocId): MacroDocument | undefined;
+  /** Whether the *editor* may read that document — the host passes its own `can(...)`. */
+  readable(coll: "macros", doc: { _id: DocId }): boolean;
+  /** Every timeline already bound to that spell, so one spell plays exactly one cue. */
+  boundTimelines(spellId: string): readonly { id: DocId }[];
+}
+
+/** The document rule for a timeline's spell binding, or `null` when it may be stored. */
+export function fxSpellBindingError(macro: MacroDocument, lookup: FxSpellBindingLookup): string | null {
+  if (macro.fxSpell === undefined) return null;
+  const checked = validateFxSpellBinding(macro.fxSpell);
+  if (!checked.ok) return checked.error;
+  const binding = checked.binding;
+  if (!lookup.catalogue(binding.spellId))
+    return "an FX spell binding must name a spell the tactical-effect catalogue ships";
+  for (const [which, id] of [["the cue", macro._id], ["the failure cue", binding.onFailureId]] as const) {
+    if (id === undefined) continue;
+    const target = id === macro._id ? macro : lookup.macro(id);
+    if (target === undefined) return `${which} names no timeline`;
+    if (target.kind !== "sequence") return `${which} names a ${target.kind} macro, not a timeline`;
+    if (!lookup.readable("macros", target)) return `${which} names a timeline its author cannot read`;
+  }
+  const clash = lookup.boundTimelines(binding.spellId).find((other) => other.id !== macro._id);
+  if (clash !== undefined) return "another timeline is already bound to that spell";
+  return null;
+}
+
 /** Validate the authored shape of a binding, refusing an unknown field by name. */
 export function validateFxItemBinding(
   value: unknown,

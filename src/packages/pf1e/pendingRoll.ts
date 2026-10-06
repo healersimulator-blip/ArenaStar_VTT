@@ -235,12 +235,19 @@ export function shouldDeferToPlayer(input: {
   worldSettings: CoreWorldSettings;
   isStrategic?: boolean;
   turnMode?: string | null;
+  /**
+   * D-405 — a rider save (poison delivered by an action). The table's "saves are auto" mode hands
+   * ordinary saves to the host, but a delivered rider is the victim's own roll by design: it stays
+   * pending for a player-owned victim in every mode except a wholly auto-rolled table.
+   */
+  isRiderSave?: boolean;
 }): boolean {
   if (input.isStrategic === true) return false;
   if (input.turnMode === "simultaneous") return false;
   if (!input.targetIsPlayerOwned) return false;
   const mode = playerPendingRollModeOf(input.worldSettings);
   if (mode === "auto") return false;
+  if (input.isRiderSave === true) return true;
   if (mode === "savesChecksAuto") return input.kind === "attack";
   if (mode === "manual") return true;
   return false;

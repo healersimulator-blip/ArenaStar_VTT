@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ActorDocument } from "../../core/documents";
   import type { PF1eDerivedAttack } from "../../packages/pf1e/actor";
+  import { PF1E_POISON_FIXTURES } from "../../packages/pf1e/afflictions";
   import {
     ATTACK_TEXT_FIELDS,
     ATTACK_NUMBER_FIELDS,
@@ -46,7 +47,7 @@
   {#each view.rows as row, index (index)}
     <fieldset data-pf1e-attack-row={index} disabled={!editable || view.error !== null}>
       <legend>Attack {index + 1}</legend>
-      {#each ATTACK_TEXT_FIELDS as [field, label] (field)}
+      {#each ATTACK_TEXT_FIELDS.filter(([field]) => field !== "poisonId") as [field, label] (field)}
         {#if row[field] !== null && typeof row[field] === "object"}
           <p>{label} (structured import, read-only)</p>
           <pre>{JSON.stringify(row[field], null, 2)}</pre>
@@ -70,6 +71,25 @@
           >
         {/if}
       {/each}
+      <label
+        >Poison profile (delivered on a hit)<select
+          data-attack-field="poisonId"
+          value={String(row.poisonId ?? "")}
+          onchange={(e) =>
+            onEdit({
+              kind: "set",
+              index,
+              field: "poisonId",
+              value: e.currentTarget.value,
+              expected: view.rows,
+            })}
+        >
+          <option value="">— none —</option>
+          {#each PF1E_POISON_FIXTURES as poison (poison.id)}
+            <option value={poison.id}>{poison.name}</option>
+          {/each}
+        </select></label
+      >
       {#each ATTACK_NUMBER_FIELDS as [field, label] (field)}
         {#if row[field] !== null && typeof row[field] === "object"}
           <p>{label} (structured import, read-only)</p>

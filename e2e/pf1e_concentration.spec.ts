@@ -103,7 +103,9 @@ test.describe("PF1e casting legality and concentration (§9/P5 C03)", () => {
       system: { pf1e: { conditions: ["deafened"] } },
       deafenedDie: 10, // at or below 20%
     });
-    expect(res.conditions).toContain("deafened");
+    // The platform canonicalizes condition identities (`conditionApplications`); the authored
+    // lowercase label is what the fixture writes, the surface reports the canonical name.
+    expect(res.conditions.map((c) => c.toLocaleLowerCase("en-US"))).toContain("deafened");
     expect(res.deafenedFailed).toBe(true);
     expect(res.outcome).toBe("lost");
   });

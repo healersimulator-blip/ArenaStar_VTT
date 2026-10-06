@@ -39,6 +39,7 @@ describe("the tool manifest (MCP plan §5)", () => {
       "token.list",
       "chat.read",
       "sheet.read",
+      "condition.read",
       "bestiary.search",
       "hexcrawl.cells",
       "hex.read",

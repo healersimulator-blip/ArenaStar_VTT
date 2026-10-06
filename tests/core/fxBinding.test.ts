@@ -5,9 +5,11 @@
  */
 import { describe, expect, test } from "vitest";
 import { fxBindingBranch, fxBindingDeletionOps, fxBindingEvents, fxBindingFiresOn,
-  fxBindingMatches, fxBindingOf, fxItemBindingError, FX_BINDING_KEYS, FX_ITEM_EVENT_CONTRACT,
-  FX_ITEM_EVENTS, validateFxItemBinding,
-  type FxBindingLookup, type FxItemBinding } from "../../src/core/fxBinding";
+  fxBindingMatches, fxBindingOf, fxItemBindingError, fxSpellBindingBranch, fxSpellBindingError,
+  fxSpellBindingMatches, fxSpellBindingOf, FX_BINDING_KEYS, FX_ITEM_EVENT_CONTRACT,
+  FX_ITEM_EVENTS, FX_SPELL_BINDING_KEYS, validateFxItemBinding, validateFxSpellBinding,
+  type FxBindingLookup, type FxItemBinding, type FxSpellBinding,
+  type FxSpellBindingLookup } from "../../src/core/fxBinding";
 import type { ActorDocument, ItemDocument, MacroDocument } from "../../src/core/documents";
 import type { DocId } from "../../src/core/ids";
 import type { Op } from "../../src/core/ops";
@@ -239,5 +241,95 @@ describe("FX item binding (D-311)", () => {
       .toHaveLength(1);
     expect(fxBindingDeletionOps({}, [deleteItem])).toHaveLength(1);
     expect(FX_BINDING_KEYS).toHaveLength(6);
+  });
+});
+
+/** A world with a catalogue of catalogued spells and named timelines (D-407). */
+function spellWorld(overrides: {
+  spells?: string[]; macros?: MacroDocument[]; readable?: DocId[];
+} = {}): FxSpellBindingLookup & { macros: MacroDocument[] } {
+  const spells = new Set(overrides.spells ?? ["entangle"]);
+  const macros = overrides.macros ?? [];
+  // `readable` omitted means "everything is readable"; listing ids narrows it, like a real host.
+  const readable = overrides.readable === undefined ? null : new Set(overrides.readable);
+  return {
+    macros,
+    catalogue: (spellId) => spells.has(spellId),
+    macro: (id) => macros.find((entry) => entry._id === id),
+    readable: (_coll, doc) => readable === null || readable.has(doc._id),
+    boundTimelines: (spellId) => macros
+      .filter((macro) => macro.kind === "sequence" && macro.fxSpell?.spellId === spellId)
+      .map((macro) => ({ id: macro._id })),
+  };
+}
+
+describe("FX spell binding (D-407)", () => {
+  test("the authored shape is closed: unknown fields and half-bindings are refused by name", () => {
+    expect(FX_SPELL_BINDING_KEYS).toEqual(["spellId", "onFailureId", "recognition", "enabled"]);
+    expect(validateFxSpellBinding({ spellId: "entangle" })).toEqual({
+      ok: true, binding: { spellId: "entangle" } });
+    const full = validateFxSpellBinding({ spellId: "entangle", onFailureId: "fizzle",
+      recognition: "failure", enabled: false });
+    expect(full).toEqual({ ok: true, binding: { spellId: "entangle", onFailureId: "fizzle",
+      recognition: "failure", enabled: false } });
+    for (const bad of [
+      {}, null, "entangle", { spellId: "" }, { spellId: "entangle", actorId: "a" },
+      { spellId: "entangle", onFailureId: "" }, { spellId: "entangle", recognition: "sometimes" },
+      { spellId: "entangle", enabled: "yes" },
+      // An item binding's field on a spell binding is a named refusal, not a silent ignore.
+      { spellId: "entangle", itemId: "wand" },
+    ]) expect(validateFxSpellBinding(bad).ok, JSON.stringify(bad)).toBe(false);
+    // Forcing the failure branch needs a cue to play.
+    expect(validateFxSpellBinding({ spellId: "entangle", recognition: "failure" }).ok).toBe(false);
+  });
+
+  test("a malformed binding reads as no binding at all, never as a cue", () => {
+    const good = timeline("vines", { fxSpell: { spellId: "entangle" } as FxSpellBinding });
+    expect(fxSpellBindingOf(good)).toEqual({ spellId: "entangle" });
+    expect(fxSpellBindingMatches(good, "entangle")).toBe(true);
+    expect(fxSpellBindingMatches(good, "Entangle")).toBe(false);
+    expect(fxSpellBindingOf(timeline("vines", { fxSpell: {} as unknown as FxSpellBinding }))).toBeNull();
+    expect(fxSpellBindingOf(timeline("vines"))).toBeNull();
+  });
+
+  test("the branch follows the committed cast, and 'play nothing' is an answer", () => {
+    const plain = timeline("vines", { fxSpell: { spellId: "entangle" } as FxSpellBinding });
+    expect(fxSpellBindingBranch(plain, "success")).toBe("vines");
+    // A made save is a `failure` for recognition, and with no failure cue bound nothing plays.
+    expect(fxSpellBindingBranch(plain, "failure")).toBeNull();
+    const paired = timeline("vines", { fxSpell: { spellId: "entangle",
+      onFailureId: "fizzle" } as FxSpellBinding });
+    expect(fxSpellBindingBranch(paired, "failure")).toBe("fizzle");
+    expect(fxSpellBindingBranch(timeline("vines", { fxSpell: { spellId: "entangle",
+      enabled: false } as FxSpellBinding }), "success")).toBeNull();
+    // An author may force either branch, exactly as the item binding allows.
+    expect(fxSpellBindingBranch(timeline("vines", { fxSpell: { spellId: "entangle",
+      recognition: "success" } as FxSpellBinding }), "failure")).toBe("vines");
+  });
+
+  test("the document rule names the catalogue, the timelines and the one-cue-per-spell rule", () => {
+    const vines = timeline("vines", { fxSpell: { spellId: "entangle" } as FxSpellBinding });
+    expect(fxSpellBindingError(vines, spellWorld())).toBeNull();
+    expect(fxSpellBindingError(vines, spellWorld({ spells: [] })))
+      .toContain("tactical-effect catalogue");
+    // A failure cue must be a *timeline*: a preset is named as such.
+    const presetBase = { _id: "preset", type: "macro", name: "preset", command: "", kind: "fxPreset",
+      ownership: { default: 1 }, flags: {}, system: {}, preset: { version: 1, sections: [] } };
+    const preset = presetBase as unknown as MacroDocument;
+    const badCue = timeline("vines", { fxSpell: { spellId: "entangle",
+      onFailureId: "preset" } as FxSpellBinding });
+    expect(fxSpellBindingError(badCue, spellWorld({ macros: [preset] }))).toContain("not a timeline");
+    expect(fxSpellBindingError(badCue, spellWorld())).toContain("names no timeline");
+    // Readability is the author's, not the cue's.
+    const unreadable = timeline("vines", { fxSpell: { spellId: "entangle",
+      onFailureId: "hidden" } as FxSpellBinding });
+    expect(fxSpellBindingError(unreadable, spellWorld({ spells: ["entangle"],
+      macros: [timeline("hidden", { fxSpell: { spellId: "other" } as FxSpellBinding })],
+      readable: [] }))).toContain("cannot read");
+    // One cue per spell: a second timeline on the same spell is refused, the same document is not.
+    const second = timeline("more", { fxSpell: { spellId: "entangle" } as FxSpellBinding });
+    const world = spellWorld({ macros: [vines] });
+    expect(fxSpellBindingError(vines, world)).toBeNull();
+    expect(fxSpellBindingError(second, world)).toContain("already bound to that spell");
   });
 });

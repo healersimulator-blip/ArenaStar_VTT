@@ -18,7 +18,7 @@ This keeps “what happened” separate from “how it looks.”
 
 ## 2. Storage and identity
 
-`src/core/action.ts` defines the version-1 contract.
+`src/core/action.ts` defines the version-2 contract (version 1 stays readable and rider-free).
 
 - The containing message is the durable unit.
 - On creation the host forces `action.id === message._id`, `revision = 0`, and host timestamps.
@@ -37,6 +37,8 @@ An action records:
 - closed outcomes (`saved`, `failedSave`, `hit`, `miss`, `resisted`, and so on);
 - check formula/DC/total/save type/automatic result;
 - committed damage, healing, conditions, and bounded notes;
+- per-target **riders** (version 2): secondary effects the recorded interaction delivered, such as a
+  poison coating on a landed strike (see §4a);
 - host creation/update times and revision.
 
 ## 3. State model
@@ -104,6 +106,40 @@ Ordinary dice messages minted by the host now carry immutable `system.rollEviden
 
 The immediate adapter is deliberately limited to one normal, actor-sourced, noncritical, non-touch target with bounded `NdM` damage. Unknown adapters, replayed rolls, consumable-specific DCs, unsupported paths, mismatched state, or missing Ops do not fail ordinary narration; they remain visibly `reported`, and their lifecycle and mechanics are stripped from FX projection. This is fail-closed presentation authority, not a way for evidence to authorize world writes.
 
+### Riders: an interaction delivers more than its own outcome
+
+A rider is a secondary effect attached to the target row of the interaction that delivered it —
+poison on a landed attack or an applied spell (D-405/D-406), or a condition a landed spell applies
+(D-407). It is not a top-level flow: the same card records
+what happened, and the rider records what it caused. `ActionTarget.riders` carries a closed
+`kind` (`poison` or `condition`), a bounded label, a state (`pending`, `applied`, `resisted`, `immune`,
+`queued`, `ended`, `expired`), an optional save (`saveType`, `dc`, `total`, `passed`) and, while a
+player-owned victim's save is unresolved, its own `pendingRollId`. Riders are capped at 6 per target
+with 6 facts of 200 characters; a version-1 card may not carry them.
+
+The split of authority mirrors the action's own: the client proposes the rider as part of the
+delivering intent (`pf1e.poison` with `rider: { actionId, targetKey }`); the host re-reads the live
+card, requires the named target row and a landed outcome (`hit`, `failedSave`, `affected`), inherits
+the delivering actor as the poison source and attaches the rider in the same host envelope that
+writes the mechanics. A save the victim must roll becomes an ordinary host pending roll linked to
+the row (`system.pendingRolls`), so the existing chat Roll button and commit-reveal path resolve it;
+a non-player victim is host-rolled. `immune` never rolls; `queued` is Delay Poison; `expired` is a
+save window that closed, never a failed save. Only host-verified targets project riders to FX, and a
+reported target's rider carries no mechanics there.
+
+A `condition` rider is the same contract with the tactical spell-effect catalogue as its authority:
+the client names the catalogue effect and the row (`pf1e.condition` with
+`spell: { effectId, actionId, targetKey }`), and the host re-reads the card, requires a `cast` card
+whose named row is resolved and **landed by the effect's own save shape** (`failedSave` for a spell
+with a save, `affected` for one without), requires the condition to be one the effect applies, derives
+the source (spell id, card id, caster actor/item) from the card, and only then attaches the rider.
+Its evidence adapter is `pf1e.spellEffect.v1`; the host re-derives it on every card write, so a
+hand-edited rider is demoted to `reported` rather than trusted.
+
+Because the delivering card is the delivery record, Revert restores the pre-interaction state: the
+rider row disappears with its pending roll and any ability damage/condition the rider applied is
+undone by the receipt's inverse.
+
 ### Post-commit FX hook
 
 `HostEvents["action:committed"]` emits `ActionFxContext` exactly once for a new or changed revision; an ordinary edit to the containing message does not re-emit it. The context contains only bounded, explicitly projected data and omits pending-roll identity/seeds, formulas, notes, evidence payloads, and executable state. A target has `verified: true` only for a non-mechanical host-normalized pending stage, a trusted pending row's host-owned resolution/expiry, or an immediate result whose mechanical inputs passed a recognized evidence adapter. Resolving or expiring a reported check does not upgrade its authority. For `verified: false`, even target lifecycle state is omitted alongside outcome/check/damage/healing/conditions. Root `state` is present only when every target is verified.
@@ -121,6 +157,8 @@ It renders:
 - every target, canonical identity, stage label, independent outcome, and a visible warning for client-reported terminal results;
 - DC/formula/total/pass-fail facts;
 - damage, healing, and conditions;
+- rider rows (poison, its state, save facts, bounded display facts) with a Roll button for a
+  pending rider save on the same owner/GM gates as any other pending check;
 - one Roll button per linked pending ID, gated by owner/GM and expiry;
 - initiator, target, and area highlight links.
 
