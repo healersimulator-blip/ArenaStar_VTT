@@ -262,11 +262,11 @@ describe("projectWorld (§5)", () => {
     expect(s.tokens[0].flags.prefab).toEqual(marker); // pure, including reconnect snapshots
   });
 
-  test("live FX records and GM-audience macro assets never project, including direct ops", () => {
+  test("live FX records and GM-owned macro assets never project, including direct ops", () => {
     const w = world();
     const secret = "a".repeat(64);
     const macro: MacroDocument = { _id: "gm-fx", type: "macro", name: "GM secret", flags: {}, system: {},
-      ownership: { default: 3 }, kind: "sequence", command: "", sequence: {
+      ownership: { default: 0 }, kind: "sequence", command: "", sequence: {
         version: 1, audience: "gm", persistent: true, sections: [{ kind: "image", id: "secret",
           assetId: secret, at: { kind: "point", x: 100, y: 100 }, startMs: 0, durationMs: 1000 }],
       } };
@@ -288,6 +288,27 @@ describe("projectWorld (§5)", () => {
     const resolver: ProjectionResolver = { resolve: (ref) => ref.coll === "macros" ? macro : instance };
     expect(projectEnvelope(env, player, resolver)).toBeNull();
     expect(projectEnvelope(env, gm, resolver)).toBe(env);
+  });
+
+  test("FX timeline library visibility is ownership-based, independent of GM-only playback audience", () => {
+    const w = world();
+    const macro: MacroDocument = { _id: "shared-gm-playback", type: "macro", name: "Shared definition",
+      command: "", kind: "sequence", ownership: { default: 2 }, flags: {}, system: {},
+      sequence: { version: 1, audience: "gm", persistent: false, sections: [] } };
+    w.macros.push(macro);
+    const projectedMacro = { ...macro };
+    expect(projectWorld(w, 5, player).collections.macros).toEqual([projectedMacro]);
+    const env: OpEnvelope = { seq: 6, ts: 6, by: gm.id, txId: "shared-fx", ops: [
+      { kind: "create", coll: "macros", data: macro },
+    ] };
+    const resolver: ProjectionResolver = { resolve: () => undefined };
+    const projectedEnvelope = projectEnvelope(env, player, resolver);
+    expect(projectedEnvelope).toMatchObject({ seq: 6, txId: "shared-fx", ops: [
+      { kind: "create", coll: "macros", data: projectedMacro },
+    ] });
+    const create = projectedEnvelope?.ops[0];
+    expect(create?.kind).toBe("create");
+    if (create?.kind === "create") expect(create.data).toHaveProperty("sequence");
   });
 
   test("an FX preset is an authoring aid: a player never receives it, an assistant does (D-310)", () => {

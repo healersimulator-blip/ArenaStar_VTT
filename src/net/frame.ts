@@ -43,6 +43,9 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "pf1e.poison":
     case "pf1e.condition":
     case "pf1e.condition.result":
+    case "codex.purchase":
+    case "codex.purchase.result":
+    case "codex.claim":
     case "roll.delegate":
     case "roll.apply":
     case "automation.request":
@@ -146,6 +149,9 @@ export function channelFor(kind: MsgName): ChannelName {
     case "pf1e.poison":
     case "pf1e.condition":
     case "pf1e.condition.result":
+    case "codex.purchase":
+    case "codex.purchase.result":
+    case "codex.claim":
     case "roll.delegate":
     case "fog.put":
     case "fog.get":

@@ -24,18 +24,22 @@
   } from "../../core/crosshair";
   import { shapeWithExtent, type CrosshairPickOptions } from "./crosshairPicker";
 
-  let { options, request, camera, pick, cancel }: {
+  let { options, request, camera, pick, cancel, previewAssetUrl = null }: {
     options: CrosshairPickOptions;
     request: CrosshairRequest;
     camera: () => Camera;
     pick: (placement: CrosshairPlacement) => void;
     cancel: () => void;
+    /** Optional transparent supplied media, stretched to the live shape outline. */
+    previewAssetUrl?: string | null;
   } = $props();
 
   let overlay: HTMLDivElement;
   // Like the starting shape, the gesture is fixed by whoever opened the overlay:
   // a later re-render must not turn a drag into a click half-way through.
   const drag = untrack(() => options.gesture === "drag");
+  const snapTo = untrack(() => options.snapTo ?? "center");
+  const anchorShapeAtOrigin = untrack(() => options.anchorShapeAtOrigin === true);
   let point = $state<CrosshairPoint | null>(null);
   /** The drag's start: set by a pointer press, cleared until then. */
   let source = $state<CrosshairPoint | null>(null);
@@ -65,10 +69,20 @@
   const preview = $derived(point ? worldToScreen(camera(), point.x, point.y) : null);
   // A drag's outline belongs to its *start* — the shape sits where the effect starts and
   // points at the target — while a click's belongs to the point itself.
-  const areaAt = $derived(drag ? source : point);
+  const areaAt = $derived(drag ? source
+    : anchorShapeAtOrigin && request.origin ? request.origin : point);
   const outline = $derived(areaAt
     ? crosshairArea(areaAt, shape, request.grid, angleDeg).map((at) => worldToScreen(camera(), at.x, at.y))
     : []);
+  const mediaBounds = $derived.by(() => {
+    if (outline.length < 3) return null;
+    const xs = outline.map((point) => point.x);
+    const ys = outline.map((point) => point.y);
+    const left = Math.min(...xs);
+    const top = Math.min(...ys);
+    return { left, top, width: Math.max(1, Math.max(...xs) - left),
+      height: Math.max(1, Math.max(...ys) - top) };
+  });
   const footprint = $derived(options.constraints?.footprint
     ? options.constraints.footprint * crosshairPxPerUnit(request.grid) * camera().scale : 22);
   const unit = $derived(request.grid.units ?? "units");
@@ -76,12 +90,24 @@
   const canCommit = $derived(point !== null && faults.length === 0 && (!drag || (source !== null && (line ?? 0) > 0)));
   $effect(() => { if (overlay) queueMicrotask(() => overlay?.focus()); });
 
+  function snapPointerPoint(world: CrosshairPoint): CrosshairPoint {
+    if (!snap) return world;
+    if (snapTo === "intersection" && request.grid.type === "square" &&
+        Number.isFinite(request.grid.size) && request.grid.size > 0) {
+      return { x: Math.round(world.x / request.grid.size) * request.grid.size,
+        y: Math.round(world.y / request.grid.size) * request.grid.size };
+    }
+    return crosshairSnapPoint(world, request.grid, true);
+  }
+
   function move(ev: PointerEvent): void {
     if (!overlay || (ev.target instanceof Element && ev.target.closest(".controls"))) return;
     const rect = overlay.getBoundingClientRect();
     const world = screenToWorld(camera(), ev.clientX - rect.left, ev.clientY - rect.top);
-    point = crosshairSnapPoint(world, request.grid, snap);
+    point = snapPointerPoint(world);
     if (dragging && source) point = foldDirection(source, point);
+    else if (anchorShapeAtOrigin && request.origin && shape.kind === "ray")
+      angleDeg = crosshairNormalize(crosshairAngle(request.origin, point, snap, angleDeg));
     reusing = matchingName(point);
   }
 
@@ -107,7 +133,7 @@
     const rect = overlay.getBoundingClientRect();
     const world = screenToWorld(camera(), ev.clientX - rect.left, ev.clientY - rect.top);
     // The press itself is the start; the point follows the pointer from here.
-    source = crosshairSnapPoint(world, request.grid, snap);
+    source = snapPointerPoint(world);
     point = foldDirection(source, source);
   }
 
@@ -185,6 +211,11 @@
     else if (ev.key === "[" || ev.key === "ArrowLeft" && ev.shiftKey) { ev.preventDefault(); rotate(-CROSSHAIR_ANGLE_STEP); }
     else if (ev.key === "]" || ev.key === "ArrowRight" && ev.shiftKey) { ev.preventDefault(); rotate(CROSSHAIR_ANGLE_STEP); }
   }}>
+  {#if previewAssetUrl && mediaBounds}
+    <video class="crosshair-media" data-crosshair-media muted autoplay loop playsinline
+      src={previewAssetUrl}
+      style={`left:${mediaBounds.left}px;top:${mediaBounds.top}px;width:${mediaBounds.width}px;height:${mediaBounds.height}px;`}></video>
+  {/if}
   {#if outline.length > 1}
     <svg class="area" data-crosshair-area aria-hidden="true">
       <polygon class:invalid={faults.length > 0}
@@ -282,7 +313,8 @@
 
 <style>
   .crosshair { position: absolute; inset: 0; z-index: 1050; background: rgb(4 10 18 / 0.25); cursor: crosshair; outline: none; overflow: hidden; }
-  .area { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .crosshair-media { position: absolute; z-index: 1; pointer-events: none; object-fit: fill; opacity: 0.82; mix-blend-mode: screen; }
+  .area { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .area polygon { fill: rgb(40 214 122 / 0.18); stroke: #81edb2; stroke-width: 2; }
   .area polygon.invalid { fill: rgb(231 63 63 / 0.22); stroke: #fb7575; }
   .area line { stroke: #81edb2; stroke-width: 2.5; stroke-dasharray: 8 5; }
@@ -292,7 +324,7 @@
   .footprint { position: absolute; pointer-events: none; transform: translate(-50%, -50%); border: 2px solid #81edb2; background: rgb(40 214 122 / 0.23); border-radius: 50%; box-shadow: 0 0 18px #30a569; }
   .footprint.invalid { border-color: #fb7575; background: rgb(231 63 63 / 0.3); box-shadow: 0 0 15px #a23232; }
   .readout { position: absolute; pointer-events: none; transform: translateX(-50%); white-space: nowrap; background: #151d29e8; border: 1px solid #8291ac; padding: 3px 7px; border-radius: 4px; color: #f6f6f6; }
-  .controls { position: absolute; top: 14px; right: 14px; display: grid; gap: 5px; max-width: 340px; padding: 12px; color: #fff; background: #141b29ed; border: 1px solid #67789a; border-radius: 8px; cursor: auto; }
+  .controls { position: absolute; z-index: 4; top: 14px; right: 14px; display: grid; gap: 5px; max-width: 340px; padding: 12px; color: #fff; background: #141b29ed; border: 1px solid #67789a; border-radius: 8px; cursor: auto; }
   .controls label { display: flex; gap: 6px; align-items: center; }
   .controls small { color: #bbcbdd; }
   .row { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }

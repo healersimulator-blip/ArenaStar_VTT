@@ -1,4 +1,6 @@
+<!-- eslint-disable @typescript-eslint/no-non-null-assertion -->
 <script lang="ts">
+  /* eslint-disable @typescript-eslint/no-non-null-assertion */
   import { SceneLightingPlayer } from "../client/sceneLighting";
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
   import { TileImageCache } from "../canvas/imageTexture";
@@ -10,7 +12,9 @@
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
   import CrosshairOverlay from "../ui/macros/CrosshairOverlay.svelte";
-  import { resolveCrosshairPick, summonCrosshairOptions } from "../ui/macros/crosshairPicker";
+  import { resolveCrosshairPick, summonCrosshairOptions,
+    type CrosshairPickOptions } from "../ui/macros/crosshairPicker";
+  import { sightBlockedBetween, type CrosshairPlacement } from "../core/crosshair";
   import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
   import { displayDistance } from "../canvas/grid/measure";
   import { rulerLabel } from "../canvas/ephemera";
@@ -54,7 +58,8 @@
   import OnboardingPanel from "../ui/onboarding/OnboardingPanel.svelte";
   import Icon from "../ui/icons/Icon.svelte";
   import { ChatPanel } from "../ui/chat";
-  import { QuickbarRow } from "../ui/quickbar";
+  import { QuickbarRow, prefetchQuickbarSpellFx, runQuickbarEntangleArea, runQuickbarLightningBoltLine,
+    type PF1eQuickbarEntry, type PF1eQuickbarRunResult } from "../ui/quickbar";
   import { MacroHotbar, macroResultText, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
   import MacroHotbarPrefsPanel from "../ui/macros/MacroHotbarPrefsPanel.svelte";
   import { assignMacroHotbarSlot, hotbarMacroChoices, macroHotbarStorageKey, normalizeMacroHotbarPrefs,
@@ -82,6 +87,9 @@
   import { createVisionComputer } from "../workers/visionComputer";
   import { buildChatMessage, parseChatCommand } from "../core/chat";
   import { tokenHpBarsMap } from "../packages/pf1e/tokenHpBars";
+  import { pf1eAreaPreviewModel, type PF1eAreaPreviewModel } from "../packages/pf1e/areaPreview";
+  import { lineIntersectsTokenFootprint, pf1eAreaGridFromScene } from "../packages/pf1e/targeting";
+  import { sightSegments } from "../canvas/vision";
   import { tokenHpBarsOf, worldSettingsFrom } from "../core/worldSettings";
 
   let app = $state<PlayerApp | null>(null);
@@ -521,6 +529,189 @@
     return new Promise((resolve) => { pendingSummonPick = { options, resolve }; });
   };
 
+  type PendingQuickbarAim = {
+    sceneId: string;
+    actorId: string;
+    casterTokenId: string;
+    entry: PF1eQuickbarEntry;
+    spellName: "Entangle" | "Lightning Bolt";
+    resolve: (result: PF1eQuickbarRunResult) => void;
+  };
+  let pendingSpellAim = $state.raw<PendingQuickbarAim | null>(null);
+  let pf1ePreview: PF1eAreaPreviewModel | null = null;
+  let pf1ePreviewSceneId: string | null = null;
+
+  function syncPF1eAreaPreview(): void {
+    if (!stage) return;
+    const layer = stage.getAreaPreviewLayer();
+    if (pf1ePreview?.ok) layer.sync(pf1ePreview.rects, pf1ePreview.highlightRects, stage.camera);
+    else layer.sync([], [], stage.camera);
+  }
+
+  function showPF1eAreaPreview(spec: { kind: "spread"; origin: { col: number; row: number }; radiusFt: number }): PF1eAreaPreviewModel {
+    const scene = activeScene();
+    if (!scene) {
+      const model: PF1eAreaPreviewModel = { ok: false,
+        issues: [{ field: "scene", message: "no active scene" }], cells: 0, rects: [],
+        affectedTokenIds: [], highlightRects: [], label: "" };
+      pf1ePreview = model;
+      pf1ePreviewSceneId = null;
+      syncPF1eAreaPreview();
+      return model;
+    }
+    pf1ePreview = pf1eAreaPreviewModel({ grid: scene.grid, tokens: scene.tokens,
+      segments: sightSegments(scene.walls) }, spec);
+    pf1ePreviewSceneId = scene._id;
+    syncPF1eAreaPreview();
+    return pf1ePreview;
+  }
+
+  function clearPF1eAreaPreview(): void {
+    pf1ePreview = null;
+    pf1ePreviewSceneId = null;
+    syncPF1eAreaPreview();
+  }
+
+  function settleSpellAim(result: PF1eQuickbarRunResult): void {
+    const pending = pendingSpellAim;
+    pendingSpellAim = null;
+    clearPF1eAreaPreview();
+    pending?.resolve(result);
+  }
+
+  function requestQuickbarSpellAim(request: {
+    actor: ActorDocument; entry: PF1eQuickbarEntry;
+  }): Promise<PF1eQuickbarRunResult> {
+    const spellName = request.entry.label.replace(/ \(level \d+\)$/, "").trim();
+    if (spellName !== "Entangle" && spellName !== "Lightning Bolt")
+      return Promise.resolve({ ok: false, error: `${spellName} has no canvas aiming flow.` });
+    const scene = activeScene();
+    const user = app?.client?.user;
+    const caster = scene?.tokens.find((token) => token.actorId === request.actor._id && user &&
+      can(user, "update", token, "tokens", { parent: scene }));
+    if (!scene || !caster || !stage || !user)
+      return Promise.resolve({ ok: false, error: "Select an owned caster token on the active scene first." });
+    if (pendingSpellAim) settleSpellAim({ ok: false, error: "Aiming cancelled; no slot was spent." });
+    const current = app;
+    if (current?.client && current.fetcher)
+      prefetchQuickbarSpellFx({ client: current.client, scene, spellName,
+        requestAsset: (assetId, mime) => current.fetcher!.request(assetId, "scene", mime) });
+    return new Promise((resolve) => { pendingSpellAim = { sceneId: scene._id, actorId: request.actor._id,
+      casterTokenId: caster._id, entry: request.entry, spellName, resolve }; });
+  }
+
+  function quickbarAimAssetUrl(scene: SceneDocument, aim: PendingQuickbarAim): string | null {
+    const flags = scene.flags as Record<string, unknown>;
+    const core = flags.core && typeof flags.core === "object" ? flags.core as Record<string, unknown> : null;
+    const demo = core?.spellDemo && typeof core.spellDemo === "object"
+      ? core.spellDemo as Record<string, unknown> : null;
+    const assets = demo?.assets && typeof demo.assets === "object"
+      ? demo.assets as Record<string, unknown> : null;
+    const key = aim.spellName === "Lightning Bolt" ? "lightningCrosshair" : "entangleCrosshair";
+    const record = assets?.[key] && typeof assets[key] === "object"
+      ? assets[key] as Record<string, unknown> : null;
+    return typeof record?.assetId === "string" ? resolveAsset(record.assetId) : null;
+  }
+
+  function quickbarAimOptions(scene: SceneDocument, aim: PendingQuickbarAim): CrosshairPickOptions {
+    const caster = scene.tokens.find((token) => token._id === aim.casterTokenId);
+    const line = aim.spellName === "Lightning Bolt";
+    return {
+      sceneId: scene._id,
+      label: line ? "Lightning Bolt direction (90-ft line)" : "Entangle origin (40-ft radius)",
+      gesture: "click",
+      shapes: [line ? "ray" : "circle"],
+      shape: line ? { kind: "ray", length: 90, width: 5 } : { kind: "circle", length: 40 },
+      snapTo: "intersection",
+      ...(line ? { anchorShapeAtOrigin: true } : {}),
+      constraints: { ...(caster ? { origin: { x: caster.x, y: caster.y } } : {}),
+        maxDistance: line ? 90 : 640 },
+      hint: line
+        ? "Click a direction to preview and cast the 90-ft Lightning Bolt line."
+        : "Click a grid intersection to preview and cast a 40-ft-radius Entangle spread.",
+    };
+  }
+
+  function confirmQuickbarSpellAim(placement: CrosshairPlacement): void {
+    const aim = pendingSpellAim;
+    const current = app;
+    const scene = activeScene();
+    if (!aim) return;
+    if (!current?.client || !scene || scene._id !== aim.sceneId || !stage) {
+      settleSpellAim({ ok: false, error: "The aiming scene changed; no slot was spent." });
+      return;
+    }
+    const actor = current.client.store.get("actors", aim.actorId) as ActorDocument | undefined;
+    const caster = scene.tokens.find((token) => token._id === aim.casterTokenId);
+    if (!actor || !caster || caster.actorId !== actor._id) {
+      settleSpellAim({ ok: false, error: "The caster is no longer available; no slot was spent." });
+      return;
+    }
+    if (scene.grid.type !== "square" || scene.grid.units !== "ft" ||
+        !Number.isFinite(scene.grid.size) || scene.grid.size <= 0) {
+      settleSpellAim({ ok: false, error: "Spell area aiming needs a feet-based square grid; no slot was spent." });
+      return;
+    }
+
+    if (aim.spellName === "Lightning Bolt") {
+      const built = pf1eAreaGridFromScene(scene.grid);
+      if (built.issues.length > 0) {
+        settleSpellAim({ ok: false, error: `Lightning Bolt line could not be resolved: ${built.issues.map((issue) => issue.message).join("; ")}. No slot was spent.` });
+        return;
+      }
+      const radians = placement.angleDeg * Math.PI / 180;
+      const direction = { x: Math.cos(radians), y: Math.sin(radians) };
+      const line = { origin: { x: caster.x, y: caster.y }, direction, lengthFt: 90, widthFt: 5 };
+      const targets = scene.tokens.flatMap((token) => {
+        if (token._id === caster._id || !lineIntersectsTokenFootprint(line, token, built.grid) ||
+            sightBlockedBetween(scene.walls, line.origin, { x: token.x, y: token.y })) return [];
+        const targetActor = token.actorId
+          ? current.client?.store.get("actors", token.actorId) as ActorDocument | undefined : undefined;
+        return targetActor ? [{ tokenId: token._id, actor: targetActor }] : [];
+      });
+      const flags = scene.flags as Record<string, unknown>;
+      const core = flags.core && typeof flags.core === "object" ? flags.core as Record<string, unknown> : null;
+      const demo = core?.spellDemo && typeof core.spellDemo === "object"
+        ? core.spellDemo as Record<string, unknown> : null;
+      const macros = demo?.macros && typeof demo.macros === "object"
+        ? demo.macros as Record<string, unknown> : null;
+      const effectMacroId = typeof macros?.lightningBolt === "string" ? macros.lightningBolt : undefined;
+      if (!effectMacroId) {
+        settleSpellAim({ ok: false, error: "The Lightning Bolt effect timeline is missing; no slot was spent." });
+        return;
+      }
+      void runQuickbarLightningBoltLine({ client: current.client, actor, entry: aim.entry, scene,
+        casterTokenId: caster._id, origin: line.origin, direction, targets, effectMacroId })
+        .then(settleSpellAim)
+        .catch((error: unknown) => settleSpellAim({ ok: false,
+          error: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+
+    if (!Number.isInteger(placement.point.x / scene.grid.size) ||
+        !Number.isInteger(placement.point.y / scene.grid.size)) {
+      settleSpellAim({ ok: false, error: "Entangle needs a grid intersection; no slot was spent." });
+      return;
+    }
+    const preview = showPF1eAreaPreview({ kind: "spread",
+      origin: { col: placement.point.x / scene.grid.size, row: placement.point.y / scene.grid.size }, radiusFt: 40 });
+    if (!preview.ok) {
+      settleSpellAim({ ok: false, error: `Entangle area could not be resolved: ${preview.issues.map((issue) => issue.message).join("; ")}. No slot was spent.` });
+      return;
+    }
+    const targets = preview.affectedTokenIds.flatMap((tokenId) => {
+      const token = scene.tokens.find((candidate) => candidate._id === tokenId);
+      const targetActor = token?.actorId
+        ? current.client?.store.get("actors", token.actorId) as ActorDocument | undefined : undefined;
+      return token && targetActor ? [{ tokenId, actor: targetActor }] : [];
+    });
+    void runQuickbarEntangleArea({ client: current.client, actor, entry: aim.entry, scene,
+      casterTokenId: caster._id, origin: placement.point, targets })
+      .then(settleSpellAim)
+      .catch((error: unknown) => settleSpellAim({ ok: false,
+        error: error instanceof Error ? error.message : String(error) }));
+  }
+
   /** MC-01/D-392: defaults are world state; a player's overrides never leave this device. */
   let hotbarPrefs = $state<MacroHotbarPrefs>(normalizeMacroHotbarPrefs(null));
   let hotbarLoadedKey = $state("");
@@ -640,10 +831,18 @@
     const client = app?.client;
     const user = client?.user;
     if (!client || !user) return null;
-    for (const view of tokenViews()) {
+    const views = tokenViews();
+    const scene = activeScene();
+    const selectedId = selection.length === 1 ? selection[0] : null;
+    const selected = selectedId ? views.find((view) => view.token._id === selectedId) : undefined;
+    if (selected?.token.actorId && can(user, "update", selected.token, "tokens",
+        scene ? { parent: scene } : {})) {
+      const actor = client.store.get("actors", selected.token.actorId) as ActorDocument | undefined;
+      if (actor) return actor;
+    }
+    for (const view of views) {
       const actorId = view.token.actorId ?? null;
       if (actorId === null) continue;
-      const scene = activeScene();
       if (!can(user, "update", view.token, "tokens", scene ? { parent: scene } : {})) continue;
       const actor = client.store.get("actors", actorId) as ActorDocument | undefined;
       if (actor) return actor;
@@ -716,6 +915,14 @@
     // them whenever a snapshot or an op lands (the GM shell tracks its store the same way).
     storeVersion++;
     const scene = activeScene();
+    if (pendingSpellAim && (scene?._id !== pendingSpellAim.sceneId ||
+        !scene?.tokens.some((token) => token._id === pendingSpellAim?.casterTokenId)))
+      settleSpellAim({ ok: false, error: "The caster or aiming scene changed; no slot was spent." });
+    if (pf1ePreviewSceneId !== null && pf1ePreviewSceneId !== (scene?._id ?? null)) {
+      pf1ePreview = null;
+      pf1ePreviewSceneId = null;
+    }
+    syncPF1eAreaPreview();
     fxPlayer?.syncScene();
     sceneLighting.sync(scene, view);
     worldName = client.world?.name ?? "—";
@@ -1172,6 +1379,7 @@
     return () => {
       globalThis.removeEventListener("pagehide", onPageHide);
       settleSummonPick(null);
+      settleSpellAim({ ok: false, error: "The session closed before aiming completed; no slot was spent." });
       offWm();
       toolCleanup?.();
       toolCleanup = null;
@@ -1431,6 +1639,28 @@
               {/each}
             </div>
           {/if}
+        {#if pendingSpellAim}
+          {@const aimScene = activeScene()}
+          {#if aimScene && aimScene._id === pendingSpellAim.sceneId &&
+              aimScene.tokens.some((token) => token._id === pendingSpellAim.casterTokenId)}
+            {@const resolved = resolveCrosshairPick(aimScene, quickbarAimOptions(aimScene, pendingSpellAim))}
+            <CrosshairOverlay options={resolved.options} request={resolved.request}
+              previewAssetUrl={quickbarAimAssetUrl(aimScene, pendingSpellAim)}
+              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
+              pick={confirmQuickbarSpellAim}
+              cancel={() => settleSpellAim({ ok: false, error: "Aiming cancelled; no slot was spent." })} />
+          {/if}
+        {/if}
+        {#if pendingSummonPick}
+          {@const summonScene = activeScene()}
+          {#if summonScene && summonScene._id === pendingSummonPick.options.sceneId}
+            {@const resolved = resolveCrosshairPick(summonScene,
+              summonCrosshairOptions(summonScene, pendingSummonPick.options))}
+            <CrosshairOverlay options={resolved.options} request={resolved.request}
+              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
+              pick={(placement) => settleSummonPick(placement.point)} cancel={() => settleSummonPick(null)} />
+          {/if}
+        {/if}
           </div>
         </div>
         {#if app?.client}
@@ -1449,16 +1679,6 @@
             {resolveAsset}
             isGM={false}
           />
-        {/if}
-        {#if pendingSummonPick}
-          {@const summonScene = activeScene()}
-          {#if summonScene && summonScene._id === pendingSummonPick.options.sceneId}
-            {@const resolved = resolveCrosshairPick(summonScene,
-              summonCrosshairOptions(summonScene, pendingSummonPick.options))}
-            <CrosshairOverlay options={resolved.options} request={resolved.request}
-              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
-              pick={(placement) => settleSummonPick(placement.point)} cancel={() => settleSummonPick(null)} />
-          {/if}
         {/if}
       </div>
       <aside class="sidebar" data-player-dock aria-label="Player content">
@@ -1482,7 +1702,8 @@
         {#if app?.client}<div class="dock-footer">
           <MacroHotbar slots={playerHotbarSlots} onRun={runPlayerSlot} onArrange={openHotbarPrefs} arranging={guideOpen} />
           {#if hotbarRunStatus}<p class="hotbar-status" role="status" data-player-hotbar-run-status>{hotbarRunStatus}</p>{/if}
-          <QuickbarRow client={app.client} actor={quickbarActor} targets={quickbarTargets} />
+          <QuickbarRow client={app.client} actor={quickbarActor} targets={quickbarTargets}
+            onAimSpell={requestQuickbarSpellAim} />
         </div>{/if}
       </aside>
     </section>
@@ -1747,6 +1968,7 @@
     display: flex;
   }
   .canvas-host {
+    position: relative;
     flex: 1;
     min-width: 0;
     height: 100%;

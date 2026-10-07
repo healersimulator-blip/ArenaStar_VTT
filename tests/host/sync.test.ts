@@ -1641,7 +1641,7 @@ describe("Macros / FX host authority and audience", () => {
       expect(cue?.sections.map((section) => section.startMs)).toEqual([200, 1_300]);
       expect(cue?.sections.every((section) => !Object.hasOwn(section, "randomDelay") &&
         !Object.hasOwn(section, "startAfter"))).toBe(true);
-      expect(cue?.atHostTime).toBe(hostNow + 750);
+      expect(cue?.atHostTime).toBe(hostNow + 2_000);
     }
     expect(received[1]?.[0]?.sections).toEqual(received[2]?.[0]?.sections);
   });
@@ -1939,7 +1939,7 @@ describe("Macros / FX host authority and audience", () => {
     expect(a[0]?.sections[1]).toMatchObject({ kind: "image", mime: "image/png", x: 150, y: 150, startMs: 300 });
     // Media gets enough transport/decode lead to be useful; scheduler-only cues retain the
     // shorter base lead. This remains a fixed bound, not a readiness claim.
-    expect((a[0]?.atHostTime ?? 0) - hostNow).toBe(750);
+    expect((a[0]?.atHostTime ?? 0) - hostNow).toBe(2_000);
     expect(h.hostStore.seq).toBe(seq); // audiovisual cues never run mechanical ops
 
     const duplicate = { kind: "fx.request" as const, requestId: "replay", macroId: "pulse", sceneId: "s1" };
@@ -2280,7 +2280,7 @@ describe("Macros / FX host authority and audience", () => {
     expect(h.hostStore.get("actors", "a-hero")?.items.map((entry) => entry._id)).toEqual(["wand"]);
   });
 
-  test("a bound spell cue names a catalogued spell and one timeline per spell (D-407)", async () => {
+  test("a bound spell cue accepts a normalized compendium name and one timeline per spell (D-407)", async () => {
     const h = await setup();
     const sections = [{ kind: "text", id: "s", text: "vines", startMs: 0, durationMs: 600,
       at: { kind: "point", x: 120, y: 120 }, color: "#ffffff", scale: 1 }];
@@ -2291,13 +2291,18 @@ describe("Macros / FX host authority and audience", () => {
     const refused: string[] = [];
     h.gmBus.on("rejected", (event) => refused.push(event.detail));
 
-    // The spell must be one the shipped tactical-effect catalogue defines — an FX binding may not
-    // invent a spell, exactly as the item binding may not invent an item.
+    // A compendium spell outside the tactical-effect catalogue binds by its normalized name.
     h.gm.submit([{ kind: "create", coll: "macros",
-      data: look("fx-wish", "Wish", { fxSpell: { spellId: "wish" } }) }]);
+      data: look("fx-wish", "Wish", { fxSpell: { spellId: "wish", spellName: "Wish" } }) }]);
     await flushMicrotasks();
-    expect(h.hostStore.get("macros", "fx-wish")).toBeUndefined();
-    expect(refused.join(" | ")).toContain("tactical-effect catalogue");
+    expect(h.hostStore.get("macros", "fx-wish")?.fxSpell).toEqual({
+      spellId: "wish", spellName: "Wish" });
+    // Different display casing still normalizes to the same stable key and is a duplicate.
+    h.gm.submit([{ kind: "create", coll: "macros",
+      data: look("fx-wish-two", "More Wish", { fxSpell: { spellId: "wish", spellName: "WISH" } }) }]);
+    await flushMicrotasks();
+    expect(h.hostStore.get("macros", "fx-wish-two")).toBeUndefined();
+    expect(refused.join(" | ")).toContain("already bound to that spell");
 
     // The failure cue must be a timeline, not a preset (the D-310 mixed-document rule).
     h.gm.submit([{ kind: "create", coll: "macros", data: { _id: "spell-look", type: "macro",
@@ -2334,6 +2339,55 @@ describe("Macros / FX host authority and audience", () => {
       diff: { fxSpell: { spellId: "entangle" } } }]);
     await flushMicrotasks();
     expect(playerRefused.filter((entry) => entry.startsWith("forbidden"))).toHaveLength(1);
+  });
+
+  test("selected-player visibility, invocation permission, and playback audience are independent", async () => {
+    const h = await setup();
+    const macro: MacroDocument = { _id: "fx-private-fireball", type: "macro", name: "Fireball",
+      command: "", kind: "sequence", ownership: { default: 0, [PLAYER_ID]: 2 },
+      flags: { core: { playerCallable: true } }, system: {},
+      sequence: { version: 1, audience: "gm", persistent: false, sections: [{ kind: "text",
+        id: "flash", text: "Fireball", startMs: 0, durationMs: 500,
+        at: { kind: "point", x: 120, y: 120 }, color: "#ffffff", scale: 1 }] },
+      fxSpell: { spellId: "fireball", spellName: "Fireball" } };
+    h.gm.submit([{ kind: "create", coll: "macros", data: macro }]);
+    await flushMicrotasks();
+    const { client: rex, bus: rexBus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const { client: ivy, bus: ivyBus } = await h.addPlayer(OTHER_ID, "Ivy");
+    expect(rex.store.get("macros", macro._id)?.fxSpell).toEqual(macro.fxSpell);
+    expect(ivy.store.get("macros", macro._id)).toBeUndefined();
+
+    const gmCues: ClientEvents["fx"][] = [];
+    const rexCues: ClientEvents["fx"][] = [];
+    const ivyCues: ClientEvents["fx"][] = [];
+    const rejected: string[] = [];
+    h.gmBus.on("fx", (cue) => gmCues.push(cue));
+    rexBus.on("fx", (cue) => rexCues.push(cue));
+    ivyBus.on("fx", (cue) => ivyCues.push(cue));
+    rexBus.on("rejected", (event) => rejected.push(event.detail));
+
+    // Rex may invoke the shared spell action, while GM-only playback stays GM-only.
+    rex.requestSequence(macro._id, "s1");
+    await flushMicrotasks();
+    expect(rejected).toEqual([]);
+    expect(gmCues).toHaveLength(1);
+    expect(rexCues).toHaveLength(0);
+    expect(ivyCues).toHaveLength(0);
+
+    // Revoking invocation alone leaves read visibility intact, but the host now refuses the run.
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: macro._id },
+      diff: { flags: { core: { playerCallable: false } } } }]);
+    await flushMicrotasks();
+    expect(rex.store.get("macros", macro._id)).toBeDefined();
+    rex.requestSequence(macro._id, "s1");
+    await flushMicrotasks();
+    expect(rejected.join(" | ")).toContain("not published for this caller");
+
+    // Revoking the selected ownership grant removes the definition as a separate operation.
+    h.gm.submit([{ kind: "update", ref: { coll: "macros", id: macro._id },
+      diff: { ownership: { default: 0 } } }]);
+    await flushMicrotasks();
+    expect(rex.store.get("macros", macro._id)).toBeUndefined();
   });
 
   test("phase binding: one cue per committed moment, and a swing does not answer a charge burn (D-312)", async () => {
@@ -2672,8 +2726,8 @@ player.client.requestFxSync("s1");
     expect(reports.at(-1)?.skipped).toEqual({ audience: 1, rights: 0, anchor: 0, media: 0 });
     expect(JSON.stringify(reports.at(-1))).not.toContain(PLAYER_ID);
 
-    // Firing it as a player is refused, because a player may only fire a cue that includes
-    // them (D-316) — "everyone else" is the GM's "not me", not a way to aim at the table.
+    // Player invocation is independent of playback Audience: Rex may trigger this published
+    // timeline, while `others` still excludes Rex from receiving the run.
     const refused: string[] = [];
     const rexRejected: string[] = [];
     const gmRejected: string[] = [];
@@ -2681,8 +2735,10 @@ player.client.requestFxSync("s1");
     h.gmBus.on("rejected", (event) => gmRejected.push(event.detail));
     rex.requestSequence("hush", "s1");
     await flushMicrotasks();
-    expect(refused).toEqual(["FX macro is not published for this caller"]);
-    expect(rexCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1); // unchanged
+    expect(refused).toEqual([]);
+    expect(rexCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1); // excluded runner
+    expect(ivyCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(2);
+    expect(gmCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1);
 
     const hushGraph: AutomationDocument = { _id: "hush-graph", type: "automation",
       name: "Hush plate", ownership: { default: 3 }, flags: {}, system: {},
@@ -2698,11 +2754,10 @@ player.client.requestFxSync("s1");
     await flushMicrotasks();
     rex.requestAutomationClick("s1", "zone", { x: 150, y: 150 }, "t-pl");
     await flushMicrotasks();
-    expect([...gmRejected, ...rexRejected].filter((detail) => detail !== "FX macro is not published for this caller"))
-      .toEqual([]);
-    expect(rexCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1); // still just the GM's run
-    expect(ivyCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(2);
-    expect(gmCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1);
+    expect([...gmRejected, ...rexRejected]).toEqual([]);
+    expect(rexCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(1); // runner excluded
+    expect(ivyCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(3);
+    expect(gmCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(2);
   });
 
   test("a chosen-players audience reaches exactly the users it names (D-316)", async () => {
@@ -2750,8 +2805,8 @@ player.client.requestFxSync("s1");
     expect(JSON.stringify(rexStart)).not.toContain(OTHER_ID);
     expect(JSON.stringify(rexStart)).not.toContain(PLAYER_ID);
 
-    // Publishing a cue is not a licence to fire it at other people: Ivy, who is not in
-    // the list, is refused — while Rex, who is, may run it for himself.
+    // Ivy is outside the playback list but may invoke the published definition; the exact
+    // same saved audience still sends the cue to Rex, not to Ivy. Rex can invoke it too.
     const ivyRefused: string[] = [];
     const rexRefused: string[] = [];
     ivyBus.on("rejected", (event) => ivyRefused.push(event.detail));
@@ -2760,12 +2815,13 @@ player.client.requestFxSync("s1");
     const before = rexCueCount();
     ivy.requestSequence("chosen", "s1");
     await flushMicrotasks();
-    expect(ivyRefused).toHaveLength(1);
-    expect(rexCueCount()).toBe(before);
+    expect(ivyRefused).toHaveLength(0);
+    expect(rexCueCount()).toBe(before + 1);
+    expect(ivyCues.filter((msg) => msg.kind === "fx.start")).toHaveLength(0);
     rex.requestSequence("chosen", "s1");
     await flushMicrotasks();
     expect(rexRefused).toHaveLength(0);
-    expect(rexCueCount()).toBe(before + 1);
+    expect(rexCueCount()).toBe(before + 2);
   });
 
   test("a chosen-players camera section is filtered per viewer and its list never ships (D-316)", async () => {
@@ -3252,7 +3308,7 @@ player.client.requestFxSync("s1");
     expect(h.hostStore.seq).toBe(seq); // no duplicate mechanic or durable record
   });
 
-  test("a changed asset entitlement ends live FX, and an unauthorized listener sees no instance", async () => {
+  test("playback audience changes delivery, not timeline or media-library visibility", async () => {
     const h = await setup({ [imageHash]: { name: "aura.png", mime: "image/png", size: 4,
       chunks: 1, visibility: "referenced" } });
     const macro = fxMacro("private-aura");
@@ -3267,8 +3323,9 @@ player.client.requestFxSync("s1");
     h.gm.requestSequence("private-aura", "s1");
     await flushMicrotasks();
     expect(fx).toHaveLength(0);
-    expect(player.store.get("macros", "private-aura")).toBeUndefined();
-    expect(player.store.world.assetManifest[imageHash]).toBeUndefined();
+    // Ownership published the definition, even though its current playback audience is GM-only.
+    expect(player.store.get("macros", "private-aura")).toBeDefined();
+    expect(player.store.world.assetManifest[imageHash]?.name).toBe("aura.png");
     expect(player.store.getAll("fxInstances")).toEqual([]);
     player.requestFxSync("s1");
     await flushMicrotasks();
@@ -3288,8 +3345,8 @@ player.client.requestFxSync("s1");
       sequence: { ...privateMacro.sequence, audience: "gm" } as unknown as Json,
     } }]);
     await flushMicrotasks();
-    expect(player.store.get("macros", "private-aura")).toBeUndefined();
-    expect(player.store.world.assetManifest[imageHash]).toBeUndefined();
+    expect(player.store.get("macros", "private-aura")).toBeDefined();
+    expect(player.store.world.assetManifest[imageHash]?.name).toBe("aura.png");
     h.gm.requestFxStop(id);
     await flushMicrotasks();
     expect(ends).toHaveLength(0); // no end notification to a never-entitled viewer
@@ -3308,8 +3365,8 @@ player.client.requestFxSync("s1");
       sequence: { ...open.sequence, audience: "gm" } as unknown as Json,
     } }]);
     await flushMicrotasks();
-    expect(player.store.get("macros", "public-aura")).toBeUndefined();
-    expect(player.store.world.assetManifest[imageHash]).toBeUndefined();
+    expect(player.store.get("macros", "public-aura")).toBeDefined();
+    expect(player.store.world.assetManifest[imageHash]?.name).toBe("aura.png");
     expect(ends.at(-1)?.runId).toBe(publicRun);
     h.gm.submit([{ kind: "update", ref: { coll: "macros", id: "public-aura" }, diff: {
       sequence: { ...open.sequence, audience: "scene" } as unknown as Json,
@@ -10922,8 +10979,7 @@ describe("structured action cards and pending resolution", () => {
       action: {
         v: 1, id, revision: 0, kind: "cast", label: "Entangle", state: "pending",
         source: { name: "Druid", actorId: "action-source" },
-        sceneId: "s1", area: { sceneId: "s1", shape: "spread", origin: { x: 100, y: 200 },
-          radius: 40, units: "ft" }, targets, notes: [], createdAt: 1, updatedAt: 1,
+        sceneId: "s1", targets, notes: [], createdAt: 1, updatedAt: 1,
       },
     };
     if (multi) system.pendingRolls = rolls;

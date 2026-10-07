@@ -57,6 +57,8 @@ export interface PF1eSpellEffect {
   readonly save: { readonly type: PF1eSaveType; readonly severity: PF1eSaveSeverity } | null;
   /** Canonical condition names applied to a target whose save failed (or that had none). */
   readonly conditions: readonly string[];
+  /** Optional starter-world persistent visual, linked to the exact condition application at runtime. */
+  readonly conditionFxMacroId?: string;
 }
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -78,7 +80,7 @@ function isText(value: unknown, max: number): value is string {
  */
 const CONDITION_SAVE_SEVERITY: PF1eSaveSeverity = "negates";
 
-const EFFECT_KEYS = ["id", "version", "name", "source", "save", "conditions"] as const;
+const EFFECT_KEYS = ["id", "version", "name", "source", "save", "conditions", "conditionFxMacroId"] as const;
 const SOURCE_KEYS = ["title", "citation", "url"] as const;
 const SAVE_KEYS = ["type", "severity"] as const;
 
@@ -96,6 +98,9 @@ export function validatePF1eSpellEffect(raw: unknown): Result<PF1eSpellEffect> {
   if (raw.version !== PF1E_SPELL_EFFECT_VERSION)
     return err(`a spell effect version must be ${String(PF1E_SPELL_EFFECT_VERSION)}`);
   if (!isText(raw.name, 80)) return err("a spell effect needs a name of at most 80 characters");
+  if (raw.conditionFxMacroId !== undefined &&
+      (typeof raw.conditionFxMacroId !== "string" || !ID_RE.test(raw.conditionFxMacroId)))
+    return err("a spell effect condition FX macro id must be a bounded document id");
   if (!isRecord(raw.source) ||
       Object.keys(raw.source).some((key) => !(SOURCE_KEYS as readonly string[]).includes(key)) ||
       !isText(raw.source.title, 160) || !isText(raw.source.citation, 240) ||
@@ -133,6 +138,7 @@ export function validatePF1eSpellEffect(raw: unknown): Result<PF1eSpellEffect> {
       ? null
       : { type: raw.save.type as PF1eSaveType, severity: raw.save.severity as PF1eSaveSeverity },
     conditions,
+    ...(typeof raw.conditionFxMacroId === "string" ? { conditionFxMacroId: raw.conditionFxMacroId } : {}),
   });
 }
 
@@ -153,6 +159,7 @@ export const PF1E_SPELL_EFFECT_ROWS: readonly unknown[] = [
     },
     save: { type: "ref", severity: "negates" },
     conditions: ["Entangled"],
+    conditionFxMacroId: "macro-entangled-vines",
   },
 ];
 

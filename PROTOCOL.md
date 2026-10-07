@@ -557,6 +557,33 @@ normal projected world Ops.
   actorId: DocId; applicationId: string; receiptId: DocId; seq: number }
 ```
 
+### codex.purchase (0x56 · client → host · ops)
+
+A player asks the host to purchase a quantity of one published Campaign Codex shop stock row for a character. The request contains identifiers and quantity only; the host rechecks shop/page/item visibility, actor update permission, current stock and PF1e currency, then commits stock, wallet, inventory and the durable Revert receipt atomically. The `requestId` is stable across retries; a duplicate successful request receives a private replay acknowledgement and never transfers a second time.
+
+```ts
+{ kind: "codex.purchase"; requestId: string; sheetId: DocId; stockRowId: string;
+  quantity: number; actorId: DocId }
+```
+
+### codex.purchase.result (0x57 · host → requester · ops)
+
+Private transaction result. It is sent after commit or validation failure and does not replace the authoritative projected world Ops. `replayed` means an earlier request with the same ID already committed.
+
+```ts
+{ kind: "codex.purchase.result"; requestId: string; ok: boolean; detail: string;
+  receiptId?: DocId; totalCopper?: number; replayed?: boolean }
+```
+
+### codex.claim (0x58 · client → host · ops)
+
+A player claims a published Campaign Codex shop/loot row. The host validates the selected sheet, stock, actor ownership and current availability before committing the idempotent transfer; the request carries no client-authored price or item data.
+
+```ts
+{ kind: "codex.claim"; requestId: string; sheetId: DocId; stockRowId: string;
+  quantity: number; actorId: DocId }
+```
+
 ### macro.result (0x3b · host → caller and GMs · ops)
 
 Other GMs see bounded execution traces, errors and JSON return values. The player caller sees only a generic completed/failed status: script output and logs are never a hidden-data read channel.

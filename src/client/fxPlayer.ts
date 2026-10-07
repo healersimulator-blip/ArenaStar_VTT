@@ -3,7 +3,7 @@
  * never mutates documents. Media loads lazily through the entitled asset fetcher.
  * The stage's FX strata are below fog (not the ping/ruler overlay).
  */
-import { Texture } from "pixi.js";
+import { Texture, VideoSource } from "pixi.js";
 import type { Stage } from "../canvas/stage";
 import type { FxMediaAckState, FxStartMsg } from "../core/messages";
 import type { ResolvedFxSection } from "../core/fx";
@@ -38,6 +38,48 @@ const staticImageDataUrl = (bytes: Uint8Array, mime: string): string | undefined
 };
 const decoderUnsupported = (error: unknown): boolean =>
   /unsupported|format|decode|not supported/i.test(String(error));
+
+/**
+ * Pixi's default VideoSource constructor starts an asynchronous alpha-probe load that
+ * can outlive a short FX section. Destroying that texture while the probe is pending
+ * clears `resource`, and Pixi's continuation then reads `videoWidth` from null. The
+ * video is already decoded and playing at this point, so bypass the redundant probe
+ * and drive texture updates from the browser's decoded frames instead.
+ */
+function textureFromPlayingVideo(video: HTMLVideoElement): { texture: Texture; stop: () => void } {
+  const source = new VideoSource({ resource: video, autoLoad: false, autoPlay: false });
+  source.isReady = true;
+  const texture = new Texture({ source });
+  source.update();
+
+  const frames = video as unknown as {
+    requestVideoFrameCallback?: (callback: () => void) => number;
+    cancelVideoFrameCallback?: (handle: number) => void;
+  };
+  let stopped = false;
+  let videoFrameHandle: number | null = null;
+  let animationFrameHandle: number | null = null;
+  const update = () => {
+    if (stopped) return;
+    source.update();
+    if (typeof frames.requestVideoFrameCallback === "function")
+      videoFrameHandle = frames.requestVideoFrameCallback(update);
+    else animationFrameHandle = window.requestAnimationFrame(update);
+  };
+  if (typeof frames.requestVideoFrameCallback === "function")
+    videoFrameHandle = frames.requestVideoFrameCallback(update);
+  else animationFrameHandle = window.requestAnimationFrame(update);
+
+  return {
+    texture,
+    stop: () => {
+      if (stopped) return;
+      stopped = true;
+      if (videoFrameHandle !== null) frames.cancelVideoFrameCallback?.(videoFrameHandle);
+      if (animationFrameHandle !== null) window.cancelAnimationFrame(animationFrameHandle);
+    },
+  };
+}
 
 interface FxMediaClipWindow {
   /** Seconds in the decoded source; start is inclusive and end exclusive. */
@@ -78,6 +120,7 @@ interface FxPrefetchRecord {
   decodeError?: unknown;
   decodeReadyAtHost?: number;
   image?: HTMLImageElement;
+  video?: HTMLVideoElement;
   objectUrl?: string;
 }
 
@@ -162,9 +205,18 @@ export class FxPlayer {
 
   /** Release decoder resources only when the whole scene/cache is leaving. */
   private releasePrefetch(record: FxPrefetchRecord): void {
+    if (record.video) {
+      record.video.onloadeddata = null;
+      record.video.onerror = null;
+      record.video.pause();
+      if (typeof record.video.removeAttribute === "function") record.video.removeAttribute("src");
+      else record.video.src = "";
+      if (typeof record.video.load === "function") record.video.load();
+    }
     if (record.objectUrl) URL.revokeObjectURL(record.objectUrl);
     delete record.objectUrl;
     delete record.image;
+    delete record.video;
   }
 
   private clearLocal(): void {
@@ -435,7 +487,7 @@ export class FxPlayer {
         let bytes: Uint8Array;
         try {
           bytes = await this.options.fetchAsset(assetId);
-          // Keep the receipt's established meaning: `ready` says the bytes arrived. Image
+          // Keep the receipt's established meaning: `ready` says the bytes arrived. Media
           // decode begins in the same continuation but has its own shared promise below.
           fresh.readyAtHost = this.hostNow();
           fresh.done = true;
@@ -477,6 +529,43 @@ export class FxPlayer {
             } catch (cause) {
               fresh.decodeFailed = true; // cue-time decode gets one honest retry/report
               fresh.decodeError = cause;
+            }
+          })();
+        } else if (mime.startsWith("video/") && typeof document !== "undefined") {
+          // Video startup is the part that commonly outlives a short timeline's whole
+          // frame budget. Decode its first frame during the lead window, keep the paused
+          // element warm, then transfer it to the first playback run at the scheduled time.
+          fresh.decodeWork = (async () => {
+            try {
+              const objectUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: mime }));
+              fresh.objectUrl = objectUrl;
+              const video = document.createElement("video");
+              video.muted = true;
+              video.playsInline = true;
+              video.preload = "auto";
+              fresh.video = video;
+              await new Promise<void>((resolve, reject) => {
+                const ready = () => {
+                  video.onloadeddata = null;
+                  video.onerror = null;
+                  resolve();
+                };
+                const failed = () => {
+                  video.onloadeddata = null;
+                  video.onerror = null;
+                  reject(new Error("video format unsupported"));
+                };
+                video.onloadeddata = ready;
+                video.onerror = failed;
+                video.src = objectUrl;
+                video.load();
+              });
+              if (fresh.abandoned) return;
+              fresh.decodeReadyAtHost = this.hostNow();
+            } catch (cause) {
+              fresh.decodeFailed = true;
+              fresh.decodeError = cause;
+              this.releasePrefetch(fresh);
             }
           })();
         }
@@ -662,7 +751,7 @@ export class FxPlayer {
     // is about.
     const preload = this.prefetched.get(section.assetId);
     const landed = preload?.done === true;
-    const decodedAtDispatch = preload?.image !== undefined;
+    const decodedAtDispatch = preload?.image !== undefined || (preload?.video?.readyState ?? 0) >= 2;
     const scheduledFor = cue.atHostTime + section.startMs;
     const fetchStarted = this.hostNow();
     try {
@@ -713,7 +802,8 @@ export class FxPlayer {
       const usableLateMs = (): number => mediaLateMs +
         Math.max(0, this.hostNow() - decoderStartedAt);
       const staticImage = section.kind === "image" && section.mime.startsWith("image/");
-      let staticImageLateMs: number | undefined;
+      const videoMedia = section.mime.startsWith("video/");
+      let mediaReadyLateMs: number | undefined;
       /**
        * A decoded source that existed when the cue callback got its turn added no media
        * wait, even if the browser/OS later pauses synchronous Pixi setup. If playback had
@@ -723,23 +813,32 @@ export class FxPlayer {
       const predecodeLateMs = (): number => decodedAtDispatch ? mediaLateMs : mediaLateMs +
         Math.max(0, (preload?.decodeReadyAtHost ?? this.hostNow()) -
           Math.max(scheduledFor, fetchStarted, preload?.readyAtHost ?? fetchStarted));
-      if (staticImage && preload?.decodeWork && !preload.image && !preload.decodeFailed) {
+      const videoReady = () => (preload?.video?.readyState ?? 0) >= 2;
+      if (((staticImage && !preload?.image) || (videoMedia && !videoReady())) &&
+          preload?.decodeWork && !preload.decodeFailed) {
         await preload.decodeWork;
         if (!active()) return;
         // A failed predecode gets the established cue-time retry below. Do not relabel a
         // known decoder refusal as mere lateness before that retry can recover or report it.
         if (!preload.decodeFailed) {
-          staticImageLateMs = predecodeLateMs();
-          if (skipExpired(staticImageLateMs) || skipLate(staticImageLateMs)) return;
+          mediaReadyLateMs = predecodeLateMs();
+          if (skipExpired(mediaReadyLateMs) || skipLate(mediaReadyLateMs)) return;
         }
       }
       const warmedImage = staticImage ? preload?.image : undefined;
-      if (warmedImage && staticImageLateMs === undefined) staticImageLateMs = predecodeLateMs();
-      // A retained decoded source needs no second blob URL. Audio, video and lazy/static
-      // fallback paths own a cue-local URL that is revoked with their playback resource.
+      const warmedVideo = videoMedia && videoReady() && preload?.objectUrl ? preload.video : undefined;
+      const warmVideoUrl = warmedVideo ? preload?.objectUrl : undefined;
+      if ((warmedImage || warmedVideo) && mediaReadyLateMs === undefined)
+        mediaReadyLateMs = predecodeLateMs();
+      // Transfer a predecoded video and its Blob URL to the first run that needs it. Static
+      // decoded images stay shared; every active video run owns its playback element and URL.
+      if (warmedVideo && preload) {
+        delete preload.video;
+        delete preload.objectUrl;
+      }
       const ownsUrl = !warmedImage;
-      const url = ownsUrl
-        ? URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: section.mime })) : "";
+      const url = warmedImage ? "" : warmVideoUrl ??
+        URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: section.mime }));
       const revokeUrl = () => { if (ownsUrl) URL.revokeObjectURL(url); };
       if (section.kind === "sound") {
         const channel = soundChannelOf(section);
@@ -933,26 +1032,31 @@ export class FxPlayer {
       let texture: Texture;
       let video: HTMLVideoElement | null = null;
       let clearVideoClip: (() => void) | null = null;
+      let stopVideoTextureUpdates: (() => void) | null = null;
       try {
-        if (section.mime.startsWith("video/")) {
-          video = document.createElement("video");
+        if (videoMedia) {
+          video = warmedVideo ?? document.createElement("video");
           video.muted = true; // sound is an explicit sound section, not an autoplay side effect
           video.playsInline = true;
           video.playbackRate = section.playbackRate ?? 1;
-          video.src = url;
-          await new Promise<void>((resolve, reject) => {
-            if (!video) return reject(new Error("video released"));
-            video.onloadeddata = () => resolve();
-            video.onerror = () => reject(new Error("video format unsupported"));
-          });
+          if (!warmedVideo) {
+            video.preload = "auto";
+            video.src = url;
+            await new Promise<void>((resolve, reject) => {
+              if (!video) return reject(new Error("video released"));
+              video.onloadeddata = () => resolve();
+              video.onerror = () => reject(new Error("video format unsupported"));
+            });
+          }
           video.onloadeddata = null;
           video.onerror = null;
-          const loadedLateMs = usableLateMs();
+          const loadedLateMs = mediaReadyLateMs ?? usableLateMs();
           if (!active() || skipExpired(loadedLateMs) || skipLate(loadedLateMs)) {
             video.pause();
             revokeUrl();
             return;
           }
+          mediaReadyLateMs = loadedLateMs;
           const clip = fxMediaClipWindow(section, video.duration);
           // An unclipped video keeps the browser's native whole-source loop. A clip loops
           // explicitly to its own start for both one-shot and persistent timeline sections.
@@ -962,6 +1066,13 @@ export class FxPlayer {
             : cue.persistent && Number.isFinite(video.duration) && video.duration > 0
               ? seconds % video.duration : seconds;
           await video.play();
+          const playedLateMs = Math.max(loadedLateMs, usableLateMs());
+          if (!active() || skipExpired(playedLateMs) || skipLate(playedLateMs)) {
+            video.pause();
+            revokeUrl();
+            return;
+          }
+          mediaReadyLateMs = playedLateMs;
           if (clip) {
             const rewind = () => {
               if (!video || !active()) return;
@@ -985,7 +1096,9 @@ export class FxPlayer {
               video.onended = null;
             };
           }
-          texture = Texture.from(video);
+          const liveTexture = textureFromPlayingVideo(video);
+          texture = liveTexture.texture;
+          stopVideoTextureUpdates = liveTexture.stop;
         } else {
           let image: HTMLImageElement;
           if (warmedImage) image = warmedImage;
@@ -997,15 +1110,16 @@ export class FxPlayer {
             image = freshImage;
             // Capture actual decoder settlement before synchronous texture construction.
             // A browser/OS scheduler pause in `Texture.from` is not media startup delay.
-            staticImageLateMs = usableLateMs();
+            mediaReadyLateMs = usableLateMs();
           }
           // Each layer owns its own texture lifetime even when runs share the decoded source.
           // Skipping Pixi's source cache prevents one run's destroy from invalidating an
           // overlapping run (or the retained predecode record).
           texture = Texture.from(image, true);
         }
-        const lateMs = staticImageLateMs ?? usableLateMs();
+        const lateMs = mediaReadyLateMs ?? usableLateMs();
         if (!active() || skipExpired(lateMs) || skipLate(lateMs)) {
+          stopVideoTextureUpdates?.();
           clearVideoClip?.();
           video?.pause();
           texture.destroy(true);
@@ -1015,7 +1129,9 @@ export class FxPlayer {
         reportUsable(lateMs);
         const media = video;
         const releaseClip = clearVideoClip;
+        const releaseVideoTexture = stopVideoTextureUpdates;
         this.options.stage.getFxLayer().spawn(cue.runId, section, elapsed(), texture, () => {
+          releaseVideoTexture?.();
           releaseClip?.();
           media?.pause();
           texture.destroy(true);
@@ -1023,6 +1139,7 @@ export class FxPlayer {
         }, cue.persistent === true);
         this.settleCue(cue.runId);
       } catch (err) {
+        stopVideoTextureUpdates?.();
         clearVideoClip?.();
         video?.pause();
         revokeUrl();

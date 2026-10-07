@@ -20,12 +20,14 @@ import type { ClientSync } from "../../client/sync";
 import { pf1eSpellEffectByName } from "../../packages/pf1e/spellEffects";
 import type { ActorDocument, ItemDocument, MacroDocument, SceneDocument, TokenDocument } from "../../core/documents";
 import { fxBindingBranch, fxBindingFiresOn, fxBindingMatches, fxSpellBindingBranch,
-  fxSpellBindingMatches, type FxItemEvent, type FxItemOutcome } from "../../core/fxBinding";
+  fxSpellBindingMatches, fxSpellKeyFromName, type FxItemEvent, type FxItemOutcome } from "../../core/fxBinding";
 
 export type { FxItemEvent, FxItemOutcome } from "../../core/fxBinding";
 
 /** The facts a committed item use carries that recognition needs (a structural subset). */
 export interface FxItemOutcomeFacts {
+  /** The use/cast was refused before it produced a committed result. */
+  ok?: boolean;
   /** The spell was ruined after committing (the slot is spent, nothing resolves). */
   lost?: boolean;
   /** A melee touch missed: the charge is spent and held. */
@@ -44,7 +46,9 @@ export interface FxItemOutcomeFacts {
  * **failures** for this purpose: each of them means the effect did not land on the target.
  */
 export function fxCastOutcome(facts: FxItemOutcomeFacts): FxItemOutcome {
-  if (facts.pending !== undefined && facts.pending !== null) return "unknown";
+  // A rejected/refused action and a still-pending cast/save have no committed target result.
+  // Never turn either absence of evidence into the success branch.
+  if (facts.ok === false || (facts.pending !== undefined && facts.pending !== null)) return "unknown";
   if (facts.lost === true || facts.held === true) return "failure";
   if (facts.touch?.hit === false) return "failure";
   if (facts.result?.resisted === true || facts.result?.passed === true) return "failure";
@@ -110,11 +114,11 @@ export function fxItemCueNote(cue: FxItemCueResult, subject: "item" | "spell" = 
  * item with no binding is not a problem to report).
  */
 /**
- * D-407 — the same cue contract for a **spell**: the timeline an author bound to a catalogue spell
- * (`fxSpell`, the FX wizard's "Bind to a spell" panel) plays when that spell is cast. The committed
- * moment is the cast, the recognition is `fxCastOutcome`'s, and the default branch is a landed
- * effect: a made save, spell resistance, a lost spell, a held charge or a missed touch plays the
- * failure branch — which is "nothing" unless the author bound one.
+ * D-407 — the same cue contract for a **spell**: a timeline bound to a canonical spell key plays
+ * when that spell is cast. Tactical-effect catalogue ids remain valid, while any world-compendium
+ * spell can use its normalized name key. The committed moment is the cast, recognition reads
+ * `fxCastOutcome`, and a made save, spell resistance, lost spell, held charge or missed touch plays
+ * the failure branch — which is "nothing" unless the author bound one.
  */
 export function fireBoundSpellCue(input: {
   client: ClientSync;
@@ -125,17 +129,30 @@ export function fireBoundSpellCue(input: {
   casterActor: ActorDocument;
   /** The cast's own target, when the flow has one: the cue's `target` anchor. */
   targetActor?: ActorDocument | null;
+  /** Explicit scene/token context for canvas-targeted casts; otherwise use the active caster scene. */
+  sceneId?: string;
+  sourceTokenId?: string;
+  targetTokenId?: string;
 }): FxItemCueResult {
   const { client, spellId } = input;
   const macro = boundSpellCueFor(client, spellId);
   if (macro === null) return { fired: false, reason: "unbound" };
-  const branch = fxSpellBindingBranch(macro, input.outcome === "failure" ? "failure" : "success");
+  // A pending/manual-save or rejected cast has no result to branch on yet. In particular,
+  // `unknown` must not fall through to `success` merely because it is not `failure`.
+  if (input.outcome === "unknown") return { fired: false, reason: "no-branch" };
+  const branch = fxSpellBindingBranch(macro, input.outcome);
   if (branch === null)
     return { fired: false, reason: macro.fxSpell?.enabled === false ? "disabled" : "no-branch" };
-  const scene = cueScene(client, input.casterActor._id);
+  const scene = input.sceneId !== undefined
+    ? client.store.get("scenes", input.sceneId) as SceneDocument | undefined ?? null
+    : cueScene(client, input.casterActor._id);
   if (scene === null) return { fired: false, reason: "no-scene" };
-  const source = tokenFor(scene, input.casterActor._id);
-  const target = input.targetActor ? tokenFor(scene, input.targetActor._id) : undefined;
+  const source = input.sourceTokenId
+    ? scene.tokens.find((token) => token._id === input.sourceTokenId)
+    : tokenFor(scene, input.casterActor._id);
+  const target = input.targetTokenId
+    ? scene.tokens.find((token) => token._id === input.targetTokenId)
+    : input.targetActor ? tokenFor(scene, input.targetActor._id) : undefined;
   client.requestSequence(branch, scene._id, source?._id, target?._id);
   const branchName = (client.store.get("macros", branch) as MacroDocument | undefined)?.name ?? branch;
   return { fired: true, macroId: branch, macroName: branchName, branch: input.outcome,
@@ -145,22 +162,31 @@ export function fireBoundSpellCue(input: {
 }
 
 /**
- * The note a **spell cast** adds when the cast named a catalogue spell: the cue lookup by the
- * spell's *name*, which is what every cast call site has (a prepared row carries a name, not an id).
- * A name the catalogue does not know plays nothing and says nothing — most spells have no authored
- * tactical effect, and that is the normal case, not news.
+ * The spell key the sheet/wizard use for a cast name. Catalogue ids stay canonical for tactical
+ * effects; every other compendium spell gets an exact, normalized display-name key. Unknown spell
+ * names without a matching FX binding are still the usual silent no-op.
  */
+export function fxSpellBindingIdForName(spellName: string): string | null {
+  return pf1eSpellEffectByName(spellName)?.id ?? fxSpellKeyFromName(spellName);
+}
+
 export function castSpellCueNote(input: {
   client: ClientSync;
   spellName: string;
   outcome: FxItemOutcome;
   caster: ActorDocument;
   target?: ActorDocument | null;
+  sceneId?: string;
+  sourceTokenId?: string;
+  targetTokenId?: string;
 }): string {
-  const effect = pf1eSpellEffectByName(input.spellName);
-  if (effect === null) return "";
-  return fxItemCueNote(fireBoundSpellCue({ client: input.client, spellId: effect.id,
-    outcome: input.outcome, casterActor: input.caster, targetActor: input.target ?? null }), "spell");
+  const spellId = fxSpellBindingIdForName(input.spellName);
+  if (spellId === null) return "";
+  return fxItemCueNote(fireBoundSpellCue({ client: input.client, spellId,
+    outcome: input.outcome, casterActor: input.caster, targetActor: input.target ?? null,
+    ...(input.sceneId !== undefined ? { sceneId: input.sceneId } : {}),
+    ...(input.sourceTokenId !== undefined ? { sourceTokenId: input.sourceTokenId } : {}),
+    ...(input.targetTokenId !== undefined ? { targetTokenId: input.targetTokenId } : {}), }), "spell");
 }
 
 /**
@@ -188,7 +214,8 @@ export function fireBoundItemCue(input: {
   const event = input.event ?? "use";
   const macro = boundCueFor(client, actor._id, item._id, event);
   if (macro === null) return { fired: false, reason: "unbound" };
-  const branch = fxBindingBranch(macro, input.outcome === "failure" ? "failure" : "success", event);
+  if (input.outcome === "unknown") return { fired: false, reason: "no-branch" };
+  const branch = fxBindingBranch(macro, input.outcome, event);
   if (branch === null)
     return { fired: false, reason: macro.fxItem?.enabled === false ? "disabled" : "no-branch" };
   const scene = cueScene(client, actor._id);

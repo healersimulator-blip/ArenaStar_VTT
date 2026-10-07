@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /**
  * D-249 starter worlds: one importable world file per strategic ruleset package —
  * `dist/worlds/<id>-starter-<version>.zip`. A starter is a format-2 world archive
@@ -25,6 +26,7 @@
  * pre-placed tactical + strategic + overland scenario and a tester guide. Missing
  * content dir ⇒ the tester is skipped with a note (fresh clones build the plain starter only).
  */
+import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,6 +86,46 @@ function readManifestFromDir(dir, expectedId = null) {
 
 function readManifest(systemsDir, id) {
   return readManifestFromDir(join(systemsDir, id), id);
+}
+
+/** Media used by the PF1e JungleEntrance2 spell demonstration. */
+const STARTER_DEMO_MEDIA = {
+  jungleMap: "Assets/Maps/JungleEntrance2.jpg",
+  hosilla: "Assets/Tokens/token_Hosilla.png",
+  vacorg: "Assets/Tokens/token_Vacorg.png",
+  hobgoblin: "Assets/Tokens/token_Hobgoblin1.png",
+  troll: "Assets/Tokens/token_Troll6.png",
+  tyrannosaur: "Assets/Tokens/token_Tyrannosaur.png",
+  lightningCrosshair: "Assets/VisualEffects/Crosshair_Line_Generic_01_White_90ft.webm",
+  entangleCrosshair: "Assets/VisualEffects/Crosshair_Circle_Fantasy_01_White_30ft.webm",
+  lightningEffect: "Assets/VisualEffects/Lightning_Bolt_Blue_90ft.webm",
+  entangleAreaEffect: "Assets/VisualEffects/Nature_Vine_Normal_Circle_01_Physical_Green_30ft.webm",
+  entangledTokenEffect: "Assets/VisualEffects/Nature_Vine_Normal_Token_01_Physical_Green.webm",
+};
+
+/** Read, hash and package the supplied demo media using the VTT's 32 KiB transfer chunks. */
+function starterDemoAssets() {
+  const assets = [];
+  const refs = {};
+  for (const [key, rel] of Object.entries(STARTER_DEMO_MEDIA)) {
+    const bytes = new Uint8Array(readFileSync(join(repoRoot, rel)));
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const ext = rel.slice(rel.lastIndexOf(".") + 1).toLowerCase();
+    const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg"
+      : ext === "png" ? "image/png" : ext === "webm" ? "video/webm" : null;
+    if (mime === null) throw new Error(`unsupported starter media type: ${rel}`);
+    refs[key] = hash;
+    assets.push({
+      hash,
+      name: rel.slice(rel.lastIndexOf("/") + 1),
+      mime,
+      size: bytes.byteLength,
+      chunks: Math.ceil(bytes.byteLength / (32 * 1024)),
+      visibility: "referenced",
+      bytes,
+    });
+  }
+  return { refs, assets };
 }
 
 /** A package folder as `packages/<id>/…` archive entries, verifying the manifest's declared files. */
@@ -154,6 +196,7 @@ function assembleArchive(systemsDir, rulesetId, opts = {}) {
   const worldId = `starter-${rulesetId}${opts.worldIdSuffix ?? ""}`;
   const name = opts.nameOverride ?? recipe.name ?? `${ruleset.name} — starter`;
   const docRows = (opts.docs ?? []).map(docRow);
+  const assets = opts.assets ?? [];
   const entries = {};
   const json = (value) => strToU8(JSON.stringify(value, null, 2));
   entries["world.json"] = json({
@@ -168,7 +211,8 @@ function assembleArchive(systemsDir, rulesetId, opts = {}) {
     starter: true,
   });
   entries["documents.json"] = json({ seq: docRows.length, docs: docRows });
-  entries["assets.json"] = json([]);
+  entries["assets.json"] = json(assets.map(({ bytes: _bytes, ...asset }) => asset));
+  for (const asset of assets) entries[`assets/${asset.hash}`] = asset.bytes;
   entries["packages.json"] = json(
     manifests.map((m) => ({
       id: m.id,
@@ -194,7 +238,8 @@ function assembleArchive(systemsDir, rulesetId, opts = {}) {
     worldId,
     name,
     version: ruleset.version,
-    files: ["world.json", "documents.json", "assets.json", "packages.json", ...files],
+    files: ["world.json", "documents.json", "assets.json", ...assets.map((asset) => `assets/${asset.hash}`),
+      "packages.json", ...files],
     packages: manifests.map((m) => m.id),
     zip,
   };
@@ -202,8 +247,13 @@ function assembleArchive(systemsDir, rulesetId, opts = {}) {
 
 /** Assemble the plain (document-less) starter for one strategic ruleset. */
 export function buildStarterArchive(systemsDir, rulesetId, opts = {}) {
-  const docs = opts.docs ?? (rulesetId === "pf1e-mass-battles" ? testerDocuments(null) : []);
-  return assembleArchive(systemsDir, rulesetId, { ...opts, docs });
+  const demo = rulesetId === "pf1e-mass-battles" ? starterDemoAssets() : { refs: {}, assets: [] };
+  const docs = opts.docs ?? (rulesetId === "pf1e-mass-battles" ? testerDocuments(null, demo.refs) : []);
+  return assembleArchive(systemsDir, rulesetId, {
+    ...opts,
+    docs,
+    assets: opts.assets ?? demo.assets,
+  });
 }
 
 // ─── tester starter: rulesets + converted content + a playable scenario ────────
@@ -250,6 +300,7 @@ const COLL_OF_TYPE = {
   army: "armies",
   journal: "journals",
   encounterTable: "encounterTables",
+  macro: "macros",
 };
 
 function docRow(doc) {
@@ -258,16 +309,17 @@ function docRow(doc) {
   return { coll, id: doc._id, doc };
 }
 
-function tokenDoc(id, name, x, y, actorId, disposition) {
+function tokenDoc(id, name, x, y, actorId, disposition, options = {}) {
   return baseDoc(id, "token", name, {
-    // D-061 tabletop default (hostBoot.makeToken): players see & move
-    ownership: { default: 3, gm: 3 },
+    // D-061 tabletop default (hostBoot.makeToken): players see & move. The Jungle demo marks
+    // its player characters this way and keeps hostile tokens GM-controlled.
+    ownership: options.ownership ?? { default: 3, gm: 3 },
     x,
     y,
     rotation: 0,
-    width: 100,
-    height: 100,
-    img: "",
+    width: options.width ?? 100,
+    height: options.height ?? 100,
+    img: options.img ?? "",
     actorId,
     hidden: false,
     disposition,
@@ -604,11 +656,152 @@ export function hexcrawlDocuments(file = HEXCRAWL_CONTENT) {
   return [scene, ...tables, guide];
 }
 
+/** Build the PF1e encounter and authored, player-callable Entangle FX timelines. */
+function jungleSpellDemoDocuments(media) {
+  const medium = 100; // one 5-ft PF1e square on this scene's 100-unit grid
+  const playerOwnership = { default: 3, gm: 3 };
+  const npcOwnership = { default: 2, gm: 3 };
+  const gmTokenOwnership = { default: 0, gm: 3 };
+  const sceneTokens = [
+    tokenDoc("tok-hosilla", "Hosilla", 350, 350, "hosilla", "friendly", {
+      img: media.hosilla, width: medium, height: medium, ownership: playerOwnership,
+    }),
+    tokenDoc("tok-vacorg", "Vacorg", 450, 350, "vacorg", "friendly", {
+      img: media.vacorg, width: medium, height: medium, ownership: playerOwnership,
+    }),
+    tokenDoc("tok-hobgoblin-1", "Hobgoblin Fighter 1", 650, 550, "hobgoblin-fighter-1", "hostile", {
+      img: media.hobgoblin, width: medium, height: medium, ownership: gmTokenOwnership,
+    }),
+    tokenDoc("tok-hobgoblin-2", "Hobgoblin Fighter 2", 750, 550, "hobgoblin-fighter-2", "hostile", {
+      img: media.hobgoblin, width: medium, height: medium, ownership: gmTokenOwnership,
+    }),
+    tokenDoc("tok-hobgoblin-3", "Hobgoblin Fighter 3", 850, 550, "hobgoblin-fighter-3", "hostile", {
+      img: media.hobgoblin, width: medium, height: medium, ownership: gmTokenOwnership,
+    }),
+    tokenDoc("tok-troll", "Troll", 650, 800, "troll", "hostile", {
+      img: media.troll, width: medium * 2, height: medium * 2, ownership: gmTokenOwnership,
+    }),
+    tokenDoc("tok-tyrannosaur", "Tyrannosaur", 950, 1050, "tyrannosaur", "hostile", {
+      img: media.tyrannosaur, width: medium * 3, height: medium * 3, ownership: gmTokenOwnership,
+    }),
+  ];
+  const scene = sceneDoc2("scene-jungle", "JungleEntrance2 — PF1e Spell Demonstration", 1200, 1800,
+    { core: { spellDemo: { assets: {
+      lightningCrosshair: { assetId: media.lightningCrosshair },
+      entangleCrosshair: { assetId: media.entangleCrosshair },
+      lightningEffect: { assetId: media.lightningEffect },
+      entangleAreaEffect: { assetId: media.entangleAreaEffect },
+      entangledTokenEffect: { assetId: media.entangledTokenEffect },
+    }, macros: { lightningBolt: "macro-lightning-bolt-effect" } } } }, sceneTokens, [baseDoc("note-jungle-spells", "note", "Spell demonstration", {
+      x: 150, y: 150,
+      text: "Open this scene from the scene rail. Select Hosilla and click Lightning Bolt (slot 1); aim with the supplied 90-ft line crosshair and click again to confirm. Each creature footprint in the 5-ft-wide line receives a 6d6 electricity roll and Reflex save for half, and the supplied bolt effect plays once. Select Vacorg and click Entangle (slot 1); the supplied 30-ft circle crosshair is enlarged to a 40-ft-radius spread. Click again to cast. Failed saves apply Entangled and attach the supplied token-vine effect; removing Entangled also removes that effect.",
+      icon: "✦", visible: true,
+    })], false);
+  scene.img = media.jungleMap;
+  scene.grid = { type: "square", size: medium, distance: 5, units: "ft", diagonals: "555", hexLayout: "oddQ" };
+
+  const hosillaQuickbar = [{ slot: 1, kind: "spell", label: "Lightning Bolt (level 3)",
+    attackIndex: 0, itemId: null, preparedIndex: null, spellLevel: 3 }];
+  const vacorgQuickbar = [{ slot: 1, kind: "spell", label: "Entangle (level 1)",
+    attackIndex: 0, itemId: null, preparedIndex: 0, spellLevel: 1 }];
+  const hosilla = baseDoc("hosilla", "actor", "Hosilla", {
+    ownership: playerOwnership,
+    flags: { pf1e: { quickbar: hosillaQuickbar } },
+    system: { pf1e: {
+      size: "Medium", speedFt: 30,
+      abilities: { str: 10, dex: 14, con: 12, int: 12, wis: 10, cha: 18 },
+      baseAttack: 3, saves: { fort: 3, ref: 2, will: 5 }, savesAsTotal: true,
+      hp: 24, hpMax: 24, attacks: [], feats: [],
+      spells: { keyAbility: "cha", casterLevel: 6, tradition: "arcane", mode: "spontaneous",
+        slotsPerDay: { 0: 6, 1: 8, 2: 6, 3: 4 }, slotsUsed: { 0: 0, 1: 0, 2: 0, 3: 0 },
+        known: [{ name: "Lightning Bolt", level: 3, components: "V, S" }] },
+      notes: "Sorcerer 6. Charisma 18. Lightning Bolt is a 3rd-level known spell; quickbar slot 1 casts its 90-ft line, 6d6 electricity, Reflex half.",
+    } }, items: [], effects: [],
+  });
+  const vacorg = baseDoc("vacorg", "actor", "Vacorg", {
+    ownership: playerOwnership,
+    flags: { pf1e: { quickbar: vacorgQuickbar } },
+    system: { pf1e: {
+      size: "Medium", speedFt: 30,
+      abilities: { str: 10, dex: 12, con: 12, int: 12, wis: 18, cha: 10 },
+      baseAttack: 4, saves: { fort: 5, ref: 2, will: 5 }, savesAsTotal: true,
+      hp: 34, hpMax: 34, attacks: [], feats: [],
+      spells: { keyAbility: "wis", casterLevel: 6, tradition: "divine", mode: "prepared",
+        slotsPerDay: { 0: 4, 1: 5, 2: 4, 3: 3 }, slotsUsed: { 0: 0, 1: 0, 2: 0, 3: 0 },
+        prepared: [{ name: "Entangle", level: 1, components: "V, S, DF" }] },
+      notes: "Druid 6. Wisdom 18. Entangle is prepared at 1st level and bound to quickbar slot 1.",
+    } }, items: [], effects: [],
+  });
+  const hobgoblinPf1e = {
+    size: "Medium", speedFt: 30,
+    abilities: { str: 13, dex: 12, con: 12, int: 10, wis: 10, cha: 9 },
+    baseAttack: 1, saves: { fort: 3, ref: 1, will: 0 }, savesAsTotal: true,
+    hp: 11, hpMax: 11,
+    attacks: [{ name: "Longsword", damageDice: "1d8", damageType: "slashing", critThreatMin: 19, critMultiplier: 2 }],
+    notes: "Hobgoblin Fighter 1; starter encounter profile.",
+  };
+  const trollPf1e = {
+    size: "Large", speedFt: 30,
+    abilities: { str: 23, dex: 14, con: 23, int: 6, wis: 9, cha: 6 },
+    baseAttack: 6, saves: { fort: 8, ref: 3, will: 2 }, savesAsTotal: true,
+    hp: 63, hpMax: 63,
+    attacks: [{ name: "Claw", damageDice: "1d6", damageType: "slashing", critThreatMin: 20, critMultiplier: 2, natural: true }],
+    notes: "Troll, Large (2×2 squares); starter encounter profile.",
+  };
+  const tyrannosaurPf1e = {
+    size: "Huge", speedFt: 40,
+    abilities: { str: 28, dex: 12, con: 21, int: 2, wis: 15, cha: 10 },
+    baseAttack: 12, saves: { fort: 14, ref: 8, will: 7 }, savesAsTotal: true,
+    hp: 150, hpMax: 150,
+    attacks: [{ name: "Bite", damageDice: "2d8", damageType: "piercing", critThreatMin: 20, critMultiplier: 2, natural: true }],
+    notes: "Tyrannosaur, Huge (3×3 squares); starter encounter profile.",
+  };
+  const enemy = (id, name, pf1e) => baseDoc(id, "actor", name, {
+    ownership: npcOwnership, system: { pf1e }, items: [], effects: [],
+  });
+  const macroBase = (id, name, sequence, extra = {}) => baseDoc(id, "macro", name, {
+    // Players must be able to read a published scene effect before playerCallable can authorize
+    // its request; LIMITED (1) is not enough for HostSync's read check.
+    ownership: { default: 2, gm: 3 },
+    flags: { core: { playerCallable: true } },
+    kind: "sequence", command: "", sequence, ...extra,
+  });
+  const entangleArea = macroBase("macro-entangle-area", "Entangle — 40-ft. Area Vines", {
+    version: 1, audience: "scene", sections: [{
+      id: "entangle-area", kind: "image", assetId: media.entangleAreaEffect,
+      at: { kind: "target" }, startMs: 0, durationMs: 5000, scale: 1.333,
+      layer: "aboveTokens",
+    }],
+  }, { fxSpell: { spellId: "entangle", recognition: "success" } });
+  const entangledVines = macroBase("macro-entangled-vines", "Entangled — Token Vines", {
+    version: 1, audience: "scene", persistent: true, sections: [{
+      id: "entangled-vines", kind: "image", assetId: media.entangledTokenEffect,
+      at: { kind: "target" }, startMs: 0, durationMs: 1000, scale: 1,
+      follow: true, layer: "aboveTokens",
+    }],
+  });
+  const lightningBoltEffect = macroBase("macro-lightning-bolt-effect", "Lightning Bolt — 90-ft. Line", {
+    version: 1, audience: "scene", sections: [{
+      id: "lightning-bolt-line", kind: "image", assetId: media.lightningEffect,
+      at: { kind: "source" }, to: { kind: "target" }, stretch: true,
+      startMs: 0, durationMs: 1400, scale: 1, layer: "aboveTokens",
+    }],
+  });
+
+  return [scene, hosilla, vacorg,
+    enemy("hobgoblin-fighter-1", "Hobgoblin Fighter 1", hobgoblinPf1e),
+    enemy("hobgoblin-fighter-2", "Hobgoblin Fighter 2", hobgoblinPf1e),
+    enemy("hobgoblin-fighter-3", "Hobgoblin Fighter 3", hobgoblinPf1e),
+    enemy("troll", "Troll", trollPf1e),
+    enemy("tyrannosaur", "Tyrannosaur", tyrannosaurPf1e),
+    entangleArea, entangledVines, lightningBoltEffect];
+}
+
 /**
  * The pre-placed documents of the tester world, in deterministic order. `contentDir` is the
  * built content package (dist/content/pf1e) — the Goblin actor is read from its pack.
  */
-function testerDocuments(contentDir) {
+function testerDocuments(contentDir, demoMedia = starterDemoAssets().refs) {
   const goblinPf1e = goblinPf1eFromPack(contentDir);
   const heroToken = tokenDoc("tok-hero", "Ser Aldric Vane", 500, 500, "hero", "friendly");
   const goblinAToken = tokenDoc("tok-goblin-a", "Goblin", 700, 450, "goblin-a", "hostile");
@@ -675,6 +868,8 @@ function testerDocuments(contentDir) {
     // The overland region: a hexcrawl scene with 28 authored hexes, four encounter tables and a
     // traveller's guide, so a tester can walk before they author.
     ...hexcrawlDocuments(),
+    // A ready-to-play PF1e spell scene, using the supplied JungleEntrance2 and media assets.
+    ...jungleSpellDemoDocuments(demoMedia),
   ];
 }
 
@@ -684,12 +879,14 @@ function testerDocuments(contentDir) {
  * Returns the same record shape as buildStarterArchive (id suffixed "-tester").
  */
 export function buildTesterStarterArchive({ systemsDir, contentDir }) {
+  const demo = starterDemoAssets();
   return assembleArchive(systemsDir, "pf1e-mass-battles", {
     contentDir,
     idOverride: "pf1e-mass-battles-tester",
     nameOverride: "Pathfinder 1e Mass Battles — tester",
     worldIdSuffix: "-tester",
-    docs: testerDocuments(resolve(contentDir)),
+    docs: testerDocuments(resolve(contentDir), demo.refs),
+    assets: demo.assets,
   });
 }
 
@@ -725,8 +922,10 @@ export async function buildStarterWorlds(opts = {}) {
     // Keep the built-in starter playable even when the optional converted content checkout is
     // unavailable. The PF1e Core package still supplies the compendia; these seeded documents
     // provide the hero, enemy actors, scene tokens, and tester guide for real browser testing.
+    const demo = id === "pf1e-mass-battles" ? starterDemoAssets() : { refs: {}, assets: [] };
     const built = buildStarterArchive(systemsDir, id, {
-      docs: id === "pf1e-mass-battles" ? testerDocuments(null) : [],
+      docs: id === "pf1e-mass-battles" ? testerDocuments(null, demo.refs) : [],
+      assets: demo.assets,
     });
     results.push({ ...built, zip: writeZip(built, `${id}-starter-${built.version}.zip`) });
   }

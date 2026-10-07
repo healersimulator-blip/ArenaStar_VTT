@@ -1426,7 +1426,8 @@
       },
       "conditions": [
        "Entangled"
-      ]
+      ],
+      "conditionFxMacroId": "macro-entangled-vines"
      }
     },
     "items": [],

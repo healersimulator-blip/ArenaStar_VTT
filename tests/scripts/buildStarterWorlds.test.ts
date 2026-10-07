@@ -89,14 +89,69 @@ describe("scripts/buildStarterWorlds.mjs", () => {
       worldId: "starter-pf1e-mass-battles",
       system: "pf1e-mass-battles",
       version: "1.0.0",
-      seq: 17,
+      seq: 28,
       rules: { active: "pf1e-mass-battles" },
       starter: true,
     });
-    const starterDocuments = JSON.parse(strFromU8(entries["documents.json"] as Uint8Array)) as { seq: number; docs: unknown[] };
-    expect(starterDocuments.seq).toBe(17);
-    expect(starterDocuments.docs).toHaveLength(17);
+    const starterDocuments = JSON.parse(strFromU8(entries["documents.json"] as Uint8Array)) as {
+      seq: number;
+      docs: { coll: string; id: string; doc: Record<string, unknown> }[];
+    };
+    expect(starterDocuments.seq).toBe(28);
+    expect(starterDocuments.docs).toHaveLength(28);
+    const starterById = new Map(starterDocuments.docs.map((row) => [row.id, row]));
+    const jungle = starterById.get("scene-jungle")?.doc as {
+      name: string; active: boolean; img: string; width: number; height: number;
+      flags: { core?: { spellDemo?: { macros?: { lightningBolt?: string } } } };
+      grid: { size: number; distance: number; units: string };
+      tokens: { _id: string; actorId: string; width: number; height: number }[];
+    } | undefined;
+    expect(jungle).toMatchObject({ name: "JungleEntrance2 — PF1e Spell Demonstration",
+      active: false, width: 1200, height: 1800, grid: { size: 100, distance: 5, units: "ft" } });
+    expect(jungle?.tokens.map(({ _id, actorId, width, height }) => ({ _id, actorId, width, height })))
+      .toEqual([
+        { _id: "tok-hosilla", actorId: "hosilla", width: 100, height: 100 },
+        { _id: "tok-vacorg", actorId: "vacorg", width: 100, height: 100 },
+        { _id: "tok-hobgoblin-1", actorId: "hobgoblin-fighter-1", width: 100, height: 100 },
+        { _id: "tok-hobgoblin-2", actorId: "hobgoblin-fighter-2", width: 100, height: 100 },
+        { _id: "tok-hobgoblin-3", actorId: "hobgoblin-fighter-3", width: 100, height: 100 },
+        { _id: "tok-troll", actorId: "troll", width: 200, height: 200 },
+        { _id: "tok-tyrannosaur", actorId: "tyrannosaur", width: 300, height: 300 },
+      ]);
+    expect(starterDocuments.docs.find((row) => row.id === "scene-1")?.doc)
+      .toMatchObject({ active: true });
+    expect(starterDocuments.docs.find((row) => row.id === "hosilla")?.doc)
+      .toMatchObject({ name: "Hosilla", system: { pf1e: { abilities: { cha: 18 }, spells: {
+        casterLevel: 6, mode: "spontaneous", known: [{ name: "Lightning Bolt", level: 3 }] } } } });
+    expect(starterDocuments.docs.find((row) => row.id === "vacorg")?.doc)
+      .toMatchObject({ name: "Vacorg", system: { pf1e: { abilities: { wis: 18 }, spells: {
+        casterLevel: 6, prepared: [{ name: "Entangle", level: 1 }] } } } });
+    const starterAssets = JSON.parse(strFromU8(entries["assets.json"] as Uint8Array)) as
+      { hash: string; name: string; mime: string; chunks: number; visibility: string }[];
+    expect(starterAssets).toHaveLength(11);
+    expect(starterAssets.map((asset) => asset.name)).toEqual(expect.arrayContaining([
+      "JungleEntrance2.jpg", "token_Hosilla.png", "token_Vacorg.png", "token_Hobgoblin1.png",
+      "token_Troll6.png", "token_Tyrannosaur.png", "Crosshair_Line_Generic_01_White_90ft.webm",
+      "Crosshair_Circle_Fantasy_01_White_30ft.webm", "Lightning_Bolt_Blue_90ft.webm",
+      "Nature_Vine_Normal_Circle_01_Physical_Green_30ft.webm",
+      "Nature_Vine_Normal_Token_01_Physical_Green.webm",
+    ]));
+    for (const asset of starterAssets) {
+      expect(asset.visibility).toBe("referenced");
+      expect(asset.chunks).toBeGreaterThan(0);
+      expect(entries[`assets/${asset.hash}`]).toBeDefined();
+    }
+    expect(jungle?.img).toBe(starterAssets.find((asset) => asset.name === "JungleEntrance2.jpg")?.hash);
+    expect(jungle?.flags.core?.spellDemo?.macros?.lightningBolt).toBe("macro-lightning-bolt-effect");
+    expect(starterById.get("macro-lightning-bolt-effect")?.doc).toMatchObject({
+      name: "Lightning Bolt — 90-ft. Line", ownership: { default: 2, gm: 3 },
+      flags: { core: { playerCallable: true } }, sequence: { sections: [{
+        id: "lightning-bolt-line", kind: "image", at: { kind: "source" },
+        to: { kind: "target" }, stretch: true,
+      }] },
+    });
     expect(Object.keys(entries)).toEqual(expect.arrayContaining([
+      "assets.json",
       "packages/pf1e-mass-battles/manifest.json",
       "packages/pf1e-mass-battles/rules.js",
       "packages/pf1e-core/manifest.json",
@@ -151,12 +206,16 @@ describe("scripts/buildStarterWorlds.mjs", () => {
     try {
       expect(app.meta.name).toBe("Kingmaker");
       expect(app.rulesBoot).toMatchObject({ source: "package", packageId: "pf1e-mass-battles", error: null });
-      // seq 0 → the host seeded the world like a brand-new one: default scene, tactical by default
+      // The starter includes the demonstration documents, while preserving the ordinary default
+      // scene (`scene-1`) as active so existing starter behavior does not change.
       const scene = app.gm.client.store.get("scenes", DEFAULT_SCENE_ID) as
-        | { flags?: { core?: { scale?: string } } }
+        | { active?: boolean; flags?: { core?: { scale?: string } } }
         | undefined;
       expect(scene).toBeDefined();
+      expect(scene?.active).toBe(true);
       expect(scene?.flags?.core?.scale ?? "tactical").toBe("tactical");
+      expect(app.gm.client.store.get("scenes", "scene-jungle")).toMatchObject({
+        name: "JungleEntrance2 — PF1e Spell Demonstration", active: false });
       // the content pack is installed beside the ruleset and no dependency is missing
       const pkgs = await app.packages.list();
       expect(pkgs.map((p) => [p.id, p.active, p.missingDependencies.length])).toEqual(
@@ -259,8 +318,9 @@ describe("scripts/buildStarterWorlds.mjs", () => {
 
 /**
  * The tester starter bundles the mass-battles ruleset (active) + pf1e-core + the converted
- * PF1e content package, with 17 pre-placed documents (a tactical skirmish, a strategic
- * battle with two armies, an overland hexcrawl, and a tester guide). The content package here
+ * PF1e content package, with 28 pre-placed documents (a tactical skirmish, a strategic
+ * battle with two armies, an overland hexcrawl, the JungleEntrance2 spell demonstration, and
+ * a tester guide). The content package here
  * is a SMALL fixture
  * shaped like the real `dist/content/pf1e` (the real one is 58 MB / 25 k entries — the
  * conversion itself is covered by tests/scripts/contentConverter.test.ts).
@@ -322,7 +382,7 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
     tester = built.find((b) => b.id === "pf1e-mass-battles-tester");
   }, 120_000);
 
-  test("builds the plain starter PLUS the tester with three packages and 17 documents", () => {
+  test("builds the plain starter PLUS the tester with three packages and 28 documents", () => {
     expect(tester).toBeDefined();
     if (!tester?.zip) throw new Error("tester starter not built");
     expect(tester.name).toBe("Pathfinder 1e Mass Battles — tester");
@@ -336,7 +396,7 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
       format: 2,
       worldId: "starter-pf1e-mass-battles-tester",
       system: "pf1e-mass-battles",
-      seq: 17,
+      seq: 28,
       rules: { active: "pf1e-mass-battles" },
       starter: true,
     });
@@ -372,8 +432,8 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
       seq: number;
       docs: DocRow[];
     };
-    expect(docs.seq).toBe(17);
-    expect(docs.docs).toHaveLength(17);
+    expect(docs.seq).toBe(28);
+    expect(docs.docs).toHaveLength(28);
     const byId = new Map(docs.docs.map((d) => [d.id, d]));
     const docOf = <T>(id: string): T => {
       const row = byId.get(id);
@@ -440,7 +500,7 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
       expect(app.meta.name).toBe("Tester World");
       expect(app.rulesBoot).toMatchObject({ source: "package", packageId: "pf1e-mass-battles", error: null });
       const store = app.gm.client.store;
-      // pre-placed docs: no default seed (seq 17), the tactical scene is DEFAULT_SCENE_ID
+      // pre-placed docs: no default seed (seq 28), the tactical scene is DEFAULT_SCENE_ID
       expect(store.get("scenes", "scene-1")).toBeDefined();
       const scene2 = store.get("scenes", "scene-2") as { flags?: { core?: { scale?: string } } } | undefined;
       expect(scene2?.flags?.core?.scale).toBe("strategic");

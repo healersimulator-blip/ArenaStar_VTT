@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { describe, expect, test } from "vitest";
 import { canFetchAsset, projectAssetManifest } from "../../src/core/assetAccess";
 import type { AssetManifest, SceneDocument, TokenDocument } from "../../src/core/documents";
@@ -88,7 +89,7 @@ describe("asset entitlement / per-viewer manifest", () => {
     expect(canFetchAsset(world, manifest, player, "private")).toBe(true);
   });
 
-  test("a GM-only persistent timeline never grants its media just because a private instance exists", () => {
+  test("a GM-only persistent timeline grants media from its published definition, not its private instance", () => {
     const world = emptyWorld();
     world.scenes.push(scene());
     world.macros.push({ _id: "secret-timeline", type: "macro", name: "GM cue", flags: {}, system: {},
@@ -105,8 +106,8 @@ describe("asset entitlement / per-viewer manifest", () => {
           startMs: 0, durationMs: 500 },
       ] });
     const manifest: AssetManifest = { "secret-media": entry("private effects", "referenced") };
-    expect(projectAssetManifest(world, manifest, player)).toEqual({});
-    expect(canFetchAsset(world, manifest, player, "secret-media")).toBe(false);
+    expect(projectAssetManifest(world, manifest, player)["secret-media"]?.name).toBe("private effects");
+    expect(canFetchAsset(world, manifest, player, "secret-media")).toBe(true);
     expect(projectAssetManifest(world, manifest, gm)["secret-media"]?.name).toBe("private effects");
     const authored = world.macros[0];
     if (!authored?.sequence) throw new Error("Missing authored timeline");
@@ -135,6 +136,28 @@ describe("asset entitlement / per-viewer manifest", () => {
     // *new* (no visibility), stays GM-only exactly as before.
     world.macros.length = 0;
     expect(canFetchAsset(world, manifest, player, "preset-media")).toBe(false);
+  });
+
+  test("visible Codex galleries grant reference-gated assets only to their audience", () => {
+    const world = emptyWorld();
+    const image = "d".repeat(64);
+    world.journals.push({
+      _id: "gallery-sheet", type: "journal", name: "Gallery", ownership: { default: 1 },
+      flags: {}, system: {}, pages: [], codex: {
+        version: 1, kind: "entry", links: [], tabs: [{ key: "info", label: "Info", order: 0 }],
+        quests: [], widgets: [{ id: "gallery", type: "image-gallery", version: 1, tab: "info", order: 0,
+          enabled: true, audience: { kind: "inherit" }, config: { images: [{ assetId: image, caption: "Public" }] } }],
+      },
+    });
+    const manifest: AssetManifest = { [image]: entry("Codex art", "referenced") };
+    expect(canFetchAsset(world, manifest, player, image)).toBe(true);
+    const gallery = world.journals[0];
+    if (!gallery?.codex) throw new Error("Missing Codex gallery");
+    gallery.codex.widgets[0]!.audience = { kind: "gmOnly" };
+    expect(canFetchAsset(world, manifest, player, image)).toBe(false);
+    expect(canFetchAsset(world, manifest, gm, image)).toBe(true);
+    gallery.codex.widgets[0]!.audience = { kind: "inherit" };
+    expect(canFetchAsset(world, { [image]: entry("Private Codex art", "gm") }, player, image)).toBe(false);
   });
 
   test("no scene ownership also hides a referenced asset even with public token", () => {

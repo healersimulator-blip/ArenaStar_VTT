@@ -203,6 +203,15 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
     case "pf1e.condition.result":
       return { kind: "pf1e.condition.result", requestId: "condition-01", action: "apply",
         actorId: "actor-1", applicationId: "condition-app-1", receiptId: "condition-receipt-1", seq: 1 };
+    case "codex.purchase":
+      return { kind: "codex.purchase", requestId: "purchase-01", sheetId: "shop-1",
+        stockRowId: "stock-1", quantity: 2, actorId: "actor-1" };
+    case "codex.purchase.result":
+      return { kind: "codex.purchase.result", requestId: "purchase-01", ok: true,
+        detail: "Purchased 2 × Potion.", totalCopper: 300 };
+    case "codex.claim":
+      return { kind: "codex.claim", requestId: "claim-01", sheetId: "shop-1",
+        stockRowId: "stock-1", quantity: 1, actorId: "actor-1" };
     case "roll.delegate":
       return { kind: "roll.delegate", messageId: "m1", playerId: "u1" };
     case "roll.apply":

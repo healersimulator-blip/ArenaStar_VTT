@@ -77,6 +77,9 @@ export const MsgKind = {
   // Source-addressed condition edits are host-audited and use the private Revert receipt.
   "pf1e.condition": 0x54,
   "pf1e.condition.result": 0x55,
+  "codex.purchase": 0x56,
+  "codex.purchase.result": 0x57,
+  "codex.claim": 0x58,
   // D-394 — permitted personal macro authoring in the GM world (not execution).
   "macros.save": 0x51,
   // SQ-02 — private acknowledgement naming the exact host-approved run a requester may cancel.
@@ -294,6 +297,37 @@ export interface PF1eConditionActionResultMsg {
   applicationId: string;
   receiptId: DocId;
   seq: number;
+}
+
+/** Player request names only bounded identifiers; price, stock and Ops are host-derived. */
+export interface CodexPurchaseMsg {
+  kind: "codex.purchase";
+  requestId: string;
+  sheetId: DocId;
+  stockRowId: string;
+  quantity: number;
+  actorId: DocId;
+}
+
+/** Private acknowledgment for one Codex shop purchase. */
+export interface CodexClaimMsg {
+  kind: "codex.claim";
+  requestId: string;
+  sheetId: DocId;
+  stockRowId: string;
+  quantity: number;
+  actorId: DocId;
+}
+
+export interface CodexPurchaseResultMsg {
+  kind: "codex.purchase.result";
+  action?: "purchase" | "claim";
+  requestId: string;
+  ok: boolean;
+  detail: string;
+  receiptId?: DocId;
+  totalCopper?: number;
+  replayed?: boolean;
 }
 
 /** F01 — GM delegates a reroll window to a player (expires in 2 turns). */
@@ -870,6 +904,9 @@ export type WireMessage =
   | PF1ePoisonActionMsg
   | PF1eConditionActionMsg
   | PF1eConditionActionResultMsg
+  | CodexPurchaseMsg
+  | CodexClaimMsg
+  | CodexPurchaseResultMsg
   | RollDelegateMsg
   | RollApplyMsg
   | AutomationRequestMsg

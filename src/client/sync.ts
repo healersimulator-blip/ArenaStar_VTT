@@ -37,6 +37,7 @@ import type {
   PF1ePoisonActionRequest,
   PF1eConditionActionRequest,
   PF1eConditionActionResultMsg,
+  CodexPurchaseResultMsg,
   RollMode,
   SimControlAction,
   SimDeltaMsg,
@@ -101,6 +102,8 @@ export interface ClientEvents {
   taggerRulesResult: TaggerRulesResultMsg;
   /** Host-validated keyed condition application/removal committed with a private Revert receipt. */
   conditionActionResult: PF1eConditionActionResultMsg;
+  /** Private acknowledgement for a host-validated Campaign Codex shop purchase. */
+  codexPurchaseResult: CodexPurchaseResultMsg;
   /** Host-validated atomic prefab placement (GM only). */
   prefabResult: PrefabResultMsg;
   /** Source-free host result for an authorized summon or dismissal. */
@@ -399,6 +402,20 @@ export class ClientSync {
     this.send({ kind: "action.revert", receiptId });
   }
 
+  /** Submit a Codex purchase by identifiers only; prices and generated Ops stay host-authoritative. */
+  requestCodexPurchase(sheetId: DocId, stockRowId: string, quantity: number, actorId: DocId, requestId?: string): string {
+    const id = requestId ?? globalThis.crypto.randomUUID();
+    this.send({ kind: "codex.purchase", requestId: id, sheetId, stockRowId, quantity, actorId });
+    return id;
+  }
+
+  /** Ask the host to transfer a loot stock row to an owned actor without charging currency. */
+  requestCodexClaim(sheetId: DocId, stockRowId: string, quantity: number, actorId: DocId, requestId?: string): string {
+    const id = requestId ?? globalThis.crypto.randomUUID();
+    this.send({ kind: "codex.claim", requestId: id, sheetId, stockRowId, quantity, actorId });
+    return id;
+  }
+
   /** Ask HostSync to resolve one Core PF1e poison operation; mechanics/results never travel here. */
   requestPF1ePoisonAction(request: PF1ePoisonActionRequest): string {
     const requestId = globalThis.crypto.randomUUID();
@@ -623,6 +640,9 @@ export class ClientSync {
         return;
       case "pf1e.condition.result":
         this.bus.emit("conditionActionResult", msg);
+        return;
+      case "codex.purchase.result":
+        this.bus.emit("codexPurchaseResult", msg);
         return;
       case "prefab.result":
         this.bus.emit("prefabResult", msg);

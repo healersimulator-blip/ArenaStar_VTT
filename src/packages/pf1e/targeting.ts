@@ -11,32 +11,24 @@
  * "Aiming a Spell", i.e. CRB pp.214–216; the same text appears verbatim on
  * d20pfsrd.com/magic and d20srd.org). Each encoded rule is cited inline.
  *
- * **Shapes resolved here:** burst, emanation, cylinder, spread — the four whose
- * grid templates follow unambiguously from the quoted counting rule. C01 says
- * "burst, cone, line, emanation, spread/cylinder **where supported**".
+ * **Cell-area resolver:** burst, emanation, cylinder and spread. A straight line is
+ * resolved separately as a finite, 5-ft-wide corridor against each token's complete
+ * rectangular footprint (`PF1eLineArea` below); the starter Lightning Bolt uses that
+ * published template rather than inventing a zero-width grid ray.
  *
- * **Not encoded on purpose — cone and line (C01b).** Both have a contested grid
- * discretization that the rules text does not settle:
- *   • Cone: AoN 212 says "a quarter-circle … starts from any corner of your
- *     square and widens out as it goes", but the rules designer's own answer on
- *     the template is "Cones can't be perfect on a square grid. Just pick one,
- *     drop it on the map so its origin point is the corner of one of the
- *     caster's squares, and that's what area the spell effects" (Sean K
- *     Reynolds, Paizo forums). Published templates disagree (1/2/3 rows vs
- *     2/4/6 rows for a 15-ft. cone).
- *   • Line: AoN 212 says it "affects all creatures in squares through which the
- *     line passes", but a zero-width line drawn exactly along grid lines or an
- *     exact diagonal grazes shared edges; the published template is a 5-ft.-wide
- *     corridor, so the two readings differ on every axis-aligned and 45° cast.
- * Per the R01 transcribe-before-fixtures requirement, C01b must fix a named
- * template from a canonical figure before any cone/line fixture is written —
- * a guessed template is exactly the "snapshot a missing table" failure V01
- * forbids, and this slice refuses to invent one.
+ * **Still deferred — cone (C01b).** AoN 212 says "a quarter-circle … starts from any
+ * corner of your square and widens out as it goes", but the rules designer's own answer
+ * on the template is "Cones can't be perfect on a square grid. Just pick one, drop it on
+ * the map so its origin point is the corner of one of the caster's squares, and that's
+ * what area the spell effects" (Sean K Reynolds, Paizo forums). Published templates
+ * disagree (1/2/3 rows vs 2/4/6 rows for a 15-ft. cone). The grid-area resolver therefore
+ * refuses cones rather than guessing; the separately documented line corridor has its
+ * own explicit footprint-intersection rule.
  */
 import { cellDistance, type DiagonalRule } from "../../canvas/grid/measure";
 import type { Segment } from "../../canvas/vision/polygon";
 
-/** Area shapes this slice resolves. Cone and line are deferred to C01b. */
+/** Shapes resolved by the cell-area resolver; finite line corridors use `PF1eLineArea` separately. */
 export const PF1E_AREA_KINDS = [
   "burst",
   "emanation",
@@ -668,6 +660,55 @@ export function affectedTokens<
   return tokens.filter((t) =>
     tokenCells(t, grid).some((c) => keys.has(cellKey(c))),
   );
+}
+
+/** One published straight-line template, used by the starter Lightning Bolt demo. */
+export interface PF1eLineArea {
+  origin: { x: number; y: number };
+  /** Unit bearing in world axes (canvas y grows downward). */
+  direction: { x: number; y: number };
+  lengthFt: number;
+  widthFt: number;
+}
+
+/**
+ * Does a creature's complete rectangular grid footprint intersect a straight-line area?
+ * Lightning Bolt uses a 5-ft-wide corridor; the four separating axes (world x/y, line
+ * forward/side) make edge contact inclusive and work for Medium through Huge footprints.
+ */
+export function lineIntersectsTokenFootprint(
+  line: PF1eLineArea,
+  token: { x: number; y: number; width: number; height: number },
+  grid: PF1eAreaGrid,
+): boolean {
+  const { origin, direction } = line;
+  const directionLength = Math.hypot(direction.x, direction.y);
+  if (![origin.x, origin.y, direction.x, direction.y, line.lengthFt, line.widthFt,
+    token.x, token.y, token.width, token.height, grid.cellSize, grid.feetPerCell]
+    .every(Number.isFinite) || directionLength < 1e-9 || line.lengthFt <= 0 ||
+      line.widthFt <= 0 || token.width <= 0 || token.height <= 0 ||
+      grid.cellSize <= 0 || grid.feetPerCell <= 0) return false;
+  const forward = { x: direction.x / directionLength, y: direction.y / directionLength };
+  const side = { x: -forward.y, y: forward.x };
+  const length = line.lengthFt * grid.cellSize / grid.feetPerCell;
+  const halfWidth = line.widthFt * grid.cellSize / grid.feetPerCell / 2;
+  const halfLength = length / 2;
+  const lineCenter = { x: origin.x + forward.x * halfLength,
+    y: origin.y + forward.y * halfLength };
+  const tokenHalfWidth = token.width / 2;
+  const tokenHalfHeight = token.height / 2;
+  const dx = token.x - lineCenter.x;
+  const dy = token.y - lineCenter.y;
+  const axes = [
+    { x: 1, y: 0 }, { x: 0, y: 1 }, forward, side,
+  ];
+  return axes.every((axis) => {
+    const centerDistance = Math.abs(dx * axis.x + dy * axis.y);
+    const tokenRadius = tokenHalfWidth * Math.abs(axis.x) + tokenHalfHeight * Math.abs(axis.y);
+    const lineRadius = halfLength * Math.abs(forward.x * axis.x + forward.y * axis.y) +
+      halfWidth * Math.abs(side.x * axis.x + side.y * axis.y);
+    return centerDistance <= tokenRadius + lineRadius + 1e-7;
+  });
 }
 
 // ─── larger creatures (AoN 212, "Bursts and Emanations and Larger Creatures") ─

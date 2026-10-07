@@ -269,25 +269,34 @@ describe("the hot-bar spell slot (D-407)", () => {
     ...over,
   });
 
-  test("only the catalogue's spells are offered, with the mechanics the catalogue authors", () => {
+  test("all prepared spells are offered; authored mechanics are distinct from reviewed manual profiles", () => {
     const actor = druid();
     const candidates = quickbarCandidates(actor, derivedOf(actor));
     const spells = candidates.filter((candidate) => candidate.kind === "spell");
-    // Magic Missile is prepared but unauthored, so the bar does not invent its save for it.
-    expect(spells.map((candidate) => candidate.label)).toEqual(["Entangle (level 1)"]);
+    expect(spells.map((candidate) => candidate.label)).toEqual([
+      "Entangle (level 1)", "Magic Missile (level 1)",
+    ]);
     expect(spells[0]?.detail).toContain("REF DC");
     expect(spells[0]?.detail).toContain("Entangled");
+    expect(spells[1]?.detail).toContain("review and set this spell's save/damage profile");
     const entangle = spells[0];
     if (entangle === undefined) throw new Error("no spell candidate");
     const entry = candidateToEntry(3, entangle);
     expect(entry).toMatchObject({ slot: 3, kind: "spell", label: "Entangle (level 1)",
       preparedIndex: 0, spellLevel: 1, itemId: null });
-    // The binding survives the round trip through the actor's flags.
-    const written = quickbarWriteOp(actor, [entry]);
+    const magicMissile = spells[1];
+    if (magicMissile === undefined) throw new Error("no generic spell candidate");
+    const reviewed = candidateToEntry(4, magicMissile, {
+      saveType: "ref", severity: "none", damageFormula: "1d4+1",
+    });
+    expect(quickbarSlotNote(actor, reviewed, derivedOf(actor))).toBeNull();
+    // The binding and the caller-reviewed mechanics survive the actor-flag round trip.
+    const written = quickbarWriteOp(actor, [reviewed]);
     expect(written.kind).toBe("update");
     const reread = readQuickbar({ ...actor, flags: {
-      pf1e: { quickbar: [{ ...entry }] } } } as unknown as ActorDocument);
-    expect(reread[0]).toMatchObject({ kind: "spell", preparedIndex: 0, spellLevel: 1 });
+      pf1e: { quickbar: [{ ...reviewed }] } } } as unknown as ActorDocument);
+    expect(reread[0]).toMatchObject({ kind: "spell", preparedIndex: 1, spellLevel: 1,
+      spellProfile: { saveType: "ref", severity: "none", damageFormula: "1d4+1" } });
   });
 
   test("a malformed spell entry reads as unbound, and a missing level never crashes the bar", () => {
@@ -298,7 +307,7 @@ describe("the hot-bar spell slot (D-407)", () => {
     expect(readQuickbar(hero({ quickbar: [{ slot: 1, kind: "spell" }] }))).toEqual([]);
   });
 
-  test("a stale spell binding is named: a re-prepared row, a gone row, an unauthored spell", () => {
+  test("a stale spell binding and a missing manual profile are named before the slot can run", () => {
     const actor = druid();
     const derived = derivedOf(actor);
     const slot = (over: Record<string, unknown> = {}) => ({ slot: 1, kind: "spell" as const,
@@ -313,8 +322,38 @@ describe("the hot-bar spell slot (D-407)", () => {
       prepared: [{ name: "Magic Missile", level: 1 }] } } });
     expect(quickbarSlotNote(swapped, slot(), derivedOf(swapped)))
       .toContain("now holds Magic Missile");
-    // A spell the catalogue stopped authoring is not silently rerolled either.
-    expect(quickbarSlotNote(actor, slot({ label: "Wish (level 9)" }), derived))
-      .toBe("the bound spell has no authored tactical effect");
+    const wishCaster = druid({ spells: { abilities: { int: 16 }, spells: {
+      keyAbility: "int", mode: "prepared", casterLevel: 17, slotsPerDay: { 9: 1 },
+      prepared: [{ name: "Wish", level: 9 }] } } });
+    const wish = quickbarCandidates(wishCaster, derivedOf(wishCaster)).find((candidate) =>
+      candidate.kind === "spell" && candidate.label === "Wish (level 9)");
+    if (!wish) throw new Error("Wish compendium spell candidate missing");
+    const unconfigured = candidateToEntry(1, wish);
+    expect(quickbarSlotNote(wishCaster, unconfigured, derivedOf(wishCaster)))
+      .toBe("set this spell's save, severity and damage profile when binding it");
+    const reviewed = candidateToEntry(1, wish, {
+      saveType: "will", severity: "none", damageFormula: "",
+    });
+    expect(quickbarSlotNote(wishCaster, reviewed, derivedOf(wishCaster))).toBeNull();
+  });
+
+  test("a spontaneous caster can bind a known Lightning Bolt for a safe line-preview-only flow", () => {
+    const actor = hero({ spells: {
+      abilities: { str: 16, cha: 18 },
+      spells: { keyAbility: "cha", mode: "spontaneous", casterLevel: 6,
+        slotsPerDay: { 0: 6, 1: 8, 2: 6, 3: 4 }, slotsUsed: { 3: 0 },
+        known: [{ name: "Lightning Bolt", level: 3, components: "V, S" }] },
+    } });
+    const derived = derivedOf(actor);
+    const candidate = quickbarCandidates(actor, derived).find((row) => row.kind === "spell");
+    expect(candidate).toMatchObject({ id: "spell:known:0", label: "Lightning Bolt (level 3)",
+      spellLevel: 3, detail: expect.stringContaining("90-ft line, 6d6 electricity") });
+    if (!candidate) throw new Error("known spell candidate missing");
+    const entry = candidateToEntry(1, candidate);
+    expect(entry).toMatchObject({ preparedIndex: null, spellLevel: 3 });
+    expect(quickbarSlotNote(actor, entry, derived)).toBeNull();
+    const removed = hero({ spells: { spells: { mode: "spontaneous", known: [] } } });
+    expect(quickbarSlotNote(removed, entry, derivedOf(removed)))
+      .toBe("the bound known spell is gone — re-bind it");
   });
 });

@@ -138,8 +138,14 @@ const isId = (value: unknown): value is string => typeof value === "string" && v
  * nothing) plays instead of the spell's own cue.
  */
 export interface FxSpellBinding {
-  /** Catalogue id (`entangle`), validated against the shipped tactical-effect catalogue. */
+  /**
+   * Stable spell key. Tactical-effect catalogue ids remain valid for legacy worlds; otherwise
+   * this is the normalized name key (for example, "fireball" or "burning-hands") so any
+   * world-compendium spell can bind without inventing a rules effect.
+   */
   spellId: string;
+  /** Original catalogue/compendium display name, when known; the key remains authoritative. */
+  spellName?: string;
   /** The cue a **failed** cast plays instead. */
   onFailureId?: DocId;
   /** Author override of the automatic recognition. Default `auto`. */
@@ -149,7 +155,24 @@ export interface FxSpellBinding {
 }
 
 /** Every field a spell binding may carry — anything else is refused by name. */
-export const FX_SPELL_BINDING_KEYS = ["spellId", "onFailureId", "recognition", "enabled"] as const;
+export const FX_SPELL_BINDING_KEYS = ["spellId", "spellName", "onFailureId", "recognition", "enabled"] as const;
+
+/**
+ * Turn a display name into the stable key used by both compendium rows and cast outcomes.
+ * Matching is exact after normalization — never fuzzy — so "Fireball" cannot capture
+ * "Delayed Blast Fireball". Existing tactical ids (such as `entangle`) are unchanged.
+ */
+export function fxSpellKeyFromName(name: string): string | null {
+  const key = name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return key.length > 0 && key.length <= 128 ? key : null;
+}
+
+/** The validated key a macro carries, or null when its field is malformed/absent. */
+export function fxSpellBindingKey(binding: unknown): string | null {
+  const checked = validateFxSpellBinding(binding);
+  return checked.ok ? checked.binding.spellId : null;
+}
 
 /** Validate the authored shape of a spell binding, refusing an unknown field by name. */
 export function validateFxSpellBinding(
@@ -159,7 +182,14 @@ export function validateFxSpellBinding(
   if (!isObject(value)) return invalid("an FX spell binding needs a spell");
   const stray = Object.keys(value).filter((key) => !(FX_SPELL_BINDING_KEYS as readonly string[]).includes(key));
   if (stray.length > 0) return invalid(`an FX spell binding carries no ${stray.join("/")} field`);
-  if (!isId(value.spellId)) return invalid("an FX spell binding needs the spell it belongs to");
+  if (typeof value.spellId !== "string" || !/^[a-z0-9][a-z0-9_-]{0,127}$/i.test(value.spellId))
+    return invalid("an FX spell binding needs a stable spell key of 1–128 letters, digits, \"_\" or \"-\"");
+  const spellId = value.spellId.toLowerCase();
+  if (value.spellName !== undefined) {
+    if (typeof value.spellName !== "string" || value.spellName.trim() === "" ||
+        value.spellName.length > 80 || fxSpellKeyFromName(value.spellName) !== spellId)
+      return invalid("an FX spell binding's display name must match its stable spell key");
+  }
   if (value.onFailureId !== undefined && !isId(value.onFailureId))
     return invalid("an FX spell binding's failure cue must name a timeline");
   if (value.recognition !== undefined &&
@@ -169,7 +199,8 @@ export function validateFxSpellBinding(
     return invalid("an FX spell binding's enabled must be a boolean");
   if (value.recognition === "failure" && value.onFailureId === undefined)
     return invalid("forcing the failure cue needs a bound failure timeline to play");
-  const binding: FxSpellBinding = { spellId: value.spellId };
+  const binding: FxSpellBinding = { spellId };
+  if (typeof value.spellName === "string") binding.spellName = value.spellName.trim();
   if (typeof value.onFailureId === "string") binding.onFailureId = value.onFailureId;
   if (typeof value.recognition === "string") binding.recognition = value.recognition as FxRecognition;
   if (typeof value.enabled === "boolean") binding.enabled = value.enabled;
@@ -188,9 +219,15 @@ export function fxSpellBindingOf(macro: MacroDocument): FxSpellBinding | null {
 }
 
 /** Does this timeline name that spell? */
-export function fxSpellBindingMatches(macro: MacroDocument, spellId: string): boolean {
+export function fxSpellBindingMatches(macro: MacroDocument, spellIdOrName: string): boolean {
   const binding = fxSpellBindingOf(macro);
-  return binding !== null && binding.spellId === spellId;
+  const rawKey = /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(spellIdOrName)
+    ? spellIdOrName.toLowerCase() : null;
+  // Preserve an exact legacy catalogue id; otherwise normalize display-name punctuation too
+  // (for example, "Fireball_0" and "Fireball, 0" both become "fireball-0").
+  const key = binding !== null && rawKey === binding.spellId
+    ? rawKey : fxSpellKeyFromName(spellIdOrName) ?? rawKey;
+  return binding !== null && key !== null && binding.spellId === key;
 }
 
 /**
@@ -207,10 +244,8 @@ export function fxSpellBindingBranch(macro: MacroDocument, outcome: "success" | 
   return outcome === "success" ? macro._id : binding.onFailureId ?? null;
 }
 
-/** What the host must be able to see for a spell binding: a catalogue spell and readable timelines. */
+/** What the host must be able to see for a spell binding: its readable timelines and unique key. */
 export interface FxSpellBindingLookup {
-  /** Whether the shipped tactical-effect catalogue defines that spell id. */
-  catalogue(spellId: string): boolean;
   macro(id: DocId): MacroDocument | undefined;
   /** Whether the *editor* may read that document — the host passes its own `can(...)`. */
   readable(coll: "macros", doc: { _id: DocId }): boolean;
@@ -224,8 +259,6 @@ export function fxSpellBindingError(macro: MacroDocument, lookup: FxSpellBinding
   const checked = validateFxSpellBinding(macro.fxSpell);
   if (!checked.ok) return checked.error;
   const binding = checked.binding;
-  if (!lookup.catalogue(binding.spellId))
-    return "an FX spell binding must name a spell the tactical-effect catalogue ships";
   for (const [which, id] of [["the cue", macro._id], ["the failure cue", binding.onFailureId]] as const) {
     if (id === undefined) continue;
     const target = id === macro._id ? macro : lookup.macro(id);

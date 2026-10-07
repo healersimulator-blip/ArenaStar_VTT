@@ -218,6 +218,15 @@ export interface AppSurface {
   macroCallable(): string;
   /** D-394 read-only: documents actually present in this shell, including projected owner DTOs. */
   worldMacros(): string;
+  /** Host-only condition-linked FX instances, including the application that owns each lifetime. */
+  fxInstances(): Array<{
+    id: string;
+    sceneId: string;
+    macroId: string;
+    sourceTokenId: string | null;
+    targetTokenId: string | null;
+    conditionApplicationId: string | null;
+  }>;
   /** Test-only durability barrier: await the queued IDB oplog append before navigating away. */
   drainOps(): Promise<number>;
   tokenCount(): number;
@@ -457,6 +466,8 @@ export interface AppSurface {
   /** D-255: the live camera — pan mode / zoom assertions. */
   camera(): { x: number; y: number; scale: number } | null;
   lastRejected(): string | null;
+  /** Last live FX cue this replica received, for browser delivery assertions. */
+  lastFxCue(): { runId: string; macroId: string; sceneId: string } | null;
   /** §12 rules-package boot state + management readbacks. */
   rulesBoot(): {
     source: "package" | "builtin";
@@ -1037,6 +1048,9 @@ export interface PlayerSurface {
   /** D-256: what the GM's placements look like on this replica. */
   walls(): Array<{ id: string; door: number }>;
   camera(): { x: number; y: number; scale: number } | null;
+  /** Last presentation cue/rejection observed by this replica; useful for browser-sync diagnosis. */
+  lastFxCue(): { runId: string; macroId: string; sceneId: string } | null;
+  lastRejected(): { txId: string; reason: string; detail: string } | null;
   /** D-271: the cell keys this replica holds. A closed cell is never sent, so this is the
    *  reveal set and nothing else — the browser half of the projection rule. */
   hexCellKeys(): string[];
@@ -1593,6 +1607,14 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
     ).distributions;
     lastByType = dist?.byType ?? {};
   });
+  let lastFxCue: { runId: string; macroId: string; sceneId: string } | null = null;
+  let lastRejected: { txId: string; reason: string; detail: string } | null = null;
+  playerApp.bus.on("fx", (cue) => {
+    lastFxCue = { runId: cue.runId, macroId: cue.macroId, sceneId: cue.sceneId };
+  });
+  playerApp.bus.on("rejected", (event) => {
+    lastRejected = { txId: event.txId, reason: event.reason, detail: event.detail };
+  });
   const scene = () => {
     const c = client();
     if (!c) return null;
@@ -1632,6 +1654,8 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
         .__canvasStage;
       return stage ? { ...stage.camera } : null;
     },
+    lastFxCue: () => lastFxCue,
+    lastRejected: () => lastRejected,
     hexCellKeys: () => {
       const scenes = client()?.store.getAll("scenes") ?? [];
       const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
@@ -1736,6 +1760,10 @@ interface MovementOpportunitySurface {
 
 function appSurface(app: HostApp): AppSurface {
   const client = app.gm.client;
+  let lastFxCue: { runId: string; macroId: string; sceneId: string } | null = null;
+  app.gm.bus.on("fx", (cue) => {
+    lastFxCue = { runId: cue.runId, macroId: cue.macroId, sceneId: cue.sceneId };
+  });
   const scene = () => client.store.get("scenes", "scene-1");
   const firstToken = () => scene()?.tokens[0];
   /** The seam's own empty result, for the surfaces' "no scene" early return. */
@@ -2404,6 +2432,14 @@ function appSurface(app: HostApp): AppSurface {
     seq: () => client.store.seq,
     chatLines: () => client.store.getAll("messages").map((message) => message.content),
     worldMacros: () => JSON.stringify(client.store.getAll("macros")),
+    fxInstances: () => client.store.getAll("fxInstances").map((instance) => ({
+      id: instance._id,
+      sceneId: instance.sceneId,
+      macroId: instance.macroId,
+      sourceTokenId: instance.sourceTokenId ?? null,
+      targetTokenId: instance.targetTokenId ?? null,
+      conditionApplicationId: instance.conditionApplicationId ?? null,
+    })),
     macroCallable: () => {
       const found = client.store.getAll("macros").find((m) => m.kind === "automation");
       return JSON.stringify(found ? { id: found._id, automation: found.automation ?? null } : null);
@@ -2718,6 +2754,7 @@ function appSurface(app: HostApp): AppSurface {
     },
     lastRejected: () =>
       globalThis.localStorage.getItem("vtt-e2e-last-rejected"),
+    lastFxCue: () => lastFxCue,
     rulesBoot: () => app.rulesBoot,
     migrationBoot: () => app.migrationBoot,
     simInfo: () => app.gm.client.simInfo,

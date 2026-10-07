@@ -14,12 +14,18 @@ import type {
   ActorDocument,
   ActionReceiptDocument,
   Json,
+  MacroDocument,
   MessageDocument,
+  SceneDocument,
+  TokenDocument,
+  Ownership,
   UserDocument,
 } from "../../src/core/documents";
 import { DocumentStore, OpLog, UndoStack, type StoreMeta } from "../../src/core";
 import { ClientSync, type ClientEvents } from "../../src/client/sync";
 import { HostSync, gmSessionUser } from "../../src/host/sync";
+import { deriveFromActorDocument } from "../../src/packages/pf1e/actor";
+import { resolveCastFlow } from "../../src/ui/sheets/pf1eCastFlow";
 import { createTransportPair, flushMicrotasks } from "../../src/net/memory";
 
 const meta: StoreMeta = {
@@ -45,6 +51,54 @@ function actorDoc(id: string, over: Partial<ActorDocument> = {}): ActorDocument 
       saves: { fort: 0, ref: 0, will: 0 }, savesAsTotal: true, hitDice: 4,
     } },
     items: [], effects: [], ...over,
+  };
+}
+
+function spellDemoScene(): SceneDocument {
+  const token = (id: string, actorId: string, x: number): TokenDocument => ({
+    _id: id, type: "token", name: actorId, flags: {}, system: {}, ownership: { default: 0 },
+    x, y: 500, rotation: 0, width: 100, height: 100, img: "", actorId,
+    hidden: false, disposition: "neutral", vision: true,
+    light: { radius: 0, color: "#ffffff", alpha: 0 },
+  });
+  return {
+    _id: "scene-jungle", type: "scene", name: "JungleEntrance2 — PF1e Spell Demonstration",
+    ownership: { default: 2, [GM_ID]: 3 }, flags: {}, system: {}, active: false,
+    img: null, width: 1200, height: 1800, darkness: 0,
+    grid: { type: "square", size: 100, distance: 5, units: "ft", diagonals: "555", hexLayout: "oddQ" },
+    tokens: [token("tok-druid", "druid", 300), token("tok-orc", "orc", 500)],
+    walls: [], lights: [], sounds: [], tiles: [], drawings: [], templates: [], notes: [],
+  };
+}
+
+function lightningDemoScene(): SceneDocument {
+  const token = (id: string, name: string, actorId: string, x: number, ownership: Ownership): TokenDocument => ({
+    _id: id, type: "token", name, flags: {}, system: {}, ownership,
+    x, y: 500, rotation: 0, width: 100, height: 100, img: "", actorId,
+    hidden: false, disposition: "hostile", vision: true,
+    light: { radius: 0, color: "#ffffff", alpha: 0 },
+  });
+  return {
+    _id: "scene-jungle", type: "scene", name: "JungleEntrance2 — PF1e Spell Demonstration",
+    ownership: { default: 2, [GM_ID]: 3, [PLAYER_ID]: 2 }, flags: {}, system: {}, active: false,
+    img: null, width: 1200, height: 1800, darkness: 0,
+    grid: { type: "square", size: 100, distance: 5, units: "ft", diagonals: "555", hexLayout: "oddQ" },
+    tokens: [
+      token("tok-hosilla", "Hosilla", "hosilla", 300, { default: 0, [GM_ID]: 3, [PLAYER_ID]: 3 }),
+      token("tok-hobgoblin-1", "Hobgoblin Fighter 1", "hobgoblin-fighter-1", 600,
+        { default: 2, [GM_ID]: 3, [PLAYER_ID]: 2 }),
+    ],
+    walls: [], lights: [], sounds: [], tiles: [], drawings: [], templates: [], notes: [],
+  };
+}
+
+function entangledVinesMacro(): MacroDocument {
+  return {
+    _id: "macro-entangled-vines", type: "macro", name: "Entangled — Token Vines",
+    ownership: { default: 1, [GM_ID]: 3 }, flags: { core: { playerCallable: true } }, system: {},
+    kind: "sequence", command: "", sequence: { version: 1, persistent: true, audience: "scene",
+      sections: [{ kind: "text", id: "vines", text: "vines", at: { kind: "target" },
+        startMs: 0, durationMs: 1000 }] },
   };
 }
 
@@ -74,6 +128,7 @@ async function setup() {
   gmBus.on("rejected", (event) => rejected.push(event));
   playerBus.on("rejected", (event) => rejected.push(event));
   gmBus.on("conditionActionResult", (event) => results.push(event));
+  playerBus.on("conditionActionResult", (event) => results.push(event));
   const gm = new ClientSync({ transport: gmPair.b, bus: gmBus, meta });
   const player = new ClientSync({ transport: playerPair.b, bus: playerBus, meta });
   await flushMicrotasks();
@@ -90,6 +145,7 @@ function castCardMessage(input: {
   messageId: string; casterId: string; itemId?: string; targetActorId: string;
   targetName?: string; outcome?: "failedSave" | "saved" | "affected" | "resisted";
   dc?: number; total?: number; saveType?: "ref" | "fort" | "will";
+  sceneId?: string; casterTokenId?: string; targetTokenId?: string;
 }): MessageDocument {
   const resolver = input.outcome === "saved" || input.outcome === "resisted";
   return {
@@ -98,11 +154,15 @@ function castCardMessage(input: {
     system: { action: {
       v: 2, id: input.messageId, revision: 0, kind: "cast", label: "Entangle", state: "resolved",
       source: { name: "druid", actorId: input.casterId,
+        ...(input.casterTokenId !== undefined ? { tokenId: input.casterTokenId } : {}),
         ...(input.itemId !== undefined ? { itemId: input.itemId } : {}) },
+      ...(input.sceneId !== undefined ? { sceneId: input.sceneId } : {}),
       notes: [],
       targets: [{
         key: input.targetActorId, name: input.targetName ?? input.targetActorId,
-        actorId: input.targetActorId, state: "resolved", outcome: input.outcome ?? "failedSave",
+        actorId: input.targetActorId,
+        ...(input.targetTokenId !== undefined ? { tokenId: input.targetTokenId } : {}),
+        state: "resolved", outcome: input.outcome ?? "failedSave",
         check: { kind: "save", status: "resolved", formula: "1d20+1", dc: input.dc ?? 15,
           total: input.total ?? (resolver ? 20 : 4), saveType: input.saveType ?? "ref",
           passed: resolver },
@@ -151,12 +211,16 @@ function receiptsOf(store: DocumentStore): ActionReceiptDocument[] {
 async function landedCast(gm: ClientSync, input: {
   messageId: string; casterId: string; targetId: string; itemId?: string;
   outcome?: "failedSave" | "saved"; dc?: number;
+  sceneId?: string; casterTokenId?: string; targetTokenId?: string;
 }): Promise<void> {
   gm.submit([{ kind: "create", coll: "messages", data: castCardMessage({
     messageId: input.messageId, casterId: input.casterId, targetActorId: input.targetId,
     ...(input.itemId !== undefined ? { itemId: input.itemId } : {}),
     outcome: input.outcome ?? "failedSave",
     ...(input.dc !== undefined ? { dc: input.dc } : {}),
+    ...(input.sceneId !== undefined ? { sceneId: input.sceneId } : {}),
+    ...(input.casterTokenId !== undefined ? { casterTokenId: input.casterTokenId } : {}),
+    ...(input.targetTokenId !== undefined ? { targetTokenId: input.targetTokenId } : {}),
   }) }]);
   await flushMicrotasks();
 }
@@ -165,7 +229,13 @@ describe("D-407 spell effects deliver conditions on the landed cast", () => {
   test("a failed save applies the catalogue condition, records it on the card and Reverts cleanly", async () => {
     const { store, gm, results, rejected } = await setup();
     await seedActors(gm, [actorDoc("druid"), actorDoc("orc")]);
-    await landedCast(gm, { messageId: "cast-one", casterId: "druid", targetId: "orc" });
+    gm.submit([
+      { kind: "create", coll: "scenes", data: spellDemoScene() },
+      { kind: "create", coll: "macros", data: entangledVinesMacro() },
+    ]);
+    await flushMicrotasks();
+    await landedCast(gm, { messageId: "cast-one", casterId: "druid", targetId: "orc",
+      sceneId: "scene-jungle", casterTokenId: "tok-druid", targetTokenId: "tok-orc" });
 
     // The catalogue, not the client, decides what the effect applies: `entangle` applies Entangled.
     gm.requestPF1eConditionAction({ action: "apply", actorId: "orc", condition: "Entangled",
@@ -182,6 +252,11 @@ describe("D-407 spell effects deliver conditions on the landed cast", () => {
       condition: "Entangled",
       source: { kind: "spell", id: "entangle", actionId: "cast-one", actorId: "druid" },
       removal: { kind: "manual" },
+    });
+    expect(store.getAll("fxInstances")).toHaveLength(1);
+    expect(store.getAll("fxInstances")[0]).toMatchObject({
+      macroId: "macro-entangled-vines", targetTokenId: "tok-orc",
+      conditionApplicationId: applicationId,
     });
     // The delivering card carries the rider, and the rider's evidence is the catalogue row.
     expect(riderOf(store, "cast-one")).toMatchObject({
@@ -203,6 +278,7 @@ describe("D-407 spell effects deliver conditions on the landed cast", () => {
     expect(conditionApps(actorOf(store, "orc"))).toEqual({});
     expect(((cardOf(store, "cast-one").targets as Record<string, unknown>[])[0]?.riders ?? []))
       .toEqual([]);
+    expect(store.getAll("fxInstances")).toEqual([]);
     expect(receiptsOf(store).find((entry) => entry._id === receiptId)?.status).toBe("reverted");
   });
 
@@ -286,27 +362,45 @@ describe("D-407 spell effects deliver conditions on the landed cast", () => {
     expect(firstId).toBe("speffect-cast-six-0");
   });
 
-  test("only the caster's controller may deliver the effect; the GM may deliver anyone's", async () => {
+  test("the caster's controller may deliver to an NPC, and condition-linked FX stop when removed", async () => {
     const { store, gm, player, rejected, results } = await setup();
     await seedActors(gm, [
       actorDoc("druid", { ownership: { default: 0, [PLAYER_ID]: 3, [GM_ID]: 3 } }),
       actorDoc("orc", { ownership: { default: 0, [GM_ID]: 3 } }),
     ]);
-    await landedCast(gm, { messageId: "cast-seven", casterId: "druid", targetId: "orc" });
+    gm.submit([
+      { kind: "create", coll: "scenes", data: spellDemoScene() },
+      { kind: "create", coll: "macros", data: entangledVinesMacro() },
+    ]);
+    await flushMicrotasks();
+    await landedCast(gm, { messageId: "cast-seven", casterId: "druid", targetId: "orc",
+      sceneId: "scene-jungle", casterTokenId: "tok-druid", targetTokenId: "tok-orc" });
 
-    // The player controls the caster but not the target: the target gate refuses first, by design.
+    // Players may apply only a host-verified spell delivery from an actor they control, even though
+    // they do not own the NPC target. The linked FX run belongs to the exact condition application.
     player.requestPF1eConditionAction({ action: "apply", actorId: "orc", condition: "Entangled",
       spell: { effectId: "entangle", actionId: "cast-seven", targetKey: "orc" } });
     await flushMicrotasks();
-    expect(rejected.at(-1)?.reason).toBe("forbidden");
-    expect(rejected.at(-1)?.detail).toContain("condition target");
-    // The GM delivers it, and the source still names the caster's controller as the authority.
-    gm.requestPF1eConditionAction({ action: "apply", actorId: "orc", condition: "Entangled",
-      spell: { effectId: "entangle", actionId: "cast-seven", targetKey: "orc" } });
+    expect(rejected, JSON.stringify(rejected)).toEqual([]);
+    expect(results).toHaveLength(1);
+    const applicationId = results[0]?.applicationId;
+    if (!applicationId) throw new Error("condition application acknowledgement missing");
+    expect(conditionApps(actorOf(store, "orc"))[applicationId]).toMatchObject({
+      source: { kind: "spell", actorId: "druid" }, removal: { kind: "manual" },
+    });
+    expect(store.getAll("fxInstances")).toHaveLength(1);
+    expect(store.getAll("fxInstances")[0]).toMatchObject({
+      macroId: "macro-entangled-vines", sceneId: "scene-jungle", targetTokenId: "tok-orc",
+      conditionApplicationId: applicationId,
+    });
+
+    // The GM can break/remove an NPC's condition. Deleting its keyed application also removes the
+    // persistent vine instance, instead of leaving an orphaned visual on the token.
+    gm.requestPF1eConditionAction({ action: "remove", actorId: "orc", applicationId });
     await flushMicrotasks();
-    expect(rejected, JSON.stringify(rejected)).toHaveLength(1);
-    expect(conditionApps(actorOf(store, "orc"))).toMatchObject({
-      [results[0]?.applicationId ?? "missing"]: { source: { kind: "spell", actorId: "druid" } } });
+    expect(rejected, JSON.stringify(rejected)).toEqual([]);
+    expect(conditionApps(actorOf(store, "orc"))).toEqual({});
+    expect(store.getAll("fxInstances")).toEqual([]);
   });
 
   test("a manual application still carries its manual source and removal (the spell path is additive)", async () => {
@@ -321,6 +415,80 @@ describe("D-407 spell effects deliver conditions on the landed cast", () => {
 });
 
 /** The message the GM reads must name the client and the condition (the D4 policy). */
+describe("starter Lightning Bolt host verification", () => {
+  test("a player cast uses the 90-ft line profile and may write only the verified NPC HP delta", async () => {
+    const { store, gm, player, rejected } = await setup();
+    const hosilla = actorDoc("hosilla", {
+      name: "Hosilla",
+      ownership: { default: 0, [PLAYER_ID]: 3, [GM_ID]: 3 },
+      system: { pf1e: {
+        size: "Medium", hp: 24, hpMax: 24, saves: { fort: 3, ref: 2, will: 5 }, savesAsTotal: true,
+        abilities: { str: 10, dex: 14, con: 12, int: 12, wis: 10, cha: 18 },
+        spells: { keyAbility: "cha", casterLevel: 6, mode: "spontaneous",
+          slotsPerDay: { 0: 6, 1: 8, 2: 6, 3: 4 }, slotsUsed: { 3: 0 },
+          known: [{ name: "Lightning Bolt", level: 3 }] },
+      } },
+    });
+    const hobgoblin = actorDoc("hobgoblin-fighter-1", {
+      name: "Hobgoblin Fighter 1",
+      ownership: { default: 2, [GM_ID]: 3 },
+      system: { pf1e: {
+        size: "Medium", hp: 20, hpMax: 20, saves: { fort: 3, ref: 1, will: 0 }, savesAsTotal: true,
+        abilities: { str: 13, dex: 12, con: 12, int: 10, wis: 10, cha: 9 },
+      } },
+    });
+    gm.submit([
+      { kind: "create", coll: "actors", data: hosilla },
+      { kind: "create", coll: "actors", data: hobgoblin },
+      { kind: "create", coll: "scenes", data: lightningDemoScene() },
+    ]);
+    await flushMicrotasks();
+
+    const caster = player.store.get("actors", "hosilla") as ActorDocument | undefined;
+    const target = player.store.get("actors", "hobgoblin-fighter-1") as ActorDocument | undefined;
+    if (!caster || !target || !player.user) throw new Error("player replica did not receive spell demo actors");
+    const area = { sceneId: "scene-jungle", shape: "line" as const, origin: { x: 300, y: 500 },
+      length: 90, width: 5, direction: { x: 1, y: 0 }, units: "ft" as const };
+    const resolved = await resolveCastFlow(player, player.user, {
+      context: { sceneId: "scene-jungle", casterTokenId: "tok-hosilla",
+        targetTokenId: "tok-hobgoblin-1", area },
+      casterActor: caster,
+      casterDerived: deriveFromActorDocument(caster),
+      spell: { name: "Lightning Bolt", level: 3 },
+      authored: { saveType: "ref", severity: "half", damageFormula: "6d6", energyType: "electricity" },
+      targetName: target.name,
+      targetActor: target,
+      targetDerived: deriveFromActorDocument(target),
+    });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) throw new Error(resolved.error);
+    if (resolved.lost || resolved.held || resolved.pending === true)
+      throw new Error("Lightning Bolt did not reach its resolved effect branch");
+    expect(resolved.hpWriteError).toBeNull();
+    await flushMicrotasks();
+
+    expect(rejected, JSON.stringify(rejected)).toEqual([]);
+    const card = messagesOf(store).map((message) => message.system.action as Record<string, unknown> | undefined)
+      .find((action) => action?.label === "Lightning Bolt");
+    expect(card).toMatchObject({ kind: "cast", area: { shape: "line", length: 90, width: 5,
+      sceneId: "scene-jungle", origin: { x: 300, y: 500 }, direction: { x: 1, y: 0 } },
+      targets: [expect.objectContaining({ actorId: "hobgoblin-fighter-1", provenance: "host",
+        evidence: expect.objectContaining({ adapter: "pf1e.spellTarget.v1" }) })] });
+    const currentCaster = actorOf(store, "hosilla");
+    expect(((pf1eOf(currentCaster).spells as Record<string, unknown>).slotsUsed as Record<string, number>)["3"])
+      .toBe(1);
+    const hpAfterBolt = Number(pf1eOf(actorOf(store, "hobgoblin-fighter-1")).hp);
+    expect(hpAfterBolt).toBeLessThan(20);
+
+    // The carve-out is not generic NPC ownership: a standalone HP edit still fails.
+    player.submit([{ kind: "update", ref: { coll: "actors", id: "hobgoblin-fighter-1" },
+      diff: { "system.pf1e.hp": hpAfterBolt - 1 } }]);
+    await flushMicrotasks();
+    expect(rejected.at(-1)?.reason).toBe("forbidden");
+    expect(Number(pf1eOf(actorOf(store, "hobgoblin-fighter-1")).hp)).toBe(hpAfterBolt);
+  });
+});
+
 describe("D-407 spell effectiveness metadata", () => {
   test("the applying client's name and the spell are both in the chat record", async () => {
     const { store, gm } = await setup();

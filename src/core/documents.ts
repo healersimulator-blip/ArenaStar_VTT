@@ -307,16 +307,123 @@ export interface ActorDocument extends BaseDocument {
   prototypeToken?: TokenPrototypeData;
 }
 
+export type CodexSheetKind = "group" | "region" | "location" | "entry" | "npc" | "tag";
+
+export type CodexRelation =
+  | "contains"
+  | "locatedAt"
+  | "associatedWith"
+  | "operatedBy"
+  | "representsActor"
+  | "linksScene"
+  | "linksItem"
+  | "relatedTo";
+
+/** Audience rules only narrow access already granted by the parent document. */
+export type CodexAudience =
+  | { kind: "inherit" }
+  | { kind: "gmOnly" }
+  | { kind: "selectedUsers"; userIds: UserId[] };
+
+export interface CodexTabConfig {
+  key: string;
+  label: string;
+  order: number;
+  audience?: CodexAudience;
+}
+
+export interface CodexLink {
+  id: string;
+  relation: CodexRelation;
+  target: DocRef;
+  label?: string;
+  audience?: CodexAudience;
+}
+
+export interface CodexObjective {
+  id: string;
+  title: string;
+  description?: string;
+  completed: boolean;
+  audience?: CodexAudience;
+  order: number;
+  children: CodexObjective[];
+}
+
+export interface CodexQuest {
+  id: string;
+  title: string;
+  description: string;
+  state: "active" | "completed" | "failed";
+  pinned: boolean;
+  audience?: CodexAudience;
+  order: number;
+  objectives: CodexObjective[];
+}
+
+/** Declarative widget data only; imported configs never execute code. */
+export interface CodexWidgetInstance {
+  id: string;
+  type: string;
+  version: number;
+  tab: string;
+  order: number;
+  enabled: boolean;
+  audience?: CodexAudience;
+  config: Json;
+}
+
+export interface CodexShopStockRow {
+  id: string;
+  item: DocRef;
+  quantity: number | null;
+  unitPrice?: string;
+  order: number;
+}
+
+export interface CodexShopConfig {
+  mode: "shop" | "loot";
+  audience?: CodexAudience;
+  markup?: number;
+  currencyLabel?: string;
+  stock: CodexShopStockRow[];
+}
+
+export interface CodexSheet {
+  /** Codex metadata version, independent from the World ZIP format. */
+  version: number;
+  kind: CodexSheetKind;
+  subtitle?: string;
+  /** ArenaStar asset hash/reference; never an instruction to fetch a remote URL. */
+  cover?: string;
+  tabs?: CodexTabConfig[];
+  links: CodexLink[];
+  widgets: CodexWidgetInstance[];
+  quests?: CodexQuest[];
+  shop?: CodexShopConfig;
+}
+
+export interface CodexPageMetadata {
+  tabKey?: string;
+  label?: string;
+  order?: number;
+  audience?: CodexAudience;
+}
+
 export interface JournalPageDocument extends BaseDocument {
   type: "page";
   /** Markdown; `<secret>` blocks are stripped for non-GM by projection (§5). */
   text: string;
   src: string | null;
+  /** Optional Codex presentation/audience metadata; absent on ordinary pages. */
+  codex?: CodexPageMetadata;
 }
 
 export interface JournalDocument extends BaseDocument {
   type: "journal";
   pages: JournalPageDocument[];
+  /** Optional Campaign Codex metadata; absent on ordinary journals. */
+  codex?: CodexSheet;
 }
 
 export interface RollTableResult {
@@ -441,8 +548,9 @@ export interface MacroDocument extends BaseDocument {
    */
   fxItem?: import("./fxBinding").FxItemBinding;
   /**
-   * D-407: the spell this timeline is bound to, by tactical-effect catalogue id. Stored on the
-   * timeline for the same reason `fxItem` is — the ordinary macro projection decides who may
+   * D-407: the spell this timeline is bound to, by stable normalized name key (while preserving
+   * legacy tactical-effect ids). Stored on the timeline for the same reason `fxItem` is — the
+   * ordinary macro projection decides who may
    * discover the binding, and a spell row is not an item document to hang it on.
    */
   fxSpell?: import("./fxBinding").FxSpellBinding;
@@ -485,6 +593,8 @@ export interface FxInstanceDocument extends BaseDocument {
   syncGroups?: import("./fx").FxSyncGroupMember[];
   sourceTokenId?: DocId;
   targetTokenId?: DocId;
+  /** Exact PF1e condition application whose lifetime owns this persistent visual. */
+  conditionApplicationId?: DocId;
 }
 
 export interface CardEntry {

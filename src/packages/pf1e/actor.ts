@@ -1,3 +1,4 @@
+/* eslint-disable no-useless-escape */
 /**
  * PF1e tactical **actor state** — what an actor *is* in combat, and the one derivation that turns
  * `system.pf1e` + active effects into the numbers combat consumes.
@@ -196,6 +197,16 @@ export interface PF1eSpellsAuthored {
    * data (D-155). Resting/resetting is manual until recovery lands (P7).
    */
   slotsUsed?: Partial<Record<number, number>>;
+  /**
+   * A spontaneous caster's known spell rows. The hotbar reads these to offer real known spells;
+   * each cast still validates name/level and spends the corresponding slot on the host.
+   */
+  known?: Array<{
+    name: string;
+    level: number;
+    slotLevel?: number;
+    components?: string;
+  }>;
   /**
    * A prepared caster's current preparation (D-155): each entry names the
    * spell, the level it was prepared at, the slot it fills (defaults to its
@@ -742,6 +753,25 @@ export function parsePF1eActorSystem(raw: unknown): Result<PF1eActorSystem> {
           return err(
             `prepared spell "${entry.name}": components must be a string of at most 120 characters`,
           );
+      }
+    }
+    if (s.known !== undefined) {
+      if (!Array.isArray(s.known)) return err("system.pf1e.spells.known must be an array");
+      if (s.known.length > MAX_PREPARED_SPELLS)
+        return err(`system.pf1e.spells.known supports at most ${MAX_PREPARED_SPELLS} entries`);
+      for (const rawKnown of s.known) {
+        if (!isRecord(rawKnown)) return err("known spells must be objects");
+        const known = rawKnown as Record<string, unknown>;
+        if (typeof known.name !== "string" || known.name.trim() === "")
+          return err("known spells need a non-empty name");
+        if (known.name.length > 120) return err("known spell names are at most 120 characters");
+        if (!Number.isInteger(known.level) || (known.level as number) < 0 || (known.level as number) > 9)
+          return err(`known spell \"${known.name}\": level must be an integer 0–9`);
+        if (known.slotLevel !== undefined && (!Number.isInteger(known.slotLevel) ||
+            (known.slotLevel as number) < 0 || (known.slotLevel as number) > 9))
+          return err(`known spell \"${known.name}\": slotLevel must be an integer 0–9`);
+        if (known.components !== undefined && (typeof known.components !== "string" || known.components.length > 120))
+          return err(`known spell \"${known.name}\": components must be a string of at most 120 characters`);
       }
     }
   }

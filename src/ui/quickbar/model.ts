@@ -8,8 +8,9 @@
  * to one of the actions the sheet already computes — an attack line (rolled against the selected
  * target through the sheet's own `resolveAttackFlow`), that line's damage (a public roll card, which
  * the D-261 apply verb can then land on whoever it hit), a castable item (the wand/scroll/potion
- * path `PF1eItemWindow` uses, charges and all), or — D-407 — a **prepared spell** the tactical
- * spell-effect catalogue knows, which the same `resolveCastFlow` the sheet's cast form uses resolves.
+ * path `PF1eItemWindow` uses, charges and all), or — D-407 — a prepared/known spell through the same
+ * `resolveCastFlow` the sheet's cast form uses. Catalogue spells carry authored mechanics; all other
+ * spells require a reviewed save/damage profile rather than an invented one.
  *
  * Slots live on the document, not in component state: binding a slot is an ordinary op, so it
  * replicates to the whole table and undoes like anything else. A spell slot was deferred by D-259
@@ -24,9 +25,20 @@ import type { PF1eDerived } from "../../packages/pf1e/actor";
 import { pf1eItemView } from "../sheets/pf1eItemsTab";
 import { pf1eSpellbookView } from "../sheets/pf1eSpellbook";
 import { pf1eSpellEffectByName } from "../../packages/pf1e/spellEffects";
+import { fxSpellKeyFromName } from "../../core/fxBinding";
+import { PF1E_SAVE_SEVERITIES, type PF1eSaveSeverity, type PF1eSaveType } from "../../packages/pf1e/casting";
+import { PF1E_ENERGY_TYPES, type PF1eEnergyType } from "../../packages/pf1e/healthState";
 
 /** The four things a player can put on a slot. */
 export type PF1eQuickbarKind = "attack" | "damage" | "item" | "spell";
+
+export interface PF1eQuickbarSpellProfile {
+  /** The spellbook/compendium's adjudicated mechanics for a spell without an authored effect. */
+  saveType: PF1eSaveType;
+  severity: PF1eSaveSeverity;
+  damageFormula: string;
+  energyType?: PF1eEnergyType;
+}
 
 export interface PF1eQuickbarEntry {
   /** 1–5, the key the table presses. */
@@ -46,6 +58,14 @@ export interface PF1eQuickbarEntry {
   preparedIndex?: number | null;
   /** `spell`: the spell level, for the cast and for the DC. */
   spellLevel?: number;
+  /**
+   * A caller-reviewed cast profile for a spell with no authored tactical-effect row. It does not
+   * assert that the VTT automates the spell's full text; it feeds the same save/damage inputs the
+   * actor sheet asks the GM to adjudicate.
+   */
+  spellProfile?: PF1eQuickbarSpellProfile;
+  /** Components line from the prepared/known row, used by the shared cast gate when present. */
+  spellComponents?: string;
 }
 
 /** The five slots, in hotbar order. */
@@ -53,6 +73,22 @@ export const QUICKBAR_SLOTS: readonly number[] = [1, 2, 3, 4, 5];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const QUICKBAR_SAVE_TYPES: readonly PF1eSaveType[] = ["fort", "ref", "will"];
+
+function readSpellProfile(raw: unknown): PF1eQuickbarSpellProfile | null {
+  if (!isRecord(raw) || Object.keys(raw).some((key) =>
+    !["saveType", "severity", "damageFormula", "energyType"].includes(key))) return null;
+  if (!QUICKBAR_SAVE_TYPES.includes(raw.saveType as PF1eSaveType) ||
+      !PF1E_SAVE_SEVERITIES.includes(raw.severity as PF1eSaveSeverity) ||
+      typeof raw.damageFormula !== "string" || raw.damageFormula.length > 120 ||
+      (raw.energyType !== undefined && !PF1E_ENERGY_TYPES.includes(raw.energyType as PF1eEnergyType)))
+    return null;
+  return { saveType: raw.saveType as PF1eSaveType,
+    severity: raw.severity as PF1eSaveSeverity,
+    damageFormula: raw.damageFormula,
+    ...(raw.energyType !== undefined ? { energyType: raw.energyType as PF1eEnergyType } : {}) };
 }
 
 function readEntry(raw: unknown): PF1eQuickbarEntry | null {
@@ -70,10 +106,17 @@ function readEntry(raw: unknown): PF1eQuickbarEntry | null {
     raw.preparedIndex >= 0 ? raw.preparedIndex : null;
   const spellLevel = typeof raw.spellLevel === "number" && Number.isInteger(raw.spellLevel) &&
     raw.spellLevel >= 0 && raw.spellLevel <= 9 ? raw.spellLevel : 0;
-  // The spell fields are written only for a spell binding, so an attack/item slot keeps the shape
-  // older worlds already stored (and the shapes their tests pin).
+  const spellProfile = raw.spellProfile === undefined ? null : readSpellProfile(raw.spellProfile);
+  const spellComponents = raw.spellComponents === undefined ? undefined
+    : typeof raw.spellComponents === "string" && raw.spellComponents.length <= 120
+      ? raw.spellComponents : null;
+  if (kind === "spell" && (raw.spellProfile !== undefined && spellProfile === null || spellComponents === null))
+    return null;
+  // Spell fields are written only for spell bindings; the other kinds keep older stored shapes.
   return kind === "spell"
-    ? { slot, kind, label, attackIndex, itemId, preparedIndex, spellLevel }
+    ? { slot, kind, label, attackIndex, itemId, preparedIndex, spellLevel,
+        ...(spellProfile !== null ? { spellProfile } : {}),
+        ...(spellComponents !== undefined && spellComponents !== null ? { spellComponents } : {}) }
     : { slot, kind, label, attackIndex, itemId };
 }
 
@@ -148,6 +191,8 @@ export interface PF1eQuickbarCandidate {
   preparedIndex?: number;
   /** `spell`: the spell level. */
   spellLevel?: number;
+  /** `spell`: components line carried by the prepared/known row, when authored. */
+  spellComponents?: string;
 }
 
 /**
@@ -182,23 +227,56 @@ export function quickbarCandidates(
       });
     }
   });
-  // D-407: the prepared spells the tactical catalogue knows. A spell the catalogue does not
-  // author is not listed: a hot-bar cast must not invent the save the sheet would ask for.
+  // D-407: catalogue spells carry authored tactical mechanics; every other prepared spell remains
+  // available with an explicit, caller-reviewed quickbar cast profile rather than being hidden.
   const spellbook = pf1eSpellbookView(actor, derived);
   spellbook.prepared.forEach((row, index) => {
     const effect = pf1eSpellEffectByName(row.name);
-    if (effect === null) return;
+    const lightningLine = row.name.trim().toLowerCase() === "lightning bolt";
     out.push({
       id: `spell:${String(index)}`,
       kind: "spell",
-      label: `${effect.name} (level ${String(row.level)})`,
-      detail: `cast at the selected target — ${effect.save === null
-        ? "no save" : `${effect.save.type.toUpperCase()} DC from your spell DC`}`
-        + `, delivers ${effect.conditions.join(", ")}`,
+      label: `${effect?.name ?? row.name} (level ${String(row.level)})`,
+      detail: effect
+        ? `cast at the selected target — ${effect.save === null
+          ? "no save" : `${effect.save.type.toUpperCase()} DC from your spell DC`}, delivers ${effect.conditions.join(", ")}`
+        : lightningLine
+          ? "aim a 90-ft line — 6d6 electricity, Reflex half (verified level-six profile)"
+          : "cast at the selected target — review and set this spell's save/damage profile when binding",
       attackIndex: 0,
       itemId: null,
       preparedIndex: index,
       spellLevel: row.level,
+      ...(row.components !== "" ? { spellComponents: row.components } : {}),
+    });
+  });
+  // Spontaneous casters use the same stored slot flow but identify a spell from `known`, not from
+  // a prepared row. The starter Lightning Bolt keeps its explicit CL 6 line profile; other known
+  // spells require a reviewed quickbar profile when bound.
+  const pf1e = (actor.system as Record<string, unknown>).pf1e;
+  const spells = isRecord(pf1e) ? pf1e.spells : undefined;
+  const known = isRecord(spells) && Array.isArray(spells.known) ? spells.known : [];
+  known.forEach((raw, index) => {
+    if (!isRecord(raw) || typeof raw.name !== "string" || !Number.isInteger(raw.level)) return;
+    const effect = pf1eSpellEffectByName(raw.name);
+    const demoLine = raw.name.trim().toLowerCase() === "lightning bolt";
+    const level = typeof raw.slotLevel === "number" && Number.isInteger(raw.slotLevel)
+      ? raw.slotLevel : raw.level as number;
+    out.push({
+      id: `spell:known:${String(index)}`,
+      kind: "spell",
+      label: `${effect?.name ?? raw.name} (level ${String(level)})`,
+      detail: demoLine
+        ? "cast a 90-ft line, 6d6 electricity, Reflex half (6th-level sorcerer profile)"
+        : effect
+          ? `cast at the selected target — ${effect.save === null
+            ? "no save" : `${effect.save.type.toUpperCase()} DC from your spell DC`}, delivers ${effect.conditions.join(", ")}`
+          : "cast at the selected target — review and set this spell's save/damage profile when binding",
+      attackIndex: 0,
+      itemId: null,
+      spellLevel: level,
+      ...(typeof raw.components === "string" && raw.components.length <= 120 && raw.components !== ""
+        ? { spellComponents: raw.components } : {}),
     });
   });
   for (const item of actor.items ?? []) {
@@ -222,6 +300,7 @@ export function quickbarCandidates(
 export function candidateToEntry(
   slot: number,
   candidate: PF1eQuickbarCandidate,
+  spellProfile?: PF1eQuickbarSpellProfile,
 ): PF1eQuickbarEntry {
   return {
     slot,
@@ -231,7 +310,9 @@ export function candidateToEntry(
     itemId: candidate.itemId,
     // Only a spell binding carries the spell fields; the other kinds keep their stored shape.
     ...(candidate.kind === "spell"
-      ? { preparedIndex: candidate.preparedIndex ?? null, spellLevel: candidate.spellLevel ?? 0 }
+      ? { preparedIndex: candidate.preparedIndex ?? null, spellLevel: candidate.spellLevel ?? 0,
+          ...(spellProfile !== undefined ? { spellProfile } : {}),
+          ...(candidate.spellComponents !== undefined ? { spellComponents: candidate.spellComponents } : {}) }
       : {}),
   };
 }
@@ -246,15 +327,29 @@ export function quickbarSlotNote(
   derived: PF1eDerived,
 ): string | null {
   if (entry.kind === "spell") {
-    // The name is the binding's identity: a prepared row's *index* shifts as the caster re-prepares,
-    // so the note re-reads the spellbook and checks the row still names this spell.
-    const effect = pf1eSpellEffectByName(entry.label.replace(/ \(level \d+\)$/, ""));
-    if (effect === null) return "the bound spell has no authored tactical effect";
-    if (entry.preparedIndex === null) return null;
-    const row = pf1eSpellbookView(actor, derived).prepared[entry.preparedIndex ?? -1];
-    if (row === undefined) return "the bound prepared row is gone — re-prepare and re-bind";
-    if (pf1eSpellEffectByName(row.name)?.id !== effect.id)
-      return `the bound row now holds ${row.name}, not ${effect.name}`;
+    // The normalized exact name is the binding's identity: a prepared row's *index* shifts as the
+    // caster re-prepares, so the note re-reads the current book and never casts a different spell.
+    const spellName = entry.label.replace(/ \(level \d+\)$/, "").trim();
+    const spellKey = fxSpellKeyFromName(spellName);
+    if (spellKey === null) return "the bound spell name cannot be normalized — re-bind it";
+    const effect = pf1eSpellEffectByName(spellName);
+    const demoLine = spellName.toLowerCase() === "lightning bolt";
+    if (entry.preparedIndex == null) {
+      const pf1e = (actor.system as Record<string, unknown>).pf1e;
+      const spells = isRecord(pf1e) ? pf1e.spells : undefined;
+      const known = isRecord(spells) && Array.isArray(spells.known) ? spells.known : [];
+      const found = known.some((raw) => isRecord(raw) && typeof raw.name === "string" &&
+        fxSpellKeyFromName(raw.name) === spellKey &&
+        (raw.slotLevel === entry.spellLevel || raw.slotLevel === undefined && raw.level === entry.spellLevel));
+      if (!found) return "the bound known spell is gone — re-bind it";
+    } else {
+      const row = pf1eSpellbookView(actor, derived).prepared[entry.preparedIndex];
+      if (row === undefined) return "the bound prepared row is gone — re-prepare and re-bind";
+      if (fxSpellKeyFromName(row.name) !== spellKey)
+        return `the bound row now holds ${row.name}, not ${spellName}`;
+    }
+    if (effect === null && !demoLine && entry.spellProfile === undefined)
+      return "set this spell's save, severity and damage profile when binding it";
     return null;
   }
   if (entry.kind === "item") {

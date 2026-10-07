@@ -14,6 +14,7 @@ import {
   affectedTokens,
   areaCellDistance,
   areaPreviewRects,
+  lineIntersectsTokenFootprint,
   cellRect,
   cellsByRow,
   centeredOnYouRadiusBonusFt,
@@ -408,6 +409,23 @@ describe("affected tokens and preview geometry", () => {
     expect(affectedTokens(cells, [inside, outside, straddling], GRID)).toEqual([
       inside,
     ]);
+  });
+
+  it("targets complete token footprints through a 5-ft-wide 90-ft line", () => {
+    const line = { origin: { x: 0, y: 0 }, direction: { x: 1, y: 0 }, lengthFt: 90, widthFt: 5 };
+    expect(lineIntersectsTokenFootprint(line,
+      { x: 1_000, y: 50, width: 100, height: 100 }, GRID)).toBe(true);
+    expect(lineIntersectsTokenFootprint(line,
+      { x: 1_000, y: 101, width: 100, height: 100 }, GRID)).toBe(false);
+    expect(lineIntersectsTokenFootprint(line,
+      { x: 1_900, y: 0, width: 100, height: 100 }, GRID)).toBe(false);
+    const diagonal = { ...line, direction: { x: 1, y: 1 } };
+    expect(lineIntersectsTokenFootprint(diagonal,
+      { x: 700, y: 700, width: 200, height: 200 }, GRID)).toBe(true);
+    expect(lineIntersectsTokenFootprint(diagonal,
+      { x: 700, y: 900, width: 100, height: 100 }, GRID)).toBe(false);
+    expect(lineIntersectsTokenFootprint(line,
+      { x: 1_000, y: 0, width: 0, height: 100 }, GRID)).toBe(false);
   });
 
   it("counts a Large token touched on a single cell", () => {

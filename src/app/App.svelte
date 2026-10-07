@@ -15,7 +15,8 @@
     pf1eAreaPreviewModel,
     type PF1eAreaPreviewModel,
   } from "../packages/pf1e/areaPreview";
-  import type { PF1eAreaKind, PF1eAreaSpec } from "../packages/pf1e/targeting";
+  import { lineIntersectsTokenFootprint, pf1eAreaGridFromScene,
+    type PF1eAreaKind, type PF1eAreaSpec } from "../packages/pf1e/targeting";
   import { moveSegments, sightSegments } from "../canvas/vision";
   import { SvelteMap } from "svelte/reactivity";
   import { TileImageCache } from "../canvas/imageTexture";
@@ -30,7 +31,8 @@
     exportWorldZip,
   } from "../host/worldFile";
   import { ChatPanel } from "../ui/chat";
-  import { QuickbarRow } from "../ui/quickbar";
+  import { QuickbarRow, prefetchQuickbarSpellFx, runQuickbarEntangleArea, runQuickbarLightningBoltLine,
+    type PF1eQuickbarEntry, type PF1eQuickbarRunResult } from "../ui/quickbar";
   import OnboardingPanel from "../ui/onboarding/OnboardingPanel.svelte";
   import { CombatPanel } from "../ui/combat";
   import {
@@ -62,7 +64,8 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import CrosshairOverlay from "../ui/macros/CrosshairOverlay.svelte";
   import { resolveCrosshairPick, summonCrosshairOptions, type CrosshairPickOptions } from "../ui/macros/crosshairPicker";
   import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
-  import type { CrosshairPlacement, RequestCrosshairPick } from "../ui/macros/crosshairPicker";
+  import type { RequestCrosshairPick } from "../ui/macros/crosshairPicker";
+  import { sightBlockedBetween, type CrosshairPlacement } from "../core/crosshair";
   import type { PreviewFxSequence } from "../ui/macros/fxPreview";
   import Icon from "../ui/icons/Icon.svelte";
   import CanvasToolbar, {
@@ -210,6 +213,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { startHostShare, type HostShare } from "./hostShare";
   import type {
     ActorDocument,
+    AssetManifestEntry,
     CellFeature,
     CombatDocument,
     LightDocument,
@@ -1367,6 +1371,23 @@ const WALL_PICK_RADIUS = 12;
    */
   const assetUrls = new SvelteMap<string, string>();
 
+  async function getCodexAssetBytes(assetId: string): Promise<Uint8Array | undefined> {
+    const current = app;
+    if (!current) return undefined;
+    const local = await current.assets.get(assetId);
+    if (local) return local;
+    try { return await current.gm.fetcher.request(assetId, "ui"); }
+    catch { return undefined; }
+  }
+
+  async function importCodexAsset(assetId: string, entry: AssetManifestEntry, bytes: Uint8Array): Promise<void> {
+    const current = app;
+    if (!current) throw new Error("The world is not ready for media import.");
+    if (await current.assets.has(assetId)) return;
+    const imported = await current.assets.import(bytes, entry.name, entry.mime, "referenced", "restricted");
+    if (imported.hash !== assetId) throw new Error("A Codex bundle asset failed its hash check during import.");
+  }
+
   function resolveAsset(hash: string | null | undefined): string | null {
     if (!hash) return null;
     if (/^(https?:|data:|blob:)/.test(hash)) return hash;
@@ -2037,6 +2058,160 @@ const WALL_PICK_RADIUS = 12;
     return new Promise((resolve) => { pendingAnchorPick = { options, resolve }; });
   };
 
+  type PendingQuickbarAim = {
+    sceneId: string;
+    actorId: string;
+    casterTokenId: string;
+    entry: PF1eQuickbarEntry;
+    spellName: "Entangle" | "Lightning Bolt";
+    resolve: (result: PF1eQuickbarRunResult) => void;
+  };
+  let pendingSpellAim = $state.raw<PendingQuickbarAim | null>(null);
+
+  function settleSpellAim(result: PF1eQuickbarRunResult): void {
+    const pending = pendingSpellAim;
+    pendingSpellAim = null;
+    clearPF1eAreaPreview();
+    pending?.resolve(result);
+  }
+
+  function requestQuickbarSpellAim(request: {
+    actor: ActorDocument; entry: PF1eQuickbarEntry;
+  }): Promise<PF1eQuickbarRunResult> {
+    const spellName = request.entry.label.replace(/ \(level \d+\)$/, "").trim();
+    if (spellName !== "Entangle" && spellName !== "Lightning Bolt")
+      return Promise.resolve({ ok: false, error: `${spellName} has no canvas aiming flow.` });
+    const scene = activeScene();
+    const casterTokenId = singleSelectedTokenId();
+    const caster = scene?.tokens.find((token) => token._id === casterTokenId);
+    if (!scene || !caster || caster.actorId !== request.actor._id || !stage)
+      return Promise.resolve({ ok: false, error: "Select the caster's token on the active scene first." });
+    if (pendingSpellAim) settleSpellAim({ ok: false, error: "Aiming cancelled; no slot was spent." });
+    const current = app;
+    if (current) prefetchQuickbarSpellFx({ client: current.gm.client, scene, spellName,
+      requestAsset: (assetId, mime) => current.gm.fetcher.request(assetId, "scene", mime) });
+    return new Promise((resolve) => {
+      pendingSpellAim = { sceneId: scene._id, actorId: request.actor._id,
+        casterTokenId: caster._id, entry: request.entry, spellName, resolve };
+    });
+  }
+
+  function quickbarAimAssetUrl(scene: SceneDocument, aim: PendingQuickbarAim): string | null {
+    const flags = scene.flags as Record<string, unknown>;
+    const core = flags.core && typeof flags.core === "object" ? flags.core as Record<string, unknown> : null;
+    const demo = core?.spellDemo && typeof core.spellDemo === "object"
+      ? core.spellDemo as Record<string, unknown> : null;
+    const assets = demo?.assets && typeof demo.assets === "object"
+      ? demo.assets as Record<string, unknown> : null;
+    const key = aim.spellName === "Lightning Bolt" ? "lightningCrosshair" : "entangleCrosshair";
+    const record = assets?.[key] && typeof assets[key] === "object"
+      ? assets[key] as Record<string, unknown> : null;
+    return typeof record?.assetId === "string" ? resolveAsset(record.assetId) : null;
+  }
+
+  function quickbarAimOptions(scene: SceneDocument, aim: PendingQuickbarAim): CrosshairPickOptions {
+    const caster = scene.tokens.find((token) => token._id === aim.casterTokenId);
+    const line = aim.spellName === "Lightning Bolt";
+    return {
+      sceneId: scene._id,
+      label: line ? "Lightning Bolt direction (90-ft line)" : "Entangle origin (40-ft radius)",
+      gesture: "click",
+      shapes: [line ? "ray" : "circle"],
+      shape: line ? { kind: "ray", length: 90, width: 5 }
+        : { kind: "circle", length: 40 },
+      snapTo: "intersection",
+      ...(line ? { anchorShapeAtOrigin: true } : {}),
+      constraints: {
+        ...(caster ? { origin: { x: caster.x, y: caster.y } } : {}),
+        maxDistance: line ? 90 : 640,
+      },
+      hint: line
+        ? "Click a direction to preview and cast the 90-ft Lightning Bolt line."
+        : "Click a grid intersection to preview and cast a 40-ft-radius Entangle spread.",
+    };
+  }
+
+  function confirmQuickbarSpellAim(placement: CrosshairPlacement): void {
+    const aim = pendingSpellAim;
+    if (!aim) return;
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene || scene._id !== aim.sceneId || !stage) {
+      settleSpellAim({ ok: false, error: "The aiming scene changed; no slot was spent." });
+      return;
+    }
+    const actor = current.gm.client.store.get("actors", aim.actorId) as ActorDocument | undefined;
+    const caster = scene.tokens.find((token) => token._id === aim.casterTokenId);
+    if (!actor || !caster || caster.actorId !== actor._id) {
+      settleSpellAim({ ok: false, error: "The caster is no longer available; no slot was spent." });
+      return;
+    }
+    if (scene.grid.type !== "square" || scene.grid.units !== "ft" ||
+        !Number.isFinite(scene.grid.size) || scene.grid.size <= 0) {
+      settleSpellAim({ ok: false, error: "Spell area aiming needs a feet-based square grid; no slot was spent." });
+      return;
+    }
+
+    if (aim.spellName === "Lightning Bolt") {
+      const built = pf1eAreaGridFromScene(scene.grid);
+      if (built.issues.length > 0) {
+        settleSpellAim({ ok: false, error: `Lightning Bolt line could not be resolved: ${built.issues.map((issue) => issue.message).join("; ")}. No slot was spent.` });
+        return;
+      }
+      const radians = placement.angleDeg * Math.PI / 180;
+      const direction = { x: Math.cos(radians), y: Math.sin(radians) };
+      const line = { origin: { x: caster.x, y: caster.y }, direction, lengthFt: 90, widthFt: 5 };
+      const targets = scene.tokens.flatMap((token) => {
+        if (token._id === caster._id || !lineIntersectsTokenFootprint(line, token, built.grid) ||
+            sightBlockedBetween(scene.walls, line.origin, { x: token.x, y: token.y })) return [];
+        const targetActor = token.actorId
+          ? current.gm.client.store.get("actors", token.actorId) as ActorDocument | undefined : undefined;
+        return targetActor ? [{ tokenId: token._id, actor: targetActor }] : [];
+      });
+      const flags = scene.flags as Record<string, unknown>;
+      const core = flags.core && typeof flags.core === "object" ? flags.core as Record<string, unknown> : null;
+      const demo = core?.spellDemo && typeof core.spellDemo === "object"
+        ? core.spellDemo as Record<string, unknown> : null;
+      const macros = demo?.macros && typeof demo.macros === "object"
+        ? demo.macros as Record<string, unknown> : null;
+      const effectMacroId = typeof macros?.lightningBolt === "string" ? macros.lightningBolt : undefined;
+      if (!effectMacroId) {
+        settleSpellAim({ ok: false, error: "The Lightning Bolt effect timeline is missing; no slot was spent." });
+        return;
+      }
+      void runQuickbarLightningBoltLine({ client: current.gm.client, actor, entry: aim.entry, scene,
+        casterTokenId: caster._id, origin: line.origin, direction, targets, effectMacroId })
+        .then((result) => settleSpellAim(result))
+        .catch((error: unknown) => settleSpellAim({ ok: false,
+          error: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+
+    if (!Number.isInteger(placement.point.x / scene.grid.size) ||
+        !Number.isInteger(placement.point.y / scene.grid.size)) {
+      settleSpellAim({ ok: false, error: "Entangle needs a grid intersection; no slot was spent." });
+      return;
+    }
+    const preview = showPF1eAreaPreview({ kind: "spread",
+      origin: { col: placement.point.x / scene.grid.size, row: placement.point.y / scene.grid.size },
+      radiusFt: 40 });
+    if (!preview.ok) {
+      settleSpellAim({ ok: false, error: `Entangle area could not be resolved: ${preview.issues.map((issue) => issue.message).join("; ")}. No slot was spent.` });
+      return;
+    }
+    const targets = preview.affectedTokenIds.flatMap((tokenId) => {
+      const token = scene.tokens.find((candidate) => candidate._id === tokenId);
+      const actorId = token?.actorId;
+      const targetActor = actorId ? current.gm.client.store.get("actors", actorId) as ActorDocument | undefined : undefined;
+      return token && targetActor ? [{ tokenId, actor: targetActor }] : [];
+    });
+    void runQuickbarEntangleArea({ client: current.gm.client, actor, entry: aim.entry,
+      scene, casterTokenId: caster._id, origin: placement.point, targets })
+      .then((result) => settleSpellAim(result))
+      .catch((error: unknown) => settleSpellAim({ ok: false,
+        error: error instanceof Error ? error.message : String(error) }));
+  }
+
   /**
    * D-293: render an **unsaved** FX draft for its author. Deliberately not a host
    * request: no world op, no durable `fxInstance`, no recipient — so a preview
@@ -2547,6 +2722,9 @@ const WALL_PICK_RADIUS = 12;
     const view = stage;
     if (!current || !view) return;
     const scene = activeScene();
+    if (pendingSpellAim && (scene?._id !== pendingSpellAim.sceneId ||
+        !scene?.tokens.some((token) => token._id === pendingSpellAim?.casterTokenId)))
+      settleSpellAim({ ok: false, error: "The caster or aiming scene changed; no slot was spent." });
     fxPlayer?.syncScene();
     sceneLighting.sync(scene, view);
     if (tokenSelection.sceneId !== (scene?._id ?? null)) clearTokenSelection();
@@ -2959,6 +3137,7 @@ const WALL_PICK_RADIUS = 12;
     globalThis.addEventListener("keydown", onKey);
     onDestroy(() => {
       settleSummonPick(null);
+      settleSpellAim({ ok: false, error: "The session closed before aiming completed; no slot was spent." });
       agents?.dispose();
       agents = null;
       moduleHost?.dispose();
@@ -4608,6 +4787,37 @@ const WALL_PICK_RADIUS = 12;
               </div>
             {/if}
           {/if}
+        {#if pendingSpellAim}
+          {@const aimScene = activeScene()}
+          {#if aimScene && aimScene._id === pendingSpellAim.sceneId &&
+              aimScene.tokens.some((token) => token._id === pendingSpellAim.casterTokenId)}
+            {@const resolved = resolveCrosshairPick(aimScene, quickbarAimOptions(aimScene, pendingSpellAim))}
+            <CrosshairOverlay options={resolved.options} request={resolved.request}
+              previewAssetUrl={quickbarAimAssetUrl(aimScene, pendingSpellAim)}
+              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
+              pick={confirmQuickbarSpellAim}
+              cancel={() => settleSpellAim({ ok: false, error: "Aiming cancelled; no slot was spent." })} />
+          {/if}
+        {/if}
+        {#if pendingSummonPick}
+          {@const summonScene = activeScene()}
+          {#if summonScene && summonScene._id === pendingSummonPick.options.sceneId}
+            {@const resolved = resolveCrosshairPick(summonScene,
+              summonCrosshairOptions(summonScene, pendingSummonPick.options))}
+            <CrosshairOverlay options={resolved.options} request={resolved.request}
+              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
+              pick={(placement) => settleSummonPick(placement.point)} cancel={() => settleSummonPick(null)} />
+          {/if}
+        {/if}
+        {#if pendingAnchorPick}
+          {@const anchorScene = activeScene()}
+          {#if anchorScene && anchorScene._id === pendingAnchorPick.options.sceneId}
+            {@const resolved = resolveCrosshairPick(anchorScene, pendingAnchorPick.options)}
+            <CrosshairOverlay options={resolved.options} request={resolved.request}
+              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
+              pick={(placement) => settleAnchorPick(placement)} cancel={() => settleAnchorPick(null)} />
+          {/if}
+        {/if}
           </div>
         </div>
           {#if hexMenu}
@@ -4677,25 +4887,6 @@ const WALL_PICK_RADIUS = 12;
           onEncounterBattleScene={(resultId) => void createBattleScene({ resultId })}
           {resolveAsset}
         />
-        {#if pendingSummonPick}
-          {@const summonScene = activeScene()}
-          {#if summonScene && summonScene._id === pendingSummonPick.options.sceneId}
-            {@const resolved = resolveCrosshairPick(summonScene,
-              summonCrosshairOptions(summonScene, pendingSummonPick.options))}
-            <CrosshairOverlay options={resolved.options} request={resolved.request}
-              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
-              pick={(placement) => settleSummonPick(placement.point)} cancel={() => settleSummonPick(null)} />
-          {/if}
-        {/if}
-        {#if pendingAnchorPick}
-          {@const anchorScene = activeScene()}
-          {#if anchorScene && anchorScene._id === pendingAnchorPick.options.sceneId}
-            {@const resolved = resolveCrosshairPick(anchorScene, pendingAnchorPick.options)}
-            <CrosshairOverlay options={resolved.options} request={resolved.request}
-              camera={() => stage?.camera ?? { x: 0, y: 0, scale: 1 }}
-              pick={(placement) => settleAnchorPick(placement)} cancel={() => settleAnchorPick(null)} />
-          {/if}
-        {/if}
         {#if pendingReaction}
           <!--
             D-187: the held move's queue. Nothing has moved yet — each row is the seam's
@@ -4791,6 +4982,9 @@ const WALL_PICK_RADIUS = 12;
             <JournalsPanel
               client={app.gm.client}
               bus={app.gm.bus}
+              {resolveAsset}
+              {getCodexAssetBytes}
+              {importCodexAsset}
               popout={(journalId, pageId) =>
                 openWindow(`journal:${pageId}`, "Journal", "journal", {
                   journalId,
@@ -4818,6 +5012,7 @@ const WALL_PICK_RADIUS = 12;
             client={app.gm.client}
             actor={quickbarActor}
             targets={quickbarTargets}
+            onAimSpell={requestQuickbarSpellAim}
           />
         {/if}
         </div>

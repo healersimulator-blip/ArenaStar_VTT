@@ -83,6 +83,8 @@ export interface ActionArea {
   shape: "burst" | "circle" | "cone" | "line" | "cylinder" | "spread" | "emanation" | "rect" | "polygon";
   origin: { x: number; y: number };
   radius?: number;
+  /** Rules-template length in scene grid units (used by verified line areas). */
+  length?: number;
   width?: number;
   direction?: { x: number; y: number };
   units?: string;
@@ -253,10 +255,11 @@ function entityError(value: unknown, field: string): string | null {
 }
 
 function areaError(value: unknown): string | null {
-  if (!object(value) || !exactKeys(value, ["sceneId", "ref", "shape", "origin", "radius", "width", "direction", "units"]) ||
+  if (!object(value) || !exactKeys(value, ["sceneId", "ref", "shape", "origin", "radius", "length", "width", "direction", "units"]) ||
       !validId(value.sceneId) || !(AREA_SHAPES as readonly unknown[]).includes(value.shape) || !object(value.origin) ||
       !exactKeys(value.origin, ["x", "y"]) || !coordinate(value.origin.x) || !coordinate(value.origin.y) ||
       (value.radius !== undefined && (!finite(value.radius) || value.radius < 0 || value.radius > 1_000_000)) ||
+      (value.length !== undefined && (!finite(value.length) || value.length < 0 || value.length > 1_000_000)) ||
       (value.width !== undefined && (!finite(value.width) || value.width < 0 || value.width > 1_000_000)) ||
       (value.units !== undefined && !validText(value.units, 32))) return "action area is malformed";
   if (value.ref !== undefined && (!object(value.ref) || !exactKeys(value.ref, ["kind", "id"]) ||
@@ -655,6 +658,7 @@ export function actionFxContext(action: ActionCard): ActionFxContext {
       shape: action.area.shape,
       origin: { ...action.area.origin },
       ...(action.area.radius !== undefined ? { radius: action.area.radius } : {}),
+      ...(action.area.length !== undefined ? { length: action.area.length } : {}),
       ...(action.area.width !== undefined ? { width: action.area.width } : {}),
       ...(action.area.direction !== undefined ? { direction: { ...action.area.direction } } : {}),
       ...(action.area.units !== undefined ? { units: action.area.units } : {}),

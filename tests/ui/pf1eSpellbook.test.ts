@@ -4,6 +4,7 @@ import type { PermissionUser } from "../../src/core/ownership";
 import { applyDiff } from "../../src/core/diff";
 import { pf1eSheetView } from "../../src/ui/sheets/pf1eSheetModel";
 import {
+  pf1eCompendiumComponents,
   pf1eSpellbookEdit,
   pf1eSpellbookView,
   type PF1eSpellbookEdit,
@@ -291,5 +292,18 @@ describe("P5/C04 spellbook: authorization and view", () => {
     expect(view.preparationWarnings.join(" ")).toMatch(
       /exceeding the 5 slots/i,
     );
+  });
+});
+
+describe("PF1e compendium spell components", () => {
+  test("structured component flags become the abbreviations parsed by the cast gate", () => {
+    expect(pf1eCompendiumComponents({
+      verbal: true, somatic: true, material: "a piece of cured leather", note: "ignored metadata",
+    })).toBe("V, S, M");
+  });
+
+  test("normalizes word-form lists, preserves slash alternatives and deduplicates", () => {
+    expect(pf1eCompendiumComponents(["verbal", "S", "M/DF", "somatic"])).toBe("V, S, M/DF");
+    expect(pf1eCompendiumComponents("verbal, somatic, material")).toBe("V, S, M");
   });
 });
