@@ -5,11 +5,14 @@ import type {
   FlagStore,
   Json,
   MessageDocument,
+  SceneDocument,
 } from "../../src/core/documents";
 import type { Op } from "../../src/core/ops";
 import type { PF1eConditionActionRequest } from "../../src/core/messages";
 import type { PermissionUser } from "../../src/core/ownership";
 import { deriveFromDocuments } from "../../src/packages/pf1e/actor";
+import type { ClientSync } from "../../src/client/sync";
+import { runQuickbarLightningBoltLine } from "../../src/ui/quickbar/run";
 import {
   castResolutionCardContent,
   resolveCastFlow,
@@ -74,7 +77,9 @@ function combat(round: number, flags: FlagStore = {}): CombatDocument {
  * (first kept result) and `total` the reported total; damage reads the total.
  */
 class FakeClient implements CastFlowClient {
+  user = owner;
   messages: MessageDocument[] = [];
+  sequenceRequests: Array<[string, string, string, string]> = [];
   /** D-407 — every condition delivery the flow asked for, in order. */
   conditionRequests: Array<{ request: PF1eConditionActionRequest; requestId?: string }> = [];
   settings: unknown[] = [];
@@ -105,6 +110,11 @@ class FakeClient implements CastFlowClient {
   requestPF1eConditionAction(request: PF1eConditionActionRequest, requestId?: string): string {
     this.conditionRequests.push({ request, ...(requestId !== undefined ? { requestId } : {}) });
     return requestId ?? "condition-tx";
+  }
+
+  requestSequence(macroId: string, sceneId: string, sourceTokenId: string, targetTokenId: string): string {
+    this.sequenceRequests.push([macroId, sceneId, sourceTokenId, targetTokenId]);
+    return "sequence-request";
   }
 
   private record(
@@ -245,6 +255,31 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
         } },
         damage: { dealt: 7 } }],
     });
+  });
+
+  test("area target cards carry the resolved spread context without spending a second slot", async () => {
+    const client = new FakeClient();
+    const area = { sceneId: "forest", shape: "spread" as const,
+      origin: { x: 500, y: 500 }, radius: 40, units: "ft" };
+    const res = await resolveCastFlow(client, owner, params({
+      resourceAlreadySpent: true,
+      spell: { name: "Magic Missile", level: 1 },
+      context: { sceneId: "forest", casterTokenId: "caster-token",
+        targetTokenId: "target-token", area },
+      authored: { saveType: "ref", severity: "none", damageFormula: "" },
+    }));
+    expect(res).toMatchObject({ ok: true, lost: false, held: false });
+    const batch = client.submitted[0] ?? [];
+    const create = batch.find((op) => op.kind === "create" && op.coll === "messages");
+    if (!create || create.kind !== "create" || create.coll !== "messages")
+      throw new Error("missing area cast card");
+    expect((create.data as MessageDocument).system.action).toMatchObject({
+      sceneId: "forest", area, source: { tokenId: "caster-token" },
+      targets: [{ tokenId: "target-token", evidence: { adapter: "pf1e.spellTarget.v1" } }],
+    });
+    expect(batch.some((op) => op.kind === "update" && op.ref.coll === "actors" &&
+      Object.keys(op.diff).some((key) => key.includes("spells.slotsUsed") || key.includes("spells.prepared"))))
+      .toBe(false);
   });
 
   test("manual player save creates one linked pending action and commits it with spell costs", async () => {
@@ -636,6 +671,78 @@ describe("P5/C02 tactical cast flow (D-156)", () => {
     if (res.held) return;
     if (res.pending) return;
     expect(res.warnings.join(" ")).toMatch(/over budget/i);
+  });
+});
+
+describe("starter Lightning Bolt quickbar line", () => {
+  test("resolves one 6d6 Reflex-half cast over each intersected token and spends one slot", async () => {
+    const caster = actor("hosilla", {
+      size: "Medium", abilities: { str: 10, dex: 14, con: 12, int: 12, wis: 10, cha: 18 },
+      saves: { fort: 3, ref: 2, will: 5 }, hp: 24, hpMax: 24,
+      spells: { keyAbility: "cha", casterLevel: 6, mode: "spontaneous",
+        slotsPerDay: { 0: 6, 1: 8, 2: 6, 3: 4 }, slotsUsed: { 3: 0 },
+        known: [{ name: "Lightning Bolt", level: 3 }] },
+    });
+    const first = actor("hobgoblin-1", {
+      size: "Medium", abilities: { con: 12 }, hp: 20, hpMax: 20,
+      saves: { fort: 3, ref: 1, will: 0 }, savesAsTotal: true,
+    });
+    const second = actor("hobgoblin-2", {
+      size: "Medium", abilities: { con: 12 }, hp: 20, hpMax: 20,
+      saves: { fort: 3, ref: 1, will: 0 }, savesAsTotal: true,
+    });
+    const scene = {
+      _id: "scene-jungle", type: "scene", name: "JungleEntrance2",
+      grid: { type: "square", size: 100, distance: 5, units: "ft" }, walls: [], width: 1200, height: 1800,
+      tokens: [
+        { _id: "tok-hosilla", actorId: "hosilla", x: 350, y: 350, width: 100, height: 100 },
+        { _id: "tok-hobgoblin-1", actorId: "hobgoblin-1", x: 650, y: 350, width: 100, height: 100 },
+        { _id: "tok-hobgoblin-2", actorId: "hobgoblin-2", x: 850, y: 350, width: 100, height: 100 },
+      ],
+    } as unknown as SceneDocument;
+    const client = new FakeClient();
+    client.script = [
+      { die: 3, total: 18 }, { die: 3 }, // first target: fail Reflex, full 18
+      { die: 4, total: 12 }, { die: 20 }, // second target: save, half 6
+    ];
+    const result = await runQuickbarLightningBoltLine({
+      client: client as unknown as ClientSync,
+      actor: caster,
+      entry: { slot: 1, kind: "spell", label: "Lightning Bolt (level 3)", attackIndex: 0,
+        itemId: null, preparedIndex: null, spellLevel: 3 },
+      scene, casterTokenId: "tok-hosilla", origin: { x: 350, y: 350 },
+      direction: { x: 1, y: 0 },
+      targets: [{ tokenId: "tok-hobgoblin-1", actor: first },
+        { tokenId: "tok-hobgoblin-2", actor: second }],
+      effectMacroId: "macro-lightning-bolt-effect",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(client.formulas).toEqual(["6d6", "1d20", "6d6", "1d20"]);
+    const ops = stateOps(client);
+    const cards = ops.flatMap((op) => {
+      if (op.kind !== "create" || op.coll !== "messages") return [];
+      const action = (op.data.system as Record<string, unknown>).action as {
+        area?: Record<string, unknown>; targets: Array<{ outcome: string; damage?: { dealt: number } }>;
+      } | undefined;
+      return action ? [action] : [];
+    });
+    expect(cards).toHaveLength(2);
+    expect(cards.map((card) => card.area)).toEqual([
+      { sceneId: "scene-jungle", shape: "line", origin: { x: 350, y: 350 },
+        length: 90, width: 5, direction: { x: 1, y: 0 }, units: "ft" },
+      { sceneId: "scene-jungle", shape: "line", origin: { x: 350, y: 350 },
+        length: 90, width: 5, direction: { x: 1, y: 0 }, units: "ft" },
+    ]);
+    expect(cards.map((card) => card.targets[0])).toEqual([
+      expect.objectContaining({ outcome: "failedSave", damage: expect.objectContaining({ dealt: 18 }) }),
+      expect.objectContaining({ outcome: "saved", damage: expect.objectContaining({ dealt: 6 }) }),
+    ]);
+    const slotWrites = ops.filter((op) => op.kind === "update" && op.ref.coll === "actors" &&
+      op.ref.id === "hosilla" && Object.keys(op.diff).some((key) => key.startsWith("system.pf1e.spells.slotsUsed")));
+    expect(slotWrites).toHaveLength(1);
+    expect(client.sequenceRequests).toEqual([["macro-lightning-bolt-effect", "scene-jungle",
+      "tok-hosilla", "tok-hobgoblin-2"]]);
   });
 });
 

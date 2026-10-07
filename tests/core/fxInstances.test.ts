@@ -44,6 +44,13 @@ describe("private durable FX records", () => {
     expect(validateFxInstanceFilter({ macroId: "../escape" }).ok).toBe(false);
     expect(validateFxInstanceFilter({ sceneId: "another-scene" }).ok).toBe(false);
     expect(validateFxInstanceFilter({ ownerId: "gm" }).ok).toBe(false);
+    expect(validateFxInstanceFilter({ conditionApplicationId: "condition-1" }).ok).toBe(true);
+    expect(validateFxInstanceFilter({ conditionApplicationId: "../escape" }).ok).toBe(false);
+    const linked = { ...instance, conditionApplicationId: "condition-1" };
+    expect(fxInstanceMatches(linked, { conditionApplicationId: "condition-1" })).toBe(true);
+    expect(fxInstanceMatches(linked, { conditionApplicationId: "condition-2" })).toBe(false);
+    expect(validateFxInstance(linked, scene, manifest)).toBe(true);
+    expect(validateFxInstance({ ...linked, conditionApplicationId: "../escape" }, scene, manifest)).toBe(false);
   });
 
   test("validates resolved coordinates, MIME, bounded duration and host-only shape", () => {

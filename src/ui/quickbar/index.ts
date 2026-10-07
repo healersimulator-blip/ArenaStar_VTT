@@ -13,4 +13,5 @@ export {
   type PF1eQuickbarEntry,
   type PF1eQuickbarKind,
 } from "./model";
-export { runQuickbarEntry, type PF1eQuickbarRunResult } from "./run";
+export { prefetchQuickbarSpellFx, runQuickbarEntry, runQuickbarEntangleArea, runQuickbarLightningBoltLine,
+  type PF1eQuickbarRunResult } from "./run";

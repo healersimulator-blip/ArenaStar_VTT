@@ -39,6 +39,10 @@ export interface CrosshairPickOptions {
   shapes?: readonly CrosshairShapeKind[];
   /** Starting shape and extent. */
   shape?: CrosshairShape;
+  /** Snap a rules area origin to a cell centre (default) or to a square-grid intersection. */
+  snapTo?: "center" | "intersection";
+  /** Draw a directional ray from the request origin while the picked point sets its bearing. */
+  anchorShapeAtOrigin?: boolean;
   /**
    * The rules the consumer's host check will repeat. Shown faults come from
    * here, so a green preview is exactly what a save will accept.

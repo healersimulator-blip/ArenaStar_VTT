@@ -23,6 +23,8 @@
   import { resolveCastFlow } from "./pf1eCastFlow";
   import { boundCueFor, castSpellCueNote, fireBoundItemCue, fxCastOutcome, fxItemCueNote }
     from "./fxItemCue";
+  import FxBindingPicker from "./FxBindingPicker.svelte";
+  import type { FxBindingPickerTarget } from "./fxBindingPicker";
   import { observePF1eItem } from "./pf1eItemWindow";
   import TagEditor from "./TagEditor.svelte";
 
@@ -43,6 +45,8 @@
   let note = $state("");
   let busy = $state(false);
   let targetId = $state("");
+  let fxBindingTarget = $state<FxBindingPickerTarget | null>(null);
+  const canManageFx = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
 
   $effect(() =>
     observePF1eItem(client, bus, actorId, itemId, (value) => {
@@ -187,6 +191,20 @@
         <button type="button" data-pf1e-item-window-equip onclick={toggleEquipped}
           >{view.item.equipped ? "Unequip" : "Equip"}</button
         >
+      {/if}
+      {#if canManageFx}
+        <button type="button" data-pf1e-item-window-fx-use
+          title={boundCue ? `Edit use FX: ${boundCue.name}` : "Attach FX to item use/cast"}
+          onclick={() => (fxBindingTarget = { kind: "item", actorId, itemId: held.item._id, event: "use" })}>
+          {boundCue ? `Use FX: ${boundCue.name}` : "+ Use FX"}
+        </button>
+        {#if view.weaponLine !== null}
+          <button type="button" data-pf1e-item-window-fx-attack
+            title={boundAttackCue ? `Edit attack FX: ${boundAttackCue.name}` : "Attach FX to attacks made with this weapon"}
+            onclick={() => (fxBindingTarget = { kind: "item", actorId, itemId: held.item._id, event: "attack" })}>
+            {boundAttackCue ? `Attack FX: ${boundAttackCue.name}` : "+ Attack FX"}
+          </button>
+        {/if}
       {/if}
     </header>
 
@@ -338,6 +356,10 @@
       </div>
     {:else}
       <p class="note">No description on this item.</p>
+    {/if}
+    {#if fxBindingTarget}
+      <FxBindingPicker {client} {bus} target={fxBindingTarget}
+        onClose={() => (fxBindingTarget = null)} />
     {/if}
   </section>
 {/if}

@@ -19,6 +19,7 @@ import {
   type AutomationDocument,
   type ActionReceiptDocument,
   type BaseDocument,
+  type ItemDocument,
   type CollectionName,
   type MessageDocument,
   type MacroDocument,
@@ -72,6 +73,7 @@ import type {
   SimControlMsg,
   SimSnapshotGetMsg,
   PF1eConditionActionMsg,
+  CodexPurchaseMsg,
   TurnReadyMsg,
   WelcomeMsg,
   WelcomeSimInfo,
@@ -124,6 +126,8 @@ import {
 import { pf1eConditionDef, conditionRefusalFor } from "../packages/pf1e/conditions";
 import { pf1eSpellEffectById, pf1eSpellEffectLanded, type PF1eSpellEffect }
   from "../packages/pf1e/spellEffects";
+import { sightBlockedBetween } from "../core/crosshair";
+import { affectedTokens, lineIntersectsTokenFootprint, pf1eAreaGridFromScene, resolveAreaCells } from "../packages/pf1e/targeting";
 import { combinedTacticalEffects, resolveTacticalEffects } from "../packages/pf1e/effectOps";
 import {
   PF1E_POISON_FIXTURES,
@@ -168,6 +172,8 @@ import { ACTION_CARD_VERSION, ACTION_RIDER_MAX, actionAsJson, actionCardOf, acti
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
+import { canReadCodexRef, codexAudienceAllows, codexDocumentError, codexPageMetadataError, codexReferencesRef, hasCodexMetadata } from "../core/campaignCodex";
+import { planCodexPurchase } from "../core/campaignCodexEconomy";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
 import { FX_FINISH_OFFSET_MAX_MS, fxAudienceAllows, fxResolveSyncOrigins, fxSectionsForViewer,
   resolveFxSequence, validateFxSequence, type FxAudience } from "../core/fx";
@@ -188,7 +194,8 @@ import { validateMacroArgs, type MacroArgs } from "../core/macroArgs";
 import { macroItemReadable } from "../core/macroItems";
 import { buildPlayerMacro, canSaveWorldMacros, ownsPlayerMacro, playerMacroAuthoring, PLAYER_MACRO_LIMITS,
   validatePlayerMacroDraft } from "../core/playerMacros";
-import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError, fxSpellBindingError }
+import { fxBindingDeletionOps, fxBindingEvents, fxItemBindingError, fxSpellBindingError,
+  fxSpellBindingKey }
   from "../core/fxBinding";
 import { planSummon, summonDeletionOps, summonMarker, summonPlacementError, validateSummon,
   type SummonSource } from "../core/summons";
@@ -335,6 +342,7 @@ interface PreparedFx {
   syncGroups?: FxSyncGroupMember[];
   sourceTokenId?: string;
   targetTokenId?: string;
+  conditionApplicationId?: string;
 }
 
 /**
@@ -490,7 +498,10 @@ function visibilityCrossings(
     }
     entry.inverses.push(inverse.diff);
     const fields = visibilityFields(doc);
-    const touches = (diff: Diff, field: string) => field in diff || `-=${field}` in diff;
+    const touches = (diff: Diff, field: string) => Object.keys(diff).some((key) => {
+      const path = key.startsWith("-=") ? key.slice(2) : key;
+      return path === field || path.startsWith(`${field}.`) || field.startsWith(`${path}.`);
+    });
     if (fields.some((field) => touches(op.diff, field) && touches(inverse.diff, field)))
       entry.touches = true;
   }
@@ -1023,6 +1034,9 @@ export class HostSync {
         return;
       case "pf1e.condition":
         this.handlePF1eConditionAction(session, msg);
+        return;
+      case "codex.purchase":
+        this.handleCodexPurchase(session, msg);
         return;
       case "roll.delegate":
         void this.handleRollDelegate(
@@ -1984,6 +1998,71 @@ export class HostSync {
     return true;
   }
 
+  private pf1eLightningBoltCasterValid(actor: ActorDocument): boolean {
+    const pf1e = isRecord(actor.system?.pf1e) ? actor.system.pf1e as Record<string, unknown> : {};
+    const spells = isRecord(pf1e.spells) ? pf1e.spells : {};
+    const known = Array.isArray(spells.known) ? spells.known : [];
+    const derived = deriveFromActorDocument(actor);
+    return spells.keyAbility === "cha" && derived.spellCasterLevel === 6 &&
+      derived.spellSaveDc[3] === 17 && known.some((entry) => isRecord(entry) &&
+        typeof entry.name === "string" && entry.name.trim().toLowerCase() === "lightning bolt" &&
+        entry.level === 3 && (entry.slotLevel === undefined || entry.slotLevel === 3));
+  }
+
+  /**
+   * D-407 spatial evidence for the starter spells. The host rebuilds the Entangle spread or
+   * Lightning Bolt corridor from the committed scene geometry and verifies the target's entire
+   * token footprint; client-authored area coordinates alone cannot claim a creature was hit.
+   */
+  private pf1eSpellAreaTargetVerified(action: ActionCard, target: ActionTarget, effectId: unknown): boolean {
+    const area = action.area;
+    if (!area) return action.targets.length === 1;
+    if (action.targets.length !== 1 || area.sceneId !== action.sceneId ||
+        !action.sceneId || !target.tokenId) return false;
+    const scene = this.store.get("scenes", action.sceneId) as SceneDocument | undefined;
+    const token = scene?.tokens.find((candidate) => candidate._id === target.tokenId);
+    const casterToken = action.source.tokenId
+      ? scene?.tokens.find((candidate) => candidate._id === action.source.tokenId) : undefined;
+    if (!scene || !token || token.actorId !== target.actorId || !casterToken ||
+        casterToken.actorId !== action.source.actorId || scene.grid.type !== "square") return false;
+    const built = pf1eAreaGridFromScene(scene.grid);
+    if (built.issues.length > 0 || built.grid.feetPerCell <= 0 || built.grid.cellSize <= 0) return false;
+
+    if (effectId === "entangle" && action.label.trim().toLowerCase() === "entangle" &&
+        area.shape === "spread" && area.radius === 40 && area.length === undefined &&
+        area.units === "ft" && area.width === undefined && area.direction === undefined) {
+      // The spread resolver has no cell-blocker geometry. Refuse to claim a host-verified area
+      // across authored blocking walls rather than treating those walls as transparent.
+      if (scene.walls.some((wall) => wall.move === 0 || wall.sight === 0)) return false;
+      const col = area.origin.x / built.grid.cellSize;
+      const row = area.origin.y / built.grid.cellSize;
+      const unitsPerFoot = scene.grid.size / scene.grid.distance;
+      if (!Number.isFinite(unitsPerFoot) || unitsPerFoot <= 0 ||
+          Math.hypot(area.origin.x - casterToken.x, area.origin.y - casterToken.y) / unitsPerFoot > 640 ||
+          !Number.isInteger(col) || !Number.isInteger(row) || area.origin.x < 0 || area.origin.y < 0 ||
+          area.origin.x > scene.width || area.origin.y > scene.height) return false;
+      const resolved = resolveAreaCells({ kind: "spread", origin: { col, row }, radiusFt: 40 }, built.grid);
+      if (resolved.issues.length > 0) return false;
+      return affectedTokens(resolved.cells, [token], built.grid).length === 1;
+    }
+
+    const sourceActor = action.source.actorId
+      ? this.store.get("actors", action.source.actorId) as ActorDocument | undefined : undefined;
+    if (effectId !== undefined || action.label.trim().toLowerCase() !== "lightning bolt" ||
+        !sourceActor || !this.pf1eLightningBoltCasterValid(sourceActor) ||
+        area.shape !== "line" || area.length !== 90 || area.width !== 5 || area.radius !== undefined ||
+        area.units !== "ft" || !area.direction) return false;
+    const directionLength = Math.hypot(area.direction.x, area.direction.y);
+    if (!Number.isFinite(directionLength) || Math.abs(directionLength - 1) > 1e-6 ||
+        Math.abs(area.origin.x - casterToken.x) > 1e-6 ||
+        Math.abs(area.origin.y - casterToken.y) > 1e-6 ||
+        area.origin.x < 0 || area.origin.y < 0 || area.origin.x > scene.width || area.origin.y > scene.height)
+      return false;
+    const line = { origin: area.origin, direction: area.direction, lengthFt: 90, widthFt: 5 };
+    return lineIntersectsTokenFootprint(line, token, built.grid) &&
+      !sightBlockedBetween(scene.walls, area.origin, { x: token.x, y: token.y });
+  }
+
   /** Versioned PF1e adapter: rederive a normal spell target from immutable host roll facts/state. */
   private pf1eSpellTargetEvidenceVerified(
     action: ActionCard, target: ActionTarget, ops: readonly Op[], by: UserId,
@@ -1996,9 +2075,12 @@ export class HostSync {
         target.healing !== undefined || target.conditions !== undefined)
       return false;
     const payload = evidence.payload;
-    const allowed = ["spellLevel", "saveType", "severity", "damageFormula", "energyType", "critical",
+    const allowed = ["spellLevel", "saveType", "severity", "damageFormula", "energyType", "critical", "effectId",
       "damageRollId", "srRollId", "saveRollId", "combatId"];
     if (Object.keys(payload).some((key) => !allowed.includes(key)) ||
+        (payload.effectId !== undefined && (typeof payload.effectId !== "string" ||
+          pf1eSpellEffectById(payload.effectId) === null)) ||
+        !this.pf1eSpellAreaTargetVerified(action, target, payload.effectId) ||
         !Number.isSafeInteger(payload.spellLevel) || (payload.spellLevel as number) < 0 ||
         (payload.spellLevel as number) > 9 || !["fort", "ref", "will"].includes(String(payload.saveType)) ||
         !(PF1E_SAVE_SEVERITIES as readonly unknown[]).includes(payload.severity) ||
@@ -2007,6 +2089,10 @@ export class HostSync {
         [payload.damageRollId, payload.srRollId, payload.saveRollId, payload.combatId]
           .some((id) => id !== undefined && (typeof id !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(id))))
       return false;
+    if (action.area?.shape === "line" &&
+        (action.label.trim().toLowerCase() !== "lightning bolt" || payload.effectId !== undefined ||
+          payload.spellLevel !== 3 || payload.saveType !== "ref" || payload.severity !== "half" ||
+          payload.damageFormula !== "6d6" || payload.energyType !== "electricity")) return false;
 
     const suppliedRollIds = [payload.damageRollId, payload.srRollId, payload.saveRollId]
       .filter((id): id is string => typeof id === "string");
@@ -2162,7 +2248,9 @@ export class HostSync {
         !action.source.actorId || action.source.itemId !== undefined || !target.actorId ||
         target.state !== "pending" || target.outcome !== "pending" || target.check?.kind !== "save" ||
         target.check.status !== "pending" || target.damage !== undefined || target.healing !== undefined ||
-        target.conditions !== undefined) return false;
+        target.conditions !== undefined || action.area !== undefined &&
+          !this.pf1eSpellAreaTargetVerified(action, target,
+            action.label.trim().toLowerCase() === "entangle" ? "entangle" : undefined)) return false;
     const source = this.store.get("actors", action.source.actorId) as ActorDocument | undefined;
     const defender = this.store.get("actors", target.actorId) as ActorDocument | undefined;
     if (!source || !defender || !this.pf1eEvidenceSourceStable(source, ops)) return false;
@@ -2183,6 +2271,9 @@ export class HostSync {
     const defended = deriveFromActorDocument(defender);
     const spellLevel = evidence.payload.spellLevel as number;
     const saveType = evidence.payload.saveType as PF1eSaveType;
+    if (action.area?.shape === "line" &&
+        (action.label.trim().toLowerCase() !== "lightning bolt" || spellLevel !== 3 ||
+          saveType !== "ref" || !this.pf1eLightningBoltCasterValid(source))) return false;
     const dc = caster.spellSaveDc[spellLevel] ?? null;
     const bonus = saveType === "fort" ? defended.saves.fort
       : saveType === "ref" ? defended.saves.ref : defended.saves.will;
@@ -2634,12 +2725,11 @@ export class HostSync {
     // D-407: the spell binding is validated beside the item binding — a catalogue spell and
     // timelines the author can read, with one cue per spell.
     const spellBinding = fxSpellBindingError(macro, {
-      catalogue: (spellId) => pf1eSpellEffectById(spellId) !== null,
       macro: (id) => this.store.get("macros", id) as MacroDocument | undefined,
       readable: (coll, doc) => can(user, "read", doc as BaseDocument, coll),
       boundTimelines: (spellId) => (this.store.getAll("macros") as readonly MacroDocument[])
         .filter((candidate) => candidate.kind === "sequence" &&
-          candidate.fxSpell?.spellId === spellId)
+          fxSpellBindingKey(candidate.fxSpell) === spellId)
         .map((candidate) => ({ id: candidate._id })),
     });
     if (spellBinding !== null) return spellBinding;
@@ -2664,6 +2754,26 @@ export class HostSync {
     return null;
   }
 
+  /**
+   * A player cannot edit an NPC sheet, but a host-verified Lightning Bolt cast may commit the
+   * exact HP delta proven by its spell evidence. No other actor path or field is elevated.
+   */
+  private verifiedLightningBoltHpWrite(actor: ActorDocument, diff: Record<string, unknown>, ops: readonly Op[]): boolean {
+    if (Object.keys(diff).length !== 1 || !Number.isSafeInteger(diff["system.pf1e.hp"])) return false;
+    const pf1e = isRecord(actor.system?.pf1e) ? actor.system.pf1e as Record<string, unknown> : {};
+    if (!Number.isSafeInteger(pf1e.hp)) return false;
+    const nextHp = diff["system.pf1e.hp"] as number;
+    return ops.some((op) => {
+      if (op.kind !== "create" || op.coll !== "messages") return false;
+      const action = actionCardOf(op.data);
+      if (!action || action.kind !== "cast" || action.label.trim().toLowerCase() !== "lightning bolt" ||
+          action.area?.shape !== "line") return false;
+      return action.targets.some((target) => target.actorId === actor._id && target.provenance === "host" &&
+        target.evidence?.adapter === "pf1e.spellTarget.v1" && target.damage !== undefined &&
+        nextHp === (pf1e.hp as number) - target.damage.dealt);
+    });
+  }
+
   /** §5 validation: permissions per op (+ cascade parents), schema-lite diffs. */
   private validateOps(
     user: SessionUser,
@@ -2680,6 +2790,42 @@ export class HostSync {
       if (op.kind === "create" && op.coll === "scenes" && op.data.type === "scene")
         stagedScenes.set(op.data._id, op.data as SceneDocument);
     }
+    // Codex bundle/import transactions may create a sheet and its linked documents together.
+    // Resolve their final staged state for reference checks instead of rejecting a valid atomic
+    // batch merely because a target has not reached the live store yet.
+    const stagedCodexTargets = new Map<string, BaseDocument>();
+    const removedCodexTargets = new Set<string>();
+    const codexRootKey = (coll: string, id: string) => `${coll}:${id}`;
+    for (const op of ops) {
+      if (op.kind === "create" && op.parent === undefined) {
+        const key = codexRootKey(op.coll, op.data._id);
+        stagedCodexTargets.set(key, op.data);
+        removedCodexTargets.delete(key);
+      } else if (op.kind === "update" && op.ref.parent === undefined) {
+        const key = codexRootKey(op.ref.coll, op.ref.id);
+        const before = stagedCodexTargets.get(key) ?? this.store.resolve(op.ref);
+        if (before) {
+          const next = applyDiff(before, op.diff);
+          if (next.ok) stagedCodexTargets.set(key, next.value as BaseDocument);
+        }
+      } else if (op.kind === "delete" && op.ref.parent === undefined) {
+        const key = codexRootKey(op.ref.coll, op.ref.id);
+        stagedCodexTargets.delete(key);
+        removedCodexTargets.add(key);
+      }
+    }
+    const resolveCodexTarget = (ref: DocRef): BaseDocument | undefined => {
+      if (ref.parent !== undefined) {
+        const parent = resolveCodexTarget(ref.parent);
+        if (ref.coll === "pages" && parent?.type === "journal")
+          return (parent as JournalDocument).pages.find((page) => page._id === ref.id);
+        if (ref.coll === "items" && parent?.type === "actor")
+          return (parent as ActorDocument).items.find((item) => item._id === ref.id);
+      }
+      const key = codexRootKey(ref.coll, ref.id);
+      if (removedCodexTargets.has(key)) return undefined;
+      return stagedCodexTargets.get(key) ?? this.store.resolve(ref);
+    };
     for (const op of ops) {
       if ((op.kind === "create" ? op.coll : op.ref.coll) === "actionReceipts")
         return { ok: false, reason: "forbidden", error: "Revert history is host-owned" };
@@ -2709,6 +2855,35 @@ export class HostSync {
               reason: "forbidden",
               error: "users are assigned by the host only",
             };
+          }
+          const isGmOrAssistant = user.role === "GM" || user.role === "ASSISTANT";
+          if (op.coll === "journals" && op.data.type === "journal" && hasCodexMetadata(op.data)) {
+            if (!isGmOrAssistant)
+              return { ok: false, reason: "forbidden", error: "Campaign Codex sheets are GM-managed" };
+            const candidate = op.data as JournalDocument;
+            const error = codexDocumentError(candidate, undefined,
+              this.store.getAll("journals") as readonly JournalDocument[],
+              (ref) => resolveCodexTarget(ref),
+              (assetId) => this.store.world.assetManifest[assetId] !== undefined);
+            if (error) return { ok: false, reason: "invalid_schema", error };
+          }
+          if (op.coll === "pages" && op.data.type === "page") {
+            const page = op.data as JournalPageDocument;
+            const pageMetadataError = codexPageMetadataError(page.codex);
+            if (pageMetadataError) return { ok: false, reason: "invalid_schema", error: pageMetadataError };
+            if (page.codex !== undefined || hasCodexMetadata(parent)) {
+              if (!isGmOrAssistant)
+                return { ok: false, reason: "forbidden", error: "Campaign Codex pages are GM-managed" };
+              if (parent?.type !== "journal")
+                return { ok: false, reason: "invalid_schema", error: "Codex page requires a journal parent" };
+              const journal = parent as JournalDocument;
+              const candidate = { ...journal, pages: [...journal.pages, page] };
+              const error = codexDocumentError(candidate, journal,
+                this.store.getAll("journals") as readonly JournalDocument[],
+              (ref) => resolveCodexTarget(ref),
+              (assetId) => this.store.world.assetManifest[assetId] !== undefined);
+              if (error) return { ok: false, reason: "invalid_schema", error };
+            }
           }
           const tagError = tagDataError(op.data);
           if (tagError) return { ok: false, reason: "invalid_schema", error: tagError };
@@ -2816,7 +2991,9 @@ export class HostSync {
               : undefined;
           const canOpts = parent ? { parent } : {};
           if (
-            !can(user, "update", doc, this.embeddedCollName(op.ref), canOpts)
+            !can(user, "update", doc, this.embeddedCollName(op.ref), canOpts) &&
+            !(op.ref.coll === "actors" && this.verifiedLightningBoltHpWrite(
+              doc as ActorDocument, op.diff, ops))
           ) {
             return {
               ok: false,
@@ -2824,6 +3001,12 @@ export class HostSync {
               error: `update ${op.ref.coll}/${op.ref.id}`,
             };
           }
+          const isGmOrAssistant = user.role === "GM" || user.role === "ASSISTANT";
+          if (!isGmOrAssistant && (
+            op.ref.coll === "journals" && hasCodexMetadata(doc) ||
+            op.ref.coll === "pages" && (doc.type === "page" && (doc as JournalPageDocument).codex !== undefined ||
+              hasCodexMetadata(parent))
+          )) return { ok: false, reason: "forbidden", error: "Campaign Codex content is GM-managed" };
           // D-394: a self-owned imported User cannot promote its role to bypass the GM opt-in.
           if (op.ref.coll === "users" && user.role !== "GM" && user.role !== "ASSISTANT" &&
               Object.keys(op.diff).some((key) => /^(?:-=)?role(?:\.|$)/.test(key)))
@@ -2892,6 +3075,41 @@ export class HostSync {
           const dry = applyDiff(doc, op.diff);
           if (!dry.ok)
             return { ok: false, reason: "invalid_schema", error: dry.error };
+          if (op.ref.coll === "journals" && doc.type === "journal" && dry.value.type === "journal") {
+            const previous = doc as JournalDocument;
+            const candidate = dry.value as JournalDocument;
+            if (hasCodexMetadata(previous) || hasCodexMetadata(candidate)) {
+              if (!isGmOrAssistant)
+                return { ok: false, reason: "forbidden", error: "Campaign Codex sheets are GM-managed" };
+              const error = codexDocumentError(candidate, previous,
+                this.store.getAll("journals") as readonly JournalDocument[],
+              (ref) => resolveCodexTarget(ref),
+              (assetId) => this.store.world.assetManifest[assetId] !== undefined);
+              if (error) return { ok: false, reason: "invalid_schema", error };
+            }
+          }
+          if (op.ref.coll === "pages" && doc.type === "page" && dry.value.type === "page") {
+            const page = doc as JournalPageDocument;
+            const candidatePage = dry.value as JournalPageDocument;
+            if (candidatePage.codex !== undefined) {
+              const error = codexPageMetadataError(candidatePage.codex);
+              if (error) return { ok: false, reason: "invalid_schema", error };
+            }
+            if (page.codex !== undefined || candidatePage.codex !== undefined || hasCodexMetadata(parent)) {
+              if (!isGmOrAssistant)
+                return { ok: false, reason: "forbidden", error: "Campaign Codex pages are GM-managed" };
+              if (parent?.type !== "journal")
+                return { ok: false, reason: "invalid_schema", error: "Codex page requires a journal parent" };
+              const journal = parent as JournalDocument;
+              const candidate = { ...journal, pages: journal.pages.map((existing) =>
+                existing._id === candidatePage._id ? candidatePage : existing) };
+              const error = codexDocumentError(candidate, journal,
+                this.store.getAll("journals") as readonly JournalDocument[],
+              (ref) => resolveCodexTarget(ref),
+              (assetId) => this.store.world.assetManifest[assetId] !== undefined);
+              if (error) return { ok: false, reason: "invalid_schema", error };
+            }
+          }
           if (op.ref.coll === "actors") {
             const touchedSystem = Object.keys(op.diff).some((field) => {
               const path = field.startsWith("-=") ? field.slice(2) : field;
@@ -3052,6 +3270,12 @@ export class HostSync {
             op.ref.parent !== undefined
               ? this.store.resolve(op.ref.parent)
               : undefined;
+          const isGmOrAssistant = user.role === "GM" || user.role === "ASSISTANT";
+          if (!isGmOrAssistant && (
+            op.ref.coll === "journals" && hasCodexMetadata(doc) ||
+            op.ref.coll === "pages" && (doc.type === "page" && (doc as JournalPageDocument).codex !== undefined ||
+              hasCodexMetadata(parent))
+          )) return { ok: false, reason: "forbidden", error: "Campaign Codex content is GM-managed" };
           const canOpts = parent ? { parent } : {};
           if (
             !can(user, "delete", doc, this.embeddedCollName(op.ref), canOpts)
@@ -3062,6 +3286,18 @@ export class HostSync {
               error: `delete ${op.ref.coll}/${op.ref.id}`,
             };
           }
+          const codexReferenceRemains = (this.store.getAll("journals") as readonly JournalDocument[]).some((journal) => {
+            if (ops.some((pending) => pending.kind === "delete" && pending.ref.coll === "journals" &&
+                pending.ref.id === journal._id && pending.ref.parent === undefined)) return false;
+            const update = ops.find((pending) => pending.kind === "update" && pending.ref.coll === "journals" &&
+              pending.ref.id === journal._id && pending.ref.parent === undefined);
+            const candidate = update?.kind === "update" ? applyDiff(journal, update.diff) : undefined;
+            if (candidate && !candidate.ok) return true;
+            const current = candidate?.ok ? candidate.value as JournalDocument : journal;
+            return codexReferencesRef(current, op.ref);
+          });
+          if (codexReferenceRemains)
+            return { ok: false, reason: "invalid_schema", error: "Remove or repair Codex links before deleting this document" };
           continue;
         }
       }
@@ -3177,6 +3413,20 @@ export class HostSync {
     }
     // Capture the START of each token path before applying any op. A multi-op transaction
     // fires once from first pre-image to final committed position, never from an optimistic drag.
+    // Remember source-addressable PF1e conditions before the envelope. Condition cleanup belongs
+    // to the application identity, so normal removal, actor deletion, Undo/Redo and action Revert
+    // all stop only the FX tied to the applications that actually disappeared.
+    const conditionApplicationsBefore = new Map<string, Set<string>>();
+    for (const op of ops) {
+      const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id } : op.ref;
+      if (ref.coll !== "actors" || conditionApplicationsBefore.has(ref.id)) continue;
+      const before = this.store.get("actors", ref.id) as ActorDocument | undefined;
+      if (!before) continue;
+      const pf1e = isRecord(before.system?.pf1e) ? before.system.pf1e as Record<string, unknown> : {};
+      const applications = validatePF1eConditionApplications(pf1e.conditionApplications);
+      if (applications.ok && Object.keys(applications.value).length > 0)
+        conditionApplicationsBefore.set(ref.id, new Set(Object.keys(applications.value)));
+    }
     const moving = new Map<string, { sceneId: string; tokenId: string; before?: TokenDocument }>();
     for (const op of ops) {
       const ref = op.kind === "create" ? { coll: op.coll, id: op.data._id, parent: op.parent } : op.ref;
@@ -3427,6 +3677,15 @@ export class HostSync {
     if (!restoring && this.poisonSweepDepth === 0 &&
         ((clockBefore !== null && clockAfter !== clockBefore) || poisonTurnActors.size > 0))
       this.sweepPF1ePoisonDue(clockAfter ?? readWorldClock(this.store.getAll("settings")), poisonTurnActors);
+    for (const [actorId, beforeIds] of conditionApplicationsBefore) {
+      const after = this.store.get("actors", actorId) as ActorDocument | undefined;
+      const pf1e = after && isRecord(after.system?.pf1e) ? after.system.pf1e as Record<string, unknown> : {};
+      const applications = validatePF1eConditionApplications(pf1e.conditionApplications);
+      const afterIds = applications.ok ? new Set(Object.keys(applications.value)) : new Set<string>();
+      for (const applicationId of beforeIds) {
+        if (!afterIds.has(applicationId)) this.stopConditionFxForApplication(applicationId);
+      }
+    }
     return { ok: true, seq: envelope.seq };
   }
 
@@ -3472,7 +3731,11 @@ export class HostSync {
         ...(inverse.parent ? { parent: inverse.parent } : {}) }), inverse.data);
     for (const session of this.sessions.values()) {
       if (!session.user) continue;
-      const resolver = { resolve: (ref: DocRef) => this.store.resolve(ref) ?? deleted.get(visibilityKey(ref)) };
+      const viewerManifest = projectAssetManifest(this.store.world, this.manifestSource(), session.user);
+      const resolver = {
+        resolve: (ref: DocRef) => this.store.resolve(ref) ?? deleted.get(visibilityKey(ref)),
+        canReadAsset: (assetId: string) => Object.prototype.hasOwnProperty.call(viewerManifest, assetId),
+      };
       const projected =
         crossings.length > 0
           ? projectWithCrossings(envelope, session.user, crossings, resolver)
@@ -3879,6 +4142,18 @@ export class HostSync {
     return facts;
   }
 
+  /** Stop only persistent FX instances owned by this exact condition application. */
+  private stopConditionFxForApplication(applicationId: string): void {
+    const instances = this.store.getAll("fxInstances").filter((instance) =>
+      instance.conditionApplicationId === applicationId);
+    if (instances.length === 0) return;
+    const stopped = this.commitSystem(instances.map((instance) => ({
+      kind: "delete" as const,
+      ref: { coll: "fxInstances" as const, id: instance._id },
+    })), false);
+    if (!stopped.ok) console.warn(`PF1e condition FX cleanup failed for ${applicationId}: ${stopped.error}`);
+  }
+
   /** Bounded display facts for the card; numbers are transcribed from the validated profile. */
   private poisonRiderFacts(definition: PF1ePoisonDefinition, dc: number | null): string[] {
     const facts: string[] = [];
@@ -4208,6 +4483,90 @@ export class HostSync {
     return { ok: false, error: "Spell source must be a prepared row or spontaneous spell slot" };
   }
 
+  private handleCodexPurchase(session: Session, msg: CodexPurchaseMsg): void {
+    const reply = (ok: boolean, detail: string, extras: { totalCopper?: number; replayed?: boolean } = {}): void => {
+      this.send(session, { kind: "codex.purchase.result", requestId: typeof msg.requestId === "string" ? msg.requestId : "invalid", ok, detail, ...extras });
+    };
+    const user = session.user;
+    if (!user) { reply(false, "You are not authenticated."); return; }
+    if (!session.intentBucket.tryRemove()) { reply(false, "Purchase requests are rate-limited."); return; }
+    if (!msg || typeof msg !== "object" || Object.keys(msg).some((key) =>
+      !["kind", "requestId", "sheetId", "stockRowId", "quantity", "actorId"].includes(key)) ||
+      typeof msg.requestId !== "string" || !/^[A-Za-z0-9_-]{1,96}$/.test(msg.requestId) ||
+      typeof msg.sheetId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.sheetId) ||
+      typeof msg.stockRowId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.stockRowId) ||
+      typeof msg.actorId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.actorId) ||
+      !Number.isSafeInteger(msg.quantity) || msg.quantity < 1 || msg.quantity > 1_000) {
+      reply(false, "The purchase request is malformed.");
+      return;
+    }
+    const receiptId = `codexpurchase_${msg.requestId}`;
+    const prior = this.store.get("actionReceipts", receiptId) as ActionReceiptDocument | undefined;
+    if (prior) {
+      const priorSystem = isRecord(prior.system) ? prior.system : {};
+      if (priorSystem.action !== "codex.purchase" || priorSystem.requestId !== msg.requestId ||
+          priorSystem.userId !== user.id || priorSystem.sheetId !== msg.sheetId ||
+          priorSystem.stockRowId !== msg.stockRowId || priorSystem.actorId !== msg.actorId ||
+          priorSystem.quantity !== msg.quantity) {
+        reply(false, "This request ID has already been used.");
+        return;
+      }
+      if (prior.status === "ready") {
+        reply(true, "Purchase already completed; no second transfer was made.", {
+          ...(typeof priorSystem.totalCopper === "number" ? { totalCopper: priorSystem.totalCopper } : {}),
+          replayed: true,
+        });
+        return;
+      }
+      reply(false, prior.status === "reverted"
+        ? "This purchase was already reverted. Submit a new request if you still want the item."
+        : "This purchase request is already being processed.");
+      return;
+    }
+
+    const sheet = this.store.get("journals", msg.sheetId) as JournalDocument | undefined;
+    const actor = this.store.get("actors", msg.actorId) as ActorDocument | undefined;
+    const shop = sheet?.codex?.shop;
+    if (!sheet || sheet.type !== "journal" || !shop || !can(user, "read", sheet, "journals") ||
+        !codexAudienceAllows(shop.audience, user) || shop.mode !== "shop") {
+      reply(false, "This shop is unavailable.");
+      return;
+    }
+    const row = shop.stock.find((candidate) => candidate.id === msg.stockRowId);
+    const resolver = { resolve: (ref: DocRef) => this.store.resolve(ref) };
+    const sourceItem = row ? this.store.resolve(row.item) as ItemDocument | undefined : undefined;
+    if (!row || !sourceItem || sourceItem.type !== "item" ||
+        !canReadCodexRef(user, row.item, resolver) ||
+        !actor || actor.type !== "actor" || !can(user, "update", actor, "actors") ||
+        row.item.parent?.coll === "actors" && row.item.parent.id === actor._id) {
+      reply(false, "The stock item or selected character is unavailable.");
+      return;
+    }
+    const plan = planCodexPurchase({ sheet, row, sourceItem, actor, quantity: msg.quantity, itemId: randomId() });
+    if (!plan.ok) { reply(false, plan.error); return; }
+    const audit: ActionAudit = {
+      id: receiptId,
+      label: `Codex purchase: ${plan.itemName} ×${msg.quantity}`.slice(0, 160),
+      system: {
+        action: "codex.purchase",
+        requestId: msg.requestId,
+        userId: user.id,
+        sheetId: msg.sheetId,
+        stockRowId: msg.stockRowId,
+        actorId: msg.actorId,
+        quantity: msg.quantity,
+        totalCopper: plan.totalCopper,
+      },
+      pathChecks: [
+        { ref: { coll: "journals", id: sheet._id }, paths: ["codex.shop.stock"] },
+        { ref: { coll: "actors", id: actor._id }, paths: ["system.pf1e.currency", "items"] },
+      ],
+    };
+    const committed = this.commitOps(plan.ops, user.id, receiptId, true, audit);
+    if (!committed.ok) { reply(false, `Purchase was not committed: ${committed.error}`); return; }
+    reply(true, `Purchased ${msg.quantity} × ${plan.itemName}.`, { totalCopper: plan.totalCopper });
+  }
+
   private handlePF1eConditionAction(session: Session, raw: WireMessage): void {
     const request = raw as unknown as PF1eConditionActionMsg;
     const requestId = typeof (request as { requestId?: unknown }).requestId === "string"
@@ -4242,7 +4601,12 @@ export class HostSync {
       this.reject(session, requestId, "invalid_schema", "Condition target actor does not exist");
       return;
     }
-    if (!can(user, "update", actor, "actors")) {
+    const controlsTarget = can(user, "update", actor, "actors");
+    // A player cannot edit an NPC's sheet, but may apply the condition evidenced by their own
+    // host-verified landed spell row. The rider validator below re-reads that exact target/card,
+    // verifies the saved-outcome rule, and still requires control of the delivering actor.
+    const verifiedSpellDelivery = request.action === "apply" && request.spell !== undefined;
+    if (!controlsTarget && !verifiedSpellDelivery) {
       this.reject(session, requestId, "forbidden", "You do not control this condition target");
       return;
     }
@@ -4422,6 +4786,23 @@ export class HostSync {
     if (!committed.ok) {
       this.reject(session, requestId, "invariant", committed.error);
       return;
+    }
+    if (request.action === "apply" && spellRider?.effect.conditionFxMacroId) {
+      const row = spellRider.context.card.targets[spellRider.context.targetIndex];
+      const sceneId = spellRider.context.card.sceneId ?? spellRider.context.card.area?.sceneId;
+      if (sceneId && row?.tokenId) {
+        const prepared = this.prepareFx(user, {
+          macroId: spellRider.effect.conditionFxMacroId,
+          sceneId,
+          ...(spellRider.context.card.source.tokenId
+            ? { sourceTokenId: spellRider.context.card.source.tokenId } : {}),
+          targetTokenId: row.tokenId,
+        });
+        // The persistent token visual is owned by this exact authoritative application. Failure
+        // to deliver a cue never rolls back the already-committed PF1e condition.
+        if (prepared.ok && prepared.cue.persistent === true)
+          this.emitPreparedFx({ ...prepared, conditionApplicationId: applicationId });
+      }
     }
     const result: import("../core/messages").PF1eConditionActionResultMsg = {
       kind: "pf1e.condition.result", requestId, action: request.action,
@@ -6877,11 +7258,11 @@ export class HostSync {
   /** Non-media cues need only enough lead for every viewer to schedule the host clock. */
   private static readonly FX_LEAD_MS = 300;
   /**
-   * Active-scene asset request/response plus browser decode can cross the base scheduler
-   * lead even for a tiny image. Media runs receive a bounded extra head start; honest
-   * late reporting still applies when fetch/decode exceeds this window.
+   * Active-scene asset transfer plus video first-frame decode needs more than the base
+   * scheduler lead. Media runs receive a bounded head start for both; honest late reporting
+   * still applies when fetch/decode exceeds this window.
    */
-  private static readonly FX_MEDIA_LEAD_MS = 750;
+  private static readonly FX_MEDIA_LEAD_MS = 2_000;
   /** How many runs' worth of media expectations the host remembers (oldest evicted). */
   private static readonly FX_MEDIA_RUNS = 32;
   /** The shortest wait for viewer answers: a cue with everything due at once still gets this. */
@@ -7277,12 +7658,11 @@ export class HostSync {
     if (!macro || macro.kind !== "sequence" || !scene || !macro.sequence)
       return invalid("sequence macro or scene missing");
     const isGm = caller.role === "GM" || caller.role === "ASSISTANT";
-    // A player may invoke only a timeline that *includes them* (D-316): the old rule
-    // refused a GM-audience cue, and a chosen-players cue the caller is not in is the
-    // same refusal — publishing a cue is not a licence to fire it at other people.
+    // Definition visibility, invocation and playback recipients are independent policies. A
+    // published player needs macro read access and `playerCallable`; the saved/narrowed audience
+    // is applied below only to recipients, so a player may intentionally trigger GM-only FX.
     if (!can(caller, "read", macro, "macros") || !can(caller, "read", scene, "scenes") ||
-        (!isGm && (macro.flags?.core?.playerCallable !== true ||
-          !fxAudienceAllows(macro.sequence.audience, { id: caller.id, isGm }, ownerId))))
+        (!isGm && macro.flags?.core?.playerCallable !== true))
       return forbidden("FX macro is not published for this caller");
     const callerScene = projectWorld(this.store.world, this.store.seq, caller).collections.scenes
       ?.find((s) => s._id === scene._id);
@@ -7372,7 +7752,8 @@ export class HostSync {
         atHostTime: prepared.cue.atHostTime, sections: prepared.cue.sections,
         ...(prepared.syncGroups ? { syncGroups: prepared.syncGroups } : {}),
         ...(prepared.sourceTokenId ? { sourceTokenId: prepared.sourceTokenId } : {}),
-        ...(prepared.targetTokenId ? { targetTokenId: prepared.targetTokenId } : {}) };
+        ...(prepared.targetTokenId ? { targetTokenId: prepared.targetTokenId } : {}),
+        ...(prepared.conditionApplicationId ? { conditionApplicationId: prepared.conditionApplicationId } : {}) };
       if (!validateFxInstance(doc, scene, this.manifestSource())) return false;
       // Broadcast projects the private document to GMs, then separately sends
       // entitled viewers a resolved cue. Both happen after the durable commit.

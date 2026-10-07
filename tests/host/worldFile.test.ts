@@ -25,7 +25,7 @@ import {
   putCheckpoint,
   putReport,
 } from "../../src/storage/strategicStore";
-import type { AutomationDocument, MacroDocument, TokenDocument, UserDocument } from "../../src/core/documents";
+import type { ActorDocument, AutomationDocument, MacroDocument, TokenDocument, UserDocument } from "../../src/core/documents";
 import { ClientSync, type ClientEvents } from "../../src/client/sync";
 import { createTransportPair } from "../../src/net/memory";
 import { createEventBus } from "../../src/core/events";
@@ -185,6 +185,79 @@ describe("world.zip export/import (§8)", () => {
     // Every case in this file boots the most recent test world against an
     // independent in-memory OPFS root. Do not strand this case's asset row in
     // IDB for a later case whose root correctly has no such blob.
+    await deleteWorldData(db, app.worldId);
+  });
+
+  test("FX timelines, spell/item bindings, presets and media survive world-file copy and restore", async () => {
+    const root = new MemDirHandle();
+    const app = await boot(root);
+    const bytes = new Uint8Array([2, 3, 5, 7]);
+    const { hash } = await app.assets.import(bytes, "fireball-glow.png", "image/png", "gm", "granted");
+    const item = { _id: "archive-sword", type: "item" as const, name: "Archive sword",
+      ownership: { default: 0 as const }, flags: {}, system: {}, effects: [] };
+    const actor: ActorDocument = { _id: "archive-hero", type: "actor", name: "Archive hero",
+      ownership: { default: 0 }, flags: {}, system: {}, items: [item], effects: [] };
+    app.gm.client.submit([{ kind: "create", coll: "actors", data: actor }]);
+    await settle();
+
+    const image = { id: "fireball-media", kind: "image" as const, assetId: hash,
+      startMs: 0, durationMs: 900, at: { kind: "point" as const, x: 120, y: 140 }, scale: 1.25 };
+    const failure: MacroDocument = { _id: "fx-archive-fizzle", type: "macro", name: "Archive fizzle",
+      command: "", kind: "sequence", ownership: { default: 0 }, flags: {}, system: {},
+      sequence: { version: 1, audience: "gm", sections: [{ id: "fizzle", kind: "text",
+        text: "The spell fizzles", startMs: 0, durationMs: 500,
+        at: { kind: "point", x: 120, y: 140 } }] } };
+    app.gm.client.submit([{ kind: "create", coll: "macros", data: failure }]);
+    await settle();
+
+    const spellCue: MacroDocument = { _id: "fx-archive-fireball", type: "macro", name: "Archive Fireball",
+      command: "", kind: "sequence", ownership: { default: 2, "archive-player": 2 },
+      flags: { core: { playerCallable: true } }, system: {},
+      fxSpell: { spellId: "fireball", spellName: "Fireball", onFailureId: failure._id },
+      sequence: { version: 1, audience: { players: ["archive-player"] }, sections: [image] } };
+    const itemCue: MacroDocument = { _id: "fx-archive-sword", type: "macro", name: "Archive sword swing",
+      command: "", kind: "sequence", ownership: { default: 2, "archive-player": 2 },
+      flags: { core: { playerCallable: true } }, system: {},
+      fxItem: { actorId: actor._id, itemId: item._id, events: ["attack"],
+        recognition: "auto", enabled: true },
+      sequence: { version: 1, audience: "others", sections: [{ id: "swing", kind: "text",
+        text: "Steel flashes", startMs: 0, durationMs: 450,
+        at: { kind: "point", x: 80, y: 90 } }] } };
+    const preset: MacroDocument = { _id: "fx-archive-preset", type: "macro", name: "Archive glow preset",
+      command: "", kind: "fxPreset", ownership: { default: 0 }, flags: {}, system: {},
+      preset: { version: 1, sections: [image] } };
+    app.gm.client.submit([{ kind: "create", coll: "macros", data: spellCue },
+      { kind: "create", coll: "macros", data: itemCue }, { kind: "create", coll: "macros", data: preset }]);
+    await settle();
+    expect(app.store.get("macros", spellCue._id)?.fxSpell).toEqual(spellCue.fxSpell);
+    expect(app.store.get("macros", itemCue._id)?.fxItem).toEqual(itemCue.fxItem);
+
+    const archive = await exportWorldZip({ db, worldId: app.worldId, root, persister: app.persister });
+    const files = parseZip(new Uint8Array(await archive.arrayBuffer()));
+    const documents = JSON.parse(strFromU8(files.get("documents.json") as Uint8Array)) as WorldFileDocuments;
+    const exportedMacro = (id: string): MacroDocument =>
+      documents.docs.find((row) => row.coll === "macros" && row.id === id)?.doc as MacroDocument;
+    expect(exportedMacro(spellCue._id)).toEqual(spellCue);
+    expect(exportedMacro(itemCue._id)).toEqual(itemCue);
+    expect(exportedMacro(preset._id)).toEqual(preset);
+    expect(files.get(`assets/${hash}`)).toEqual(bytes);
+    await app.close();
+
+    for (const options of [{ mode: "copy" as const, worldId: "w-fx-archive-copy" },
+      { mode: "replace" as const }]) {
+      const imported = await importWorldZip({ db, file: archive, root, ...options });
+      const rows = await getAllDocumentRecords(db, imported.worldId);
+      const restored = (id: string): MacroDocument =>
+        rows.find((row) => row.coll === "macros" && row.id === id)?.doc as MacroDocument;
+      expect(restored(spellCue._id)).toEqual(spellCue);
+      expect(restored(itemCue._id)).toEqual(itemCue);
+      expect(restored(preset._id)).toEqual(preset);
+      expect(rows.find((row) => row.coll === "actors" && row.id === actor._id)?.doc).toEqual(actor);
+      const restoredAsset = (await listAssets(db, imported.worldId)).find((asset) => asset.hash === hash);
+      // Import never transfers a redistribution or player-serving permission from another GM.
+      expect(restoredAsset).toMatchObject({ visibility: "gm", exportRights: "restricted" });
+    }
+    await deleteWorldData(db, "w-fx-archive-copy");
     await deleteWorldData(db, app.worldId);
   });
 

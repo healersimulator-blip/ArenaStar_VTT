@@ -10,7 +10,18 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 // The media path ends in a Pixi texture; this file is about *when* bytes are asked
 // for and what the viewer is told, so the decoder is stubbed rather than simulated.
-vi.mock("pixi.js", () => ({ Texture: { from: vi.fn(() => ({ destroy: () => undefined })) } }));
+vi.mock("pixi.js", () => ({
+  Texture: class Texture {
+    static from = vi.fn(() => ({ destroy: () => undefined }));
+    constructor(readonly options: { source: unknown }) {}
+    destroy = vi.fn();
+  },
+  VideoSource: class VideoSource {
+    isReady = false;
+    constructor(readonly options: { resource: unknown; autoLoad?: boolean; autoPlay?: boolean }) {}
+    update = vi.fn();
+  },
+}));
 vi.stubGlobal("Image", class {
   src = "";
   decode(): Promise<void> { return Promise.resolve(); }
@@ -245,15 +256,18 @@ describe("FX preload and late-media fallback (D-295)", () => {
   test("an authored playback rate and clip window reach the video element", async () => {
     class FakeVideo {
       muted = false; playsInline = false; loop = false; playbackRate = 1;
-      currentTime = 0; duration = 4;
+      currentTime = 0; duration = 4; readyState = 0;
       onloadeddata: (() => void) | null = null;
       onerror: (() => void) | null = null;
       onended: (() => void) | null = null;
       ontimeupdate: (() => void) | null = null;
       canPlayType(): string { return "probably"; }
+      load = vi.fn();
       pause = vi.fn();
+      requestVideoFrameCallback(): number { return 1; }
+      cancelVideoFrameCallback(): void {}
       play = vi.fn(() => Promise.resolve());
-      set src(_value: string) { queueMicrotask(() => this.onloadeddata?.()); }
+      set src(_value: string) { queueMicrotask(() => { this.readyState = 2; this.onloadeddata?.(); }); }
     }
     const videos: FakeVideo[] = [];
     Object.defineProperty(globalThis, "document", { configurable: true, value: {
@@ -853,13 +867,14 @@ describe("the table answers with what it actually did (D-308, SQ-13)", () => {
     let finishPlay: (() => void) | undefined;
     class SlowVideo {
       muted = false; playsInline = false; loop = false; playbackRate = 1;
-      currentTime = 0; duration = 4;
+      currentTime = 0; duration = 4; readyState = 0;
       onloadeddata: (() => void) | null = null;
       onerror: (() => void) | null = null;
       canPlayType(): string { return "probably"; }
+      load = vi.fn();
       pause = vi.fn();
       play = vi.fn(() => new Promise<void>((resolve) => { finishPlay = resolve; }));
-      set src(_value: string) { queueMicrotask(() => this.onloadeddata?.()); }
+      set src(_value: string) { queueMicrotask(() => { this.readyState = 2; this.onloadeddata?.(); }); }
     }
     Object.defineProperty(globalThis, "document", { configurable: true, value: {
       createElement: () => new SlowVideo(),

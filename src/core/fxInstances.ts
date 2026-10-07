@@ -20,6 +20,7 @@ export interface FxInstanceFilter {
   macroId?: string;
   sourceTokenId?: string;
   targetTokenId?: string;
+  conditionApplicationId?: string;
 }
 export function validateFxInstanceFilter(value: unknown, requireSelector = false):
   { ok: true; filter: FxInstanceFilter } | { ok: false; error: string } {
@@ -27,13 +28,13 @@ export function validateFxInstanceFilter(value: unknown, requireSelector = false
     return { ok: false, error: "FX filter must be a named record" };
   const filter = value as Record<string, unknown>;
   const keys = Object.keys(filter);
-  if (keys.some((key) => !["name", "macroId", "sourceTokenId", "targetTokenId"].includes(key)) ||
+  if (keys.some((key) => !["name", "macroId", "sourceTokenId", "targetTokenId", "conditionApplicationId"].includes(key)) ||
       (requireSelector && !keys.some((key) => filter[key] !== undefined)) ||
       (filter.name !== undefined && (typeof filter.name !== "string" || !filter.name.trim() ||
         filter.name.length > 128 || [...filter.name].some((char) => char.charCodeAt(0) < 32))) ||
-      [filter.macroId, filter.sourceTokenId, filter.targetTokenId].some((id) => id !== undefined &&
+      [filter.macroId, filter.sourceTokenId, filter.targetTokenId, filter.conditionApplicationId].some((id) => id !== undefined &&
         (typeof id !== "string" || !ID.test(id))))
-    return { ok: false, error: "FX filter needs a bounded name/macro/token selector" };
+    return { ok: false, error: "FX filter needs a bounded name/macro/token/condition selector" };
   return { ok: true, filter: value as FxInstanceFilter };
 }
 
@@ -42,7 +43,9 @@ export function validateFxInstanceFilter(value: unknown, requireSelector = false
 export function fxInstanceMatches(doc: FxInstanceDocument, filter: FxInstanceFilter): boolean {
   if (filter.macroId !== undefined && doc.macroId !== filter.macroId ||
       filter.sourceTokenId !== undefined && doc.sourceTokenId !== filter.sourceTokenId ||
-      filter.targetTokenId !== undefined && doc.targetTokenId !== filter.targetTokenId) return false;
+      filter.targetTokenId !== undefined && doc.targetTokenId !== filter.targetTokenId ||
+      filter.conditionApplicationId !== undefined &&
+        doc.conditionApplicationId !== filter.conditionApplicationId) return false;
   return filter.name === undefined || tagMatcher(filter.name, { pattern: "wildcard", caseSensitive: false })([doc.name]);
 }
 
@@ -56,7 +59,8 @@ export function validateFxInstance(
       !Number.isFinite(doc.atHostTime) || doc.atHostTime < 0 ||
       !Array.isArray(doc.sections) || doc.sections.length < 1 || doc.sections.length > 16 ||
       (doc.sourceTokenId !== undefined && (!ID.test(doc.sourceTokenId) || !scene.tokens.some((t) => t._id === doc.sourceTokenId))) ||
-      (doc.targetTokenId !== undefined && (!ID.test(doc.targetTokenId) || !scene.tokens.some((t) => t._id === doc.targetTokenId)))) return false;
+      (doc.targetTokenId !== undefined && (!ID.test(doc.targetTokenId) || !scene.tokens.some((t) => t._id === doc.targetTokenId))) ||
+      (doc.conditionApplicationId !== undefined && !ID.test(doc.conditionApplicationId))) return false;
   // The authored names stay in this private record, keyed by resolved section ID. A
   // recipient receives neither this array nor a name — only `syncAtHostTime` below.
   if (doc.syncGroups !== undefined && (!Array.isArray(doc.syncGroups) ||

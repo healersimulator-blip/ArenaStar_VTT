@@ -59,7 +59,8 @@ import {
 } from "../storage/strategicStore";
 import type { TurnReport } from "../core/sim";
 import { OpfsAssetStore, type DirHandleLike } from "../storage/opfs";
-import type { BaseDocument, CollectionName, MacroDocument } from "../core/documents";
+import type { BaseDocument, CollectionName, JournalDocument, MacroDocument } from "../core/documents";
+import { codexArchiveJournalError } from "../core/campaignCodex";
 import type { AssetId, DocId, WorldId } from "../core/ids";
 import type { HostPersister } from "../storage/persistence";
 import { buildPackageFromFiles } from "../packages/packageLoader";
@@ -508,6 +509,12 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
   );
   if (documents.seq !== meta.seq) {
     throw new Error(`world file: seq mismatch (world ${meta.seq}, documents ${documents.seq})`);
+  }
+  if (!Array.isArray(documents.docs)) throw new Error("world file: documents.json docs must be an array");
+  for (const row of documents.docs) {
+    if (row?.coll !== "journals" || row.doc?.type !== "journal") continue;
+    const error = codexArchiveJournalError(row.doc as JournalDocument);
+    if (error) throw new Error(`world file: journal ${String(row.id)}: ${error}`);
   }
   const assetEntries = parseJson<WorldFileAsset[]>(
     requireFile(files, "assets.json"),

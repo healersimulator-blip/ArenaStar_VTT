@@ -20,6 +20,8 @@
   import PF1eSkillsTab from "./PF1eSkillsTab.svelte";
   import PF1eCharacterBuilderModal from "./PF1eCharacterBuilderModal.svelte";
   import PF1eCompendiumPicker from "./PF1eCompendiumPicker.svelte";
+  import FxBindingPicker from "./FxBindingPicker.svelte";
+  import type { FxBindingPickerTarget } from "./fxBindingPicker";
   import { pf1eSkillRollSpec } from "../../packages/pf1e/rollData";
   import type { CompendiumEntry } from "../../core/compendium";
   import { can } from "../../core/permissions";
@@ -39,6 +41,7 @@
   import PF1eItemsTab from "./PF1eItemsTab.svelte";
   import TagEditor from "./TagEditor.svelte";
   import {
+    pf1eCompendiumComponents,
     pf1eSpellbookEdit,
     pf1eSpellbookView,
     type PF1eSpellbookEdit,
@@ -103,10 +106,13 @@
   import { resolveAttackFlow, resolveManyshotFlow, resolveFirearmExplosionFlow } from "./pf1eResolveFlow";
   import { attackLineItemId } from "./pf1eItemsTab";
   import {
+    boundCueFor,
+    boundSpellCueFor,
     castSpellCueNote,
     fireBoundItemCue,
     fxCastOutcome,
     fxItemCueNote,
+    fxSpellBindingIdForName,
   } from "./fxItemCue";
   import { pf1eSpellEffectByName } from "../../packages/pf1e/spellEffects";
   import { resolveManeuverFlow } from "../combat/pf1eManeuverFlow";
@@ -169,6 +175,8 @@
   let error = $state("");
   let showBuilder = $state(false);
   let compendiumPickerKind = $state<"spell" | "feat" | null>(null);
+  let fxBindingTarget = $state<FxBindingPickerTarget | null>(null);
+  const canManageFx = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
   const pending = new SvelteSet<string>();
   // E01: when this actor fights inside an encounter, its combatant's timed
   // effects (`flags.core.effects`) ride the derivation (id collision → the
@@ -1223,6 +1231,26 @@
     if (result.ops.length) pending.add(client.submit(result.ops));
   }
 
+  function spellFxCue(name: string): ReturnType<typeof boundSpellCueFor> {
+    const spellId = fxSpellBindingIdForName(name);
+    return spellId === null ? null : boundSpellCueFor(client, spellId);
+  }
+
+  function openSpellFxBinding(name: string): void {
+    if (!canManageFx || name.trim() === "") return;
+    fxBindingTarget = { kind: "spell", spellName: name.trim() };
+  }
+
+  function openAttackFxBinding(index: number): void {
+    if (!canManageFx) return;
+    const itemId = attackLineItemId(doc, index);
+    if (itemId === null) {
+      error = "Link this attack to a weapon item first (Items tab → Attack); FX attack cues are tied to the exact item-backed line.";
+      return;
+    }
+    fxBindingTarget = { kind: "item", actorId: doc._id, itemId, event: "attack" };
+  }
+
   function handleSelectCompendiumEntry(entry: CompendiumEntry): void {
     if (compendiumPickerKind === "feat") {
       const featName = entry.name;
@@ -1240,13 +1268,9 @@
     } else if (compendiumPickerKind === "spell") {
       const entrySys = (entry.data?.system ?? {}) as Record<string, unknown>;
       const level = typeof entrySys.levelNumber === "number" ? entrySys.levelNumber : (parseInt(String(entrySys.level), 10) || 1);
-      const components = Array.isArray(entrySys.components)
-        ? entrySys.components.join(", ")
-        : typeof entrySys.components === "object" && entrySys.components !== null
-          ? Object.keys(entrySys.components).join(", ")
-          : typeof entrySys.components === "string"
-            ? entrySys.components
-            : "V, S";
+      // Compendium packs commonly store structured flags (verbal/somatic/material) rather than
+      // PF1e's printed abbreviations. Normalize the fields the shared cast gate understands.
+      const components = pf1eCompendiumComponents(entrySys.components) || "V, S";
       updateSpellbook({
         kind: "prepare",
         entry: {
@@ -1490,7 +1514,7 @@
         castWarning =
           "the touch attack missed — the charge is held; deliver it below" + spellCueNote;
       } else if (outcome.lost) {
-        castWarning = [...outcome.gateNotes, ...outcome.warnings].join(" · ");
+        castWarning = [...outcome.gateNotes, ...outcome.warnings].join(" · ") + spellCueNote;
       } else {
         const bits: string[] = [...outcome.gateNotes, ...outcome.warnings];
         if (outcome.hpWriteError !== null) bits.push(outcome.hpWriteError);
@@ -2483,6 +2507,8 @@
     {:else}
       <h4>Attacks</h4>
       {#each attackRolls as group, i (i)}
+        {@const attackItemId = attackLineItemId(doc, i)}
+        {@const attackFx = attackItemId === null ? null : boundCueFor(client, doc._id, attackItemId, "attack")}
         <div class="attack-line" data-pf1e-attack={group.label}>
           <p>
             <strong>{group.label}</strong>
@@ -2523,6 +2549,15 @@
               <button type="button" onclick={() => rollSpec(group.critDamage)}
                 >Crit ×{d.attacks[i]?.critMultiplier}</button
               >
+            {/if}
+            {#if canManageFx}
+              <button type="button" data-pf1e-attack-fx={i} disabled={attackItemId === null}
+                title={attackItemId === null
+                  ? "Link this attack to a weapon item first (Items tab → Attack)"
+                  : attackFx ? `Edit FX binding: ${attackFx.name}` : "Attach FX to this weapon attack"}
+                onclick={() => openAttackFxBinding(i)}>
+                {attackFx ? `FX: ${attackFx.name}` : "+ FX"}
+              </button>
             {/if}
           </div>
           {#if group.notes.length > 0}
@@ -3101,6 +3136,7 @@
         {:else}
           <ul>
             {#each spellbook.prepared as row, index (`${row.name}#${index}`)}
+              {@const spellFx = spellFxCue(row.name)}
               <li data-prepared-row={index}>
                 <label
                   ><input
@@ -3125,6 +3161,13 @@
                   >
                     Cast
                   </button>
+                  {#if canManageFx}
+                    <button type="button" data-pf1e-prepared-fx={index}
+                      title={spellFx ? `Edit FX binding: ${spellFx.name}` : `Attach FX to ${row.name}`}
+                      onclick={() => openSpellFxBinding(row.name)}>
+                      {spellFx ? `FX: ${spellFx.name}` : "+ FX"}
+                    </button>
+                  {/if}
                   <button
                     type="button"
                     data-prepared-remove={index}
@@ -3175,6 +3218,13 @@
               : "Pick a prepared row, or name a spell"}
           />
         </label>
+        {#if canManageFx && castName.trim() !== ""}
+          {@const spellFx = spellFxCue(castName)}
+          <button type="button" data-pf1e-cast-spell-fx
+            onclick={() => openSpellFxBinding(castName)}>
+            {spellFx ? `Edit FX: ${spellFx.name}` : `+ FX for ${castName}`}
+          </button>
+        {/if}
         <label
           >Spell level
           <select bind:value={castLevel} data-cast-level>
@@ -3700,6 +3750,10 @@
       onSelect={handleSelectCompendiumEntry}
       onClose={() => (compendiumPickerKind = null)}
     />
+  {/if}
+  {#if fxBindingTarget}
+    <FxBindingPicker {client} {bus} target={fxBindingTarget}
+      onClose={() => (fxBindingTarget = null)} />
   {/if}
 </section>
 

@@ -47,6 +47,12 @@ import { summonMarker, validateSummon } from "./summons";
 import { maskJournalLinkTargets } from "./journalLinks";
 import { macroAutomationInputs } from "./macroAutomation";
 import { projectPlayerMacroAuthoring } from "./playerMacros";
+import {
+  codexPageVisible,
+  projectCodexJournal,
+  resolveCodexWorldRef,
+  type CodexResolver,
+} from "./campaignCodex";
 
 export interface ProjectedWorld {
   seq: number;
@@ -56,10 +62,16 @@ export interface ProjectedWorld {
 /** Pure lookup into current world state (host passes a store-backed one). */
 export interface ProjectionResolver {
   resolve(ref: DocRef): BaseDocument | undefined;
+  /** If supplied, Codex image widgets are projected with the same manifest grant as streamed bytes. */
+  canReadAsset?(assetId: string): boolean;
 }
 
 export interface ProjectionFns {
-  projectWorld(world: WorldCollections, seq: number, user: PermissionUser): ProjectedWorld;
+  projectWorld(
+    world: WorldCollections,
+    seq: number,
+    user: PermissionUser,
+  ): ProjectedWorld;
   /** null ⇒ the recipient gets nothing from this envelope. */
   projectEnvelope(
     envelope: OpEnvelope,
@@ -83,7 +95,10 @@ function isGm(user: PermissionUser): boolean {
 type MessageAccess = "omit" | "redact" | "full";
 
 /** §5: whispers + GM-only roll results (§10/§11 modes). */
-function messageAccess(user: PermissionUser, msg: MessageDocument): MessageAccess {
+function messageAccess(
+  user: PermissionUser,
+  msg: MessageDocument,
+): MessageAccess {
   if (isGm(user)) return "full";
   const isAuthor = msg.author === user.id;
   const isTarget = msg.whisper.includes(user.id);
@@ -100,7 +115,10 @@ function redactMessage(msg: MessageDocument): MessageDocument {
   return { ...msg, roll: null };
 }
 
-function projectMessage(user: PermissionUser, msg: MessageDocument): MessageDocument | null {
+function projectMessage(
+  user: PermissionUser,
+  msg: MessageDocument,
+): MessageDocument | null {
   const access = messageAccess(user, msg);
   if (access === "omit") return null;
   if (access === "redact") return redactMessage(msg);
@@ -139,25 +157,47 @@ export function docVisibleTo(
   if (isGm(user)) return true;
   // D-021/D-394: User documents are the public player list in snapshots AND live ops.
   if (doc.type === "user") return true;
-  if (doc.type === "automation" || doc.type === "prefab" || doc.type === "fxInstance") return false; // host-owned definitions and instances
-  // A GM-audience timeline's authored media names/hashes are also private;
-  // omitting just its cue while publishing its sequence would leak assets.
-  if (doc.type === "macro" && (doc as MacroDocument).kind === "summon" &&
-      !(validateSummon((doc as MacroDocument).summon).ok &&
-        (doc as MacroDocument).summon?.playerCallable === true)) return false;
-  // `gm` is the one audience that also hides the DOCUMENT (D-316): the other forms,
-  // chosen players included, decide delivery only — a reader who may see a timeline may
-  // see who it is addressed to, and the host is what keeps it away from everyone else.
-  if (doc.type === "macro" && (doc as MacroDocument).kind === "sequence" &&
-      (doc as MacroDocument).sequence?.audience === "gm") return false;
+  if (
+    doc.type === "automation" ||
+    doc.type === "prefab" ||
+    doc.type === "fxInstance"
+  )
+    return false; // host-owned definitions and instances
+  // A non-callable summon preset remains private regardless of ordinary macro ownership.
+  if (
+    doc.type === "macro" &&
+    (doc as MacroDocument).kind === "summon" &&
+    !(
+      validateSummon((doc as MacroDocument).summon).ok &&
+      (doc as MacroDocument).summon?.playerCallable === true
+    )
+  )
+    return false;
+  // Timeline ownership controls who may read the authored definition and its media references.
+  // Playback audience is a separate run-time delivery rule; changing it must not silently revoke
+  // or grant library visibility.
   // D-310: a preset is an authoring aid — its own name and the media it references are
   // a GM's library, not table state. A player never receives one (an assistant does).
-  if (doc.type === "macro" && (doc as MacroDocument).kind === "fxPreset") return false;
-  if ((doc.type === "token" && (doc as TokenDocument).hidden ||
-       doc.type === "tile" && (doc as TileDocument).hidden ||
-       doc.type === "region" && (doc as RegionDocument).hidden) && parent?.type === "scene") {
+  if (doc.type === "macro" && (doc as MacroDocument).kind === "fxPreset")
+    return false;
+  if (
+    ((doc.type === "token" && (doc as TokenDocument).hidden) ||
+      (doc.type === "tile" && (doc as TileDocument).hidden) ||
+      (doc.type === "region" && (doc as RegionDocument).hidden)) &&
+    parent?.type === "scene"
+  ) {
     return getEffectiveOwnership(user, doc, parent) >= OWNERSHIP_LEVELS.OWNER;
   }
+  if (
+    doc.type === "page" &&
+    parent?.type === "journal" &&
+    !codexPageVisible(
+      doc as JournalPageDocument,
+      parent as JournalDocument,
+      user,
+    )
+  )
+    return false;
   if (doc.type === "note") {
     const note = doc as NoteDocument;
     // An explicit pin state wins. `visible: false` is the GM's "not yet"; `visible: true` is
@@ -176,9 +216,15 @@ export function docVisibleTo(
  * revoke → delete).
  */
 export function visibilityFields(doc: BaseDocument): readonly string[] {
-  return doc.type === "note" ? ["ownership", "visible"]
-    : doc.type === "token" || doc.type === "tile" || doc.type === "region" ? ["ownership", "hidden"]
-      : doc.type === "macro" ? ["ownership", "kind", "sequence", "summon"] : ["ownership"];
+  return doc.type === "note"
+    ? ["ownership", "visible"]
+    : doc.type === "token" || doc.type === "tile" || doc.type === "region"
+      ? ["ownership", "hidden"]
+      : doc.type === "page"
+        ? ["ownership", "codex"]
+        : doc.type === "macro"
+          ? ["ownership", "kind", "sequence", "summon"]
+          : ["ownership"];
 }
 
 /**
@@ -208,41 +254,103 @@ function projectSceneCells(scene: SceneDocument): CellDocument[] | null {
 /** Scene-visible placeables may belong to a secret nested hierarchy. Instance
  * IDs, invisible parent IDs and the GM's source-scene ID are never needed by
  * player rendering; only the authoritative host retains attachment metadata. */
-const PREFAB_PARTS = ["tokens", "tiles", "walls", "lights", "sounds", "drawings", "templates", "notes", "regions"] as const;
+const PREFAB_PARTS = [
+  "tokens",
+  "tiles",
+  "walls",
+  "lights",
+  "sounds",
+  "drawings",
+  "templates",
+  "notes",
+  "regions",
+] as const;
 const SCENE_PROJECTED_PARTS = [...PREFAB_PARTS] as const;
 function stripPrefabMarker<T extends BaseDocument>(doc: T): T {
-  if (doc.flags?.prefab === undefined && doc.flags?.summon === undefined &&
-      doc.flags?.summonStatus === undefined) return doc;
-  const { prefab: _hostOnly, summon: _summon, summonStatus: _status, ...flags } = doc.flags;
-  void _hostOnly; void _summon; void _status;
+  if (
+    doc.flags?.prefab === undefined &&
+    doc.flags?.summon === undefined &&
+    doc.flags?.summonStatus === undefined
+  )
+    return doc;
+  const {
+    prefab: _hostOnly,
+    summon: _summon,
+    summonStatus: _status,
+    ...flags
+  } = doc.flags;
+  void _hostOnly;
+  void _summon;
+  void _status;
   const marker = doc.type === "token" ? summonMarker(doc) : null;
-  return { ...doc, flags: marker ? { ...flags, summonStatus: {
-    ownerId: marker.ownerId, ...(marker.expiresAt !== undefined ? { expiresAt: marker.expiresAt } : {})
-  } } : flags };
+  return {
+    ...doc,
+    flags: marker
+      ? {
+          ...flags,
+          summonStatus: {
+            ownerId: marker.ownerId,
+            ...(marker.expiresAt !== undefined
+              ? { expiresAt: marker.expiresAt }
+              : {}),
+          },
+        }
+      : flags,
+  };
 }
 
 function projectPrefabCreate(op: Extract<Op, { kind: "create" }>): Op {
-  if (op.coll !== "actors" && (!PREFAB_PARTS.some((part) => part === op.coll) || !op.parent)) return op;
-  if (op.data.flags?.prefab === undefined && op.data.flags?.summon === undefined &&
-      op.data.flags?.summonStatus === undefined) return op;
+  if (
+    op.coll !== "actors" &&
+    (!PREFAB_PARTS.some((part) => part === op.coll) || !op.parent)
+  )
+    return op;
+  if (
+    op.data.flags?.prefab === undefined &&
+    op.data.flags?.summon === undefined &&
+    op.data.flags?.summonStatus === undefined
+  )
+    return op;
   return { ...op, data: stripPrefabMarker(op.data) };
 }
 
 function projectPrefabDiff(op: Extract<Op, { kind: "update" }>): Op | null {
-  if (op.ref.coll !== "actors" && (!PREFAB_PARTS.some((part) => part === op.ref.coll) || !op.ref.parent)) return op;
+  if (
+    op.ref.coll !== "actors" &&
+    (!PREFAB_PARTS.some((part) => part === op.ref.coll) || !op.ref.parent)
+  )
+    return op;
   const diff: Record<string, Json | null> = {};
   let changed = false;
   for (const [key, value] of Object.entries(op.diff)) {
     const path = key.startsWith("-=") ? key.slice(2) : key;
-    if (["prefab", "summon", "summonStatus"].some((marker) => path === `flags.${marker}` || path.startsWith(`flags.${marker}.`))) {
+    if (
+      ["prefab", "summon", "summonStatus"].some(
+        (marker) =>
+          path === `flags.${marker}` || path.startsWith(`flags.${marker}.`),
+      )
+    ) {
       changed = true;
       continue;
     }
-    if (path === "flags" && value && typeof value === "object" && !Array.isArray(value) &&
-        (Object.hasOwn(value, "prefab") || Object.hasOwn(value, "summon") ||
-          Object.hasOwn(value, "summonStatus"))) {
-      const { prefab: _hostOnly, summon: _summon, summonStatus: _status, ...flags } = value;
-      void _hostOnly; void _summon; void _status;
+    if (
+      path === "flags" &&
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      (Object.hasOwn(value, "prefab") ||
+        Object.hasOwn(value, "summon") ||
+        Object.hasOwn(value, "summonStatus"))
+    ) {
+      const {
+        prefab: _hostOnly,
+        summon: _summon,
+        summonStatus: _status,
+        ...flags
+      } = value;
+      void _hostOnly;
+      void _summon;
+      void _status;
       diff[key] = flags;
       changed = true;
       continue;
@@ -257,42 +365,85 @@ function projectPrefabDiff(op: Extract<Op, { kind: "update" }>): Op | null {
  * ops. Replace any touched array with its player-shaped committed version so a
  * parent update cannot smuggle hidden children or prefab metadata past projection. */
 function projectSceneEmbedUpdate(
-  user: PermissionUser, op: Extract<Op, { kind: "update" }>, scene: SceneDocument,
+  user: PermissionUser,
+  op: Extract<Op, { kind: "update" }>,
+  scene: SceneDocument,
 ): Op {
-  const touched = SCENE_PROJECTED_PARTS.filter((part) => Object.keys(op.diff).some((key) => {
-    const path = key.startsWith("-=") ? key.slice(2) : key;
-    return path === part || path.startsWith(`${part}.`);
-  }));
+  const touched = SCENE_PROJECTED_PARTS.filter((part) =>
+    Object.keys(op.diff).some((key) => {
+      const path = key.startsWith("-=") ? key.slice(2) : key;
+      return path === part || path.startsWith(`${part}.`);
+    }),
+  );
   if (touched.length === 0) return op;
   const projected = projectScene(user, scene);
   const diff: Record<string, Json | null> = {};
   for (const [key, value] of Object.entries(op.diff)) {
     const path = key.startsWith("-=") ? key.slice(2) : key;
-    if (!touched.some((part) => path === part || path.startsWith(`${part}.`))) diff[key] = value;
+    if (!touched.some((part) => path === part || path.startsWith(`${part}.`)))
+      diff[key] = value;
   }
   for (const part of touched) diff[part] = projected[part] as unknown as Json;
   return { ...op, diff };
 }
 
-function projectScene(user: PermissionUser, scene: SceneDocument): SceneDocument {
-  const tokens = scene.tokens.filter((t) => tokenVisible(user, t, scene)).map(stripPrefabMarker);
-  const tiles = scene.tiles.filter((t) => docVisibleTo(user, t, scene)).map(stripPrefabMarker);
-  const regions = scene.regions?.filter((region) => docVisibleTo(user, region, scene)).map(stripPrefabMarker);
-  const notes = scene.notes.filter((n) => docVisibleTo(user, n, scene)).map(stripPrefabMarker);
+function projectScene(
+  user: PermissionUser,
+  scene: SceneDocument,
+): SceneDocument {
+  const tokens = scene.tokens
+    .filter((t) => tokenVisible(user, t, scene))
+    .map(stripPrefabMarker);
+  const tiles = scene.tiles
+    .filter((t) => docVisibleTo(user, t, scene))
+    .map(stripPrefabMarker);
+  const regions = scene.regions
+    ?.filter((region) => docVisibleTo(user, region, scene))
+    .map(stripPrefabMarker);
+  const notes = scene.notes
+    .filter((n) => docVisibleTo(user, n, scene))
+    .map(stripPrefabMarker);
   const cells = projectSceneCells(scene);
-  const markers = PREFAB_PARTS.some((coll) => (scene[coll] ?? []).some((doc) => doc.flags?.prefab !== undefined || doc.flags?.summon !== undefined ||
-    doc.flags?.summonStatus !== undefined));
-  if (tokens.length === scene.tokens.length && tiles.length === scene.tiles.length &&
-      regions?.length === scene.regions?.length &&
-      notes.length === scene.notes.length && !cells && !markers) return scene;
-  return { ...scene, tokens, tiles, ...(regions ? { regions } : {}), notes,
-    ...(markers ? { walls: scene.walls.map(stripPrefabMarker), lights: scene.lights.map(stripPrefabMarker),
-      sounds: scene.sounds.map(stripPrefabMarker), drawings: scene.drawings.map(stripPrefabMarker),
-      templates: scene.templates.map(stripPrefabMarker) } : {}),
-    ...(cells ? { cells } : {}) };
+  const markers = PREFAB_PARTS.some((coll) =>
+    (scene[coll] ?? []).some(
+      (doc) =>
+        doc.flags?.prefab !== undefined ||
+        doc.flags?.summon !== undefined ||
+        doc.flags?.summonStatus !== undefined,
+    ),
+  );
+  if (
+    tokens.length === scene.tokens.length &&
+    tiles.length === scene.tiles.length &&
+    regions?.length === scene.regions?.length &&
+    notes.length === scene.notes.length &&
+    !cells &&
+    !markers
+  )
+    return scene;
+  return {
+    ...scene,
+    tokens,
+    tiles,
+    ...(regions ? { regions } : {}),
+    notes,
+    ...(markers
+      ? {
+          walls: scene.walls.map(stripPrefabMarker),
+          lights: scene.lights.map(stripPrefabMarker),
+          sounds: scene.sounds.map(stripPrefabMarker),
+          drawings: scene.drawings.map(stripPrefabMarker),
+          templates: scene.templates.map(stripPrefabMarker),
+        }
+      : {}),
+    ...(cells ? { cells } : {}),
+  };
 }
 
-function projectMacro(macro: MacroDocument, user: PermissionUser): MacroDocument {
+function projectMacro(
+  macro: MacroDocument,
+  user: PermissionUser,
+): MacroDocument {
   // D-394: retain ONLY this author's original submission, never the GM's later source/policy.
   if (macro.playerAuthoring !== undefined) {
     const original = projectPlayerMacroAuthoring(macro, user);
@@ -307,26 +458,57 @@ function projectMacro(macro: MacroDocument, user: PermissionUser): MacroDocument
     const check = validateSummon(macro.summon);
     // A published preset is a safe catalog entry, not a copy of its source
     // reference or GM flags. Every update replaces this shape, too.
-    const safe: MacroDocument = { ...macro, command: "", system: {}, flags: {},
+    const safe: MacroDocument = {
+      ...macro,
+      command: "",
+      system: {},
+      flags: {},
       ...(check.ok && check.definition.playerCallable
-        ? { summon: { version: 1 as const, sceneId: check.definition.sceneId, playerCallable: true as const,
-          maxDistance: check.definition.maxDistance,
-          ...(check.definition.size !== undefined ? { size: check.definition.size } : {}),
-          ...(check.definition.requireLoS !== undefined ? { requireLoS: check.definition.requireLoS } : {}),
-          ...(check.definition.durationMs !== undefined ? { durationMs: check.definition.durationMs } : {}) } }
-        : {}) };
+        ? {
+            summon: {
+              version: 1 as const,
+              sceneId: check.definition.sceneId,
+              playerCallable: true as const,
+              maxDistance: check.definition.maxDistance,
+              ...(check.definition.size !== undefined
+                ? { size: check.definition.size }
+                : {}),
+              ...(check.definition.requireLoS !== undefined
+                ? { requireLoS: check.definition.requireLoS }
+                : {}),
+              ...(check.definition.durationMs !== undefined
+                ? { durationMs: check.definition.durationMs }
+                : {}),
+            },
+          }
+        : {}),
+    };
     if (!check.ok || !check.definition.playerCallable) delete safe.summon;
-    delete safe.script; delete safe.scriptState; delete safe.sequence;
-    delete safe.automation; delete safe.composite;
+    delete safe.script;
+    delete safe.scriptState;
+    delete safe.sequence;
+    delete safe.automation;
+    delete safe.composite;
     return safe;
   }
   if (macro.kind !== "script") {
+    // Playback audience is a delivery policy, not a definition-visibility policy. A
+    // published sequence remains available as a callable definition; the host evaluates
+    // its audience separately for every run and never forwards that policy as authority.
     // `automation` is a graph id: it must not reach a player replica in ANY kind,
     // so its presence alone forces the copy (create, snapshot and update alike).
-    if (macro.scriptState === undefined && macro.summon === undefined &&
-        macro.automation === undefined && macro.composite === undefined) return macro;
+    if (
+      macro.scriptState === undefined &&
+      macro.summon === undefined &&
+      macro.automation === undefined &&
+      macro.composite === undefined
+    )
+      return macro;
     const safe = { ...macro };
-    delete safe.scriptState; delete safe.summon; delete safe.automation; delete safe.composite;
+    delete safe.scriptState;
+    delete safe.summon;
+    delete safe.automation;
+    delete safe.composite;
     // MC-02: the DECLARED INPUTS are callable metadata and ride along — without the id.
     if (macro.kind === "automation") {
       const inputs = macroAutomationInputs(macro);
@@ -338,18 +520,40 @@ function projectMacro(macro: MacroDocument, user: PermissionUser): MacroDocument
   // approval hash, execution history or arbitrary author metadata. Apply the
   // identical shape to snapshots, creates and every subsequent update.
   const core = macro.flags?.core;
-  const slot = core && typeof core === "object" && !Array.isArray(core) ? core.slot : undefined;
+  const slot =
+    core && typeof core === "object" && !Array.isArray(core)
+      ? core.slot
+      : undefined;
   const validated = validateScriptMacro(macro);
   const callable = validated.ok && validated.policy.playerCallable;
-  const safe: MacroDocument = { ...macro, command: "", system: {},
-    flags: { core: { playerCallable: callable,
-      ...(typeof slot === "number" && slot >= 1 && slot <= 5 ? { slot } : {}) } },
+  const safe: MacroDocument = {
+    ...macro,
+    command: "",
+    system: {},
+    flags: {
+      core: {
+        playerCallable: callable,
+        ...(typeof slot === "number" && slot >= 1 && slot <= 5 ? { slot } : {}),
+      },
+    },
     // Publish only validated input fields. A malformed import cannot smuggle
     // private metadata inside a plausible input schema.
-    script: { version: 1, approvedHash: "", sceneId: "", runAs: "caller",
-      playerCallable: callable, grants: [],
-      inputs: validated.ok ? validated.policy.inputs.map(({ name, type, required }) =>
-        ({ name, type, ...(required !== undefined ? { required } : {}) })) : [] } };
+    script: {
+      version: 1,
+      approvedHash: "",
+      sceneId: "",
+      runAs: "caller",
+      playerCallable: callable,
+      grants: [],
+      inputs: validated.ok
+        ? validated.policy.inputs.map(({ name, type, required }) => ({
+            name,
+            type,
+            ...(required !== undefined ? { required } : {}),
+          }))
+        : [],
+    },
+  };
   delete safe.scriptState;
   delete safe.sequence;
   delete safe.summon;
@@ -363,14 +567,25 @@ function projectMacro(macro: MacroDocument, user: PermissionUser): MacroDocument
  * not handed. Link order and count survive masking, which is what keeps a client's click
  * ordinal meaningful on the host.
  */
-export function projectJournal(journal: JournalDocument): JournalDocument {
-  let changed = false;
-  const pages = journal.pages.map((page) => {
+export function projectJournal(
+  journal: JournalDocument,
+  user?: PermissionUser,
+  resolver?: CodexResolver,
+): JournalDocument {
+  const codexProjected = user
+    ? projectCodexJournal(journal, user, resolver)
+    : journal;
+  const sourcePages = Array.isArray(codexProjected.pages)
+    ? codexProjected.pages
+    : [];
+  let changed =
+    codexProjected !== journal || sourcePages.length !== journal.pages?.length;
+  const pages = sourcePages.map((page) => {
     const projected = projectPageText(page);
     if (projected !== page) changed = true;
     return projected;
   });
-  return changed ? { ...journal, pages } : journal;
+  return changed ? { ...codexProjected, pages } : codexProjected;
 }
 
 // ─── projectWorld ─────────────────────────────────────────────────────────────
@@ -386,21 +601,44 @@ export function projectWorld(
   };
   for (const coll of TOP_LEVEL_COLLECTIONS) {
     if (coll === "users") continue;
-    if (coll === "automations") { out.automations = []; continue; }
-    if (coll === "actionReceipts") { out.actionReceipts = []; continue; }
-    if (coll === "prefabs") { out.prefabs = []; continue; }
-    if (coll === "fxInstances") { out.fxInstances = []; continue; }
+    if (coll === "automations") {
+      out.automations = [];
+      continue;
+    }
+    if (coll === "actionReceipts") {
+      out.actionReceipts = [];
+      continue;
+    }
+    if (coll === "prefabs") {
+      out.prefabs = [];
+      continue;
+    }
+    if (coll === "fxInstances") {
+      out.fxInstances = [];
+      continue;
+    }
     const docs = world[coll] as readonly BaseDocument[];
     const kept: BaseDocument[] = [];
     for (const doc of docs) {
-      if (getEffectiveOwnership(user, doc) < OWNERSHIP_LEVELS.LIMITED ||
-          coll === "macros" && !docVisibleTo(user, doc)) continue;
+      if (
+        getEffectiveOwnership(user, doc) < OWNERSHIP_LEVELS.LIMITED ||
+        (coll === "macros" && !docVisibleTo(user, doc))
+      )
+        continue;
       switch (coll) {
         case "scenes":
           kept.push(projectScene(user, doc as SceneDocument));
           break;
         case "journals":
-          kept.push(projectJournal(doc as JournalDocument));
+          kept.push(
+            projectJournal(doc as JournalDocument, user, {
+              resolve: (ref) => resolveCodexWorldRef(world, ref),
+              canReadAsset: (assetId) => {
+                const entry = world.assetManifest[assetId];
+                return entry !== undefined && entry.visibility !== "gm";
+              },
+            }),
+          );
           break;
         case "messages": {
           const msg = projectMessage(user, doc as MessageDocument);
@@ -426,6 +664,22 @@ export function projectWorld(
 
 // ─── projectEnvelope ──────────────────────────────────────────────────────────
 
+function projectPageForViewer(page: JournalPageDocument): JournalPageDocument {
+  let safe = page;
+  if (recordPageMetadata(page.codex) && page.codex?.audience !== undefined) {
+    const metadata = { ...page.codex };
+    delete metadata.audience;
+    safe = { ...page, codex: metadata };
+  }
+  return projectPageText(safe);
+}
+
+function recordPageMetadata(
+  value: unknown,
+): value is NonNullable<JournalPageDocument["codex"]> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** One page as a non-GM receives it: secrets out, link targets blanked (D-383). */
 function projectPageText(page: JournalPageDocument): JournalPageDocument {
   if (typeof page.text !== "string") return page;
@@ -438,37 +692,99 @@ function projectPageText(page: JournalPageDocument): JournalPageDocument {
  * (the panel's save shape) and a `text` leaf both carry page text, and an envelope-only
  * path must not forward either raw. Returns the same object when nothing changed.
  */
-function projectJournalDiff(diff: Record<string, Json | null>): Record<string, Json | null> {
+function projectJournalDiff(
+  diff: Record<string, Json | null>,
+  finalJournal?: JournalDocument,
+  user?: PermissionUser,
+  resolver?: ProjectionResolver,
+): Record<string, Json | null> {
   let changed = false;
+  let pagesTouched = false;
+  let codexTouched = false;
+  let unsafeNestedPagesTouched = false;
   const out: Record<string, Json | null> = {};
+  const safeJournal =
+    finalJournal && user
+      ? projectJournal(finalJournal, user, resolver)
+      : undefined;
   for (const [key, value] of Object.entries(diff)) {
-    const leaf = (key.startsWith("-=") ? key.slice(2) : key).split(".").pop();
+    const path = key.startsWith("-=") ? key.slice(2) : key;
+    const root = path.split(".")[0];
+    if (root === "pages" && path !== "pages" && !safeJournal) {
+      // A dotted page edit cannot be audience-checked without the committed parent journal.
+      pagesTouched = true;
+      unsafeNestedPagesTouched = true;
+      changed = true;
+      continue;
+    }
+    if (root === "pages" && safeJournal) {
+      pagesTouched = true;
+      changed = true;
+      continue;
+    }
+    if (root === "codex") {
+      codexTouched = true;
+      changed = true;
+      if (!safeJournal) continue; // Fail closed when no committed doc is available to project.
+      continue;
+    }
+    const leaf = path.split(".").pop();
     if (leaf === "text" && typeof value === "string") {
       const text = maskJournalLinkTargets(stripSecretText(value));
       if (text !== value) changed = true;
       out[key] = text;
     } else if (leaf === "pages" && Array.isArray(value)) {
-      const pages = value.map((item) =>
-        item !== null && typeof item === "object" ? projectPageText(item as unknown as JournalPageDocument) : item);
-      if (pages.some((item, index) => item !== value[index])) changed = true;
-      out[key] = pages as unknown as Json;
+      const pages: Json[] = [];
+      for (const item of value) {
+        if (item === null || typeof item !== "object" || Array.isArray(item)) {
+          pages.push(item);
+          continue;
+        }
+        const page = item as unknown as JournalPageDocument;
+        if (!safeJournal && page.codex !== undefined) {
+          changed = true;
+          continue;
+        }
+        const projected = projectPageText(page);
+        if (projected !== page) changed = true;
+        pages.push(projected as unknown as Json);
+      }
+      if (
+        pages.length !== value.length ||
+        pages.some((item, index) => item !== value[index])
+      )
+        changed = true;
+      out[key] = pages;
     } else {
       out[key] = value;
     }
   }
+  if (safeJournal && pagesTouched)
+    out.pages = safeJournal.pages as unknown as Json;
+  if (!safeJournal && pagesTouched && unsafeNestedPagesTouched) out.pages = [];
+  if (codexTouched) {
+    if (safeJournal?.codex) out.codex = safeJournal.codex as unknown as Json;
+    else out["-=codex"] = null;
+  }
   return changed ? out : diff;
 }
-
 
 function createVisible(
   user: PermissionUser,
   op: Extract<Op, { kind: "create" }>,
   resolver?: ProjectionResolver,
 ): Op | null {
-  if (op.coll === "automations" || op.coll === "actionReceipts" || op.coll === "prefabs" || op.coll === "fxInstances") return null;
+  if (
+    op.coll === "automations" ||
+    op.coll === "actionReceipts" ||
+    op.coll === "prefabs" ||
+    op.coll === "fxInstances"
+  )
+    return null;
   if (op.coll === "users") return op; // keep live membership/capabilities consistent with snapshot users
   if (op.coll === "macros" && !docVisibleTo(user, op.data)) return null;
-  if (op.coll === "walls" || op.coll === "lights") return projectPrefabCreate(op); // §5/D-022
+  if (op.coll === "walls" || op.coll === "lights")
+    return projectPrefabCreate(op); // §5/D-022
   // D-019 accepts creates without common fields; DocumentStore adds private ownership
   // on its clone, not on the original envelope. Projection must use the same default,
   // otherwise one sparse compendium actor can throw and stop a peer's whole broadcast
@@ -477,7 +793,10 @@ function createVisible(
   const data = authored.ownership
     ? authored
     : { ...authored, ownership: { default: 0 as const } };
-  const parent = op.parent !== undefined ? resolver?.resolve(op.parent) : undefined;
+  const parent =
+    op.parent !== undefined ? resolver?.resolve(op.parent) : undefined;
+  if (op.coll === "pages" && op.parent !== undefined && parent === undefined)
+    return null;
   if (op.coll === "messages") {
     const access = messageAccess(user, data as MessageDocument);
     if (access === "omit") return null;
@@ -497,27 +816,50 @@ function createVisible(
     }
     return projectPrefabCreate(op);
   }
-  if ((op.coll === "notes" || op.coll === "tiles") && !docVisibleTo(user, data, parent)) {
+  if (
+    (op.coll === "notes" || op.coll === "tiles") &&
+    !docVisibleTo(user, data, parent)
+  ) {
     return null; // A concealed pin/tile never reaches a player, even as a create op.
   }
   if (op.coll === "cells") {
     // D-271: a closed cell never reaches a player, even as a create. The reveal set lives on
     // the parent scene, so without it we cannot answer the question — and refusing to guess is
     // the only safe default.
-    const scene = parent?.type === "scene" ? (parent as SceneDocument) : undefined;
+    const scene =
+      parent?.type === "scene" ? (parent as SceneDocument) : undefined;
     if (!scene) return null;
-    const projected = projectCellForViewer(data as CellDocument, openCellKeys(scene));
-    return projected === null ? null : { ...op, data: projected as BaseDocument };
+    const projected = projectCellForViewer(
+      data as CellDocument,
+      openCellKeys(scene),
+    );
+    return projected === null
+      ? null
+      : { ...op, data: projected as BaseDocument };
+  }
+  if (op.coll === "pages" && parent?.type === "journal") {
+    const page = data as JournalPageDocument;
+    if (!docVisibleTo(user, page, parent)) return null;
+    const safe = projectPageForViewer(page);
+    return { ...op, data: safe as BaseDocument };
   }
   if (getEffectiveOwnership(user, data, parent) >= OWNERSHIP_LEVELS.LIMITED) {
-    if (op.coll === "macros") return { ...op, data: projectMacro(data as MacroDocument, user) };
-    if (op.coll === "scenes") return { ...op, data: projectScene(user, data as SceneDocument) };
-    if (op.coll === "journals") return { ...op, data: projectJournal(data as JournalDocument) };
+    if (op.coll === "macros")
+      return { ...op, data: projectMacro(data as MacroDocument, user) };
+    if (op.coll === "scenes")
+      return { ...op, data: projectScene(user, data as SceneDocument) };
+    if (op.coll === "journals")
+      return {
+        ...op,
+        data: projectJournal(data as JournalDocument, user, resolver),
+      };
     return projectPrefabCreate(op);
   }
   // Embedded create in a parent we cannot resolve (envelope-only mode): the
   // recipient sees the parent (host projects to connected users only), keep.
-  return op.parent !== undefined && parent === undefined ? projectPrefabCreate(op) : null;
+  return op.parent !== undefined && parent === undefined
+    ? projectPrefabCreate(op)
+    : null;
 }
 
 /**
@@ -528,9 +870,13 @@ function createVisible(
 function stripMacroBindingDiff(
   diff: Record<string, Json | null>,
 ): Record<string, Json | null> {
-  const keys = Object.keys(diff).filter((key) =>
-    ["automation", "composite"].includes(key) || key.startsWith("automation.") ||
-    key.startsWith("composite.") || /^(?:-=)?playerAuthoring(?:\.|$)/.test(key));
+  const keys = Object.keys(diff).filter(
+    (key) =>
+      ["automation", "composite"].includes(key) ||
+      key.startsWith("automation.") ||
+      key.startsWith("composite.") ||
+      /^(?:-=)?playerAuthoring(?:\.|$)/.test(key),
+  );
   if (keys.length === 0) return diff;
   const safe = { ...diff };
   for (const key of keys) safe[key] = null;
@@ -542,33 +888,93 @@ function updateVisible(
   op: Extract<Op, { kind: "update" }>,
   resolver?: ProjectionResolver,
 ): Op | null {
-  if (op.ref.coll === "automations" || op.ref.coll === "actionReceipts" || op.ref.coll === "prefabs" || op.ref.coll === "fxInstances") return null;
+  if (
+    op.ref.coll === "automations" ||
+    op.ref.coll === "actionReceipts" ||
+    op.ref.coll === "prefabs" ||
+    op.ref.coll === "fxInstances"
+  )
+    return null;
   if (op.ref.coll === "users") return op; // D-394: opt-in/revocation must reach the actual player's UI live
-  if (op.ref.coll === "walls" || op.ref.coll === "lights") return projectPrefabDiff(op);
+  if (op.ref.coll === "walls" || op.ref.coll === "lights")
+    return projectPrefabDiff(op);
   if (op.ref.coll === "macros") {
     const stripped = stripMacroBindingDiff(op.diff);
     if (stripped !== op.diff) op = { ...op, diff: stripped };
   }
-  if (op.ref.coll === "pages" || op.ref.coll === "journals") {
+  const doc = resolver?.resolve(op.ref);
+  if (op.ref.coll === "journals" && doc?.type === "journal") {
+    const projected = projectJournalDiff(
+      op.diff,
+      doc as JournalDocument,
+      user,
+      resolver,
+    );
+    if (projected !== op.diff) op = { ...op, diff: projected };
+  } else if (op.ref.coll === "pages" && doc?.type === "page") {
+    const parent = op.ref.parent ? resolver?.resolve(op.ref.parent) : undefined;
+    if (parent?.type === "journal") {
+      if (!docVisibleTo(user, doc, parent))
+        return { kind: "delete", ref: op.ref };
+      const page = projectPageForViewer(doc as JournalPageDocument);
+      const diff: Record<string, Json | null> = {};
+      let codexTouched = false;
+      for (const [key, value] of Object.entries(op.diff)) {
+        const path = key.startsWith("-=") ? key.slice(2) : key;
+        if (path === "codex" || path.startsWith("codex.")) {
+          codexTouched = true;
+          continue;
+        }
+        if (path === "text" && typeof value === "string") {
+          diff[key] = maskJournalLinkTargets(stripSecretText(value));
+        } else {
+          diff[key] = value;
+        }
+      }
+      if (codexTouched) {
+        if (page.codex) diff.codex = page.codex as unknown as Json;
+        else diff["-=codex"] = null;
+      }
+      if (Object.keys(diff).length > 0) op = { ...op, diff };
+    } else {
+      // Without the parent, Codex page metadata cannot be authorized. Ordinary legacy pages
+      // retain the existing secret/link redaction in envelope-only projection mode.
+      if ((doc as JournalPageDocument).codex !== undefined) return null;
+      const projected = projectJournalDiff(op.diff);
+      if (projected !== op.diff) op = { ...op, diff: projected };
+    }
+  } else if (op.ref.coll === "pages" || op.ref.coll === "journals") {
     const projected = projectJournalDiff(op.diff);
     if (projected !== op.diff) op = { ...op, diff: projected };
   }
-  const doc = resolver?.resolve(op.ref);
   if (!doc) {
     // D-394: without a live macro we cannot distinguish a chat command from private
     // executable source. Fail closed on all source/policy paths (host always resolves).
     if (op.ref.coll === "macros") {
       const safe = { ...op.diff };
       let changed = false;
-      for (const key of Object.keys(safe)) if (/^(?:-=)?(?:command|script|scriptState|sequence|summon|preset|fxItem|flags|system)(?:\.|$)/.test(key)) {
-        safe[key] = null; changed = true;
-      }
+      for (const key of Object.keys(safe))
+        if (
+          /^(?:-=)?(?:command|script|scriptState|sequence|summon|preset|fxItem|flags|system)(?:\.|$)/.test(
+            key,
+          )
+        ) {
+          safe[key] = null;
+          changed = true;
+        }
       if (changed) op = { ...op, diff: safe };
     }
     return projectPrefabDiff(op);
   }
   if (op.ref.coll === "macros" && !docVisibleTo(user, doc)) return null;
-  const parent = op.ref.parent !== undefined ? resolver?.resolve(op.ref.parent) : undefined;
+  const parent =
+    op.ref.parent !== undefined ? resolver?.resolve(op.ref.parent) : undefined;
+  if (
+    op.ref.coll === "pages" &&
+    parent?.type === "journal" &&
+    !docVisibleTo(user, doc, parent)
+  )
+    return null;
   if (op.ref.coll === "messages") {
     const access = messageAccess(user, doc as MessageDocument);
     if (access === "omit") return null;
@@ -578,52 +984,100 @@ function updateVisible(
     return op;
   }
   if (op.ref.coll === "tokens" && (doc as TokenDocument).hidden) {
-    if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.OWNER) return null;
+    if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.OWNER)
+      return null;
   }
   if (op.ref.coll === "notes" && !docVisibleTo(user, doc, parent)) {
     // Making a pin hidden again is a delete for the player (it leaves their replica).
     return { kind: "delete", ref: op.ref };
   }
-  if ((op.ref.coll === "tiles" || op.ref.coll === "regions") && !docVisibleTo(user, doc, parent)) return null;
-  if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
-  if (op.ref.coll === "scenes") return projectSceneEmbedUpdate(user, op, doc as SceneDocument);
-  if (op.ref.coll === "macros" && ((doc as MacroDocument).playerAuthoring !== undefined ||
-      ["script", "summon", "automation", "composite"].includes((doc as MacroDocument).kind) ||
-      Object.keys(op.diff).some((key) => ["kind", "script", "scriptState", "summon", "automation", "composite"].includes(key) ||
-        /^(?:-=)?playerAuthoring(?:\.|$)/.test(key)))) {
+  if (
+    (op.ref.coll === "tiles" || op.ref.coll === "regions") &&
+    !docVisibleTo(user, doc, parent)
+  )
+    return null;
+  if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED)
+    return null;
+  if (op.ref.coll === "scenes")
+    return projectSceneEmbedUpdate(user, op, doc as SceneDocument);
+  if (
+    op.ref.coll === "macros" &&
+    ((doc as MacroDocument).playerAuthoring !== undefined ||
+      ["script", "summon", "automation", "composite"].includes(
+        (doc as MacroDocument).kind,
+      ) ||
+      Object.keys(op.diff).some(
+        (key) =>
+          [
+            "kind",
+            "script",
+            "scriptState",
+            "summon",
+            "automation",
+            "composite",
+          ].includes(key) || /^(?:-=)?playerAuthoring(?:\.|$)/.test(key),
+      ))
+  ) {
     const safe = projectMacro(doc as MacroDocument, user);
     // A kind transition can leave a previous script's code — or a graph binding — in a
     // client's replica; replace all macro-specific fields rather than forwarding a partial diff.
-    return { ...op, diff: { name: safe.name, kind: safe.kind, command: safe.command,
-      script: (safe.script as unknown as Json | undefined) ?? null, scriptState: null,
-      sequence: (safe.sequence as unknown as Json | undefined) ?? null,
-      summon: (safe.summon as unknown as Json | undefined) ?? null,
-      automation: (safe.automation as unknown as Json | undefined) ?? null,
-      composite: (safe.composite as unknown as Json | undefined) ?? null,
-      flags: safe.flags, system: safe.system, ownership: safe.ownership,
-      playerAuthoring: safe.playerAuthoring as unknown as Json ?? null } };
+    return {
+      ...op,
+      diff: {
+        name: safe.name,
+        kind: safe.kind,
+        command: safe.command,
+        script: (safe.script as unknown as Json | undefined) ?? null,
+        scriptState: null,
+        sequence: (safe.sequence as unknown as Json | undefined) ?? null,
+        summon: (safe.summon as unknown as Json | undefined) ?? null,
+        automation: (safe.automation as unknown as Json | undefined) ?? null,
+        composite: (safe.composite as unknown as Json | undefined) ?? null,
+        flags: safe.flags,
+        system: safe.system,
+        ownership: safe.ownership,
+        playerAuthoring: (safe.playerAuthoring as unknown as Json) ?? null,
+      },
+    };
   }
 
   if (op.ref.coll === "cells") {
     // D-271: a cell that is closed, or has just been closed, leaves this session's replica —
     // the same rewrite D-256 gives a pin that is hidden again.
-    const scene = parent?.type === "scene" ? (parent as SceneDocument) : undefined;
+    const scene =
+      parent?.type === "scene" ? (parent as SceneDocument) : undefined;
     if (!scene) return null;
     const open = openCellKeys(scene);
-    if (!open.has((doc as CellDocument).key)) return { kind: "delete", ref: op.ref };
+    if (!open.has((doc as CellDocument).key))
+      return { kind: "delete", ref: op.ref };
     const diff = projectCellDiff(op.diff, open.has((doc as CellDocument).key));
     if (!diff) return null;
     return diff === op.diff ? op : { ...op, diff };
   }
-  if ((op.ref.coll === "tokens" || op.ref.coll === "actors") &&
-      (doc.flags?.summon !== undefined || doc.flags?.summonStatus !== undefined ||
-        Object.keys(op.diff).some((key) => key.startsWith("flags.summon") || key.startsWith("-=flags.summon") ||
-          (key === "flags" && op.diff.flags && typeof op.diff.flags === "object" &&
-            (Object.hasOwn(op.diff.flags, "summon") || Object.hasOwn(op.diff.flags, "summonStatus")))))) {
+  if (
+    (op.ref.coll === "tokens" || op.ref.coll === "actors") &&
+    (doc.flags?.summon !== undefined ||
+      doc.flags?.summonStatus !== undefined ||
+      Object.keys(op.diff).some(
+        (key) =>
+          key.startsWith("flags.summon") ||
+          key.startsWith("-=flags.summon") ||
+          (key === "flags" &&
+            op.diff.flags &&
+            typeof op.diff.flags === "object" &&
+            (Object.hasOwn(op.diff.flags, "summon") ||
+              Object.hasOwn(op.diff.flags, "summonStatus"))),
+      ))
+  ) {
     const safe = stripPrefabMarker(doc);
     const diff: Record<string, Json | null> = {};
     for (const [key, value] of Object.entries(op.diff)) {
-      if (key === "flags" || key.startsWith("flags.") || key.startsWith("-=flags.")) continue;
+      if (
+        key === "flags" ||
+        key.startsWith("flags.") ||
+        key.startsWith("-=flags.")
+      )
+        continue;
       diff[key] = value;
     }
     diff.flags = safe.flags as unknown as Json;
@@ -674,20 +1128,36 @@ function deleteVisible(
   op: Extract<Op, { kind: "delete" }>,
   resolver?: ProjectionResolver,
 ): Op | null {
-  if (op.ref.coll === "automations" || op.ref.coll === "actionReceipts" || op.ref.coll === "prefabs" || op.ref.coll === "fxInstances") return null;
+  if (
+    op.ref.coll === "automations" ||
+    op.ref.coll === "actionReceipts" ||
+    op.ref.coll === "prefabs" ||
+    op.ref.coll === "fxInstances"
+  )
+    return null;
   if (op.ref.coll === "users") return op;
   if (op.ref.coll === "walls" || op.ref.coll === "lights") return op;
   const doc = resolver?.resolve(op.ref);
   if (!doc) return op;
   if (op.ref.coll === "macros" && !docVisibleTo(user, doc)) return null;
-  const parent = op.ref.parent !== undefined ? resolver?.resolve(op.ref.parent) : undefined;
-  if (op.ref.coll === "messages" && messageAccess(user, doc as MessageDocument) === "omit")
+  const parent =
+    op.ref.parent !== undefined ? resolver?.resolve(op.ref.parent) : undefined;
+  if (
+    op.ref.coll === "messages" &&
+    messageAccess(user, doc as MessageDocument) === "omit"
+  )
     return null;
   if (op.ref.coll === "tokens" && (doc as TokenDocument).hidden) {
-    if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.OWNER) return null;
+    if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.OWNER)
+      return null;
   }
-  if ((op.ref.coll === "notes" || op.ref.coll === "tiles") && !docVisibleTo(user, doc, parent)) return null;
-  if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED) return null;
+  if (
+    (op.ref.coll === "notes" || op.ref.coll === "tiles") &&
+    !docVisibleTo(user, doc, parent)
+  )
+    return null;
+  if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED)
+    return null;
   return op;
 }
 
@@ -719,5 +1189,7 @@ export function projectEnvelope(
   }
   if (ops.length === 0) return null;
   // Return the original envelope object only when every op passed through as-is.
-  return modified || ops.length !== envelope.ops.length ? { ...envelope, ops } : envelope;
+  return modified || ops.length !== envelope.ops.length
+    ? { ...envelope, ops }
+    : envelope;
 }

@@ -24,9 +24,11 @@
   import { FX_PRESET_LIMITS, fxPresetSections, validateFxPreset,
     type FxPresetDefinition } from "../../core/fxPresets";
   import { FX_ITEM_EVENT_CONTRACT, FX_ITEM_EVENTS, FX_RECOGNITION_MODES, fxBindingEvents,
-    validateFxItemBinding, validateFxSpellBinding,
+    fxSpellKeyFromName, validateFxItemBinding, validateFxSpellBinding,
     type FxItemBinding, type FxItemEvent, type FxRecognition,
     type FxSpellBinding } from "../../core/fxBinding";
+  import { fxShareDraftOf, fxShareError, fxShareOwnership, fxShareableUsers,
+    type FxShareScope } from "../../core/fxSharing";
   import { PF1E_SPELL_EFFECTS } from "../../packages/pf1e/spellEffects";
   import type { Json } from "../../core/documents";
   import { rememberPlacement, type NamedPlacement, type RequestCrosshairPick } from "./crosshairPicker";
@@ -71,6 +73,7 @@
   let bindEvents = $state<FxItemEvent[]>(["use"]);
   // D-407: the spell binding (a spell row is not an item, so it cannot use the panel above).
   let bindSpell = $state("");
+  let bindSpellName = $state("");
   let bindSpellFailure = $state("");
   let bindSpellRecognition = $state<FxRecognition>("auto");
   let bindSpellEnabled = $state(true);
@@ -81,6 +84,8 @@
    * walks, so what the author reads is what the host compares.
    */
   let users = $state<UserDocument[]>([]);
+  let macroShareScope = $state<FxShareScope>("gm");
+  let macroShareUserIds = $state<string[]>([]);
   let media = $state<Array<{ hash: string; name: string; mime: string;
     visibility: AssetManifest[string]["visibility"]; exportRights: AssetManifest[string]["exportRights"] }>>([]);
   /**
@@ -183,6 +188,8 @@
     presets = [...client.store.getAll("macros")].filter((m) => m.kind === "fxPreset");
     scenes = [...client.store.getAll("scenes")];
     users = [...client.store.getAll("users")];
+    const shareableIds = new Set(fxShareableUsers(users).map((user) => user._id));
+    macroShareUserIds = macroShareUserIds.filter((id) => shareableIds.has(id));
     actors = [...client.store.getAll("actors")];
     if (!actors.some((actor) => actor._id === bindActorId)) {
       bindActorId = actors[0]?._id ?? "";
@@ -224,6 +231,7 @@
     editing = m._id;
     name = m.name;
     playerCallable = m.flags.core?.playerCallable === true;
+    loadFxSharing(m);
     loadBinding(m);
     loadSpellBinding(m);
     draft = { ...$state.snapshot(m.sequence ?? { version: 1, sections: [] }),
@@ -236,6 +244,7 @@
     editing = "";
     name = "";
     playerCallable = false;
+    loadFxSharing(null);
     loadBinding(null);
     loadSpellBinding(null);
     draft = { version: 1, audience: "scene", persistent: false, sections: [] };
@@ -1561,19 +1570,49 @@
   }
   // ─── D-407: bind this timeline to a spell of the tactical catalogue ─────────
   const boundSpells = PF1E_SPELL_EFFECTS;
-  const bindSpellName = $derived(boundSpells.find((effect) => effect.id === bindSpell)?.name ?? "");
+  const macroSharePlayers = $derived(fxShareableUsers(users));
+  const macroShareError = $derived(fxShareError({ scope: macroShareScope, userIds: macroShareUserIds }, users));
+  function loadFxSharing(macro: MacroDocument | null): void {
+    const sharing = macro
+      ? fxShareDraftOf(macro, users)
+      : { scope: "gm" as const, userIds: [] as string[] };
+    macroShareScope = sharing.scope;
+    macroShareUserIds = [...sharing.userIds];
+  }
+  function toggleMacroShareUser(userId: string, checked: boolean): void {
+    macroShareUserIds = checked
+      ? [...new Set([...macroShareUserIds, userId])]
+      : macroShareUserIds.filter((id) => id !== userId);
+  }
+  function selectBindSpell(spellId: string): void {
+    const catalogueName = boundSpells.find((effect) => effect.id === spellId)?.name;
+    const currentName = bindSpellName;
+    bindSpell = spellId;
+    bindSpellName = catalogueName ??
+      (fxSpellKeyFromName(currentName) === spellId ? currentName : spellId);
+  }
+  function changeBindSpellName(value: string): void {
+    bindSpellName = value;
+    const catalogue = boundSpells.find((effect) => effect.name.trim().toLowerCase() === value.trim().toLowerCase());
+    bindSpell = catalogue?.id ?? fxSpellKeyFromName(value) ?? "";
+  }
   /** Whether the timeline being edited already carries a spell binding (for the Remove button). */
   const hasSpellBinding = $derived(
     macros.find((macro) => macro._id === editing)?.fxSpell !== undefined);
   function loadSpellBinding(macro: MacroDocument | null): void {
-    const binding = macro?.fxSpell;
+    const raw = macro?.fxSpell;
+    const checked = raw === undefined ? null : validateFxSpellBinding(raw);
+    const binding = checked?.ok ? checked.binding : null;
+    const catalogueName = boundSpells.find((effect) => effect.id === binding?.spellId)?.name;
     bindSpell = binding?.spellId ?? "";
+    bindSpellName = binding?.spellName ?? catalogueName ?? binding?.spellId ?? "";
     bindSpellFailure = binding?.onFailureId ?? "";
     bindSpellRecognition = binding?.recognition ?? "auto";
     bindSpellEnabled = binding?.enabled !== false;
   }
   function spellBindingDraft(): FxSpellBinding {
     return { spellId: bindSpell,
+      ...(bindSpellName.trim() ? { spellName: bindSpellName.trim() } : {}),
       ...(bindSpellFailure ? { onFailureId: bindSpellFailure } : {}),
       ...(bindSpellRecognition !== "auto" ? { recognition: bindSpellRecognition } : {}),
       ...(bindSpellEnabled ? {} : { enabled: false }) };
@@ -1586,14 +1625,15 @@
     client.submit([{ kind: "update", ref: { coll: "macros", id: editing },
       diff: { fxSpell: checked.binding as unknown as Json } }]);
     status = `Spell binding submitted — "${name.trim() || "this timeline"}" will play when `
-      + `${bindSpellName || "the spell"} is cast`
+      + `${bindSpellName.trim() || "the spell"} is cast`
       + (playerCallable ? "" : ". Tick \"players may run this\" or a player's cast will be refused");
   }
   function removeSpellBinding(): void {
     error = ""; status = "";
     if (!editing) return;
     client.submit([{ kind: "update", ref: { coll: "macros", id: editing }, diff: { "-=fxSpell": null } }]);
-    bindSpell = ""; bindSpellFailure = ""; bindSpellRecognition = "auto"; bindSpellEnabled = true;
+    bindSpell = ""; bindSpellName = ""; bindSpellFailure = "";
+    bindSpellRecognition = "auto"; bindSpellEnabled = true;
     status = "Spell binding removed — the cast plays nothing";
   }
 
@@ -1611,6 +1651,10 @@
     error = "";
     status = "";
     if (!name.trim()) { error = "Enter a timeline name"; return; }
+    const sharing = { scope: macroShareScope, userIds: macroShareUserIds };
+    const sharingError = fxShareError(sharing, users);
+    if (sharingError) { error = sharingError; return; }
+    const ownership = fxShareOwnership(sharing);
     const checked = validateFxSequence(draft);
     if (!checked.ok) { error = checked.error; return; }
     if (editing) {
@@ -1618,15 +1662,17 @@
       if (!existing) { error = "Saved macro was deleted"; return; }
       client.submit([{ kind: "update", ref: { coll: "macros", id: editing }, diff: {
         name: name.trim(), sequence: $state.snapshot(draft) as unknown as Json,
+        ownership: ownership as unknown as Json,
         flags: { ...existing.flags, core: { ...existing.flags.core, playerCallable } },
       } }]);
       status = "Timeline update submitted";
     } else {
       const doc: MacroDocument = { _id: globalThis.crypto.randomUUID(), type: "macro", name: name.trim(),
-        ownership: { default: 1 }, flags: { core: { playerCallable } }, system: {},
+        ownership, flags: { core: { playerCallable } }, system: {},
         kind: "sequence", command: "", sequence: $state.snapshot(draft) };
       client.submit([{ kind: "create", coll: "macros", data: doc }]);
       editing = doc._id;
+      loadFxSharing(doc);
       loadBinding(doc); // a new timeline starts with no binding, never the previous one's
       loadSpellBinding(doc);
       status = "Timeline submitted; use Run once it appears in the list";
@@ -1881,7 +1927,32 @@
         {/each}
       </div>
     {/if}
-    <label><input type="checkbox" bind:checked={playerCallable} /> Published for player invocation</label>
+    <fieldset class="macro-sharing" data-fx-macro-sharing>
+      <legend>Saved timeline visibility</legend>
+      <label>Who can see this timeline?
+        <select data-fx-macro-share-scope value={macroShareScope}
+          onchange={(event) => macroShareScope = event.currentTarget.value as FxShareScope}>
+          <option value="gm">GM / assistants only</option>
+          <option value="all">All players</option>
+          <option value="selected">Selected players</option>
+        </select>
+      </label>
+      {#if macroShareScope === "selected"}
+        <div class="share-users" data-fx-macro-share-users>
+          {#each macroSharePlayers as user (user._id)}
+            <label><input type="checkbox" data-fx-macro-share-user={user._id}
+              checked={macroShareUserIds.includes(user._id)}
+              onchange={(event) => toggleMacroShareUser(user._id, event.currentTarget.checked)} />
+              {user.name} <small>{roleTag(user)}</small></label>
+          {/each}
+          {#if macroSharePlayers.length === 0}<small>No player accounts are available yet.</small>{/if}
+        </div>
+      {/if}
+      {#if macroShareError}<small class="error" role="alert" data-fx-macro-share-error>{macroShareError}</small>{/if}
+      <small>Visibility controls who can read the saved timeline and discover its spell/item binding.
+        Playback Audience controls who sees a run, and licensed media serving is separate.</small>
+    </fieldset>
+    <label><input type="checkbox" data-fx-player-callable bind:checked={playerCallable} />Allow published players to trigger this timeline</label>
     <label title={draft.persistent !== true && hasParallelBlocks
       ? "Explicit parallel blocks are one-shot only; remove their lane memberships first"
       : draft.persistent !== true && hasFinishTiming
@@ -2573,12 +2644,22 @@
     <div class="binding" data-fx-spell-binding={editing}>
       <h4>Bind to a spell</h4>
       <div class="controls">
-        <label>Spell <select data-fx-spell-binding-spell bind:value={bindSpell}>
-          <option value="">— spell —</option>
+        <label>Catalogue spell <select data-fx-spell-binding-spell value={bindSpell}
+          onchange={(event) => selectBindSpell(event.currentTarget.value)}>
+          <option value="">— select a catalogue spell —</option>
           {#each boundSpells as effect (effect.id)}
             <option value={effect.id}>{effect.name}</option>
           {/each}
+          {#if bindSpell && !boundSpells.some((effect) => effect.id === bindSpell)}
+            <option value={bindSpell}>{bindSpellName || bindSpell} · world/compendium spell</option>
+          {/if}
         </select></label>
+        <label>Or spell name <input data-fx-spell-binding-name value={bindSpellName}
+          list="fx-spell-binding-names" placeholder="e.g. Fireball"
+          oninput={(event) => changeBindSpellName(event.currentTarget.value)} /></label>
+        <datalist id="fx-spell-binding-names">
+          {#each boundSpells as effect (effect.id)}<option value={effect.name}></option>{/each}
+        </datalist>
         <label>On a failed cast <select data-fx-spell-binding-failure bind:value={bindSpellFailure}>
           <option value="">play nothing</option>
           {#each otherTimelines as macro (macro._id)}
@@ -2596,9 +2677,9 @@
           <button type="button" data-fx-spell-binding-remove onclick={removeSpellBinding}>Remove spell binding</button>
         {/if}
       </div>
-      <small>Only spells with an authored <strong>tactical effect</strong> can be bound — the catalogue
-        ships {boundSpells.length} ({boundSpells.map((effect) => effect.name).join(", ")}). The cue is
-        requested <strong>after</strong> the cast commits, and the automatic recognition is the cast's
+      <small>Bind any spell by its exact normalized name, including a world-compendium spell; the
+        tactical-effect catalogue provides optional names ({boundSpells.map((effect) => effect.name).join(", ") || "none"})
+        but does not limit binding. The cue is requested <strong>after</strong> the cast commits, and the automatic recognition is the cast's
         own: a made save, spell resistance, a lost spell, a held charge or a missed touch all mean the
         effect did not land, so the failure branch (or nothing) plays instead.</small>
     </div>

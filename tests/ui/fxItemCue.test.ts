@@ -67,7 +67,7 @@ function client(world: { macros?: MacroDocument[]; scenes?: SceneDocument[]; act
 }
 
 describe("firing an item's bound cue (D-311)", () => {
-  test("recognition reads the committed outcome, and a pending cast commits nothing", () => {
+  test("recognition reads committed outcomes and leaves pending/refused casts unresolved", () => {
     expect(fxCastOutcome({})).toBe("success");
     expect(fxCastOutcome({ lost: true })).toBe("failure"); // ruined after committing
     expect(fxCastOutcome({ held: true })).toBe("failure"); // melee touch missed, charge spent
@@ -76,8 +76,9 @@ describe("firing an item's bound cue (D-311)", () => {
     expect(fxCastOutcome({ result: { resisted: true } })).toBe("failure"); // spell resistance
     expect(fxCastOutcome({ result: { passed: true } })).toBe("failure"); // the target saved
     expect(fxCastOutcome({ result: { passed: false } })).toBe("success");
-    // A longer casting time has landed nothing yet — there is no result to recognise.
+    // A longer cast/manual save has no target result yet; a host-rejected cast has no committed result.
     expect(fxCastOutcome({ pending: { round: 3 } })).toBe("unknown");
+    expect(fxCastOutcome({ ok: false })).toBe("unknown");
   });
 
   test("a committed use asks for the branch its outcome names, with scene and both tokens", () => {
@@ -198,6 +199,25 @@ describe("the spell cue (D-407)", () => {
     expect(cue.fired && cue.note).toContain("bound spell cue");
   });
 
+  test("pending or refused casts never fall through to the success cue", () => {
+    const c = client({ ...world, macros: [vines("fx-vines", { spellId: "entangle",
+      onFailureId: "fx-fizzle" })] });
+    const outcomes = [fxCastOutcome({ pending: true }), fxCastOutcome({ ok: false })];
+    expect(outcomes).toEqual(["unknown", "unknown"]);
+    for (const outcome of outcomes) {
+      expect(fireBoundSpellCue({ client: c, spellId: "entangle", outcome,
+        casterActor: hero(), targetActor: ogre() }))
+        .toEqual({ fired: false, reason: "no-branch" });
+    }
+    expect(c.requested).toEqual([]);
+
+    const itemClient = client({ ...world, macros: [timeline("use-fx", {
+      actorId: "a-hero", itemId: "wand", onFailureId: "use-failure" })] });
+    expect(fireBoundItemCue({ client: itemClient, actor: hero(), item: spell(), outcome: "unknown" }))
+      .toEqual({ fired: false, reason: "no-branch" });
+    expect(itemClient.requested).toEqual([]);
+  });
+
   test("a made save is a failure for recognition: nothing is bound, so nothing plays", () => {
     const c = client({ ...world, macros: [vines("fx-vines", { spellId: "entangle" })] });
     expect(fireBoundSpellCue({ client: c, spellId: "entangle", outcome: "failure",
@@ -211,7 +231,7 @@ describe("the spell cue (D-407)", () => {
     expect(paired.requested).toEqual([{ macroId: "fx-fizzle", sceneId: "s1", source: "t-hero" }]);
   });
 
-  test("an unbound or disabled spell plays nothing, and a name the catalogue lacks says nothing", () => {
+  test("an unbound or disabled spell plays nothing, and an unbound compendium name stays silent", () => {
     const unbound = client({ ...world, macros: [vines("fx-other", { spellId: "sleep" })] });
     expect(fireBoundSpellCue({ client: unbound, spellId: "entangle", outcome: "success",
       casterActor: hero() })).toMatchObject({ fired: false, reason: "unbound" });
@@ -232,6 +252,19 @@ describe("the spell cue (D-407)", () => {
       macros: [vines("fx-vines", { spellId: "entangle" })] }), spellName: "Entangle",
       outcome: "failure", caster: hero(), target: ogre() }))
       .toBe(" · the spell has no cue for that outcome");
+  });
+
+  test("a world-compendium spell triggers by exact normalized name even without tactical rules", () => {
+    const c = client({ ...world, macros: [vines("fx-fireball", {
+      spellId: "fireball", spellName: "Fireball" })] });
+    const note = castSpellCueNote({ client: c, spellName: "  FIREBALL ", outcome: "success",
+      caster: hero(), target: ogre() });
+    expect(note).toContain("bound spell cue \"fx-fireball\" requested");
+    expect(c.requested).toEqual([{ macroId: "fx-fireball", sceneId: "s1", source: "t-hero",
+      target: "t-ogre" }]);
+    expect(castSpellCueNote({ client: c, spellName: "Delayed Blast Fireball", outcome: "success",
+      caster: hero(), target: ogre() })).toBe("");
+    expect(c.requested).toHaveLength(1);
   });
 
   test("the cast helper resolves the same spell by name, case-insensitively", () => {

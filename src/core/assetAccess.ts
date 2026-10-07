@@ -63,6 +63,23 @@ function references(collections: Partial<WorldCollections>, manifest: AssetManif
   }
   for (const journal of collections.journals ?? []) {
     for (const page of journal.pages ?? []) { add(page.src); custom(page); }
+    const codex = journal.codex as unknown;
+    if (!codex || typeof codex !== "object" || Array.isArray(codex)) continue;
+    const sheet = codex as Record<string, unknown>;
+    add(sheet.cover);
+    if (!Array.isArray(sheet.widgets)) continue;
+    for (const rawWidget of sheet.widgets) {
+      if (!rawWidget || typeof rawWidget !== "object" || Array.isArray(rawWidget)) continue;
+      const widget = rawWidget as Record<string, unknown>;
+      if (widget.type !== "image-gallery" || widget.version !== 1 ||
+          !widget.config || typeof widget.config !== "object" || Array.isArray(widget.config)) continue;
+      const config = widget.config as Record<string, unknown>;
+      if (!Array.isArray(config.images)) continue;
+      for (const image of config.images) {
+        if (!image || typeof image !== "object" || Array.isArray(image)) continue;
+        add((image as Record<string, unknown>).assetId);
+      }
+    }
   }
   for (const playlist of collections.playlists ?? []) {
     for (const sound of playlist.sounds ?? []) { add(sound.audio); custom(sound); }
@@ -108,6 +125,14 @@ function references(collections: Partial<WorldCollections>, manifest: AssetManif
 }
 
 /** Called against current host state, not an old cached snapshot. */
+/** Media referenced by a selected projected document closure (used by Codex share bundles). */
+export function projectWorldAssetReferences(
+  collections: Partial<WorldCollections>,
+  manifest: AssetManifest,
+): Set<string> {
+  return references(collections, manifest);
+}
+
 export function projectAssetManifest(
   world: Readonly<WorldCollections>,
   manifest: AssetManifest,
@@ -115,7 +140,10 @@ export function projectAssetManifest(
 ): AssetManifest {
   if (viewer.role === "GM" || viewer.role === "ASSISTANT") return manifest;
   const full = references(world, manifest);
-  const visible = references(projectWorld(world as WorldCollections, 0, viewer).collections, manifest);
+  // Host manifests may live in an asset service separate from WorldCollections. Project Codex
+  // gallery IDs against the manifest actually being published, not a stale/empty cached field.
+  const withManifest = { ...world, assetManifest: manifest } as WorldCollections;
+  const visible = references(projectWorld(withManifest, 0, viewer).collections, manifest);
   const allowed: AssetManifest = {};
   for (const [hash, entry] of Object.entries(manifest)) {
     // Unclassified legacy assets with no known media reference retain their old

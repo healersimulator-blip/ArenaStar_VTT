@@ -26,6 +26,7 @@ const entangle: PF1eSpellEffect = {
   source: { title: "PRPG Core Rulebook p.278 (Entangle)", citation: "Reflex partial; failure entangles." },
   save: { type: "ref", severity: "negates" },
   conditions: ["Entangled"],
+  conditionFxMacroId: "macro-entangled-vines",
 };
 
 describe("the authored tactical spell-effect catalogue (D-407)", () => {
@@ -82,6 +83,7 @@ describe("the authored tactical spell-effect catalogue (D-407)", () => {
     refuse({ save: { type: "ref", severity: "partial" } }, "save must be null or");
     refuse({ save: { type: "ref", severity: "negates", extra: 1 } }, "save must be null or");
     refuse({ conditions: [] }, `names 1–${String(PF1E_SPELL_EFFECT_MAX_CONDITIONS)} conditions`);
+    refuse({ conditionFxMacroId: "not a document id" }, "condition FX macro id");
     refuse({ conditions: ["Entangled", "Entangled"] }, "repeats condition Entangled");
     refuse({ conditions: ["Reticulated"] }, "is not a PF1e condition");
     refuse({ conditions: Array.from({ length: PF1E_SPELL_EFFECT_MAX_CONDITIONS + 1 }, () => "Prone") },

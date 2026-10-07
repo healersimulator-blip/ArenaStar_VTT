@@ -136,6 +136,11 @@ export interface CastFlowClient {
 }
 
 export interface PF1eCastFlowParams {
+  /**
+   * An area orchestration has already committed the one spell resource before resolving another
+   * affected creature. Internal to the quickbar area flow; ordinary sheet casts leave this false.
+   */
+  resourceAlreadySpent?: boolean;
   /** Optional spatial invocation facts. Rules do not infer canvas selection inside this flow. */
   context?: {
     sceneId?: string;
@@ -551,6 +556,7 @@ function resolvedCastActionTarget(params: PF1eCastFlowParams, input: {
         saveType: params.authored.saveType,
         severity: params.authored.severity,
         damageFormula: params.authored.damageFormula,
+        ...(params.spellEffectId !== undefined ? { effectId: params.spellEffectId } : {}),
         ...(params.authored.energyType !== undefined ? { energyType: params.authored.energyType } : {}),
         critical: input.evidence.critical,
         ...(input.evidence.damageRollId !== undefined ? { damageRollId: input.evidence.damageRollId } : {}),
@@ -609,6 +615,12 @@ interface SpellEffectInput {
    * caller applies one combined write. The SR-ledger op is still emitted.
    */
   skipHpWrite?: boolean;
+  /**
+   * D-407 starter Lightning Bolt only: allow a raw HP delta to accompany the action card when a
+   * player does not own the NPC. HostSync independently verifies every line/profile/roll fact and
+   * rejects any HP value that is not exactly that verified damage; this flag grants no host trust.
+   */
+  allowHostVerifiedHpWrite?: boolean;
 }
 
 type SpellEffectResult =
@@ -800,7 +812,12 @@ async function runSpellEffect(
   if (target.dealt > 0 && input.skipHpWrite !== true) {
     const after = input.targetDerived.hp - target.dealt;
     const edit = pf1eSheetEdit(input.targetActor, user, "hp", String(after));
-    if (edit.error !== null) hpWriteError = edit.error;
+    if (edit.error !== null && input.allowHostVerifiedHpWrite === true) {
+      // This is only a request-level fast path for Lightning Bolt; HostSync verifies the matching
+      // cast card and exact HP delta in the same envelope before it grants the write.
+      ops.push({ kind: "update", ref: { coll: "actors", id: input.targetActor._id },
+        diff: { "system.pf1e.hp": after } });
+    } else if (edit.error !== null) hpWriteError = edit.error;
     else ops.push(...edit.ops);
   }
 
@@ -981,7 +998,7 @@ export async function resolveCastFlow(
         : "cast as a swift action — does not provoke attacks of opportunity",
     );
   }
-  if (consumable !== null) {
+  if (!params.resourceAlreadySpent && consumable !== null) {
     // The charge **is** the cost: no slot is spent, no prepared row is expended. The
     // decrement lands with the other ops, so a refused cast (a gate failure below) spends
     // nothing — the charge is only written when the cast actually resolved.
@@ -997,7 +1014,7 @@ export async function resolveCastFlow(
       },
       diff: { "system.uses.value": Math.max(0, consumable.charges - 1) },
     } as unknown as Op);
-  } else {
+  } else if (!params.resourceAlreadySpent) {
     const spend = pf1eSpellbookEdit(params.casterActor, casterDerived, user, {
       kind: "spend",
       level: slotLevel,
@@ -1006,7 +1023,7 @@ export async function resolveCastFlow(
     if (spend.warning !== null) warnings.push(spend.warning);
     ops.push(...spend.ops);
   }
-  if (consumable === null && spell.preparedIndex !== undefined) {
+  if (!params.resourceAlreadySpent && consumable === null && spell.preparedIndex !== undefined) {
     const row = preparedRowAt(params.casterActor, spell.preparedIndex);
     if (row === null) return fail("That prepared spell no longer exists.");
     if (row.expended === true)
@@ -1682,6 +1699,11 @@ export async function resolveCastFlow(
       ? { srOvercomeByCaller: params.srOvercomeByCaller }
       : {}),
     ...(touchCritical ? { critical: true } : {}),
+    ...(spell.name.trim().toLowerCase() === "lightning bolt" && slotLevel === 3 &&
+        params.context?.area?.shape === "line" && authored.saveType === "ref" &&
+        authored.severity === "half" && authored.damageFormula === "6d6" &&
+        authored.energyType === "electricity"
+      ? { allowHostVerifiedHpWrite: true } : {}),
   });
   if (!effect.ok) return fail(effect.error);
   ops.push(...effect.ops);

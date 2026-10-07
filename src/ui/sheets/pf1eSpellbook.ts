@@ -44,6 +44,47 @@ export interface PF1ePreparedRow {
   components: string;
 }
 
+const COMPENDIUM_COMPONENT_CODES: Readonly<Record<string, string>> = {
+  verbal: "V", v: "V",
+  somatic: "S", s: "S",
+  material: "M", m: "M",
+  focus: "F", f: "F",
+  divinefocus: "DF", divine_focus: "DF", df: "DF",
+  experience: "XP", xp: "XP",
+};
+
+function normalizedComponentCode(value: string): string {
+  const trimmed = value.trim();
+  return COMPENDIUM_COMPONENT_CODES[trimmed.toLowerCase()] ?? trimmed.toUpperCase();
+}
+
+/** Convert a compendium's structured component flags into the abbreviations the PF1e cast gate parses. */
+export function pf1eCompendiumComponents(raw: unknown): string {
+  const codes: string[] = [];
+  const add = (value: string): void => {
+    // Preserve slash alternatives (e.g. M/DF) and normalize word-form component names.
+    for (const part of value.split(",")) {
+      const code = part.split("/").map(normalizedComponentCode).join("/");
+      if (code !== "" && !codes.includes(code)) codes.push(code);
+    }
+  };
+
+  if (typeof raw === "string") {
+    add(raw);
+  } else if (Array.isArray(raw)) {
+    for (const component of raw) if (typeof component === "string") add(component);
+  } else if (raw !== null && typeof raw === "object") {
+    for (const [key, value] of Object.entries(raw)) {
+      const code = COMPENDIUM_COMPONENT_CODES[key.trim().toLowerCase()];
+      if (code === undefined || value === false || value === null || value === undefined ||
+          (typeof value === "string" && value.trim() === "")) continue;
+      if (!codes.includes(code)) codes.push(code);
+    }
+  }
+
+  return codes.join(", ");
+}
+
 export interface PF1eSpellbookView {
   /** False when the actor has no spellcasting data — the tab stays hidden. */
   casting: boolean;

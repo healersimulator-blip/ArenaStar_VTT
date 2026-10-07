@@ -273,7 +273,7 @@
         {:else if win.kind === "help"}
           <HelpPanel {bindings} {isGM} />
         {:else if win.kind === "journals"}
-          <HandoutsPanel {client} {bus} />
+          <HandoutsPanel {client} {bus} {resolveAsset} />
         {:else if win.kind === "permissions"}
           <PermissionsPanel {client} {bus} />
         {:else if win.kind === "macros"}

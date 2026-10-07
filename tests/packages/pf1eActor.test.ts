@@ -926,6 +926,12 @@ describe("ability damage and drain (CRB p.555)", () => {
         },
       }).ok,
     ).toBe(false);
+    expect(parsePF1eActorSystem({ spells: { known: [
+      { name: "Lightning Bolt", level: 3, components: "V, S" },
+    ] } }).ok).toBe(true);
+    expect(parsePF1eActorSystem({ spells: { known: "Lightning Bolt" } }).ok).toBe(false);
+    expect(parsePF1eActorSystem({ spells: { known: [{ name: "Wish", level: 10 }] } }).ok).toBe(false);
+    expect(parsePF1eActorSystem({ spells: { known: [{ name: "Wish", level: 3, slotLevel: -1 }] } }).ok).toBe(false);
   });
 
   test("every bestiary block derives identically with zero damage/drain fields added", () => {
