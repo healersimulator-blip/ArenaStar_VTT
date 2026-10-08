@@ -7,6 +7,7 @@ import { RendererType } from "pixi.js";
 import { makeToken, type HostApp } from "./hostBoot";
 import type {
   ActorDocument,
+  AssetManifestEntry,
   AutomationDocument,
   FxInstanceDocument,
   MacroDocument,
@@ -14,10 +15,12 @@ import type {
   RegionDocument,
   CombatDocument,
   Json,
+  JournalDocument,
   Ownership,
   SceneDocument,
   TileDocument,
   TokenDocument,
+  UserDocument,
 } from "../core/documents";
 import type { DocId } from "../core/ids";
 import type { AutomationTraceMsg } from "../core/messages";
@@ -212,6 +215,16 @@ export interface AppSurface {
   a41RunSimpleTriggers(args: { sceneId: string; tileId: string; automationId: string; count: number }): Promise<A41TriggerSample[]>;
   worldId(): string;
   seq(): number;
+  /** Test-only: create a host-owned PLAYER record for audience-preview browser journeys. */
+  seedPreviewUser(input: { id: string; name: string }): {
+    ok: boolean;
+    error?: string;
+  };
+  /** Test-only: install manifest metadata in the host and GM replica without adding asset bytes. */
+  seedAssetManifest(input: { assetId: string; entry: AssetManifestEntry }): {
+    ok: boolean;
+    error?: string;
+  };
   /** Committed replica chat contents, for undo/projection UI regressions. */
   chatLines(): string[];
   /** MC-02 probe: the automation macro this shell holds — id and callable metadata as JSON. */
@@ -1028,12 +1041,50 @@ export interface AppSurface {
 }
 
 export interface PlayerSurface {
+  /** Test-only repeatable purchase intent for idempotency journeys; never exposed outside ?e2e. */
+  codexPurchase(input: {
+    sheetId: string;
+    stockRowId: string;
+    quantity: number;
+    actorId: string;
+    requestId: string;
+  }): string;
+  /** Latest host result for one explicit purchase/claim ID; E2E-only transport assertion. */
+  codexTransferResult(requestId: string): {
+    action: "purchase" | "claim" | null;
+    requestId: string;
+    ok: boolean;
+    detail: string;
+    receiptId: string | null;
+    replayed: boolean;
+    totalCopper: number | null;
+  } | null;
   /** Replicated darkness, separate from the canvas gate for sync diagnostics. */
   sceneDarkness(): number | null;
   userId(): string;
   worldId(): string;
   worldName(): string;
   seq(): number;
+  /** Actual audience-filtered Codex rows present in this connected player replica. */
+  codexProjection(): Array<{
+    _id: string;
+    name: string;
+    pages: Array<{
+      _id: string;
+      name: string;
+      text: string;
+      codex: JournalDocument["pages"][number]["codex"];
+    }>;
+    codex: NonNullable<JournalDocument["codex"]>;
+  }>;
+  /** IDs/names/media actually held by the connected player's projected replica. */
+  codexReplicaSummary(): {
+    journals: Array<{ id: string; name: string }>;
+    actors: Array<{ id: string; name: string }>;
+    items: Array<{ id: string; name: string }>;
+    scenes: Array<{ id: string; name: string }>;
+    assetIds: string[];
+  };
   /** Hash of the active scene's map (null until imported), §7. */
   sceneImg(): string | null;
   tokenCount(): number;
@@ -1609,6 +1660,27 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
   });
   let lastFxCue: { runId: string; macroId: string; sceneId: string } | null = null;
   let lastRejected: { txId: string; reason: string; detail: string } | null = null;
+  const codexTransferResults: Array<{
+    action: "purchase" | "claim" | null;
+    requestId: string;
+    ok: boolean;
+    detail: string;
+    receiptId: string | null;
+    replayed: boolean;
+    totalCopper: number | null;
+  }> = [];
+  playerApp.bus.on("codexPurchaseResult", (result) => {
+    codexTransferResults.push({
+      action: result.action ?? null,
+      requestId: result.requestId,
+      ok: result.ok,
+      detail: result.detail,
+      receiptId: result.receiptId ?? null,
+      replayed: result.replayed === true,
+      totalCopper: result.totalCopper ?? null,
+    });
+    if (codexTransferResults.length > 40) codexTransferResults.shift();
+  });
   playerApp.bus.on("fx", (cue) => {
     lastFxCue = { runId: cue.runId, macroId: cue.macroId, sceneId: cue.sceneId };
   });
@@ -1622,11 +1694,44 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
     return s ?? c.store.getAll("scenes")[0] ?? null;
   };
   return {
+    codexPurchase: ({ sheetId, stockRowId, quantity, actorId, requestId }) =>
+      client()?.requestCodexPurchase(
+        sheetId as DocId,
+        stockRowId,
+        quantity,
+        actorId as DocId,
+        requestId,
+      ) ?? "",
+    codexTransferResult: (requestId) =>
+      [...codexTransferResults].reverse().find((result) => result.requestId === requestId) ?? null,
     sceneDarkness: () => scene()?.darkness ?? null,
     userId: () => client()?.user?.id ?? playerApp.identity.publicKeyHex,
     worldId: () => playerApp.roomId,
     worldName: () => client()?.world?.name ?? "—",
     seq: () => client()?.store.seq ?? 0,
+    codexProjection: () => (client()?.store.getAll("journals") ?? [])
+      .filter((journal) => journal.codex !== undefined)
+      .map((journal) => ({
+        _id: journal._id,
+        name: journal.name,
+        pages: journal.pages.map((page) => ({
+          _id: page._id,
+          name: page.name,
+          text: page.text,
+          codex: page.codex,
+        })),
+        codex: journal.codex as NonNullable<JournalDocument["codex"]>,
+      })),
+    codexReplicaSummary: () => {
+      const store = client()?.store;
+      return {
+        journals: (store?.getAll("journals") ?? []).map((doc) => ({ id: doc._id, name: doc.name })),
+        actors: (store?.getAll("actors") ?? []).map((doc) => ({ id: doc._id, name: doc.name })),
+        items: (store?.getAll("items") ?? []).map((doc) => ({ id: doc._id, name: doc.name })),
+        scenes: (store?.getAll("scenes") ?? []).map((doc) => ({ id: doc._id, name: doc.name })),
+        assetIds: Object.keys(store?.world.assetManifest ?? {}).sort(),
+      };
+    },
     sceneImg: () => scene()?.img ?? null,
     tokenCount: () => scene()?.tokens.length ?? 0,
     tokenPos: () => {
@@ -2430,7 +2535,52 @@ function appSurface(app: HostApp): AppSurface {
     },
     worldId: () => app.worldId,
     seq: () => client.store.seq,
-    chatLines: () => client.store.getAll("messages").map((message) => message.content),
+    seedAssetManifest: ({ assetId, entry }) => {
+      if (!/^[a-f0-9]{64}$/i.test(assetId) || !entry || typeof entry.name !== "string" ||
+          typeof entry.mime !== "string" || !Number.isSafeInteger(entry.size) || entry.size < 0 ||
+          !Number.isSafeInteger(entry.chunks) || entry.chunks < 1)
+        return { ok: false, error: "A valid hash and asset manifest entry are required." };
+      app.store.world.assetManifest[assetId] = structuredClone(entry);
+      client.store.world.assetManifest[assetId] = structuredClone(entry);
+      return { ok: true };
+    },
+    seedPreviewUser: ({ id, name }) => {
+      const userId = id.trim();
+      const displayName = name.trim();
+      if (
+        !/^[A-Za-z0-9_-]{1,128}$/.test(userId) ||
+        !displayName ||
+        displayName.length > 80
+      )
+        return {
+          ok: false,
+          error: "A bounded player id and display name are required.",
+        };
+      const existing = app.store.get("users", userId);
+      if (existing)
+        return existing.role === "PLAYER"
+          ? { ok: true }
+          : { ok: false, error: "The requested preview user is not a player." };
+      const user: UserDocument = {
+        _id: userId,
+        type: "user",
+        name: displayName,
+        ownership: { default: 0 },
+        flags: {},
+        system: {},
+        role: "PLAYER",
+        character: null,
+        color: "#9a9ab0",
+      };
+      const committed = app.host.commitSystem([
+        { kind: "create", coll: "users", data: user },
+      ]);
+      return committed.ok
+        ? { ok: true }
+        : { ok: false, error: committed.error };
+    },
+    chatLines: () =>
+      client.store.getAll("messages").map((message) => message.content),
     worldMacros: () => JSON.stringify(client.store.getAll("macros")),
     fxInstances: () => client.store.getAll("fxInstances").map((instance) => ({
       id: instance._id,

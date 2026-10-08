@@ -142,6 +142,10 @@ function docRefError(value: unknown, depth = 0): string | null {
     : "Codex reference collection is not linkable";
 }
 
+export function isCodexDocRef(value: unknown): value is DocRef {
+  return docRefError(value) === null;
+}
+
 export function codexRefKey(ref: DocRef): string {
   return `${ref.parent ? `${codexRefKey(ref.parent)}/` : ""}${ref.coll}:${encodeURIComponent(ref.id)}`;
 }
@@ -610,8 +614,12 @@ export function isCodexJournal(
   return value?.type === "journal" && record((value as JournalDocument).codex);
 }
 
-function targetTypeError(link: CodexLink, target: BaseDocument): string | null {
+export function codexLinkTargetError(link: CodexLink, target: BaseDocument): string | null {
   return relationTargetError(link, target);
+}
+
+function targetTypeError(link: CodexLink, target: BaseDocument): string | null {
+  return codexLinkTargetError(link, target);
 }
 
 /** Validate only new/changed refs so an imported dangling ref can be repaired or left inert. */

@@ -73,6 +73,7 @@ import type {
   SimControlMsg,
   SimSnapshotGetMsg,
   PF1eConditionActionMsg,
+  CodexClaimMsg,
   CodexPurchaseMsg,
   TurnReadyMsg,
   WelcomeMsg,
@@ -172,8 +173,18 @@ import { ACTION_CARD_VERSION, ACTION_RIDER_MAX, actionAsJson, actionCardOf, acti
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { can } from "../core/permissions";
-import { canReadCodexRef, codexAudienceAllows, codexDocumentError, codexPageMetadataError, codexReferencesRef, hasCodexMetadata } from "../core/campaignCodex";
-import { planCodexPurchase } from "../core/campaignCodexEconomy";
+import {
+  canReadCodexRef,
+  codexAudienceAllows,
+  codexDocumentError,
+  codexPageMetadataError,
+  codexReferencesRef,
+  hasCodexMetadata,
+} from "../core/campaignCodex";
+import {
+  planCodexLootClaim,
+  planCodexPurchase,
+} from "../core/campaignCodexEconomy";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
 import { FX_FINISH_OFFSET_MAX_MS, fxAudienceAllows, fxResolveSyncOrigins, fxSectionsForViewer,
   resolveFxSequence, validateFxSequence, type FxAudience } from "../core/fx";
@@ -1037,6 +1048,9 @@ export class HostSync {
         return;
       case "codex.purchase":
         this.handleCodexPurchase(session, msg);
+        return;
+      case "codex.claim":
+        this.handleCodexClaim(session, msg);
         return;
       case "roll.delegate":
         void this.handleRollDelegate(
@@ -4484,8 +4498,24 @@ export class HostSync {
   }
 
   private handleCodexPurchase(session: Session, msg: CodexPurchaseMsg): void {
-    const reply = (ok: boolean, detail: string, extras: { totalCopper?: number; replayed?: boolean } = {}): void => {
-      this.send(session, { kind: "codex.purchase.result", requestId: typeof msg.requestId === "string" ? msg.requestId : "invalid", ok, detail, ...extras });
+    const reply = (
+      ok: boolean,
+      detail: string,
+      extras: {
+        receiptId?: string;
+        totalCopper?: number;
+        replayed?: boolean;
+      } = {},
+    ): void => {
+      this.send(session, {
+        kind: "codex.purchase.result",
+        action: "purchase",
+        requestId:
+          typeof msg.requestId === "string" ? msg.requestId : "invalid",
+        ok,
+        detail,
+        ...extras,
+      });
     };
     const user = session.user;
     if (!user) { reply(false, "You are not authenticated."); return; }
@@ -4512,10 +4542,17 @@ export class HostSync {
         return;
       }
       if (prior.status === "ready") {
-        reply(true, "Purchase already completed; no second transfer was made.", {
-          ...(typeof priorSystem.totalCopper === "number" ? { totalCopper: priorSystem.totalCopper } : {}),
-          replayed: true,
-        });
+        reply(
+          true,
+          "Purchase already completed; no second transfer was made.",
+          {
+            receiptId,
+            ...(typeof priorSystem.totalCopper === "number"
+              ? { totalCopper: priorSystem.totalCopper }
+              : {}),
+            replayed: true,
+          },
+        );
         return;
       }
       reply(false, prior.status === "reverted"
@@ -4563,8 +4600,185 @@ export class HostSync {
       ],
     };
     const committed = this.commitOps(plan.ops, user.id, receiptId, true, audit);
-    if (!committed.ok) { reply(false, `Purchase was not committed: ${committed.error}`); return; }
-    reply(true, `Purchased ${msg.quantity} × ${plan.itemName}.`, { totalCopper: plan.totalCopper });
+    if (!committed.ok) {
+      reply(false, `Purchase was not committed: ${committed.error}`);
+      return;
+    }
+    reply(true, `Purchased ${msg.quantity} × ${plan.itemName}.`, {
+      receiptId,
+      totalCopper: plan.totalCopper,
+    });
+  }
+
+  private handleCodexClaim(session: Session, msg: CodexClaimMsg): void {
+    const requestId =
+      typeof msg?.requestId === "string" && msg.requestId.length <= 96
+        ? msg.requestId
+        : "invalid";
+    const reply = (
+      ok: boolean,
+      detail: string,
+      extras: { receiptId?: string; replayed?: boolean } = {},
+    ): void => {
+      this.send(session, {
+        kind: "codex.purchase.result",
+        action: "claim",
+        requestId,
+        ok,
+        detail,
+        ...extras,
+      });
+    };
+    const user = session.user;
+    if (!user) {
+      reply(false, "You are not authenticated.");
+      return;
+    }
+    if (!session.intentBucket.tryRemove()) {
+      reply(false, "Loot claims are rate-limited.");
+      return;
+    }
+    if (
+      !msg ||
+      typeof msg !== "object" ||
+      msg.kind !== "codex.claim" ||
+      Object.keys(msg).some(
+        (key) =>
+          ![
+            "kind",
+            "requestId",
+            "sheetId",
+            "stockRowId",
+            "quantity",
+            "actorId",
+          ].includes(key),
+      ) ||
+      typeof msg.requestId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,96}$/.test(msg.requestId) ||
+      typeof msg.sheetId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(msg.sheetId) ||
+      typeof msg.stockRowId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(msg.stockRowId) ||
+      typeof msg.actorId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(msg.actorId) ||
+      !Number.isSafeInteger(msg.quantity) ||
+      msg.quantity < 1 ||
+      msg.quantity > 1_000
+    ) {
+      reply(false, "The loot-claim request is malformed.");
+      return;
+    }
+    const receiptId = `codexclaim_${msg.requestId}`;
+    const prior = this.store.get("actionReceipts", receiptId) as
+      ActionReceiptDocument | undefined;
+    if (prior) {
+      const priorSystem = isRecord(prior.system) ? prior.system : {};
+      if (
+        priorSystem.action !== "codex.claim" ||
+        priorSystem.requestId !== msg.requestId ||
+        priorSystem.userId !== user.id ||
+        priorSystem.sheetId !== msg.sheetId ||
+        priorSystem.stockRowId !== msg.stockRowId ||
+        priorSystem.actorId !== msg.actorId ||
+        priorSystem.quantity !== msg.quantity
+      ) {
+        reply(false, "This request ID has already been used.");
+        return;
+      }
+      if (prior.status === "ready") {
+        reply(
+          true,
+          "Loot claim already completed; no second transfer was made.",
+          {
+            receiptId,
+            replayed: true,
+          },
+        );
+        return;
+      }
+      reply(
+        false,
+        prior.status === "reverted"
+          ? "This loot claim was already reverted. Submit a new request if you still want the item."
+          : "This loot-claim request is already being processed.",
+      );
+      return;
+    }
+
+    const sheet = this.store.get("journals", msg.sheetId) as
+      JournalDocument | undefined;
+    const actor = this.store.get("actors", msg.actorId) as
+      ActorDocument | undefined;
+    const shop = sheet?.codex?.shop;
+    if (
+      !sheet ||
+      sheet.type !== "journal" ||
+      !shop ||
+      !can(user, "read", sheet, "journals") ||
+      !codexAudienceAllows(shop.audience, user) ||
+      shop.mode !== "loot"
+    ) {
+      reply(false, "This loot container is unavailable.");
+      return;
+    }
+    const row = shop.stock.find((candidate) => candidate.id === msg.stockRowId);
+    const resolver = { resolve: (ref: DocRef) => this.store.resolve(ref) };
+    const sourceItem = row
+      ? (this.store.resolve(row.item) as ItemDocument | undefined)
+      : undefined;
+    if (
+      !row ||
+      !sourceItem ||
+      sourceItem.type !== "item" ||
+      !canReadCodexRef(user, row.item, resolver) ||
+      !actor ||
+      actor.type !== "actor" ||
+      !can(user, "update", actor, "actors") ||
+      (row.item.parent?.coll === "actors" && row.item.parent.id === actor._id)
+    ) {
+      reply(false, "The loot item or selected character is unavailable.");
+      return;
+    }
+    const plan = planCodexLootClaim({
+      sheet,
+      row,
+      sourceItem,
+      actor,
+      quantity: msg.quantity,
+      itemId: randomId(),
+    });
+    if (!plan.ok) {
+      reply(false, plan.error);
+      return;
+    }
+    const audit: ActionAudit = {
+      id: receiptId,
+      label: `Codex loot claim: ${plan.itemName} ×${msg.quantity}`.slice(
+        0,
+        160,
+      ),
+      system: {
+        action: "codex.claim",
+        requestId: msg.requestId,
+        userId: user.id,
+        sheetId: sheet._id,
+        stockRowId: row.id,
+        actorId: actor._id,
+        quantity: msg.quantity,
+      },
+      pathChecks: [
+        {
+          ref: { coll: "journals", id: sheet._id },
+          paths: ["codex.shop.stock"],
+        },
+      ],
+    };
+    const committed = this.commitOps(plan.ops, user.id, receiptId, true, audit);
+    if (!committed.ok) {
+      reply(false, `Loot claim was not committed: ${committed.error}`);
+      return;
+    }
+    reply(true, `Claimed ${msg.quantity} × ${plan.itemName}.`, { receiptId });
   }
 
   private handlePF1eConditionAction(session: Session, raw: WireMessage): void {

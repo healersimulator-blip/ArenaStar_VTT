@@ -571,13 +571,13 @@ A player asks the host to purchase a quantity of one published Campaign Codex sh
 Private transaction result. It is sent after commit or validation failure and does not replace the authoritative projected world Ops. `replayed` means an earlier request with the same ID already committed.
 
 ```ts
-{ kind: "codex.purchase.result"; requestId: string; ok: boolean; detail: string;
-  receiptId?: DocId; totalCopper?: number; replayed?: boolean }
+{ kind: "codex.purchase.result"; action?: "purchase" | "claim"; requestId: string;
+  ok: boolean; detail: string; receiptId?: DocId; totalCopper?: number; replayed?: boolean }
 ```
 
 ### codex.claim (0x58 · client → host · ops)
 
-A player claims a published Campaign Codex shop/loot row. The host validates the selected sheet, stock, actor ownership and current availability before committing the idempotent transfer; the request carries no client-authored price or item data.
+A player claims a published stock row from a Codex Entry in **loot mode**. The host rechecks the sheet and shop audience, readable source item, selected actor's update permission, and current stock, then atomically decrements stock and transfers the item without charging currency. The request carries identifiers and quantity only; retries are idempotent and use the same private `codex.purchase.result` message with `action: "claim"` and the durable Revert receipt ID.
 
 ```ts
 { kind: "codex.claim"; requestId: string; sheetId: DocId; stockRowId: string;

@@ -102,7 +102,7 @@ export interface ClientEvents {
   taggerRulesResult: TaggerRulesResultMsg;
   /** Host-validated keyed condition application/removal committed with a private Revert receipt. */
   conditionActionResult: PF1eConditionActionResultMsg;
-  /** Private acknowledgement for a host-validated Campaign Codex shop purchase. */
+  /** Private result for a host-validated Campaign Codex purchase or loot claim. */
   codexPurchaseResult: CodexPurchaseResultMsg;
   /** Host-validated atomic prefab placement (GM only). */
   prefabResult: PrefabResultMsg;
@@ -409,8 +409,14 @@ export class ClientSync {
     return id;
   }
 
-  /** Ask the host to transfer a loot stock row to an owned actor without charging currency. */
-  requestCodexClaim(sheetId: DocId, stockRowId: string, quantity: number, actorId: DocId, requestId?: string): string {
+  /** Ask the host to claim a loot-mode stock row to an owned actor without charging currency. */
+  requestCodexClaim(
+    sheetId: DocId,
+    stockRowId: string,
+    quantity: number,
+    actorId: DocId,
+    requestId?: string,
+  ): string {
     const id = requestId ?? globalThis.crypto.randomUUID();
     this.send({ kind: "codex.claim", requestId: id, sheetId, stockRowId, quantity, actorId });
     return id;

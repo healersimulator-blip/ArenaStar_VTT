@@ -9,7 +9,13 @@
  *
  * Only the marker entries are inflated (fflate's `filter`); the payload stays compressed.
  */
-import { strFromU8, unzip } from "fflate";
+import { strFromU8, Unzip, UnzipInflate, UnzipPassThrough } from "fflate";
+import { extractZipEntriesBounded, WORLD_ZIP_LIMITS } from "./worldZip";
+import {
+  auditCodexArchiveDependencies,
+  codexArchiveAuditUnavailable,
+  type CodexArchiveDependencyAudit,
+} from "../core/campaignCodexArchiveAudit";
 import type { PackageManifest } from "../core/packageManifest";
 import { validatePackageManifest } from "../core/packageManifest";
 
@@ -35,6 +41,8 @@ export interface WorldZipInfo {
   packages: WorldZipPackage[];
   /** A template archive: always opened as a fresh copy (D-249). */
   starter: boolean;
+  /** Read-only full-world Codex dependency diagnostics for the Open-file preview. */
+  codexAudit?: CodexArchiveDependencyAudit;
 }
 
 export type ZipKind =
@@ -54,25 +62,166 @@ function isPackageMarker(path: string): boolean {
 }
 
 function inflateMarkers(bytes: Uint8Array): Promise<Map<string, Uint8Array>> {
-  return new Promise((resolve, reject) => {
-    unzip(
-      bytes,
-      {
-        filter: (file) =>
-          file.name === WORLD_MARKER ||
-          file.name === WORLD_PACKAGES_INDEX ||
-          isPackageMarker(file.name),
-      },
-      (error, files) => {
-        if (error) reject(new Error(`not a readable zip — ${error.message}`));
-        else resolve(new Map(Object.entries(files)));
-      },
-    );
+  return extractZipEntriesBounded(bytes, {
+    limits: {
+      ...WORLD_ZIP_LIMITS,
+      maxUncompressedBytes: 16 * 1024 * 1024,
+      maxEntryBytes: 8 * 1024 * 1024,
+    },
+    filter: (file) =>
+      file.name === WORLD_MARKER ||
+      file.name === WORLD_PACKAGES_INDEX ||
+      isPackageMarker(file.name),
   });
 }
 
+const MAX_AUDIT_DOCUMENTS_BYTES = 32 * 1024 * 1024;
+const MAX_AUDIT_ASSETS_INDEX_BYTES = 8 * 1024 * 1024;
+const MAX_AUDIT_ASSET_BLOBS = 100_000;
+
+interface CodexAuditZipEntries {
+  entries: Map<string, Uint8Array>;
+  assetBlobIds: Set<string>;
+  assetBlobIdsTruncated: boolean;
+  oversized: Set<string>;
+  duplicates: Set<string>;
+  error: string | null;
+}
+
+/** Bounded streaming extraction of the two JSON indexes; asset blobs stay compressed. */
+function inflateCodexAuditEntries(bytes: Uint8Array): CodexAuditZipEntries {
+  const entries = new Map<string, Uint8Array>();
+  const assetBlobIds = new Set<string>();
+  let assetBlobIdsTruncated = false;
+  const oversized = new Set<string>();
+  const duplicates = new Set<string>();
+  let error: string | null = null;
+  const limits = new Map([
+    ["documents.json", MAX_AUDIT_DOCUMENTS_BYTES],
+    ["assets.json", MAX_AUDIT_ASSETS_INDEX_BYTES],
+  ]);
+  const decoder = new Unzip((file) => {
+    const assetPrefix = "assets/";
+    if (file.name.startsWith(assetPrefix)) {
+      const hash = file.name.slice(assetPrefix.length);
+      if (/^[a-f0-9]{64}$/i.test(hash)) {
+        if (assetBlobIds.has(hash)) duplicates.add(file.name);
+        else if (assetBlobIds.size >= MAX_AUDIT_ASSET_BLOBS)
+          assetBlobIdsTruncated = true;
+        else assetBlobIds.add(hash);
+      }
+    }
+    const limit = limits.get(file.name);
+    if (limit === undefined) return;
+    if (entries.has(file.name) || oversized.has(file.name)) {
+      duplicates.add(file.name);
+      return;
+    }
+    if (typeof file.originalSize === "number" && file.originalSize > limit) {
+      oversized.add(file.name);
+      return;
+    }
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    file.ondata = (cause, chunk, final) => {
+      if (cause) {
+        error = `could not read ${file.name}`;
+        return;
+      }
+      total += chunk.length;
+      if (total > limit) {
+        oversized.add(file.name);
+        chunks.length = 0;
+        void file.terminate();
+        return;
+      }
+      chunks.push(chunk.slice());
+      if (final) {
+        if (entries.has(file.name)) duplicates.add(file.name);
+        else {
+          const output = new Uint8Array(total);
+          let offset = 0;
+          for (const part of chunks) {
+            output.set(part, offset);
+            offset += part.length;
+          }
+          entries.set(file.name, output);
+        }
+      }
+    };
+    try {
+      file.start();
+    } catch {
+      error = `could not read ${file.name}`;
+    }
+  });
+  decoder.register(UnzipInflate);
+  decoder.register(UnzipPassThrough);
+  try {
+    decoder.push(bytes, true);
+  } catch {
+    error = "could not scan World ZIP dependencies";
+  }
+  return {
+    entries,
+    assetBlobIds,
+    assetBlobIdsTruncated,
+    oversized,
+    duplicates,
+    error,
+  };
+}
+
+function auditWorldZipCodex(bytes: Uint8Array): CodexArchiveDependencyAudit {
+  const extracted = inflateCodexAuditEntries(bytes);
+  if (extracted.error) return codexArchiveAuditUnavailable(extracted.error);
+  if (extracted.duplicates.size > 0)
+    return codexArchiveAuditUnavailable(
+      "The archive contains duplicate Codex indexes or asset blobs.",
+    );
+  if (extracted.assetBlobIdsTruncated)
+    return codexArchiveAuditUnavailable(
+      "The archive contains too many asset blobs for the bounded Codex audit.",
+    );
+  if (extracted.oversized.has("documents.json"))
+    return codexArchiveAuditUnavailable(
+      "The document index is too large for the bounded Codex audit.",
+    );
+  if (extracted.oversized.has("assets.json"))
+    return codexArchiveAuditUnavailable(
+      "The asset index is too large for the bounded Codex audit.",
+    );
+  const documentsBytes = extracted.entries.get("documents.json");
+  const assetsBytes = extracted.entries.get("assets.json");
+  if (!documentsBytes || !assetsBytes)
+    return codexArchiveAuditUnavailable(
+      "The archive is missing a dependency index.",
+    );
+  const documents = parseJson(documentsBytes);
+  const assets = parseJson(assetsBytes);
+  return auditCodexArchiveDependencies(
+    documents,
+    assets,
+    extracted.assetBlobIds,
+  );
+}
+
+function safeAuditWorldZipCodex(
+  bytes: Uint8Array,
+): CodexArchiveDependencyAudit {
+  try {
+    return auditWorldZipCodex(bytes);
+  } catch {
+    return codexArchiveAuditUnavailable(
+      "The Codex dependency audit could not be completed.",
+    );
+  }
+}
+
 const asRecord = (v: unknown): Record<string, unknown> | null =>
-  typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  typeof v === "object" && v !== null && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : null;
 
 function parseJson(bytes: Uint8Array): unknown {
   try {
@@ -108,13 +257,20 @@ export async function classifyZip(bytes: Uint8Array): Promise<ZipKind> {
   try {
     markers = await inflateMarkers(bytes);
   } catch (error) {
-    return { kind: "unknown", reason: error instanceof Error ? error.message : String(error) };
+    return {
+      kind: "unknown",
+      reason: error instanceof Error ? error.message : String(error),
+    };
   }
 
   const worldBytes = markers.get(WORLD_MARKER);
   if (worldBytes) {
     const meta = asRecord(parseJson(worldBytes));
-    if (meta && typeof meta.worldId === "string" && typeof meta.format === "number") {
+    if (
+      meta &&
+      typeof meta.worldId === "string" &&
+      typeof meta.format === "number"
+    ) {
       const rules = asRecord(meta.rules);
       return {
         kind: "world",
@@ -125,9 +281,13 @@ export async function classifyZip(bytes: Uint8Array): Promise<ZipKind> {
         activeRules: typeof rules?.active === "string" ? rules.active : null,
         packages: readPackagesIndex(markers.get(WORLD_PACKAGES_INDEX)),
         starter: meta.starter === true,
+        codexAudit: safeAuditWorldZipCodex(bytes),
       };
     }
-    return { kind: "unknown", reason: "world.json is present but not a valid world header" };
+    return {
+      kind: "unknown",
+      reason: "world.json is present but not a valid world header",
+    };
   }
 
   const manifestPaths = [...markers.keys()].filter(isPackageMarker);
@@ -140,7 +300,10 @@ export async function classifyZip(bytes: Uint8Array): Promise<ZipKind> {
   if (manifestPath !== undefined) {
     const parsed = parseJson(markers.get(manifestPath) as Uint8Array);
     if (parsed === undefined) {
-      return { kind: "unknown", reason: "manifest.json is present but is not valid JSON" };
+      return {
+        kind: "unknown",
+        reason: "manifest.json is present but is not valid JSON",
+      };
     }
     const manifest = validatePackageManifest(parsed);
     if (!manifest.ok) return { kind: "unknown", reason: manifest.error };
@@ -149,7 +312,8 @@ export async function classifyZip(bytes: Uint8Array): Promise<ZipKind> {
 
   return {
     kind: "unknown",
-    reason: "neither a world file (no world.json) nor a package (no manifest.json)",
+    reason:
+      "neither a world file (no world.json) nor a package (no manifest.json)",
   };
 }
 
@@ -168,7 +332,9 @@ export function describePackage(manifest: PackageManifest): string {
  * "strategic ruleset PF1e Mass Battles v1.0.0 · 1 content pack" / "built-in strategic rules".
  */
 export function describeWorldContents(info: WorldZipInfo): string {
-  const ruleset = info.packages.find((p) => p.id === info.activeRules && p.type === "system");
+  const ruleset = info.packages.find(
+    (p) => p.id === info.activeRules && p.type === "system",
+  );
   const content = info.packages.filter((p) => p.type === "data");
   const parts: string[] = [];
   parts.push(
