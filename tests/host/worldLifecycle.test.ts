@@ -4,6 +4,8 @@
  * template that becomes a new campaign every time.
  */
 import "fake-indexeddb/auto";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { describe, expect, test } from "vitest";
 import { bootHostApp, DEFAULT_SCENE_ID, type HostApp } from "../../src/app/hostBoot";
@@ -19,11 +21,17 @@ import {
 import { deleteWorldFiles, MemDirHandle, OpfsAssetStore } from "../../src/storage/opfs";
 import { HostPersister } from "../../src/storage/persistence";
 import { latestCheckpoint, putCheckpoint, putReport } from "../../src/storage/strategicStore";
-import type { TurnReport } from "../../src/core/sim";
 import { exportWorldZip, importWorldZip, type WorldFileMeta } from "../../src/host/worldFile";
 import { classifyZip, describeWorldContents } from "../../src/host/zipKind";
 import { InlineSimRunner } from "../../src/workers/simWorkerClient";
 import { FakeCodec, settle } from "../app/fakes";
+
+// Restore validates asset and checkpoint hashes as SHA-256 hex of the bytes,
+// so the fixture uses the real digests rather than placeholders.
+const BLOB_BYTES = new Uint8Array([9, 9]);
+const BLOB_HASH = bytesToHex(sha256(BLOB_BYTES));
+const CHECKPOINT_POOL = new Uint8Array([1, 2, 3]);
+const CHECKPOINT_HASH = bytesToHex(sha256(CHECKPOINT_POOL));
 
 const RULES_JS =
   "export default { schema: { version: '1.2.3', modelColumns: { ammo: 'u8' }, unitTypes: {}, orderTypes: ['move'], subPhases: ['move'] }, validateOrder(){ return {ok:true}; }, resolveTurn(){}, detection(){ return 5; } };";
@@ -70,24 +78,27 @@ async function populatedWorld(worldId: string, root: MemDirHandle): Promise<Host
     slot: 1,
     turnNumber: 1,
     tick: null,
-    pool: new Uint8Array([1, 2, 3]),
+    pool: CHECKPOINT_POOL,
     maxHpMax: 1,
     version: 0,
     unitStats: {},
     seed: 1,
     rulesVersion: "1.2.3",
-    hash: "h",
+    hash: CHECKPOINT_HASH,
   });
   await putReport(db, app.worldId, DEFAULT_SCENE_ID, {
     turn: 1,
     sceneId: DEFAULT_SCENE_ID,
+    subPhases: [],
     events: [],
-  } as unknown as TurnReport);
+    summary: {},
+    rulesVersion: "1.2.3",
+  });
   await db.put(STORES.simdeltas, { worldId, sceneId: DEFAULT_SCENE_ID, version: 1, bytes: new Uint8Array([1]) });
   await db.put(STORES.fog, { worldId, sceneId: DEFAULT_SCENE_ID, userId: "gm", png: new Uint8Array([1]) });
   const opfs = await OpfsAssetStore.open(app.worldId, root);
-  await opfs?.put("deadbeef", new Uint8Array([9, 9]));
-  await db.put(STORES.assets, { worldId, hash: "deadbeef", name: "blob", mime: "application/octet-stream", size: 2, chunks: 1 });
+  await opfs?.put(BLOB_HASH, BLOB_BYTES);
+  await db.put(STORES.assets, { worldId, hash: BLOB_HASH, name: "blob", mime: "application/octet-stream", size: 2, chunks: 1 });
   await app.persister.flush();
   return app;
 }
@@ -198,8 +209,8 @@ describe("import as copy", () => {
     );
     const vtt = root.dirs.get("vtt") as MemDirHandle;
     const copyAssets = (vtt.dirs.get(copied.worldId) as MemDirHandle).dirs.get("assets") as MemDirHandle;
-    expect(copyAssets.files.has("deadbeef")).toBe(true);
-    expect((await latestCheckpoint(db, copied.worldId, DEFAULT_SCENE_ID))?.hash).toBe("h");
+    expect(copyAssets.files.has(BLOB_HASH)).toBe(true);
+    expect((await latestCheckpoint(db, copied.worldId, DEFAULT_SCENE_ID))?.hash).toBe(CHECKPOINT_HASH);
     const copyRec = await getWorld(db, copied.worldId);
     expect(copyRec).toMatchObject({
       name: "Populated (shared)",
