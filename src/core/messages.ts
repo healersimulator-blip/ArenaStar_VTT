@@ -309,7 +309,7 @@ export interface CodexPurchaseMsg {
   actorId: DocId;
 }
 
-/** Private acknowledgment for one Codex shop purchase. */
+/** Player request to claim a bounded quantity from a published loot-mode Codex stock row. */
 export interface CodexClaimMsg {
   kind: "codex.claim";
   requestId: string;
@@ -319,6 +319,7 @@ export interface CodexClaimMsg {
   actorId: DocId;
 }
 
+/** Private result for a host-validated shop purchase or loot claim. */
 export interface CodexPurchaseResultMsg {
   kind: "codex.purchase.result";
   action?: "purchase" | "claim";

@@ -4985,6 +4985,7 @@ const WALL_PICK_RADIUS = 12;
               {resolveAsset}
               {getCodexAssetBytes}
               {importCodexAsset}
+              onOpenActor={openActorSheet}
               popout={(journalId, pageId) =>
                 openWindow(`journal:${pageId}`, "Journal", "journal", {
                   journalId,

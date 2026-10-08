@@ -24,6 +24,7 @@
     resolveAsset = null,
     getCodexAssetBytes = null,
     importCodexAsset = null,
+    onOpenActor = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
@@ -31,6 +32,7 @@
     resolveAsset?: ((assetId: string) => string | null) | null;
     getCodexAssetBytes?: ((assetId: string) => Promise<Uint8Array | undefined>) | null;
     importCodexAsset?: ((assetId: string, entry: AssetManifestEntry, bytes: Uint8Array) => Promise<void>) | null;
+    onOpenActor?: ((actorId: string) => void) | null;
   } = $props();
 
   let journals = $state<JournalDocument[]>([]);
@@ -134,7 +136,7 @@
     >
   </nav>
   {#if view === "codex"}
-    <CampaignCodexPanel {client} {bus} {resolveAsset} getAssetBytes={getCodexAssetBytes} importBundleAsset={importCodexAsset} />
+    <CampaignCodexPanel {client} {bus} {resolveAsset} getAssetBytes={getCodexAssetBytes} importBundleAsset={importCodexAsset} {onOpenActor} />
   {:else}
     {#if isGm}
       <button id="journal-create" type="button" onclick={createJournal}

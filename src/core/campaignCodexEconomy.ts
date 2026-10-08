@@ -100,6 +100,10 @@ export interface CodexPurchasePlanInput {
   itemId: string;
 }
 
+export type CodexPurchaseQuote =
+  | { ok: true; unitCopper: number; totalCopper: number; walletCopper: number }
+  | { ok: false; error: string };
+
 export type CodexPurchasePlan =
   | { ok: true; ops: Op[]; unitCopper: number; totalCopper: number; itemName: string }
   | { ok: false; error: string };
@@ -168,19 +172,24 @@ export function planCodexLootClaim(input: CodexPurchasePlanInput): CodexLootClai
   return { ok: true, ops, itemName: sourceItem.name };
 }
 
-/** Validate current wallet/stock and produce one atomic shop + actor update batch. */
-export function planCodexPurchase(input: CodexPurchasePlanInput): CodexPurchasePlan {
-  const { sheet, row, sourceItem, actor, quantity, itemId } = input;
+/**
+ * Validate a purchase's current price and wallet shape without deciding whether the wallet is
+ * funded. The UI uses this to keep unsupported schemas read-only; the host planner below performs
+ * the final funds/stock checks immediately before commit.
+ */
+export function quoteCodexPurchase(
+  input: Omit<CodexPurchasePlanInput, "itemId">,
+): CodexPurchaseQuote {
+  const { sheet, row, sourceItem, actor, quantity } = input;
   const shop = sheet.codex?.shop;
   if (sheet.type !== "journal" || sourceItem.type !== "item")
     return { ok: false, error: "A readable item and Codex Entry are required." };
-  if (!shop || shop.mode !== "shop") return { ok: false, error: "This Entry is not an active shop." };
+  if (!shop || shop.mode !== "shop")
+    return { ok: false, error: "This Entry is not an active shop." };
   if (shop.currencyLabel && shop.currencyLabel.trim().toLocaleLowerCase() !== "gp")
     return { ok: false, error: "The shop currency label is not supported by the PF1e adapter." };
   if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > MAX_PURCHASE_QUANTITY)
     return { ok: false, error: `Choose a whole-number quantity from 1 to ${MAX_PURCHASE_QUANTITY}.` };
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(itemId))
-    return { ok: false, error: "A valid item identity is required." };
   const currentRow = shop.stock.find((candidate) => candidate.id === row.id);
   if (!currentRow || !sameCodexRef(currentRow.item, row.item))
     return { ok: false, error: "This stock row changed. Refresh the shop and try again." };
@@ -201,15 +210,31 @@ export function planCodexPurchase(input: CodexPurchasePlanInput): CodexPurchaseP
   const currency = currencyOf(actor);
   if (!currency) return { ok: false, error: "This actor has no supported PF1e currency block." };
   const wallet = totalCopper(currency);
-  if (wallet === null) return { ok: false, error: "This actor's PF1e wallet is outside the supported range." };
-  if (wallet < total) return { ok: false, error: "There are not enough funds for this purchase." };
+  if (wallet === null)
+    return { ok: false, error: "This actor's PF1e wallet is outside the supported range." };
+  return { ok: true, unitCopper, totalCopper: total, walletCopper: wallet };
+}
+
+/** Validate current wallet/stock and produce one atomic shop + actor update batch. */
+export function planCodexPurchase(input: CodexPurchasePlanInput): CodexPurchasePlan {
+  const { sheet, row, sourceItem, actor, quantity, itemId } = input;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(itemId))
+    return { ok: false, error: "A valid item identity is required." };
+  const quote = quoteCodexPurchase({ sheet, row, sourceItem, actor, quantity });
+  if (!quote.ok) return quote;
+  if (quote.walletCopper < quote.totalCopper)
+    return { ok: false, error: "There are not enough funds for this purchase." };
+  const shop = sheet.codex?.shop;
+  if (!shop) return { ok: false, error: "This Entry is not an active shop." };
+  const currentRow = shop.stock.find((candidate) => candidate.id === row.id);
+  if (!currentRow) return { ok: false, error: "This stock row changed. Refresh the shop and try again." };
 
   const nextStock = shop.stock.map((candidate) =>
     candidate.id === currentRow.id && candidate.quantity !== null
       ? { ...candidate, quantity: candidate.quantity - quantity }
       : candidate,
   );
-  const nextCurrency = currencyChange(wallet - total);
+  const nextCurrency = currencyChange(quote.walletCopper - quote.totalCopper);
   const flags = record(sourceItem.flags.pf1e) ? sourceItem.flags.pf1e : {};
   const matchingItem = actor.items.find((candidate) =>
     record(candidate.flags.pf1e) && candidate.flags.pf1e.codexImportedFrom === sourceItem._id,
@@ -260,8 +285,8 @@ export function planCodexPurchase(input: CodexPurchasePlanInput): CodexPurchaseP
   return {
     ok: true,
     ops,
-    unitCopper,
-    totalCopper: total,
+    unitCopper: quote.unitCopper,
+    totalCopper: quote.totalCopper,
     itemName: sourceItem.name,
   };
 }

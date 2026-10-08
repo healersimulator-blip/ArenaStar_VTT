@@ -45,21 +45,47 @@
  * Reviewed-script approvals are also local consent: copies AND restores of world
  * archives keep source/policy for inspection but must be re-approved on this host.
  */
-import { strFromU8, strToU8, unzip, Zip, ZipDeflate } from "fflate";
+import { strFromU8, strToU8, Zip, ZipDeflate } from "fflate";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
+import {
+  assertWorldZipEntriesWithinLimits,
+  extractZipEntriesBounded,
+  WORLD_ZIP_LIMITS,
+} from "./worldZip";
 import type { IDBPDatabase } from "idb";
-import type { AssetRecord, FogRecord, PackageRecord, WorldsRecord } from "../storage/idb";
-import { getWorld, listAssets, listFogForWorld, listPackages, STORES } from "../storage/idb";
+import type {
+  AssetRecord,
+  FogRecord,
+  PackageRecord,
+  WorldsRecord,
+} from "../storage/idb";
+import {
+  encodeReport,
+  type CheckpointRecord,
+  type TurnReportRecord,
+} from "../storage/strategicStore";
+import {
+  getWorld,
+  listAssets,
+  listFogForWorld,
+  listPackages,
+  STORES,
+} from "../storage/idb";
 import {
   decodeReport,
   listCheckpointsForWorld,
   listReportsForWorld,
-  putCheckpoint,
-  putReport,
-  type CheckpointRecord,
 } from "../storage/strategicStore";
 import type { TurnReport } from "../core/sim";
 import { OpfsAssetStore, type DirHandleLike } from "../storage/opfs";
-import type { BaseDocument, CollectionName, JournalDocument, MacroDocument } from "../core/documents";
+import {
+  TOP_LEVEL_COLLECTIONS,
+  type BaseDocument,
+  type CollectionName,
+  type JournalDocument,
+  type MacroDocument,
+} from "../core/documents";
 import { codexArchiveJournalError } from "../core/campaignCodex";
 import type { AssetId, DocId, WorldId } from "../core/ids";
 import type { HostPersister } from "../storage/persistence";
@@ -180,8 +206,282 @@ function parseJson<T>(bytes: Uint8Array, what: string): T {
   try {
     return JSON.parse(strFromU8(bytes)) as T;
   } catch (error) {
-    throw new Error(`world file: corrupt ${what} (${String(error)})`, { cause: error });
+    throw new Error(`world file: corrupt ${what} (${String(error)})`, {
+      cause: error,
+    });
   }
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const HASH_RE = /^[a-f0-9]{64}$/;
+const WORLD_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const MAX_ARCHIVE_DOCUMENTS = 100_000;
+const MAX_ARCHIVE_ASSETS = 100_000;
+const MAX_ARCHIVE_PACKAGES = 10_000;
+const ARCHIVE_DOCUMENT_TYPE_BY_COLLECTION: Record<CollectionName, string> = {
+  users: "user",
+  folders: "folder",
+  scenes: "scene",
+  actors: "actor",
+  items: "item",
+  journals: "journal",
+  rollTables: "rollTable",
+  encounterTables: "encounterTable",
+  playlists: "playlist",
+  macros: "macro",
+  automations: "automation",
+  actionReceipts: "actionReceipt",
+  prefabs: "prefab",
+  fxInstances: "fxInstance",
+  cards: "cards",
+  combats: "combat",
+  messages: "message",
+  settings: "settings",
+  compendia: "compendium",
+  factions: "faction",
+  armies: "army",
+  turns: "turn",
+  depots: "depot",
+  routes: "route",
+  reinforcements: "reinforcement",
+};
+
+function validateWorldMeta(value: unknown): WorldFileMeta {
+  if (!isRecord(value))
+    throw new Error("world file: world.json must be an object");
+  if (!Number.isSafeInteger(value.format) || typeof value.format !== "number")
+    throw new Error("world file: world.json has an invalid format");
+  if (typeof value.worldId !== "string" || !WORLD_ID_RE.test(value.worldId))
+    throw new Error("world file: world.json has an invalid worldId");
+  if (typeof value.name !== "string" || value.name.length > 256)
+    throw new Error("world file: world.json has an invalid name");
+  if (typeof value.system !== "string" || value.system.length > 128)
+    throw new Error("world file: world.json has an invalid system id");
+  if (typeof value.version !== "string" || value.version.length > 128)
+    throw new Error("world file: world.json has an invalid version");
+  if (
+    !Number.isSafeInteger(value.seq) ||
+    typeof value.seq !== "number" ||
+    value.seq < 0
+  )
+    throw new Error("world file: world.json has an invalid seq");
+  if (
+    value.exportedAt !== undefined &&
+    (typeof value.exportedAt !== "number" ||
+      !Number.isFinite(value.exportedAt) ||
+      value.exportedAt < 0)
+  )
+    throw new Error("world file: world.json has an invalid exportedAt");
+  if (value.starter !== undefined && typeof value.starter !== "boolean")
+    throw new Error("world file: world.json has an invalid starter flag");
+  if (value.rules !== undefined) {
+    if (!isRecord(value.rules))
+      throw new Error("world file: world.json rules must be an object");
+    const active = value.rules.active;
+    if (
+      active !== undefined &&
+      active !== null &&
+      (typeof active !== "string" || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(active))
+    )
+      throw new Error(
+        "world file: world.json rules.active must be a package id or null",
+      );
+  }
+  return value as unknown as WorldFileMeta;
+}
+
+function validateWorldDocuments(
+  value: unknown,
+  expectedSeq: number,
+): WorldFileDocuments {
+  if (
+    !isRecord(value) ||
+    !Number.isSafeInteger(value.seq) ||
+    value.seq !== expectedSeq
+  )
+    throw new Error(
+      "world file: documents.json has an invalid or mismatched seq",
+    );
+  if (!Array.isArray(value.docs))
+    throw new Error("world file: documents.json docs must be an array");
+  if (value.docs.length > MAX_ARCHIVE_DOCUMENTS)
+    throw new Error(
+      `world file: documents.json exceeds the ${MAX_ARCHIVE_DOCUMENTS}-document limit`,
+    );
+  const seen = new Set<string>();
+  for (const raw of value.docs) {
+    if (
+      !isRecord(raw) ||
+      typeof raw.coll !== "string" ||
+      !TOP_LEVEL_COLLECTIONS.includes(raw.coll as CollectionName)
+    )
+      throw new Error(
+        "world file: documents.json contains an unknown collection",
+      );
+    if (
+      typeof raw.id !== "string" ||
+      raw.id.length === 0 ||
+      raw.id.length > 128 ||
+      raw.id.includes("\0")
+    )
+      throw new Error(
+        "world file: documents.json contains an invalid document id",
+      );
+    const doc = raw.doc;
+    if (
+      !isRecord(doc) ||
+      doc._id !== raw.id ||
+      typeof doc.type !== "string" ||
+      doc.type.length === 0 ||
+      doc.type.length > 128 ||
+      typeof doc.name !== "string" ||
+      doc.name.length > 4096 ||
+      !isRecord(doc.ownership) ||
+      !isRecord(doc.flags) ||
+      !isRecord(doc.system)
+    )
+      throw new Error(`world file: document ${raw.id} has invalid base fields`);
+    const expectedType =
+      ARCHIVE_DOCUMENT_TYPE_BY_COLLECTION[raw.coll as CollectionName];
+    if (doc.type !== expectedType)
+      throw new Error(
+        `world file: document ${raw.id} has type ${doc.type} in collection ${raw.coll}; expected ${expectedType}`,
+      );
+    const ownership = doc.ownership;
+    for (const [userId, level] of Object.entries(ownership)) {
+      if (
+        !userId ||
+        userId.length > 128 ||
+        ![0, 1, 2, 3].includes(level as number)
+      )
+        throw new Error(`world file: document ${raw.id} has invalid ownership`);
+    }
+    if (![0, 1, 2, 3].includes(ownership.default as number))
+      throw new Error(
+        `world file: document ${raw.id} has invalid default ownership`,
+      );
+    const key = `${raw.coll}\0${raw.id}`;
+    if (seen.has(key))
+      throw new Error(
+        `world file: documents.json repeats ${raw.coll}:${raw.id}`,
+      );
+    seen.add(key);
+    if (raw.coll === "journals" && doc.type === "journal") {
+      const error = codexArchiveJournalError(doc as unknown as JournalDocument);
+      if (error) throw new Error(`world file: journal ${raw.id}: ${error}`);
+    }
+  }
+  return value as unknown as WorldFileDocuments;
+}
+
+function validateAssetVariant(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    HASH_RE.test(String(value.assetId ?? "")) &&
+    Number.isSafeInteger(value.width) &&
+    Number(value.width) > 0 &&
+    Number.isSafeInteger(value.height) &&
+    Number(value.height) > 0
+  );
+}
+
+function readArchiveAssets(
+  files: Map<string, Uint8Array>,
+  value: unknown,
+): WorldFileAsset[] {
+  if (!Array.isArray(value))
+    throw new Error("world file: assets.json must be an array");
+  if (value.length > MAX_ARCHIVE_ASSETS)
+    throw new Error(
+      `world file: assets.json exceeds the ${MAX_ARCHIVE_ASSETS}-asset limit`,
+    );
+  const seen = new Set<string>();
+  const entries: WorldFileAsset[] = [];
+  for (const raw of value) {
+    if (
+      !isRecord(raw) ||
+      typeof raw.hash !== "string" ||
+      !HASH_RE.test(raw.hash) ||
+      seen.has(raw.hash)
+    )
+      throw new Error(
+        "world file: assets.json contains an invalid or duplicate asset hash",
+      );
+    if (
+      typeof raw.name !== "string" ||
+      raw.name.length > 1024 ||
+      typeof raw.mime !== "string" ||
+      raw.mime.length === 0 ||
+      raw.mime.length > 256 ||
+      !Number.isSafeInteger(raw.size) ||
+      Number(raw.size) < 0 ||
+      Number(raw.size) > WORLD_ZIP_LIMITS.maxEntryBytes ||
+      !Number.isSafeInteger(raw.chunks) ||
+      Number(raw.chunks) < 1 ||
+      Number(raw.chunks) > Math.max(1, Number(raw.size))
+    )
+      throw new Error(`world file: asset ${raw.hash} has invalid metadata`);
+    if (
+      raw.visibility !== undefined &&
+      !["world", "referenced", "gm"].includes(String(raw.visibility))
+    )
+      throw new Error(`world file: asset ${raw.hash} has invalid visibility`);
+    if (
+      raw.exportRights !== undefined &&
+      !["restricted", "granted"].includes(String(raw.exportRights))
+    )
+      throw new Error(
+        `world file: asset ${raw.hash} has invalid export rights`,
+      );
+    for (const key of ["thumb", "mid"] as const) {
+      if (raw[key] !== undefined && !validateAssetVariant(raw[key]))
+        throw new Error(
+          `world file: asset ${raw.hash} has invalid ${key} descriptor`,
+        );
+    }
+    if (raw.tiles !== undefined) {
+      const tiles = raw.tiles;
+      if (
+        !isRecord(tiles) ||
+        !Number.isSafeInteger(tiles.size) ||
+        Number(tiles.size) < 1 ||
+        !Number.isSafeInteger(tiles.cols) ||
+        Number(tiles.cols) < 1 ||
+        !Number.isSafeInteger(tiles.rows) ||
+        Number(tiles.rows) < 1 ||
+        !Array.isArray(tiles.ids) ||
+        Number(tiles.cols) * Number(tiles.rows) !== tiles.ids.length ||
+        tiles.ids.length > MAX_ARCHIVE_ASSETS ||
+        !tiles.ids.every((id) => typeof id === "string" && HASH_RE.test(id))
+      )
+        throw new Error(
+          `world file: asset ${raw.hash} has invalid tile metadata`,
+        );
+    }
+    const bytes = files.get(`assets/${raw.hash}`);
+    if (!bytes)
+      throw new Error(`world file: archive lacks blob for asset ${raw.hash}`);
+    if (bytes.byteLength !== raw.size)
+      throw new Error(
+        `world file: asset ${raw.hash} has a mismatched byte length`,
+      );
+    if (bytesToHex(sha256(bytes)) !== raw.hash)
+      throw new Error(
+        `world file: asset ${raw.hash} failed its content hash check`,
+      );
+    seen.add(raw.hash);
+    entries.push(raw as unknown as WorldFileAsset);
+  }
+  for (const path of files.keys()) {
+    if (!path.startsWith("assets/")) continue;
+    const hash = path.slice("assets/".length);
+    if (!HASH_RE.test(hash) || !seen.has(hash))
+      throw new Error(
+        `world file: archive contains an unindexed asset blob ${path.slice(0, 160)}`,
+      );
+  }
+  return entries;
 }
 
 /** Read every documents-store row for a world, ordered by key. */
@@ -191,13 +491,13 @@ async function readDocuments(
 ): Promise<WorldFileDocuments["docs"]> {
   const docs: WorldFileDocuments["docs"] = [];
   const range = IDBKeyRange.bound([worldId], [worldId, []]);
-  const keys = (await db.getAllKeys(STORES.documents, range)) as unknown as Array<
-    [WorldId, CollectionName, DocId]
-  >;
+  const keys = (await db.getAllKeys(
+    STORES.documents,
+    range,
+  )) as unknown as Array<[WorldId, CollectionName, DocId]>;
   for (const [, coll, id] of keys) {
     const rec = (await db.get(STORES.documents, [worldId, coll, id])) as
-      | { doc: BaseDocument }
-      | undefined;
+      { doc: BaseDocument } | undefined;
     if (rec) docs.push({ coll, id, doc: rec.doc });
   }
   return docs;
@@ -209,14 +509,21 @@ function fxMediaReferences(docs: WorldFileDocuments["docs"]): Set<AssetId> {
   for (const row of docs) {
     if (row.coll !== "macros" || row.doc.type !== "macro") continue;
     const macro = row.doc as MacroDocument;
-    const sections: unknown = macro.kind === "sequence" ? macro.sequence?.sections
-      : macro.kind === "fxPreset" ? macro.preset?.sections : undefined;
+    const sections: unknown =
+      macro.kind === "sequence"
+        ? macro.sequence?.sections
+        : macro.kind === "fxPreset"
+          ? macro.preset?.sections
+          : undefined;
     if (!Array.isArray(sections)) continue;
     for (const raw of sections) {
       if (!raw || typeof raw !== "object") continue;
       const section = raw as { kind?: unknown; assetId?: unknown };
-      if ((section.kind === "image" || section.kind === "sound") &&
-          typeof section.assetId === "string" && section.assetId.length > 0)
+      if (
+        (section.kind === "image" || section.kind === "sound") &&
+        typeof section.assetId === "string" &&
+        section.assetId.length > 0
+      )
         hashes.add(section.assetId as AssetId);
     }
   }
@@ -240,7 +547,9 @@ export interface WorldArchive {
  * Gather everything a world export contains, in archive order. One collector feeds both
  * writers so "save to folder" and "download zip" cannot drift apart (they were two copies).
  */
-export async function collectWorldArchive(options: ExportWorldOptions): Promise<WorldArchive> {
+export async function collectWorldArchive(
+  options: ExportWorldOptions,
+): Promise<WorldArchive> {
   await options.persister?.flush(); // archive the live state, not the last batch
   const world = await getWorld(options.db, options.worldId);
   if (!world) throw new Error(`world file: unknown world ${options.worldId}`);
@@ -254,7 +563,9 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
   // (rulesBoot.error at boot) exports as built-in rather than as a dangling reference.
   const active =
     world.activeRulesPackage !== undefined &&
-    packages.some((p) => p.id === world.activeRulesPackage && p.type === "system")
+    packages.some(
+      (p) => p.id === world.activeRulesPackage && p.type === "system",
+    )
       ? world.activeRulesPackage
       : null;
 
@@ -277,26 +588,38 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
   // decision; a legacy FX reference with no decision is *unreviewed*, not granted.
   // Non-FX legacy art remains compatible with older worlds.
   const fxRefs = fxMediaReferences(docs);
-  const blocked = new Map<AssetId, { asset: (typeof assets)[number]; reason: string }>();
+  const blocked = new Map<
+    AssetId,
+    { asset: (typeof assets)[number]; reason: string }
+  >();
   for (const asset of assets) {
     if (asset.exportRights === "restricted") {
       blocked.set(asset.hash, { asset, reason: "restricted" });
     } else if (fxRefs.has(asset.hash) && asset.exportRights !== "granted") {
-      blocked.set(asset.hash, { asset, reason: asset.exportRights === undefined
-        ? "unreviewed legacy FX media" : "not explicitly granted for FX" });
+      blocked.set(asset.hash, {
+        asset,
+        reason:
+          asset.exportRights === undefined
+            ? "unreviewed legacy FX media"
+            : "not explicitly granted for FX",
+      });
     }
   }
   if (blocked.size) {
     const entries = [...blocked.values()];
-    const detail = entries.slice(0, 3).map(({ asset, reason }) => `${asset.name} (${reason})`).join(", ");
+    const detail = entries
+      .slice(0, 3)
+      .map(({ asset, reason }) => `${asset.name} (${reason})`)
+      .join(", ");
     throw new Error(
       `world file: ${blocked.size} media file(s) need explicit world-export rights (${detail}); ` +
-      "export cancelled — review existing media permissions and separately confirm redistribution rights",
+        "export cancelled — review existing media permissions and separately confirm redistribution rights",
     );
   }
   for (const record of assets) {
     const bytes = record.bytes ?? (await opfs?.get(record.hash));
-    if (!bytes) throw new Error(`world file: missing blob for asset ${record.hash}`);
+    if (!bytes)
+      throw new Error(`world file: missing blob for asset ${record.hash}`);
     const entry: WorldFileAsset = {
       hash: record.hash,
       name: record.name,
@@ -305,7 +628,8 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
       chunks: record.chunks,
     };
     if (record.visibility !== undefined) entry.visibility = record.visibility;
-    if (record.exportRights !== undefined) entry.exportRights = record.exportRights;
+    if (record.exportRights !== undefined)
+      entry.exportRights = record.exportRights;
     if (record.width !== undefined) entry.width = record.width;
     if (record.height !== undefined) entry.height = record.height;
     if (record.thumb !== undefined) entry.thumb = record.thumb;
@@ -316,7 +640,10 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
   }
 
   // §8A: checkpoints/ + reports/ ride in the world file (resume + replay)
-  const checkpoints = await listCheckpointsForWorld(options.db, options.worldId);
+  const checkpoints = await listCheckpointsForWorld(
+    options.db,
+    options.worldId,
+  );
   const reportRecords = await listReportsForWorld(options.db, options.worldId);
   // §9 explored fog per user + scene (D-250)
   const fogRows = await listFogForWorld(options.db, options.worldId);
@@ -326,7 +653,10 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
     entries.push({ path, bytes });
   };
   add("world.json", jsonBytes(meta));
-  add("documents.json", jsonBytes({ seq: meta.seq, docs } satisfies WorldFileDocuments));
+  add(
+    "documents.json",
+    jsonBytes({ seq: meta.seq, docs } satisfies WorldFileDocuments),
+  );
   add("assets.json", jsonBytes(assetEntries));
   for (const blob of blobs) add(`assets/${blob.hash}`, blob.bytes);
   for (const cp of checkpoints) {
@@ -335,7 +665,10 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
     add(`checkpoints/${cp.sceneId}/${cp.slot}.pool`, pool);
   }
   for (const rep of reportRecords) {
-    add(`reports/${rep.sceneId}/${rep.turnNumber}.json`, jsonBytes(decodeReport(rep.bytes)));
+    add(
+      `reports/${rep.sceneId}/${rep.turnNumber}.json`,
+      jsonBytes(decodeReport(rep.bytes)),
+    );
   }
   const index: WorldFilePackage[] = packages.map((p) => ({
     id: p.id,
@@ -358,12 +691,15 @@ export async function collectWorldArchive(options: ExportWorldOptions): Promise<
   }));
   add("fog.json", jsonBytes(fogIndex));
   fogRows.forEach((row, i) => add(`fog/${i}.png`, row.png));
+  assertWorldZipEntriesWithinLimits(entries);
   return { meta, entries };
 }
 
 // ─── export (streaming Zip, §8 "streaming fflate") ────────────────────────────
 
-export async function exportWorldZip(options: ExportWorldOptions): Promise<Blob> {
+export async function exportWorldZip(
+  options: ExportWorldOptions,
+): Promise<Blob> {
   const { entries } = await collectWorldArchive(options);
   const parts: BlobPart[] = [];
   const done = new Promise<void>((resolve, reject) => {
@@ -380,18 +716,29 @@ export async function exportWorldZip(options: ExportWorldOptions): Promise<Blob>
     zip.end();
   });
   await done;
-  return new Blob(parts, { type: "application/zip" });
+  const archive = new Blob(parts, { type: "application/zip" });
+  if (archive.size > WORLD_ZIP_LIMITS.maxArchiveBytes)
+    throw new Error(
+      `world file: compressed archive exceeds the ${Math.ceil(WORLD_ZIP_LIMITS.maxArchiveBytes / (1024 * 1024))} MiB import limit`,
+    );
+  return archive;
 }
 
 // ─── import (restore) ─────────────────────────────────────────────────────────
 
-function unzipAll(bytes: Uint8Array): Promise<Map<string, Uint8Array>> {
-  return new Promise((resolve, reject) => {
-    unzip(bytes, (error, files) => {
-      if (error) reject(new Error(`world file: unzip failed (${error.message})`));
-      else resolve(new Map(Object.entries(files)));
-    });
-  });
+async function unzipWorldFile(
+  bytes: Uint8Array,
+): Promise<Map<string, Uint8Array>> {
+  try {
+    return await extractZipEntriesBounded(bytes);
+  } catch (error) {
+    throw new Error(
+      `world file: ${error instanceof Error ? error.message : String(error)}`,
+      {
+        cause: error,
+      },
+    );
+  }
 }
 
 function requireFile(files: Map<string, Uint8Array>, name: string): Uint8Array {
@@ -410,29 +757,76 @@ function readArchivePackages(
   worldId: WorldId,
   now: () => number,
 ): PackageRecord[] {
-  const index = parseJson<WorldFilePackage[]>(requireFile(files, "packages.json"), "packages.json");
-  if (!Array.isArray(index)) throw new Error("world file: packages.json must be an array");
+  const index = parseJson<WorldFilePackage[]>(
+    requireFile(files, "packages.json"),
+    "packages.json",
+  );
+  if (!Array.isArray(index))
+    throw new Error("world file: packages.json must be an array");
+  if (index.length > MAX_ARCHIVE_PACKAGES)
+    throw new Error(
+      `world file: packages.json exceeds the ${MAX_ARCHIVE_PACKAGES}-package limit`,
+    );
+
+  // Index package payloads once. Scanning every archive entry once per package would let a
+  // bounded 100k-entry archive with many packages trigger billions of prefix checks.
+  const packageFiles = new Map<
+    string,
+    Array<{ path: string; bytes: Uint8Array }>
+  >();
+  for (const [path, bytes] of files) {
+    if (!path.startsWith("packages/")) continue;
+    const relative = path.slice("packages/".length);
+    const separator = relative.indexOf("/");
+    const id = separator < 0 ? "" : relative.slice(0, separator);
+    const innerPath = separator < 0 ? "" : relative.slice(separator + 1);
+    if (!/^[a-z0-9][a-z0-9-]{1,63}$/.test(id) || innerPath.length === 0)
+      throw new Error(
+        `world file: invalid package payload path ${path.slice(0, 160)}`,
+      );
+    const entries = packageFiles.get(id) ?? [];
+    entries.push({ path, bytes });
+    packageFiles.set(id, entries);
+  }
+
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const records: PackageRecord[] = [];
+  const seenIds = new Set<string>();
   for (const entry of index) {
-    if (typeof entry?.id !== "string" || entry.id.length === 0) {
-      throw new Error("world file: packages.json entry without an id");
+    if (
+      !isRecord(entry) ||
+      typeof entry.id !== "string" ||
+      !/^[a-z0-9][a-z0-9-]{1,63}$/.test(entry.id)
+    ) {
+      throw new Error("world file: packages.json entry has an invalid id");
     }
-    const prefix = `packages/${entry.id}/`;
-    const texts: Record<string, string> = {};
-    for (const [path, bytes] of files) {
-      if (!path.startsWith(prefix) || path.endsWith("/")) continue;
+    if (seenIds.has(entry.id))
+      throw new Error(`world file: packages.json repeats package ${entry.id}`);
+    seenIds.add(entry.id);
+    const payload = packageFiles.get(entry.id);
+    if (!payload || payload.length === 0) {
+      throw new Error(
+        `world file: packages.json lists ${entry.id} but packages/${entry.id}/ is empty`,
+      );
+    }
+    packageFiles.delete(entry.id);
+    const texts: Record<string, string> = Object.create(null) as Record<
+      string,
+      string
+    >;
+    for (const { path, bytes } of payload) {
+      const innerPath = path.slice(`packages/${entry.id}/`.length);
       try {
-        texts[path.slice(prefix.length)] = decoder.decode(bytes);
+        texts[innerPath] = decoder.decode(bytes);
       } catch {
-        throw new Error(`world file: package ${entry.id}: ${path} is not UTF-8 text`);
+        throw new Error(
+          `world file: package ${entry.id}: ${path} is not UTF-8 text`,
+        );
       }
     }
-    if (Object.keys(texts).length === 0) {
-      throw new Error(`world file: packages.json lists ${entry.id} but packages/${entry.id}/ is empty`);
-    }
     const loaded = buildPackageFromFiles(texts);
-    if (!loaded.ok) throw new Error(`world file: package ${entry.id}: ${loaded.error}`);
+    if (!loaded.ok)
+      throw new Error(`world file: package ${entry.id}: ${loaded.error}`);
     if (loaded.value.manifest.id !== entry.id) {
       throw new Error(
         `world file: packages/${entry.id}/ holds package ${loaded.value.manifest.id}`,
@@ -446,83 +840,248 @@ function readArchivePackages(
       version: manifest.version,
       type: manifest.type,
       importedAt:
-        typeof entry.importedAt === "number" && Number.isFinite(entry.importedAt)
+        typeof entry.importedAt === "number" &&
+        Number.isFinite(entry.importedAt)
           ? entry.importedAt
           : now(),
       manifest,
       files: loaded.value.files,
     });
   }
+  if (packageFiles.size > 0) {
+    const [id] = packageFiles.keys();
+    throw new Error(
+      `world file: package ${id} has payload files but is not listed in packages.json`,
+    );
+  }
   return records;
 }
 
 /** The explored-fog rows an archive carries (none for archives written before D-250). */
-function readArchiveFog(files: Map<string, Uint8Array>, worldId: WorldId): FogRecord[] {
+function readArchiveFog(
+  files: Map<string, Uint8Array>,
+  worldId: WorldId,
+): FogRecord[] {
   const indexBytes = files.get("fog.json");
   if (!indexBytes) return [];
-  const index = parseJson<WorldFileFog[]>(indexBytes, "fog.json");
-  if (!Array.isArray(index)) throw new Error("world file: fog.json must be an array");
+  const index = parseJson<unknown>(indexBytes, "fog.json");
+  if (!Array.isArray(index) || index.length > MAX_ARCHIVE_DOCUMENTS)
+    throw new Error("world file: fog.json must be a bounded array");
   const records: FogRecord[] = [];
   const seen = new Set<string>();
-  for (const entry of index) {
+  const seenFiles = new Set<string>();
+  for (const raw of index) {
     if (
-      typeof entry?.sceneId !== "string" ||
-      entry.sceneId.length === 0 ||
-      typeof entry.userId !== "string" ||
-      entry.userId.length === 0 ||
-      typeof entry.file !== "string"
-    ) {
-      throw new Error("world file: fog.json entry needs sceneId, userId and file");
-    }
-    const key = `${entry.sceneId}/${entry.userId}`;
-    if (seen.has(key)) throw new Error(`world file: fog.json lists ${entry.sceneId}/${entry.userId} twice`);
+      !isRecord(raw) ||
+      typeof raw.sceneId !== "string" ||
+      raw.sceneId.length === 0 ||
+      raw.sceneId.length > 128 ||
+      typeof raw.userId !== "string" ||
+      raw.userId.length === 0 ||
+      raw.userId.length > 128 ||
+      typeof raw.file !== "string" ||
+      !/^fog\/[A-Za-z0-9_-]{1,128}\.png$/.test(raw.file)
+    )
+      throw new Error(
+        "world file: fog.json entry needs valid sceneId, userId, and fog/<id>.png",
+      );
+    const key = `${raw.sceneId}/${raw.userId}`;
+    if (seen.has(key))
+      throw new Error(
+        `world file: fog.json lists ${raw.sceneId}/${raw.userId} twice`,
+      );
+    if (seenFiles.has(raw.file))
+      throw new Error(`world file: fog.json reuses ${raw.file}`);
     seen.add(key);
-    const png = files.get(entry.file);
-    if (!png) throw new Error(`world file: fog.json names missing ${entry.file}`);
+    seenFiles.add(raw.file);
+    const png = files.get(raw.file);
+    if (!png) throw new Error(`world file: fog.json names missing ${raw.file}`);
     if (png.length === 0) continue; // an empty map is no map
-    records.push({ worldId, sceneId: entry.sceneId, userId: entry.userId, png });
+    records.push({ worldId, sceneId: raw.sceneId, userId: raw.userId, png });
   }
   return records;
 }
 
-export async function importWorldZip(options: ImportWorldOptions): Promise<ImportedWorld> {
+function readArchiveCheckpoints(
+  files: Map<string, Uint8Array>,
+  sourceWorldId: WorldId,
+  targetWorldId: WorldId,
+): CheckpointRecord[] {
+  const prefix = "checkpoints/";
+  const paths = [...files.keys()].filter((path) => path.startsWith(prefix));
+  if (paths.length > MAX_ARCHIVE_DOCUMENTS * 2)
+    throw new Error("world file: too many checkpoint files");
+  const groups = new Map<
+    string,
+    { sceneId: string; slot: number; json?: Uint8Array; pool?: Uint8Array }
+  >();
+  for (const path of paths) {
+    const match = /^checkpoints\/([^/]+)\/(0|[1-9][0-9]*)\.(json|pool)$/.exec(
+      path,
+    );
+    if (!match)
+      throw new Error(
+        `world file: invalid checkpoint path ${path.slice(0, 160)}`,
+      );
+    const sceneId = match[1];
+    const slotText = match[2];
+    const extension = match[3];
+    if (!sceneId || !slotText || !extension)
+      throw new Error(
+        `world file: invalid checkpoint path ${path.slice(0, 160)}`,
+      );
+    const slot = Number(slotText);
+    if (sceneId.length > 128 || !Number.isSafeInteger(slot))
+      throw new Error(
+        `world file: invalid checkpoint path ${path.slice(0, 160)}`,
+      );
+    const key = `${sceneId}/${slot}`;
+    const row = groups.get(key) ?? { sceneId, slot };
+    const bytes = requireFile(files, path);
+    if (extension === "json") row.json = bytes;
+    else row.pool = bytes;
+    groups.set(key, row);
+  }
+  const records: CheckpointRecord[] = [];
+  for (const row of groups.values()) {
+    if (!row.json || !row.pool)
+      throw new Error(
+        `world file: checkpoint ${row.sceneId}/${row.slot} needs both metadata and pool`,
+      );
+    const value = parseJson<unknown>(
+      row.json,
+      `checkpoints/${row.sceneId}/${row.slot}.json`,
+    );
+    if (
+      !isRecord(value) ||
+      value.worldId !== sourceWorldId ||
+      value.sceneId !== row.sceneId ||
+      value.slot !== row.slot ||
+      !Number.isSafeInteger(value.turnNumber) ||
+      Number(value.turnNumber) < 0 ||
+      !(
+        value.tick === null ||
+        (Number.isSafeInteger(value.tick) && Number(value.tick) >= 0)
+      ) ||
+      typeof value.maxHpMax !== "number" ||
+      !Number.isFinite(value.maxHpMax) ||
+      value.maxHpMax < 0 ||
+      !Number.isSafeInteger(value.version) ||
+      Number(value.version) < 0 ||
+      !isRecord(value.unitStats) ||
+      !Number.isSafeInteger(value.seed) ||
+      typeof value.rulesVersion !== "string" ||
+      value.rulesVersion.length > 128 ||
+      typeof value.hash !== "string" ||
+      !HASH_RE.test(value.hash)
+    )
+      throw new Error(
+        `world file: checkpoint ${row.sceneId}/${row.slot} has invalid metadata`,
+      );
+    records.push({
+      ...(value as unknown as Omit<CheckpointRecord, "worldId" | "pool">),
+      worldId: targetWorldId,
+      sceneId: row.sceneId,
+      slot: row.slot,
+      pool: row.pool,
+    });
+  }
+  return records;
+}
+
+function readArchiveReports(
+  files: Map<string, Uint8Array>,
+  worldId: WorldId,
+): TurnReportRecord[] {
+  const prefix = "reports/";
+  const paths = [...files.keys()].filter((path) => path.startsWith(prefix));
+  if (paths.length > MAX_ARCHIVE_DOCUMENTS)
+    throw new Error("world file: too many report files");
+  const records: TurnReportRecord[] = [];
+  for (const path of paths) {
+    const match = /^reports\/([^/]+)\/(0|[1-9][0-9]*)\.json$/.exec(path);
+    if (!match)
+      throw new Error(`world file: invalid report path ${path.slice(0, 160)}`);
+    const sceneId = match[1];
+    const turnText = match[2];
+    if (!sceneId || !turnText)
+      throw new Error(`world file: invalid report path ${path.slice(0, 160)}`);
+    const turnNumber = Number(turnText);
+    if (sceneId.length > 128 || !Number.isSafeInteger(turnNumber))
+      throw new Error(`world file: invalid report path ${path.slice(0, 160)}`);
+    const report = parseJson<TurnReport>(requireFile(files, path), path);
+    if (
+      !isRecord(report) ||
+      report.turn !== turnNumber ||
+      !(report.sceneId === null || report.sceneId === sceneId) ||
+      !Array.isArray(report.subPhases) ||
+      !report.subPhases.every((phase) => typeof phase === "string") ||
+      !Array.isArray(report.events) ||
+      !isRecord(report.summary) ||
+      typeof report.rulesVersion !== "string"
+    )
+      throw new Error(
+        `world file: report ${sceneId}/${turnNumber} has invalid data`,
+      );
+    records.push({ worldId, sceneId, turnNumber, bytes: encodeReport(report) });
+  }
+  return records;
+}
+
+export async function importWorldZip(
+  options: ImportWorldOptions,
+): Promise<ImportedWorld> {
   const now = options.now ?? Date.now;
+  const compressedSize =
+    options.file instanceof Uint8Array
+      ? options.file.byteLength
+      : options.file.size;
+  if (compressedSize > WORLD_ZIP_LIMITS.maxArchiveBytes)
+    throw new Error(
+      `world file: archive exceeds the ${Math.ceil(WORLD_ZIP_LIMITS.maxArchiveBytes / (1024 * 1024))} MiB compressed-size limit`,
+    );
   const buffer =
     options.file instanceof Uint8Array
       ? options.file
       : new Uint8Array(await options.file.arrayBuffer());
-  const files = await unzipAll(buffer);
+  const files = await unzipWorldFile(buffer);
 
-  const meta = parseJson<WorldFileMeta>(requireFile(files, "world.json"), "world.json");
-  if (!WORLD_FILE_FORMATS_READ.includes(meta.format)) {
-    throw new Error(`world file: unsupported format ${String(meta.format)}`);
-  }
+  const rawMeta = parseJson<unknown>(
+    requireFile(files, "world.json"),
+    "world.json",
+  );
+  if (!isRecord(rawMeta) || !Number.isSafeInteger(rawMeta.format))
+    throw new Error("world file: world.json has an invalid format");
+  if (!WORLD_FILE_FORMATS_READ.includes(rawMeta.format as number))
+    throw new Error(`world file: unsupported format ${String(rawMeta.format)}`);
+  const meta = validateWorldMeta(rawMeta);
   if (typeof meta.worldId !== "string" || meta.worldId.length === 0) {
     throw new Error("world file: world.json has no worldId");
   }
-  if (typeof meta.seq !== "number" || !Number.isInteger(meta.seq) || meta.seq < 0) {
+  if (
+    typeof meta.seq !== "number" ||
+    !Number.isInteger(meta.seq) ||
+    meta.seq < 0
+  ) {
     throw new Error("world file: world.json has an invalid seq");
   }
-  const documents = parseJson<WorldFileDocuments>(
-    requireFile(files, "documents.json"),
-    "documents.json",
+  const documents = validateWorldDocuments(
+    parseJson<unknown>(requireFile(files, "documents.json"), "documents.json"),
+    meta.seq,
   );
-  if (documents.seq !== meta.seq) {
-    throw new Error(`world file: seq mismatch (world ${meta.seq}, documents ${documents.seq})`);
-  }
-  if (!Array.isArray(documents.docs)) throw new Error("world file: documents.json docs must be an array");
-  for (const row of documents.docs) {
-    if (row?.coll !== "journals" || row.doc?.type !== "journal") continue;
-    const error = codexArchiveJournalError(row.doc as JournalDocument);
-    if (error) throw new Error(`world file: journal ${String(row.id)}: ${error}`);
-  }
-  const assetEntries = parseJson<WorldFileAsset[]>(
-    requireFile(files, "assets.json"),
-    "assets.json",
+  const assetEntries = readArchiveAssets(
+    files,
+    parseJson<unknown>(requireFile(files, "assets.json"), "assets.json"),
   );
   const mode = options.mode ?? "replace";
-  if (mode === "replace" && options.worldId !== undefined && options.worldId !== meta.worldId) {
-    throw new Error("world file: a replace import restores the archive's own worldId");
+  if (
+    mode === "replace" &&
+    options.worldId !== undefined &&
+    options.worldId !== meta.worldId
+  ) {
+    throw new Error(
+      "world file: a replace import restores the archive's own worldId",
+    );
   }
   const worldId: WorldId =
     mode === "copy"
@@ -538,18 +1097,25 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
 
   // ── §12 packages + the ruleset pin (format 2) ──────────────────────────────
   const carriesPackages = meta.format >= 2;
-  const packageRecords = carriesPackages ? readArchivePackages(files, worldId, now) : [];
+  const packageRecords = carriesPackages
+    ? readArchivePackages(files, worldId, now)
+    : [];
   let archiveActive: string | null = null;
   if (carriesPackages) {
     const active = meta.rules?.active ?? null;
     if (active !== null) {
-      if (typeof active !== "string") throw new Error("world file: rules.active must be an id");
+      if (typeof active !== "string")
+        throw new Error("world file: rules.active must be an id");
       const rec = packageRecords.find((p) => p.id === active);
       if (!rec) {
-        throw new Error(`world file: rules.active names ${active}, which is not in the archive`);
+        throw new Error(
+          `world file: rules.active names ${active}, which is not in the archive`,
+        );
       }
       if (rec.type !== "system" || !rec.manifest.rules) {
-        throw new Error(`world file: rules.active ${active} is a content pack, not a ruleset`);
+        throw new Error(
+          `world file: rules.active ${active} is a content pack, not a ruleset`,
+        );
       }
     }
     archiveActive = active;
@@ -558,78 +1124,105 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
   // What this browser already knows about the world (nothing, for a copy — it is a new id).
   // Trust is local consent and always carried; the activation is carried only when the
   // archive has no say (format 1).
-  const existing = mode === "copy" ? undefined : await getWorld(options.db, worldId);
-  const activeRulesPackage = carriesPackages ? archiveActive : (existing?.activeRulesPackage ?? null);
+  const existing =
+    mode === "copy" ? undefined : await getWorld(options.db, worldId);
+  const activeRulesPackage = carriesPackages
+    ? archiveActive
+    : (existing?.activeRulesPackage ?? null);
   const trustedPackages = existing?.trustedPackages ?? [];
+  const checkpointRecords = readArchiveCheckpoints(
+    files,
+    meta.worldId,
+    worldId,
+  );
+  const reportRecords = readArchiveReports(files, worldId);
+  const fogRecords = readArchiveFog(files, worldId);
 
   // Blob writes first (content-addressed → idempotent): an OPFS failure leaves
   // orphan files but never a half-imported database.
   const opfs = await OpfsAssetStore.open(worldId, options.root ?? null);
   for (const entry of assetEntries) {
     const bytes = files.get(`assets/${entry.hash}`);
-    if (!bytes) throw new Error(`world file: archive lacks blob for asset ${entry.hash}`);
+    if (!bytes)
+      throw new Error(`world file: archive lacks blob for asset ${entry.hash}`);
     if (opfs) await opfs.put(entry.hash, bytes);
   }
 
-  // §8A strategic state (optional in older archives): checkpoints/ + reports/
-  const checkpointFiles = [...files.keys()].filter(
-    (k) => k.startsWith("checkpoints/") && k.endsWith(".pool"),
-  );
-  for (const poolPath of checkpointFiles) {
-    const jsonPath = poolPath.replace(/\.pool$/, ".json");
-    const cpMeta = parseJson<CheckpointRecord>(requireFile(files, jsonPath), jsonPath);
-    await putCheckpoint(options.db, {
-      ...cpMeta,
-      worldId,
-      pool: requireFile(files, poolPath),
-    });
-  }
-  const reportFiles = [...files.keys()].filter(
-    (k) => k.startsWith("reports/") && k.endsWith(".json"),
-  );
-  for (const reportPath of reportFiles) {
-    const turn = parseJson<TurnReport>(requireFile(files, reportPath), reportPath);
-    await putReport(options.db, worldId, turn.sceneId ?? "", turn);
-  }
-
-  // §9 explored fog (optional; D-250). Same user ids on every machine (pubkeys / "gm"),
-  // so a copy opened elsewhere still shows each player their own map.
-  const fogRecords = readArchiveFog(files, worldId);
-
   type StoreName = (typeof STORES)[keyof typeof STORES];
-  const replaced: StoreName[] = [STORES.documents, STORES.oplog, STORES.fog, STORES.assets];
+  const replaced: StoreName[] = [
+    STORES.documents,
+    STORES.oplog,
+    STORES.fog,
+    STORES.assets,
+    STORES.checkpoints,
+    STORES.turnReports,
+    STORES.simdeltas,
+  ];
   if (carriesPackages) replaced.push(STORES.packages);
   const tx = options.db.transaction([STORES.worlds, ...replaced], "readwrite");
   // Replace any existing world data (restore semantics) in one transaction.
   for (const store of replaced) {
-    void tx.objectStore(store).delete(IDBKeyRange.bound([worldId], [worldId, []]));
+    void tx
+      .objectStore(store)
+      .delete(IDBKeyRange.bound([worldId], [worldId, []]));
   }
   const assetStore = tx.objectStore(STORES.assets);
   for (const entry of assetEntries) {
     // A claim inside somebody else's archive does not transfer their media
     // license to the receiving GM. Even a formerly exportable FX file must be
     // reapproved for both serving to players and repackaging in a new ZIP.
-    const rights = entry.exportRights === undefined ? {} : {
-      visibility: "gm" as const, exportRights: "restricted" as const,
-    };
+    const rights =
+      entry.exportRights === undefined
+        ? {}
+        : {
+            visibility: "gm" as const,
+            exportRights: "restricted" as const,
+          };
     const record: AssetRecord = opfs
       ? { ...entry, worldId, ...rights }
-      : { ...entry, worldId, bytes: files.get(`assets/${entry.hash}`) as Uint8Array, ...rights };
+      : {
+          ...entry,
+          worldId,
+          bytes: files.get(`assets/${entry.hash}`) as Uint8Array,
+          ...rights,
+        };
     void assetStore.put(record);
   }
   const docStore = tx.objectStore(STORES.documents);
   for (const row of documents.docs) {
     let doc = row.doc;
-    if (row.coll === "macros" && doc.type === "macro" && (doc as MacroDocument).kind === "script") {
+    if (
+      row.coll === "macros" &&
+      doc.type === "macro" &&
+      (doc as MacroDocument).kind === "script"
+    ) {
       const macro = doc as MacroDocument;
       // An archive can be supplied by anyone, including a former GM. A hash matching
       // the bundled source/policy proves integrity, NOT this host's review/consent.
       // Invalidate the approval and hide the player entry until this GM republishes.
-      doc = { ...macro, ownership: { ...macro.ownership, default: 0 },
-        script: macro.script ? { ...macro.script, approvedHash: "0".repeat(64), playerCallable: false } : undefined,
-        flags: { ...macro.flags, core: { ...(typeof macro.flags.core === "object" && macro.flags.core &&
-          !Array.isArray(macro.flags.core) ? macro.flags.core : {}), playerCallable: false } },
-        scriptState: { recent: [] } } as MacroDocument;
+      doc = {
+        ...macro,
+        ownership: { ...macro.ownership, default: 0 },
+        script: macro.script
+          ? {
+              ...macro.script,
+              approvedHash: "0".repeat(64),
+              playerCallable: false,
+            }
+          : undefined,
+        flags: {
+          ...macro.flags,
+          core: {
+            ...(typeof macro.flags.core === "object" &&
+            macro.flags.core &&
+            !Array.isArray(macro.flags.core)
+              ? macro.flags.core
+              : {}),
+            playerCallable: false,
+          },
+        },
+        scriptState: { recent: [] },
+      } as MacroDocument;
     }
     void docStore.put({ worldId, coll: row.coll, id: row.id, doc });
   }
@@ -639,18 +1232,24 @@ export async function importWorldZip(options: ImportWorldOptions): Promise<Impor
   }
   const fogStore = tx.objectStore(STORES.fog);
   for (const rec of fogRecords) void fogStore.put(rec);
+  const checkpointStore = tx.objectStore(STORES.checkpoints);
+  for (const rec of checkpointRecords) void checkpointStore.put(rec);
+  const reportStore = tx.objectStore(STORES.turnReports);
+  for (const rec of reportRecords) void reportStore.put(rec);
   const world: WorldsRecord = {
     worldId,
     name,
     // `system` names the ruleset the world boots with (D-248); older archives wrote the
     // built-in id regardless, so it is derived from the pin rather than copied.
-    system: activeRulesPackage ?? (carriesPackages ? BUILTIN_SYSTEM : meta.system),
+    system:
+      activeRulesPackage ?? (carriesPackages ? BUILTIN_SYSTEM : meta.system),
     version: meta.version,
     lastOpened: now(),
     flushedSeq: meta.seq,
     oplogBase: meta.seq,
   };
-  if (activeRulesPackage !== null) world.activeRulesPackage = activeRulesPackage;
+  if (activeRulesPackage !== null)
+    world.activeRulesPackage = activeRulesPackage;
   if (trustedPackages.length > 0) world.trustedPackages = trustedPackages;
   void tx.objectStore(STORES.worlds).put(world);
   await tx.done;
@@ -681,7 +1280,9 @@ export async function exportWorldToFolder(
     if (cached) return cached;
     const cut = path.lastIndexOf("/");
     const parent = await dirFor(cut === -1 ? "" : path.slice(0, cut));
-    const handle = await parent.getDirectoryHandle(path.slice(cut + 1), { create: true });
+    const handle = await parent.getDirectoryHandle(path.slice(cut + 1), {
+      create: true,
+    });
     dirs.set(path, handle);
     return handle;
   };
@@ -689,7 +1290,9 @@ export async function exportWorldToFolder(
   for (const { path, bytes } of entries) {
     const cut = path.lastIndexOf("/");
     const parent = await dirFor(cut === -1 ? "" : path.slice(0, cut));
-    const handle = await parent.getFileHandle(path.slice(cut + 1), { create: true });
+    const handle = await parent.getFileHandle(path.slice(cut + 1), {
+      create: true,
+    });
     const writable = await handle.createWritable();
     await writable.write(bytes);
     await writable.close();

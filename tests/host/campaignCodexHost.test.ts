@@ -129,7 +129,7 @@ function userDoc(
   };
 }
 
-async function harness() {
+async function harness(additionalPlayerIds: string[] = []) {
   const store = new DocumentStore({ meta });
   const log = new OpLog();
   const undo = new UndoStack();
@@ -150,17 +150,12 @@ async function harness() {
       by: gmId,
       txId: "codex-seed",
       ops: [
-        {
-          kind: "create",
-          coll: "users",
-          data: userDoc(gmId, "GM", "GM") as BaseDocument,
-        },
-        {
-          kind: "create",
-          coll: "users",
-          data: userDoc(playerId, "Player", "PLAYER") as BaseDocument,
-        },
-      ],
+        userDoc(gmId, "GM", "GM"),
+        userDoc(playerId, "Player", "PLAYER"),
+        ...additionalPlayerIds.map((id, index) =>
+          userDoc(id, `Player ${index + 2}`, "PLAYER"),
+        ),
+      ].map((data) => ({ kind: "create" as const, coll: "users" as const, data: data as BaseDocument })),
     },
   ];
   for (const envelope of seeds) {
@@ -188,6 +183,15 @@ async function harness() {
   });
   await flushMicrotasks();
   return { host, store, gm, gmBus, player, playerBus };
+}
+
+async function addPlayerClient(host: HostSync, id: string, name: string) {
+  const pair = createTransportPair();
+  host.addSession(`codex-${id}-peer`, pair.a, { id, role: "PLAYER", name });
+  const bus = createEventBus<ClientEvents>();
+  const client = new ClientSync({ transport: pair.b, bus, meta });
+  await flushMicrotasks();
+  return { client, bus };
 }
 
 describe("Campaign Codex host authorization and live projection", () => {
@@ -497,8 +501,37 @@ describe("Campaign Codex host authorization and live projection", () => {
       items: [],
       effects: [],
     };
+    const underfundedActor: ActorDocument = {
+      ...actor,
+      _id: "underfunded-buyer",
+      name: "Broke hero",
+      system: { pf1e: { currency: { pp: 0, gp: 0, sp: 0, cp: 0 } } },
+    };
+    const unauthorizedActor: ActorDocument = {
+      ...actor,
+      _id: "foreign-buyer",
+      name: "Someone else's hero",
+      ownership: { default: 0 },
+    };
+    const fullStack: ItemDocument = {
+      ...item,
+      _id: "full-stack-potion",
+      flags: { pf1e: { codexImportedFrom: item._id } },
+      system: { quantity: 1_000_000_000 },
+    };
+    const fullStackActor: ActorDocument = {
+      ...actor,
+      _id: "full-stack-buyer",
+      name: "Full inventory",
+      items: [fullStack],
+    };
     h.gm.submit([{ kind: "create", coll: "items", data: item }]);
-    h.gm.submit([{ kind: "create", coll: "actors", data: actor }]);
+    h.gm.submit([
+      { kind: "create", coll: "actors", data: actor },
+      { kind: "create", coll: "actors", data: underfundedActor },
+      { kind: "create", coll: "actors", data: unauthorizedActor },
+      { kind: "create", coll: "actors", data: fullStackActor },
+    ]);
     await flushMicrotasks();
     const base = journalDoc();
     const journal: JournalDocument = {
@@ -521,16 +554,54 @@ describe("Campaign Codex host authorization and live projection", () => {
     const requestId = "codex-purchase-retry";
     h.player.requestCodexPurchase(journal._id, "potion-stock", 2, actor._id, requestId);
     await flushMicrotasks();
-    expect(results.at(-1)).toMatchObject({ ok: true, totalCopper: 600 });
+    expect(results.at(-1)).toMatchObject({
+      action: "purchase",
+      ok: true,
+      receiptId: `codexpurchase_${requestId}`,
+      totalCopper: 600,
+    });
     expect(results.at(-1)).not.toHaveProperty("replayed");
     expect(h.store.get("actors", actor._id)?.system.pf1e).toMatchObject({ currency: { pp: 0, gp: 4, sp: 0, cp: 0 } });
     expect(h.store.get("actors", actor._id)?.items).toHaveLength(1);
     expect(h.store.get("actors", actor._id)?.items[0]?.system.quantity).toBe(2);
     expect(h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity).toBe(1);
 
+    h.player.requestCodexPurchase(journal._id, "potion-stock", 1, underfundedActor._id, "underfunded-purchase");
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ action: "purchase", ok: false, detail: "There are not enough funds for this purchase." });
+    expect(h.store.get("actors", underfundedActor._id)?.system.pf1e).toMatchObject({ currency: { pp: 0, gp: 0, sp: 0, cp: 0 } });
+    expect(h.store.get("actors", underfundedActor._id)?.items).toHaveLength(0);
+    expect(h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity).toBe(1);
+
+    h.player.requestCodexPurchase(journal._id, "potion-stock", 1, fullStackActor._id, "full-stack-purchase");
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ action: "purchase", ok: false, detail: "The matching inventory stack has an unsupported quantity." });
+    expect(h.store.get("actors", fullStackActor._id)?.system.pf1e).toMatchObject({ currency: { pp: 0, gp: 10, sp: 0, cp: 0 } });
+    expect(h.store.get("actors", fullStackActor._id)?.items[0]?.system.quantity).toBe(1_000_000_000);
+    expect(h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity).toBe(1);
+
+    h.player.requestCodexPurchase(journal._id, "potion-stock", 1, unauthorizedActor._id, "foreign-purchase");
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ action: "purchase", ok: false });
+    h.player.requestCodexPurchase(journal._id, "potion-stock", 1, "missing-purchase-actor", "missing-purchase-actor");
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ action: "purchase", ok: false });
+    h.player.requestCodexPurchase(journal._id, "potion-stock", 2, actor._id, "depleted-purchase");
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ action: "purchase", ok: false, detail: "There is not enough stock for that quantity." });
+    expect(h.store.get("actors", actor._id)?.system.pf1e).toMatchObject({ currency: { pp: 0, gp: 4, sp: 0, cp: 0 } });
+    expect(h.store.get("actors", actor._id)?.items[0]?.system.quantity).toBe(2);
+    expect(h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity).toBe(1);
+
     h.player.requestCodexPurchase(journal._id, "potion-stock", 2, actor._id, requestId);
     await flushMicrotasks();
-    expect(results.at(-1)).toMatchObject({ ok: true, replayed: true, totalCopper: 600 });
+    expect(results.at(-1)).toMatchObject({
+      action: "purchase",
+      ok: true,
+      receiptId: `codexpurchase_${requestId}`,
+      replayed: true,
+      totalCopper: 600,
+    });
     expect(h.store.get("actors", actor._id)?.items).toHaveLength(1);
     expect(h.store.get("actors", actor._id)?.items[0]?.system.quantity).toBe(2);
 
@@ -548,6 +619,344 @@ describe("Campaign Codex host authorization and live projection", () => {
     h.player.requestCodexPurchase(journal._id, "potion-stock", 2, actor._id, requestId);
     await flushMicrotasks();
     expect(results.at(-1)?.ok).toBe(false);
+    expect(h.store.get("actors", actor._id)?.items).toHaveLength(0);
+
+    h.gm.submit([{
+      kind: "update",
+      ref: { coll: "journals", id: journal._id },
+      diff: { "codex.shop.audience": { kind: "gmOnly" } as unknown as Json },
+    }]);
+    await flushMicrotasks();
+    h.player.requestCodexPurchase(journal._id, "potion-stock", 1, actor._id, "revoked-shop-purchase");
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ action: "purchase", ok: false, detail: "This shop is unavailable." });
+    expect(h.store.get("actors", actor._id)?.system.pf1e).toMatchObject({ currency: { pp: 0, gp: 10, sp: 0, cp: 0 } });
+    expect(h.store.get("actors", actor._id)?.items).toHaveLength(0);
+    expect(h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity).toBe(3);
+
+    // Even a stale request sent after the GM removes the row and its source Item cannot write.
+    h.gm.submit([
+      {
+        kind: "update",
+        ref: { coll: "journals", id: journal._id },
+        diff: { "codex.shop.audience": { kind: "inherit" } as unknown as Json, "codex.shop.stock": [] as unknown as Json },
+      },
+      { kind: "delete", ref: { coll: "items", id: item._id } },
+    ]);
+    await flushMicrotasks();
+    expect(h.store.get("items", item._id)).toBeUndefined();
+    h.player.requestCodexPurchase(journal._id, "potion-stock", 1, actor._id, "deleted-source-purchase");
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ action: "purchase", ok: false });
+    expect(h.store.get("actors", actor._id)?.system.pf1e).toMatchObject({ currency: { pp: 0, gp: 10, sp: 0, cp: 0 } });
+    expect(h.store.get("actors", actor._id)?.items).toHaveLength(0);
+    expect(h.store.get("journals", journal._id)?.codex?.shop?.stock).toEqual([]);
+    expect(h.store.get("actionReceipts", "codexpurchase_deleted-source-purchase")).toBeUndefined();
+  });
+
+  test("serializes competing player purchases so only one buyer receives the last stock unit", async () => {
+    const secondPlayerId = "codex-player-two";
+    const h = await harness([secondPlayerId]);
+    const second = await addPlayerClient(h.host, secondPlayerId, "Second Player");
+    const item: ItemDocument = {
+      _id: "race-potion",
+      type: "item",
+      name: "Last potion",
+      ownership: { default: 1 },
+      flags: {},
+      system: { quantity: 1, value: 2 },
+      effects: [],
+    };
+    const firstActor: ActorDocument = {
+      _id: "race-buyer-one",
+      type: "actor",
+      name: "First buyer",
+      ownership: { default: 0, [playerId]: 3 },
+      flags: {},
+      system: { pf1e: { currency: { pp: 0, gp: 10, sp: 0, cp: 0 } } },
+      items: [],
+      effects: [],
+    };
+    const secondActor: ActorDocument = {
+      ...firstActor,
+      _id: "race-buyer-two",
+      name: "Second buyer",
+      ownership: { default: 0, [secondPlayerId]: 3 },
+    };
+    const base = journalDoc();
+    const journal: JournalDocument = {
+      ...base,
+      _id: "race-shop",
+      codex: {
+        ...codexOf(base),
+        shop: {
+          mode: "shop",
+          markup: 2,
+          audience: { kind: "inherit" },
+          stock: [{ id: "last-potion", item: { coll: "items", id: item._id }, quantity: 1, unitPrice: "2", order: 0 }],
+        },
+      },
+    };
+    h.gm.submit([
+      { kind: "create", coll: "items", data: item },
+      { kind: "create", coll: "actors", data: firstActor },
+      { kind: "create", coll: "actors", data: secondActor },
+      { kind: "create", coll: "journals", data: journal },
+    ]);
+    await flushMicrotasks();
+
+    const firstResults: ClientEvents["codexPurchaseResult"][] = [];
+    const secondResults: ClientEvents["codexPurchaseResult"][] = [];
+    h.playerBus.on("codexPurchaseResult", (result) => firstResults.push(result));
+    second.bus.on("codexPurchaseResult", (result) => secondResults.push(result));
+    h.player.requestCodexPurchase(journal._id, "last-potion", 1, firstActor._id, "race-buy-one");
+    second.client.requestCodexPurchase(journal._id, "last-potion", 1, secondActor._id, "race-buy-two");
+    await flushMicrotasks();
+
+    expect(firstResults.at(-1)).toMatchObject({ action: "purchase", requestId: "race-buy-one" });
+    expect(secondResults.at(-1)).toMatchObject({ action: "purchase", requestId: "race-buy-two" });
+    const outcomes = [firstResults.at(-1), secondResults.at(-1)];
+    expect(outcomes.filter((result) => result?.ok)).toHaveLength(1);
+    expect(outcomes.filter((result) => result?.ok === false)).toHaveLength(1);
+    expect(outcomes.find((result) => result?.ok)).toMatchObject({ ok: true, totalCopper: 400 });
+    expect(outcomes.find((result) => result?.ok === false)).toMatchObject({
+      ok: false,
+      detail: "There is not enough stock for that quantity.",
+    });
+
+    const committedShop = h.store.get("journals", journal._id) as JournalDocument | undefined;
+    expect(committedShop?.codex?.shop?.stock[0]?.quantity).toBe(0);
+    const committedActors = [firstActor, secondActor].map((actor) => {
+      const current = h.store.get("actors", actor._id) as ActorDocument | undefined;
+      const currency = (current?.system as { pf1e?: { currency?: { gp?: number } } } | undefined)?.pf1e?.currency;
+      return { gp: currency?.gp, items: current?.items.map((owned) => owned.system.quantity) ?? [] };
+    });
+    expect(committedActors.filter((actor) => actor.gp === 6 && actor.items[0] === 1)).toHaveLength(1);
+    expect(committedActors.filter((actor) => actor.gp === 10 && actor.items.length === 0)).toHaveLength(1);
+    expect(h.store.getAll("actionReceipts").filter((receipt) =>
+      receipt.system.action === "codex.purchase" && receipt.system.sheetId === journal._id,
+    )).toHaveLength(1);
+  });
+
+  test("commits loot claims atomically, deduplicates retries, and supports GM Revert", async () => {
+    const h = await harness();
+    const item: ItemDocument = {
+      _id: "codex-loot-herb",
+      type: "item",
+      name: "Healing herb",
+      ownership: { default: 3 },
+      flags: { pf1e: { source: "field-cache" } },
+      system: { quantity: 1 },
+      effects: [],
+    };
+    const actor: ActorDocument = {
+      _id: "loot-buyer",
+      type: "actor",
+      name: "Player ranger",
+      ownership: { default: 0, [playerId]: 3 },
+      flags: {},
+      system: { pf1e: { currency: { pp: 0, gp: 7, sp: 0, cp: 0 } } },
+      items: [],
+      effects: [],
+    };
+    const unauthorizedActor: ActorDocument = {
+      ...actor,
+      _id: "loot-foreign-actor",
+      name: "Someone else's ranger",
+      ownership: { default: 0 },
+    };
+    const base = journalDoc();
+    const journal: JournalDocument = {
+      ...base,
+      _id: "codex-loot-container",
+      name: "Abandoned cache",
+      codex: {
+        ...codexOf(base),
+        shop: {
+          mode: "loot",
+          audience: { kind: "selectedUsers", userIds: [gmId] },
+          stock: [
+            {
+              id: "herb-stock",
+              item: { coll: "items", id: item._id },
+              quantity: 3,
+              order: 0,
+            },
+          ],
+        },
+      },
+    };
+    h.gm.submit([
+      { kind: "create", coll: "items", data: item },
+      { kind: "create", coll: "actors", data: actor },
+      { kind: "create", coll: "actors", data: unauthorizedActor },
+      { kind: "create", coll: "journals", data: journal },
+    ]);
+    await flushMicrotasks();
+
+    const results: ClientEvents["codexPurchaseResult"][] = [];
+    h.playerBus.on("codexPurchaseResult", (result) => results.push(result));
+    h.player.requestCodexClaim(
+      journal._id,
+      "herb-stock",
+      1,
+      actor._id,
+      "hidden-shop-claim",
+    );
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({
+      action: "claim",
+      ok: false,
+      detail: "This loot container is unavailable.",
+    });
+    expect(
+      h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity,
+    ).toBe(3);
+    expect(h.store.get("actors", actor._id)?.items).toHaveLength(0);
+
+    h.gm.submit([
+      {
+        kind: "update",
+        ref: { coll: "journals", id: journal._id },
+        diff: { "codex.shop.audience": { kind: "inherit" } as unknown as Json },
+      },
+    ]);
+    await flushMicrotasks();
+    h.player.requestCodexClaim(
+      journal._id,
+      "herb-stock",
+      1,
+      "missing-actor",
+      "missing-actor-claim",
+    );
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ action: "claim", ok: false });
+    expect(
+      h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity,
+    ).toBe(3);
+
+    h.player.requestCodexClaim(
+      journal._id,
+      "herb-stock",
+      1,
+      unauthorizedActor._id,
+      "foreign-claim",
+    );
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ action: "claim", ok: false });
+    expect(h.store.get("actors", unauthorizedActor._id)?.items).toHaveLength(0);
+    expect(
+      h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity,
+    ).toBe(3);
+
+    h.player.requestCodexClaim(
+      journal._id,
+      "herb-stock",
+      4,
+      actor._id,
+      "overstock-claim",
+    );
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({
+      action: "claim",
+      ok: false,
+      detail: "There is not enough stock for that quantity.",
+    });
+    expect(h.store.get("actors", actor._id)?.items).toHaveLength(0);
+    expect(
+      h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity,
+    ).toBe(3);
+
+    const requestId = "codex-loot-claim-retry";
+    h.player.requestCodexClaim(
+      journal._id,
+      "herb-stock",
+      2,
+      actor._id,
+      requestId,
+    );
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({
+      action: "claim",
+      ok: true,
+      detail: "Claimed 2 × Healing herb.",
+    });
+    expect(results.at(-1)).toHaveProperty(
+      "receiptId",
+      `codexclaim_${requestId}`,
+    );
+    expect(h.store.get("actors", actor._id)?.system.pf1e).toMatchObject({
+      currency: { pp: 0, gp: 7, sp: 0, cp: 0 },
+    });
+    expect(h.store.get("actors", actor._id)?.items).toHaveLength(1);
+    expect(h.store.get("actors", actor._id)?.items[0]).toMatchObject({
+      name: "Healing herb",
+      flags: { pf1e: { source: "field-cache", codexImportedFrom: item._id } },
+      system: { quantity: 2 },
+    });
+    expect(
+      h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity,
+    ).toBe(1);
+
+    h.player.requestCodexClaim(
+      journal._id,
+      "herb-stock",
+      2,
+      actor._id,
+      "depleted-claim",
+    );
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({
+      action: "claim",
+      ok: false,
+      detail: "There is not enough stock for that quantity.",
+    });
+    expect(h.store.get("actors", actor._id)?.items[0]?.system.quantity).toBe(2);
+    expect(
+      h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity,
+    ).toBe(1);
+
+    h.player.requestCodexClaim(
+      journal._id,
+      "herb-stock",
+      2,
+      actor._id,
+      requestId,
+    );
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({
+      action: "claim",
+      ok: true,
+      receiptId: `codexclaim_${requestId}`,
+      replayed: true,
+    });
+    expect(h.store.get("actors", actor._id)?.items).toHaveLength(1);
+    expect(h.store.get("actors", actor._id)?.items[0]?.system.quantity).toBe(2);
+
+    const receipt = h.store
+      .getAll("actionReceipts")
+      .find((candidate) => candidate.system.requestId === requestId);
+    if (!receipt) throw new Error("Expected durable Codex loot-claim receipt");
+    h.gm.actionRevert(receipt._id);
+    await flushMicrotasks();
+    expect(h.store.get("actors", actor._id)?.items).toHaveLength(0);
+    expect(h.store.get("actors", actor._id)?.system.pf1e).toMatchObject({
+      currency: { pp: 0, gp: 7, sp: 0, cp: 0 },
+    });
+    expect(
+      h.store.get("journals", journal._id)?.codex?.shop?.stock[0]?.quantity,
+    ).toBe(3);
+    expect(h.store.get("actionReceipts", receipt._id)?.status).toBe("reverted");
+
+    h.player.requestCodexClaim(
+      journal._id,
+      "herb-stock",
+      2,
+      actor._id,
+      requestId,
+    );
+    await flushMicrotasks();
+    expect(results.at(-1)).toMatchObject({ action: "claim", ok: false });
     expect(h.store.get("actors", actor._id)?.items).toHaveLength(0);
   });
 });

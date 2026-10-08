@@ -1,11 +1,12 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { describe, expect, test } from "vitest";
-import { strFromU8, unzipSync, zipSync } from "fflate";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import type { AssetManifest, JournalDocument, WorldCollections } from "../../src/core/documents";
 import { exportCodexMarkdownZip } from "../../src/core/campaignCodexMarkdown";
 import {
+  CODEX_BUNDLE_MAX_ASSET_BYTES,
   buildCodexBundleModel,
   exportCodexBundle,
   parseCodexBundleZip,
@@ -173,30 +174,83 @@ describe("Campaign Codex selected-content bundle", () => {
         hasUnavailableDependencies: false, hasPortablePermissionResets: false },
     };
     const destination = emptyWorld();
-    destination.journals.push(journal("local-root", "root", 3));
+    destination.journals.push(journal("local-child", "new record", 3));
     const pending = planCodexBundleImport(bundle, destination, {}, nextIdFactory());
     expect(pending.ready).toBe(false);
-    expect(pending.pendingConflicts).toEqual(["journals:incoming-root"]);
+    expect(pending.pendingConflicts).toEqual(["journals:incoming-child"]);
     expect(pending.ops).toHaveLength(0);
 
+    const skipped = planCodexBundleImport(bundle, destination, {
+      "journals:incoming-child": { action: "skip" },
+    }, nextIdFactory());
+    expect(skipped.ready).toBe(true);
+    expect(skipped.ops).toHaveLength(1);
+    const skippedRoot = skipped.ops.find((op) => op.kind === "create" && op.data.name === "Root");
+    expect(skippedRoot?.kind).toBe("create");
+    const skippedJournal = skippedRoot?.kind === "create" ? skippedRoot.data as JournalDocument : undefined;
+    expect(skippedJournal?.codex?.links).toEqual([]);
+
     const linked = planCodexBundleImport(bundle, destination, {
-      "journals:incoming-root": { action: "link", targetId: "local-root" },
+      "journals:incoming-child": { action: "link", targetId: "local-child" },
     }, nextIdFactory());
     expect(linked.ready).toBe(true);
     expect(linked.ops).toHaveLength(1);
-    expect(linked.ops[0]?.kind).toBe("create");
+    const linkedRoot = linked.ops.find((op) => op.kind === "create" && op.data.name === "Root");
+    expect(linkedRoot?.kind).toBe("create");
+    const linkedJournal = linkedRoot?.kind === "create" ? linkedRoot.data as JournalDocument : undefined;
+    expect(linkedJournal?.codex?.links[0]?.target).toEqual({ coll: "journals", id: "local-child" });
 
     const replaced = planCodexBundleImport(bundle, destination, {
-      "journals:incoming-root": { action: "replace", targetId: "local-root" },
+      "journals:incoming-child": { action: "replace", targetId: "local-child" },
     }, nextIdFactory());
     expect(replaced.ready).toBe(true);
     const update = replaced.ops.find((op) => op.kind === "update");
     expect(update?.kind).toBe("update");
-    expect(update?.ref).toEqual({ coll: "journals", id: "local-root" });
+    expect(update?.ref).toEqual({ coll: "journals", id: "local-child" });
     const rewritten = JSON.stringify(update?.diff);
-    const childCreate = replaced.ops.find((op) => op.kind === "create" && op.data.name === "New Record");
-    expect(childCreate?.kind).toBe("create");
-    expect(rewritten).toContain(childCreate?.kind === "create" ? childCreate.data._id : "");
     expect(rewritten).not.toContain("incoming-child");
+    const replacedRoot = replaced.ops.find((op) => op.kind === "create" && op.data.name === "Root");
+    expect(replacedRoot?.kind).toBe("create");
+    const replacedJournal = replacedRoot?.kind === "create" ? replacedRoot.data as JournalDocument : undefined;
+    expect(replacedJournal?.codex?.links[0]?.target).toEqual({ coll: "journals", id: "local-child" });
+  });
+
+  test("reports partially missing dependencies and removes dangling links during import remapping", async () => {
+    const { world, manifest, root } = fixture();
+    root.codex!.links.push({
+      id: "legacy-dangling-link", relation: "relatedTo",
+      target: { coll: "journals", id: "missing-legacy-record" },
+    });
+    const exported = await exportCodexBundle({
+      world, manifest, viewer: gm, rootJournalIds: [root._id], loadAsset: async () => undefined,
+    });
+    const parsed = parseCodexBundleZip(exported.bytes).bundle;
+    expect(parsed.report.hasUnavailableDependencies).toBe(true);
+    const exportedRoot = parsed.documents.journals.find((doc) => doc._id === root._id)!;
+    expect(exportedRoot.codex?.links.some((link) => link.id === "legacy-dangling-link")).toBe(false);
+
+    // A legacy archive may still carry the stale DocRef itself. Keep that import repairable:
+    // warn generically, remap the valid closure, and drop only the reference with no target.
+    exportedRoot.codex!.links.push({
+      id: "legacy-dangling-link", relation: "relatedTo",
+      target: { coll: "journals", id: "missing-legacy-record" },
+    });
+    const plan = planCodexBundleImport(parsed, emptyWorld(), {}, nextIdFactory());
+    expect(plan.ready).toBe(true);
+    expect(plan.warnings).toContain("Some dependencies were unavailable to the exporter and are not included.");
+    const rootOp = plan.ops.find((op) => op.kind === "create" && op.data.name === "Root");
+    expect(rootOp?.kind).toBe("create");
+    if (rootOp?.kind !== "create") throw new Error("Expected a remapped bundle root");
+    expect((rootOp.data as JournalDocument).codex?.links.some((link) => link.id === "legacy-dangling-link")).toBe(false);
+    expect((rootOp.data as JournalDocument).codex?.links.every((link) => link.target.id !== "missing-legacy-record")).toBe(true);
+  });
+
+  test("rejects an oversized compressed asset entry before extracting it", () => {
+    const archive = zipSync({
+      "campaign-codex.json": strToU8("{}"),
+      [`assets/${"a".repeat(64)}`]: new Uint8Array(CODEX_BUNDLE_MAX_ASSET_BYTES + 1),
+    }, { level: 9 });
+    expect(archive.length).toBeLessThan(64 * 1024);
+    expect(() => parseCodexBundleZip(archive)).toThrow(/asset exceeds 32 MiB/);
   });
 });

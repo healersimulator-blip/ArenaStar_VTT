@@ -25,10 +25,17 @@ import {
   type WorldFileMeta,
   type WorldFilePackage,
 } from "../../src/host/worldFile";
-import { bootHostApp, DEFAULT_SCENE_ID, type HostApp } from "../../src/app/hostBoot";
+import {
+  bootHostApp,
+  DEFAULT_SCENE_ID,
+  type HostApp,
+} from "../../src/app/hostBoot";
 import { FakeCodec, settle } from "../app/fakes";
 import { HostPersister } from "../../src/storage/persistence";
-import { latestCheckpoint, putCheckpoint } from "../../src/storage/strategicStore";
+import {
+  latestCheckpoint,
+  putCheckpoint,
+} from "../../src/storage/strategicStore";
 import { InlineSimRunner } from "../../src/workers/simWorkerClient";
 import { sceneIsStrategic } from "../../src/core/strategicFog";
 import type { SceneDocument, TokenDocument } from "../../src/core/documents";
@@ -54,22 +61,33 @@ const CONTENT_MANIFEST = {
   name: "Probe Content",
   version: "1.1.0",
   type: "data",
-  packs: [{ name: "Probe Bestiary", type: "actors", file: "packs/bestiary.json" }],
+  packs: [
+    { name: "Probe Bestiary", type: "actors", file: "packs/bestiary.json" },
+  ],
 };
 
 const BESTIARY = {
   name: "Probe Bestiary",
   type: "actors",
   entries: [
-    { id: "goblin", name: "Goblin", data: { type: "actor", name: "Goblin", system: {} } },
+    {
+      id: "goblin",
+      name: "Goblin",
+      data: { type: "actor", name: "Goblin", system: {} },
+    },
   ],
 };
 
 const zipOf = (files: Record<string, string>): Uint8Array =>
-  zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)])));
+  zipSync(
+    Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)])),
+  );
 
 const rulesetZip = (): Uint8Array =>
-  zipOf({ "manifest.json": JSON.stringify(RULESET_MANIFEST), "rules.js": RULES_JS });
+  zipOf({
+    "manifest.json": JSON.stringify(RULESET_MANIFEST),
+    "rules.js": RULES_JS,
+  });
 const contentZip = (): Uint8Array =>
   zipOf({
     "manifest.json": JSON.stringify(CONTENT_MANIFEST),
@@ -95,7 +113,10 @@ const heroToken = (id: string, x: number, y: number): TokenDocument => ({
   light: { radius: 0, color: "#fff", alpha: 0.5 },
 });
 
-const bootWorld = async (worldId: string, root: MemDirHandle): Promise<HostApp> =>
+const bootWorld = async (
+  worldId: string,
+  root: MemDirHandle,
+): Promise<HostApp> =>
   bootHostApp({
     db: await openVttDb(),
     root,
@@ -112,7 +133,10 @@ const parseZip = (bytes: Uint8Array): Map<string, Uint8Array> =>
  * scene-2 tactical with two hero tokens, both packages imported, the ruleset active, and one
  * checkpoint on the strategic scene so the ruleset pin is a live constraint.
  */
-async function buildMixedWorld(worldId: string, root: MemDirHandle): Promise<HostApp> {
+async function buildMixedWorld(
+  worldId: string,
+  root: MemDirHandle,
+): Promise<HostApp> {
   const db = await openVttDb();
   await HostPersister.createWorld(db, {
     worldId: worldId as HostApp["worldId"],
@@ -222,7 +246,7 @@ async function buildMixedWorld(worldId: string, root: MemDirHandle): Promise<Hos
     unitStats: {},
     seed: 42,
     rulesVersion: "2.0.0",
-    hash: "cp-hash",
+    hash: "a".repeat(64),
   });
   await app.persister.flush();
   return app;
@@ -247,13 +271,17 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
     expect(before?.activeRulesPackage).toBe("probe-rules");
 
     const archive = new Uint8Array(
-      await (await exportWorldZip({ db, worldId, root, persister: app.persister })).arrayBuffer(),
+      await (
+        await exportWorldZip({ db, worldId, root, persister: app.persister })
+      ).arrayBuffer(),
     );
     await app.close();
 
     // ── archive shape ──
     const files = parseZip(archive);
-    const meta = JSON.parse(strFromU8(files.get("world.json") as Uint8Array)) as WorldFileMeta;
+    const meta = JSON.parse(
+      strFromU8(files.get("world.json") as Uint8Array),
+    ) as WorldFileMeta;
     expect(meta.format).toBe(WORLD_FILE_FORMAT);
     expect(meta.rules).toEqual({ active: "probe-rules" });
     expect(meta.system).toBe("probe-rules");
@@ -264,19 +292,28 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
       ["probe-content", "data", 1],
       ["probe-rules", "system", 0],
     ]);
-    expect(strFromU8(files.get("packages/probe-rules/rules.js") as Uint8Array)).toBe(RULES_JS);
+    expect(
+      strFromU8(files.get("packages/probe-rules/rules.js") as Uint8Array),
+    ).toBe(RULES_JS);
     expect(files.get("packages/probe-rules/manifest.json")).toBeDefined();
-    expect(files.get("packages/probe-content/packs/bestiary.json")).toBeDefined();
+    expect(
+      files.get("packages/probe-content/packs/bestiary.json"),
+    ).toBeDefined();
     expect(files.get(`checkpoints/${DEFAULT_SCENE_ID}/1.pool`)).toBeDefined();
     // trust is local consent (D-089): never in the archive
     expect(JSON.stringify(meta)).not.toContain("trusted");
 
     // ── "another GM's machine": no trace of the world or its packages ──
     await deleteWorldData(db, worldId);
-    for (const p of await listPackages(db, worldId)) await deletePackage(db, worldId, p.id);
+    for (const p of await listPackages(db, worldId))
+      await deletePackage(db, worldId, p.id);
     expect(await listPackages(db, worldId)).toEqual([]);
 
-    const imported = await importWorldZip({ db, file: archive, root: new MemDirHandle() });
+    const imported = await importWorldZip({
+      db,
+      file: archive,
+      root: new MemDirHandle(),
+    });
     expect(imported).toMatchObject({
       worldId,
       format: 2,
@@ -288,8 +325,13 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
     expect(restoredRec?.system).toBe("probe-rules");
     expect(restoredRec?.trustedPackages).toBeUndefined();
     const restoredPkgs = await listPackages(db, worldId);
-    expect(restoredPkgs.map((p) => p.id)).toEqual(["probe-content", "probe-rules"]);
-    expect(restoredPkgs.find((p) => p.id === "probe-rules")?.files["rules.js"]).toBe(RULES_JS);
+    expect(restoredPkgs.map((p) => p.id)).toEqual([
+      "probe-content",
+      "probe-rules",
+    ]);
+    expect(
+      restoredPkgs.find((p) => p.id === "probe-rules")?.files["rules.js"],
+    ).toBe(RULES_JS);
 
     // ── reboot: the package takes the SimWorker rules slot, both scene kinds intact ──
     const rebooted = await bootWorld(worldId, new MemDirHandle());
@@ -305,12 +347,19 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
     expect(sceneIsStrategic(strategic)).toBe(true);
     expect(sceneIsStrategic(tactical)).toBe(false);
     expect(strategic.tokens.map((t) => t._id)).toEqual(["hero-general"]); // a hero on the field
-    expect(tactical.tokens.map((t) => t._id).sort()).toEqual(["hero-cleric", "hero-rogue"]);
-    expect((store.get("armies", "a-red-1") as ArmyDocument).units[0]?.stats.strength).toBe(40);
+    expect(tactical.tokens.map((t) => t._id).sort()).toEqual([
+      "hero-cleric",
+      "hero-rogue",
+    ]);
+    expect(
+      (store.get("armies", "a-red-1") as ArmyDocument).units[0]?.stats.strength,
+    ).toBe(40);
     expect(store.get("factions", "f-red")?.name).toBe("Red");
     // strategic state and the pin survived: the checkpoint is back and the ruleset is locked
     expect(
-      Array.from((await latestCheckpoint(db, worldId, DEFAULT_SCENE_ID))?.pool ?? []),
+      Array.from(
+        (await latestCheckpoint(db, worldId, DEFAULT_SCENE_ID))?.pool ?? [],
+      ),
     ).toEqual([7, 7, 7]);
     const swap = await rebooted.packages.deactivate();
     expect(swap.ok).toBe(false);
@@ -335,13 +384,17 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
     const app = await buildMixedWorld("w-legacy", root);
     const worldId = app.worldId;
     const archive = new Uint8Array(
-      await (await exportWorldZip({ db, worldId, root, persister: app.persister })).arrayBuffer(),
+      await (
+        await exportWorldZip({ db, worldId, root, persister: app.persister })
+      ).arrayBuffer(),
     );
     await app.close();
 
     // Downgrade the archive to what a pre-D-248 build wrote: format 1, no packages.
     const files = unzipSync(archive);
-    const meta = JSON.parse(strFromU8(files["world.json"] as Uint8Array)) as WorldFileMeta;
+    const meta = JSON.parse(
+      strFromU8(files["world.json"] as Uint8Array),
+    ) as WorldFileMeta;
     const legacy: Record<string, Uint8Array> = {};
     for (const [path, bytes] of Object.entries(files)) {
       if (path === "packages.json" || path.startsWith("packages/")) continue;
@@ -398,19 +451,27 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
     expect((await app.packages.grantTrust("trusting-rules")).ok).toBe(true);
     await app.persister.flush();
     const archive = new Uint8Array(
-      await (await exportWorldZip({ db, worldId, root, persister: app.persister })).arrayBuffer(),
+      await (
+        await exportWorldZip({ db, worldId, root, persister: app.persister })
+      ).arrayBuffer(),
     );
     await app.close();
 
     // Forge an archive that claims trust the way a stranger's zip might.
     const files = unzipSync(archive);
-    const meta = JSON.parse(strFromU8(files["world.json"] as Uint8Array)) as Record<string, unknown>;
-    files["world.json"] = strToU8(JSON.stringify({ ...meta, trustedPackages: ["trusting-rules"] }));
+    const meta = JSON.parse(
+      strFromU8(files["world.json"] as Uint8Array),
+    ) as Record<string, unknown>;
+    files["world.json"] = strToU8(
+      JSON.stringify({ ...meta, trustedPackages: ["trusting-rules"] }),
+    );
     const forged = zipSync(files);
 
     // Same browser, restore: the grant this GM made locally survives (it is not from the archive).
     await importWorldZip({ db, file: forged, root });
-    expect((await getWorld(db, worldId))?.trustedPackages).toEqual(["trusting-rules"]);
+    expect((await getWorld(db, worldId))?.trustedPackages).toEqual([
+      "trusting-rules",
+    ]);
 
     // A browser that never granted anything: the claim in the archive is ignored.
     await deleteWorldData(db, worldId);
@@ -430,7 +491,9 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
     const app = await buildMixedWorld("w-corrupt", root);
     const worldId = app.worldId;
     const archive = new Uint8Array(
-      await (await exportWorldZip({ db, worldId, root, persister: app.persister })).arrayBuffer(),
+      await (
+        await exportWorldZip({ db, worldId, root, persister: app.persister })
+      ).arrayBuffer(),
     );
     await app.close();
     const files = unzipSync(archive);
@@ -438,31 +501,57 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
     // 1. the ruleset's entry file is gone → the loader's own message, prefixed
     const noEntry = { ...files };
     delete noEntry["packages/probe-rules/rules.js"];
-    await expect(importWorldZip({ db, file: zipSync(noEntry), root })).rejects.toThrow(
+    await expect(
+      importWorldZip({ db, file: zipSync(noEntry), root }),
+    ).rejects.toThrow(
       /world file: package probe-rules: .*rules entry rules\.js is missing/,
     );
 
     // 2. the pin names a package the archive does not carry
-    const meta = JSON.parse(strFromU8(files["world.json"] as Uint8Array)) as WorldFileMeta;
+    const meta = JSON.parse(
+      strFromU8(files["world.json"] as Uint8Array),
+    ) as WorldFileMeta;
     const dangling = {
       ...files,
-      "world.json": strToU8(JSON.stringify({ ...meta, rules: { active: "ghost-rules" } })),
+      "world.json": strToU8(
+        JSON.stringify({ ...meta, rules: { active: "ghost-rules" } }),
+      ),
     };
-    await expect(importWorldZip({ db, file: zipSync(dangling), root })).rejects.toThrow(
-      /rules\.active names ghost-rules/,
-    );
+    await expect(
+      importWorldZip({ db, file: zipSync(dangling), root }),
+    ).rejects.toThrow(/rules\.active names ghost-rules/);
 
     // 3. the pin names a content pack
     const wrongKind = {
       ...files,
-      "world.json": strToU8(JSON.stringify({ ...meta, rules: { active: "probe-content" } })),
+      "world.json": strToU8(
+        JSON.stringify({ ...meta, rules: { active: "probe-content" } }),
+      ),
     };
-    await expect(importWorldZip({ db, file: zipSync(wrongKind), root })).rejects.toThrow(
-      /content pack, not a ruleset/,
-    );
+    await expect(
+      importWorldZip({ db, file: zipSync(wrongKind), root }),
+    ).rejects.toThrow(/content pack, not a ruleset/);
+
+    // 4. package payloads not present in the index are not silently discarded.
+    const unindexedPackage = {
+      ...files,
+      "packages/extra-addon/manifest.json": strToU8(
+        JSON.stringify({
+          id: "extra-addon",
+          name: "Unindexed add-on",
+          version: "1.0.0",
+          type: "data",
+        }),
+      ),
+    };
+    await expect(
+      importWorldZip({ db, file: zipSync(unindexedPackage), root }),
+    ).rejects.toThrow(/payload files but is not listed in packages.json/);
 
     // nothing above touched the database: the world is exactly as exported
-    expect((await getWorld(db, worldId))?.activeRulesPackage).toBe("probe-rules");
+    expect((await getWorld(db, worldId))?.activeRulesPackage).toBe(
+      "probe-rules",
+    );
     expect((await listPackages(db, worldId)).length).toBe(2);
   }, 20_000);
 
@@ -478,7 +567,10 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
       ),
     );
     const dir = new MemDirHandle();
-    const { filesCount } = await exportWorldToFolder({ db, worldId, root, persister: app.persister }, dir);
+    const { filesCount } = await exportWorldToFolder(
+      { db, worldId, root, persister: app.persister },
+      dir,
+    );
     await app.close();
 
     const walk = (d: MemDirHandle, prefix: string, out: string[]): string[] => {
@@ -516,12 +608,18 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
       ),
     );
     await app.close();
-    const meta = JSON.parse(strFromU8(files.get("world.json") as Uint8Array)) as WorldFileMeta;
+    const meta = JSON.parse(
+      strFromU8(files.get("world.json") as Uint8Array),
+    ) as WorldFileMeta;
     expect(meta.rules).toEqual({ active: null });
     expect(meta.system).toBe("mass-battle-basic");
     // …and such an archive imports on the built-in ruleset without error
     await deleteWorldData(db, worldId);
-    const imported = await importWorldZip({ db, file: zipSync(Object.fromEntries(files)), root });
+    const imported = await importWorldZip({
+      db,
+      file: zipSync(Object.fromEntries(files)),
+      root,
+    });
     expect(imported.activeRulesPackage).toBeNull();
   }, 20_000);
 });
@@ -542,6 +640,10 @@ describe("package records survive putPackage/listPackages ordering used by the a
         files: { "manifest.json": "{}" },
       });
     }
-    expect((await listPackages(db, worldId)).map((p) => p.id)).toEqual(["alpha", "mid", "zeta"]);
+    expect((await listPackages(db, worldId)).map((p) => p.id)).toEqual([
+      "alpha",
+      "mid",
+      "zeta",
+    ]);
   });
 });

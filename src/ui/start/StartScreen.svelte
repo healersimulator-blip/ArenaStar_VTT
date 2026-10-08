@@ -15,6 +15,7 @@
     describeWorldContents,
     type WorldZipInfo,
   } from "../../host/zipKind";
+  import { WORLD_ZIP_LIMITS } from "../../host/worldZip";
   import type { PackageManifest } from "../../core/packageManifest";
   import {
     deleteWorldData,
@@ -91,6 +92,11 @@
     error = null;
     notice = null;
     pending = null;
+    if (file.size > WORLD_ZIP_LIMITS.maxArchiveBytes) {
+      error = `The selected ZIP exceeds the ${Math.ceil(WORLD_ZIP_LIMITS.maxArchiveBytes / (1024 * 1024))} MiB compressed archive limit.`;
+      if (fileInput) fileInput.value = "";
+      return;
+    }
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const kind = await classifyZip(bytes);
@@ -270,6 +276,69 @@
             Brings along: {describeWorldContents(pending.info)} · format {pending
               .info.format}
           </p>
+          {#if pending.info.codexAudit}
+            {@const audit = pending.info.codexAudit}
+            <section class="codex-audit" role="status" data-open-codex-audit>
+              {#if audit.status === "complete"}
+                <strong>Campaign Codex dependency check</strong>
+                <p class="detail">
+                  {audit.codexSheets} Codex sheet(s), {audit.referencesChecked} supported
+                  reference(s) checked.
+                </p>
+                {#if audit.uninspectedSheetCount > 0}
+                  <p class="detail">
+                    {audit.uninspectedSheetCount} unknown-version or malformed Codex
+                    sheet(s) could not be fully inspected; dependencies inside them
+                    may not be listed.
+                  </p>
+                {/if}
+                {#if audit.uninspectedWidgetCount > 0}
+                  <p class="detail">
+                    {audit.uninspectedWidgetCount} unknown, future, or malformed widget(s)
+                    could not be inspected; dependencies inside them may not be listed.
+                  </p>
+                {/if}
+                {#if audit.missingCount + audit.incompatibleCount + audit.invalidCount > 0}
+                  <p class="detail">
+                    Found {audit.missingCount} missing, {audit.incompatibleCount}
+                    incompatible, and {audit.invalidCount} malformed reference(s).
+                    Restore keeps them inert; the GM can repair supported links and
+                    shop rows later. No target is inferred by name.
+                  </p>
+                  {#if audit.issues.length > 0}
+                    <ul>
+                      {#each audit.issues.slice(0, 5) as issue (`${issue.sourceId}:${issue.kind}:${issue.ownerId}:${issue.target}`)}
+                        <li>
+                          {issue.sourceName} · {issue.kind} “{issue.ownerId}” → {issue.problem}
+                          {issue.target}
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                  {#if audit.missingCount + audit.incompatibleCount + audit.invalidCount > 5}
+                    <p class="detail">
+                      And {audit.missingCount +
+                        audit.incompatibleCount +
+                        audit.invalidCount -
+                        5} additional diagnostic(s) are not listed here; preview details
+                      are capped to the first five.
+                    </p>
+                  {/if}
+                {:else}
+                  <p class="detail">
+                    No unresolved dependencies in the supported Codex fields
+                    were found in the archive.
+                  </p>
+                {/if}
+              {:else}
+                <strong>Campaign Codex dependency check unavailable</strong>
+                <p class="detail">
+                  {audit.reason ?? "The archive could not be checked."} Restore validation
+                  still runs before any world data is replaced.
+                </p>
+              {/if}
+            </section>
+          {/if}
           {#if pending.info.starter}
             <p class="detail">
               A starter is a template — it always opens as a fresh world of its
@@ -588,6 +657,27 @@
     color: #b6c8ce;
     font-size: 0.86rem;
     line-height: 1.5;
+  }
+  .codex-audit {
+    display: grid;
+    gap: 6px;
+    margin: 10px 0;
+    padding: 12px;
+    border: 1px solid #54707a;
+    border-radius: 8px;
+    background: #101c24;
+  }
+  .codex-audit ul {
+    margin: 0;
+    padding-inline-start: 20px;
+    color: #d2e1e3;
+    font-size: 0.8rem;
+  }
+  .codex-audit li {
+    overflow-wrap: anywhere;
+  }
+  .codex-audit .detail {
+    font-size: 0.82rem;
   }
   .field {
     display: flex;
