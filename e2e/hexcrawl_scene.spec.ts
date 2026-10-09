@@ -152,6 +152,9 @@ test.describe("hexcrawl scene (§9 Phase 1, D-270)", () => {
     await expect.poll(read).toMatchObject({ encounterMode: "auto" });
 
     // ── the D-270 fix: a sidebar map import lands on the scene the GM is looking at ──
+    // Design §6.3: a background on an existing scene keeps that scene's size, so the map is placed
+    // at its native size and the scene stays 1600 × 1200.
+    const imgBefore = await surfaceCallArg<string | null>(page, "app", "sceneImgById", after.sceneId);
     await page.setInputFiles("#map-input", {
       name: "second.png",
       mimeType: "image/png",
@@ -160,7 +163,10 @@ test.describe("hexcrawl scene (§9 Phase 1, D-270)", () => {
     await applySidebarMap(page);
     await expect
       .poll(read, { timeout: 20_000 })
-      .toMatchObject({ width: 800, height: 600 });
+      .toMatchObject({ sceneName: "Marsh overland", width: 1600, height: 1200 });
+    await expect
+      .poll(() => surfaceCallArg<string | null>(page, "app", "sceneImgById", after.sceneId))
+      .not.toBe(imgBefore);
     // …and scene 1 — the scene this used to be hardcoded to — is untouched.
     expect(
       await surfaceCallArg<string | null>(

@@ -105,7 +105,8 @@
   let gridType = $state<SceneGrid["type"]>(initialDialogState.gridType);
   let squareColumns = $state(22);
   let gridWarning = $state("");
-  let resizeChoice = $state<"keep" | "rescale">("keep");
+  /** New scene only: match the scene to the image, or keep the chosen size and fit the image into it (§6.3). */
+  let sceneSizeMode = $state<"matchImage" | "fitImage">("matchImage");
   let offsetX = $state(initialDialogState.offsetX);
   let offsetY = $state(initialDialogState.offsetY);
   let backgroundScale = $state(initialDialogState.backgroundScale);
@@ -189,24 +190,35 @@
     onPreferencesChange(next);
   }
 
+  /** A background placed on an existing scene never changes that scene's size (§6.3). */
+  function keepsSceneSize(action: ImageAction = selectedAction): boolean {
+    return action === "replaceBackground";
+  }
+
   function resetGeometry(image?: PreparedImage): void {
     const width = image?.width ?? prepared?.width ?? 1;
     const height = image?.height ?? prepared?.height ?? 1;
-    sceneWidth = width;
-    sceneHeight = height;
+    if (keepsSceneSize() && scene) {
+      sceneWidth = scene.width;
+      sceneHeight = scene.height;
+    } else {
+      sceneWidth = width;
+      sceneHeight = height;
+    }
+    sceneSizeMode = "matchImage";
     dimensionsLock = true;
     const newScene = selectedAction === "newScene";
     gridType = newScene ? sceneDefaults.gridType : scene?.grid.type ?? sceneDefaults.gridType;
     gridSize = newScene ? sceneDefaults.gridSize : scene?.grid.size ?? sceneDefaults.gridSize;
     squareColumns = Math.max(1, Math.round(width / Math.max(50, gridSize)));
-    offsetX = newScene ? 0 : scene?.background?.offset?.x ?? 0;
-    offsetY = newScene ? 0 : scene?.background?.offset?.y ?? 0;
-    backgroundScale = newScene ? 1 : scene?.background?.scale ?? 1;
+    // Native size: 1:1 with its top-left at the scene origin. The fields below can still adjust it.
+    offsetX = 0;
+    offsetY = 0;
+    backgroundScale = 1;
     padding = newScene ? 0 : scene?.background?.padding ?? 0;
     backgroundColor = !newScene && /^#[0-9a-f]{6}$/i.test(scene?.background?.color ?? "") ? scene?.background?.color ?? "#ffffff" : "#ffffff";
     foregroundElevation = scene?.foreground?.elevation ?? 0;
     assetGridSize = newScene ? sceneDefaults.gridSize : scene?.grid.size ?? sceneDefaults.gridSize;
-    resizeChoice = "keep";
     gridWarning = "";
   }
 
@@ -327,8 +339,35 @@
     }
   }
 
+  /** Fit mode: the image is scaled to fill the chosen scene and centred, with its aspect kept. */
+  function refitBackground(): void {
+    if (!prepared || sceneSizeMode !== "fitImage") return;
+    const scale = Math.min(sceneWidth / prepared.width, sceneHeight / prepared.height);
+    backgroundScale = scale;
+    offsetX = Math.round((sceneWidth - prepared.width * scale) / 2);
+    offsetY = Math.round((sceneHeight - prepared.height * scale) / 2);
+  }
+
+  function changeSceneSizeMode(mode: "matchImage" | "fitImage"): void {
+    sceneSizeMode = mode;
+    if (mode === "fitImage") {
+      refitBackground();
+      return;
+    }
+    sceneWidth = prepared?.width ?? sceneWidth;
+    sceneHeight = prepared?.height ?? sceneHeight;
+    backgroundScale = 1;
+    offsetX = 0;
+    offsetY = 0;
+  }
+
   function changeWidth(value: number): void {
-    if (!Number.isFinite(value) || value < 1) return;
+    if (!Number.isFinite(value) || value < 1 || keepsSceneSize()) return;
+    if (sceneSizeMode === "fitImage") {
+      sceneWidth = Math.round(value);
+      refitBackground();
+      return;
+    }
     const next = dimensionsLock && prepared
       ? aspectLockedSize({ width: prepared.width, height: prepared.height }, "width", value)
       : { width: Math.round(value), height: sceneHeight };
@@ -336,7 +375,12 @@
     if (dimensionsLock) sceneHeight = next.height;
   }
   function changeHeight(value: number): void {
-    if (!Number.isFinite(value) || value < 1) return;
+    if (!Number.isFinite(value) || value < 1 || keepsSceneSize()) return;
+    if (sceneSizeMode === "fitImage") {
+      sceneHeight = Math.round(value);
+      refitBackground();
+      return;
+    }
     const next = dimensionsLock && prepared
       ? aspectLockedSize({ width: prepared.width, height: prepared.height }, "height", value)
       : { width: sceneWidth, height: Math.round(value) };
@@ -430,7 +474,6 @@
         backgroundColor = /^#[0-9a-f]{6}$/i.test(duplicate.background?.color ?? "") ? duplicate.background?.color ?? "#ffffff" : "#ffffff";
         gridType = duplicate.grid.type;
         gridSize = duplicate.grid.size;
-        resizeChoice = "keep";
       }
     }
 
@@ -495,8 +538,11 @@
           padding,
           color: backgroundColor,
         },
-        sceneSize: { width: sceneWidth, height: sceneHeight },
-        resizeChoice,
+        // A background never resizes the scene it lands on: its size is the scene's own (§6.3).
+        sceneSize: keepsSceneSize(actualAction) && targetScene
+          ? { width: targetScene.width, height: targetScene.height }
+          : { width: sceneWidth, height: sceneHeight },
+        resizeChoice: "keep",
         grid: {
           type: gridType,
           size: gridType === "gridless" ? 100 : gridSize,
@@ -745,20 +791,30 @@
 
           {#if selectedAction === "newScene" || selectedAction === "replaceBackground"}
             <fieldset class="geometry">
-              <legend>{selectedAction === "newScene" ? "New scene size and grid" : "Background sizing and alignment"}</legend>
-              <div class="row">
-                <label>Width<input type="number" min="1" max="100000" step="1" value={sceneWidth} disabled={running} oninput={(event) => changeWidth(Number(event.currentTarget.value))} /></label>
-                <label>Height<input type="number" min="1" max="100000" step="1" value={sceneHeight} disabled={running} oninput={(event) => changeHeight(Number(event.currentTarget.value))} /></label>
-              </div>
-              <div class="row tight">
-                <label class="check"><input type="checkbox" bind:checked={dimensionsLock} disabled={running} /> Lock image aspect ratio</label>
-                <button type="button" disabled={running || !prepared} onclick={() => resetGeometry()}>Reset to image size</button>
-              </div>
-              {#if selectedAction === "replaceBackground" && scene && (scene.width !== sceneWidth || scene.height !== sceneHeight)}
-                <label>Existing placeables when dimensions change
-                  <select bind:value={resizeChoice} disabled={running}><option value="keep">Keep positions (default)</option><option value="rescale">Rescale placeables to new dimensions</option></select>
-                </label>
-                {#if resizeChoice === "rescale"}<p class="warning">Rescales token/tile/light/sound/wall/drawing/note/region coordinates as one undo step. Circular radii use the geometric-mean scale; normalized region shapes stay normalized.</p>{/if}
+              <legend>{selectedAction === "newScene" ? "New scene size and grid" : "Background placement and grid"}</legend>
+              {#if keepsSceneSize()}
+                <p class="hint">The scene stays {sceneWidth.toLocaleString()} × {sceneHeight.toLocaleString()} px. The image is placed at its native size; the offset and scale below adjust it.</p>
+              {:else}
+                <div class="row">
+                  <label>Scene size
+                    <select value={sceneSizeMode} disabled={running} onchange={(event) => changeSceneSizeMode(event.currentTarget.value as "matchImage" | "fitImage")}>
+                      <option value="matchImage">Match the scene to the image</option>
+                      <option value="fitImage">Choose the scene size; fit the image to it</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="row">
+                  <label>Width<input type="number" min="1" max="100000" step="1" value={sceneWidth} disabled={running} oninput={(event) => changeWidth(Number(event.currentTarget.value))} /></label>
+                  <label>Height<input type="number" min="1" max="100000" step="1" value={sceneHeight} disabled={running} oninput={(event) => changeHeight(Number(event.currentTarget.value))} /></label>
+                </div>
+                <div class="row tight">
+                  {#if sceneSizeMode === "matchImage"}
+                    <label class="check"><input type="checkbox" bind:checked={dimensionsLock} disabled={running} /> Lock image aspect ratio</label>
+                  {:else}
+                    <p class="hint">The image is scaled to fit inside the scene and centred. The background colour fills the rest.</p>
+                  {/if}
+                  <button type="button" disabled={running || !prepared} onclick={() => resetGeometry()}>Reset to image size</button>
+                </div>
               {/if}
               <div class="row">
                 <label>Grid type

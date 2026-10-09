@@ -394,7 +394,17 @@ is not a document Op, but the shared image is persistent.
 These are the only geometry rules. They live in `src/core/imageSizing.ts` and are tested directly.
 
 - **Scene size from image:** `width = image.width`, `height = image.height`. Aspect-locked edits
-  change one side and derive the other, rounded to the nearest integer.
+  change one side and derive the other, rounded to the nearest integer. This applies to a **new scene**
+  whose size is set to match the image. Decided by the GM on 2026-10-10 (supersedes the earlier open
+  question):
+  - **Background on an existing scene** keeps that scene's width and height. The image is placed at native
+    size (scale 1, offset 0,0), and the offset and scale fields can adjust it. No size or rescale choice is
+    offered for this case. `planImageAction` keeps the `rescale` option for callers that use it, but the
+    dialog does not expose it.
+  - **New scene from an image** offers two choices. *Match the scene to the image* uses the image's pixel
+    size. *Choose the scene size; fit the image to it* keeps the chosen width and height. The image is scaled
+    by `min(sceneWidth / imageWidth, sceneHeight / imageHeight)`, keeping its aspect, and centred, so the
+    offset is `round((sceneWidth − imageWidth × scale) / 2)` on each axis.
 - **Grid from pre-gridded image:** `size = round(image.width / columns)`. Reject sizes below 50. Warn
   when the result is not an integer divisor of the image height within 1 px.
 - **Background transform:** `drawnWidth = width × scale`, `drawnHeight = height × scale`, drawn at
@@ -662,7 +672,10 @@ e2e spec for the user-visible parts.
   - The file:// and https origin checks (`e2e/origins.spec.ts`).
   - The new strings are gathered in one table, `src/ui/images/strings.ts`. There is still no catalogue and no
     translation (D-263 / G-38).
-  - Open: the Pinterest test scene (blocked, since the three source images could not be fetched in the sandbox).
+  - Scene sizing per §6.3 (GM decision, 2026-10-10): a background on an existing scene keeps the scene's size;
+    a new scene can match the image or fit the image into a chosen size (`e2e/image_geometry.spec.ts`).
+  - Open: the Pinterest test scene. The GM chose to skip it this round, since the sandbox cannot fetch the three
+    source images.
     Also a player-side video check. The video path is covered on the GM stage only.
 
 ---
