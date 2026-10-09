@@ -434,6 +434,32 @@ function readArchiveAssets(
       throw new Error(
         `world file: asset ${raw.hash} has invalid export rights`,
       );
+    if (raw.source !== undefined) {
+      const source = raw.source;
+      if (!isRecord(source) || !["file", "paste", "url", "tile-browser"].includes(String(source.kind)) ||
+          (source.originalName !== undefined && (typeof source.originalName !== "string" || source.originalName.length > 1024)) ||
+          (source.originalMime !== undefined && (typeof source.originalMime !== "string" || source.originalMime.length > 256)) ||
+          (source.url !== undefined && (typeof source.url !== "string" || source.url.length > 4096)) ||
+          (source.importedBy !== undefined && (typeof source.importedBy !== "string" || source.importedBy.length > 256)) ||
+          (source.uploadedBytes !== undefined && (typeof source.uploadedBytes !== "number" || !Number.isSafeInteger(source.uploadedBytes) || source.uploadedBytes < 1 || source.uploadedBytes > 64 * 1024 * 1024)) ||
+          (source.uploadedBytesByUser !== undefined && (!isRecord(source.uploadedBytesByUser) ||
+            Object.keys(source.uploadedBytesByUser).length > 1000 ||
+            Object.entries(source.uploadedBytesByUser).some(([userId, bytes]) => userId.length > 256 ||
+              typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 1))))
+        throw new Error(`world file: asset ${raw.hash} has invalid import provenance`);
+    }
+    if (raw.ingest !== undefined) {
+      const ingest = raw.ingest;
+      if (!isRecord(ingest) || !["original", "webp"].includes(String(ingest.format)) ||
+          (ingest.quality !== undefined && (typeof ingest.quality !== "number" || !Number.isFinite(ingest.quality) || ingest.quality < 0.1 || ingest.quality > 1)))
+        throw new Error(`world file: asset ${raw.hash} has invalid ingest metadata`);
+    }
+    if (raw.logicalFiles !== undefined) {
+      if (!Array.isArray(raw.logicalFiles) || raw.logicalFiles.length > 1000 ||
+          !raw.logicalFiles.every((file) => isRecord(file) && typeof file.folder === "string" && file.folder.length <= 240 &&
+            typeof file.name === "string" && file.name.length <= 1024))
+        throw new Error(`world file: asset ${raw.hash} has invalid logical file aliases`);
+    }
     for (const key of ["thumb", "mid"] as const) {
       if (raw[key] !== undefined && !validateAssetVariant(raw[key]))
         throw new Error(
@@ -630,6 +656,9 @@ export async function collectWorldArchive(
     if (record.visibility !== undefined) entry.visibility = record.visibility;
     if (record.exportRights !== undefined)
       entry.exportRights = record.exportRights;
+    if (record.source !== undefined) entry.source = structuredClone(record.source);
+    if (record.ingest !== undefined) entry.ingest = structuredClone(record.ingest);
+    if (record.logicalFiles !== undefined) entry.logicalFiles = structuredClone(record.logicalFiles);
     if (record.width !== undefined) entry.width = record.width;
     if (record.height !== undefined) entry.height = record.height;
     if (record.thumb !== undefined) entry.thumb = record.thumb;

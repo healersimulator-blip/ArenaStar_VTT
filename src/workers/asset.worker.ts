@@ -16,7 +16,8 @@ const ctx = self as unknown as WorkerCtx;
 
 async function decode(bytes: Uint8Array): Promise<ImageBitmap> {
   const copy = new Uint8Array(bytes); // createImageBitmap may detach
-  return createImageBitmap(new Blob([copy.buffer as ArrayBuffer]));
+  // Explicitly apply EXIF orientation before metadata, variant sizing and scene sizing.
+  return createImageBitmap(new Blob([copy.buffer as ArrayBuffer]), { imageOrientation: "from-image" });
 }
 
 ctx.onmessage = (ev: MessageEvent<AssetJob>) => {

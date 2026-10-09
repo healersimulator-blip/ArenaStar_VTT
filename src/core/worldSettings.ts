@@ -63,6 +63,10 @@ export interface CoreWorldSettings {
    * derived ones the sheet shows (`packages/pf1e/tokenHpBars`).
    */
   tokenHpBars?: TokenHpBarMode;
+  /** World-level optional image workflow gate: when true, non-GMs may preview only. */
+  restrictedPlayerImageMode?: boolean;
+  /** Optional byte quota (MB) for persistent image uploads by each non-GM user. */
+  playerUploadQuotaMB?: number | null;
   /** Anything a package defines; never stripped by core. Absent means "unset", not `undefined`. */
   [key: string]: Json;
 }

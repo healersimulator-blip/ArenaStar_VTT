@@ -13,15 +13,32 @@
   import { renderMarkdown } from "../../core/markdown";
   import { journalSegments } from "../../core/journalLinks";
 
-  let { client, journalId, pageId, text, revealSecrets = false }: {
+  let {
+    client,
+    journalId,
+    pageId,
+    text,
+    src = null,
+    imageAlt = "Journal page image",
+    resolveAsset = null,
+    revealSecrets = false,
+  }: {
     client: ClientSync;
     journalId: string;
     pageId: string;
     text: string;
+    src?: string | null;
+    imageAlt?: string;
+    resolveAsset?: ((assetId: string) => string | null) | null;
     revealSecrets?: boolean;
   } = $props();
 
   const segments = $derived(journalSegments(text));
+  const imageUrl = $derived(
+    src
+      ? resolveAsset?.(src) ?? (/^https:\/\//i.test(src) ? src : null)
+      : null,
+  );
 
   function trigger(index: number): void {
     client.requestJournalTrigger(journalId, pageId, index);
@@ -29,6 +46,15 @@
 </script>
 
 <div class="page" data-page={pageId}>
+  {#if src}
+    <figure class="page-image" data-journal-image={pageId}>
+      {#if imageUrl}
+        <img src={imageUrl} alt={imageAlt || "Journal page image"} loading="lazy" />
+      {:else}
+        <div class="image-pending" role="status">Loading journal image…</div>
+      {/if}
+    </figure>
+  {/if}
   {#each segments as segment, i (i)}
     {#if segment.kind === "link"}
       {#if segment.hidden && !revealSecrets}
@@ -64,6 +90,19 @@
   }
   .page :global(p) {
     margin: 4px 0;
+  }
+  .page-image {
+    margin: 0 0 8px;
+  }
+  .page-image img {
+    display: block;
+    max-width: 100%;
+    max-height: min(70vh, 720px);
+    object-fit: contain;
+  }
+  .image-pending {
+    min-height: 36px;
+    opacity: 0.7;
   }
   .secret {
     background: #3a2f16;

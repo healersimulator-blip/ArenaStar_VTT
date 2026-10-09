@@ -7,9 +7,11 @@ export async function imageTexture(bytes: Uint8Array, mime = "image/png"): Promi
   finally { URL.revokeObjectURL(url); }
 }
 
-async function imageUrlTexture(url: string): Promise<Texture> {
+export async function imageUrlTexture(url: string): Promise<Texture> {
+  if (url.startsWith("http:") || (!/^(https:|blob:|data:)/i.test(url)))
+    throw new Error("Images must use HTTPS or an in-memory object URL");
   const image = new Image();
-  image.crossOrigin = "anonymous";
+  if (/^https:/i.test(url)) image.crossOrigin = "anonymous";
   image.src = url;
   await image.decode();
   return Texture.from(image);

@@ -75,6 +75,13 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "asset.manifest":
     case "ephemeral":
     case "asset.get":
+    case "asset.upload.start":
+    case "asset.upload.chunk":
+    case "asset.upload.finish":
+    case "asset.upload.cancel":
+    case "asset.upload.result":
+    case "asset.share":
+    case "asset.share.result":
     case "fog.put":
     case "fog.get":
     case "fog.state":
@@ -130,6 +137,13 @@ export function channelFor(kind: MsgName): ChannelName {
       return "ephemeral";
     case "asset.get":
     case "asset.chunk":
+    case "asset.upload.start":
+    case "asset.upload.chunk":
+    case "asset.upload.finish":
+    case "asset.upload.cancel":
+    case "asset.upload.result":
+    case "asset.share":
+    case "asset.share.result":
       return "assets";
     case "sim.delta":
     case "sim.snapshot":

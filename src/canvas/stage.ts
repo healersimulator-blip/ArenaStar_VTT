@@ -16,11 +16,12 @@ import {
   Graphics,
   Sprite,
   Text,
+  Texture,
 } from "pixi.js";
 // file:// and CSP-restricted contexts forbid unsafe-eval; this side-effect
 // import swaps Pixi's Function()-based fast paths for eval-free ones (D-058).
 import "pixi.js/unsafe-eval";
-import { imageTexture } from "./imageTexture";
+import { imageTexture, imageUrlTexture } from "./imageTexture";
 import type { TokenDocument } from "../core/documents";
 import type { Camera, Viewport } from "./camera";
 import { fitRect, screenToWorld } from "./camera";
@@ -75,12 +76,22 @@ export const LAYER_ORDER = [
   "tokens",
   "models",
   "tilesAbove",
+  "foreground",
   "fxAboveTokens",
   "fog",
   "effects",
   "notes",
   "controls",
 ] as const;
+
+export interface StageBackgroundPresentation {
+  width: number;
+  height: number;
+  offset?: { x: number; y: number };
+  scale?: number;
+  padding?: number;
+  color?: string;
+}
 
 export interface StageOptions {
   width: number;
@@ -128,6 +139,13 @@ export interface Stage {
   setBackground(color: number): void;
   clearBackgroundImage(): void;
   setBackgroundImage(bytes: Uint8Array, mime?: string): Promise<void>;
+  setBackgroundUrl(url: string): Promise<void>;
+  setBackgroundPresentation(presentation: StageBackgroundPresentation): void;
+  clearForegroundImage(): void;
+  setForegroundImage(bytes: Uint8Array, mime?: string): Promise<void>;
+  setForegroundUrl(url: string): Promise<void>;
+  setForegroundSceneSize(width: number, height: number, elevation?: number): void;
+  setTokenImageLoader(loader: ((image: string) => Promise<Texture | null>) | null): void;
   setGrid(grid: GridSpec | null): void;
   /** §9 templates overlay (cone/circle/ray/rect). */
   getTemplatesLayer(): TemplatesLayer;
@@ -378,10 +396,12 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const backgroundLayer = new Container();
   backgroundLayer.label = "background";
   const bgFill = new Graphics();
-  backgroundLayer.addChild(bgFill);
+  const bgPadding = new Graphics();
+  backgroundLayer.addChild(bgFill, bgPadding);
   let bgSprite: Sprite | null = null;
   let bgRevision = 0;
   let bgColor = options.background ?? 0x14171c;
+  let bgPresentation: StageBackgroundPresentation = { width: 2000, height: 1500, offset: { x: 0, y: 0 }, scale: 1, padding: 0 };
   root.addChild(backgroundLayer);
 
   // ── Tiles(below) (§9 order: Background → Tiles(below) → Grid) ───────────────
@@ -438,6 +458,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   tokenLayer.label = "tokens";
   root.addChild(tokenLayer);
   const tokenViews = new Map<string, Container>();
+  const tokenArtwork = new Map<string, { image: string | null; revision: number; sprite: Sprite | null }>();
+  let tokenImageLoader: ((image: string) => Promise<Texture | null>) | null = null;
   /** D-251: fog's token gate (null = draw every token). */
   let tokenFilter: ReadonlySet<string> | null = null;
   /** Glide targets (§9 animated movement): views lerp here each tick. */
@@ -467,6 +489,14 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const tilesAboveLayer = new Container();
   tilesAboveLayer.label = "tilesAbove";
   root.addChild(tilesAboveLayer);
+  const foregroundLayer = new Container();
+  foregroundLayer.label = "foreground";
+  root.addChild(foregroundLayer);
+  let foregroundSprite: Sprite | null = null;
+  let foregroundRevision = 0;
+  let foregroundWidth = 0;
+  let foregroundHeight = 0;
+  let foregroundElevation = 0;
   const fxAboveTokens = new Container();
   fxAboveTokens.label = "fxAboveTokens";
   root.addChild(fxAboveTokens);
@@ -555,7 +585,33 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     setBackground(color: number): void {
       bgColor = color;
       bgFill.clear().rect(0, 0, viewport.width, viewport.height).fill(color);
-      if (bgSprite) bgSprite.tint = color;
+    },
+    setBackgroundPresentation(presentation: StageBackgroundPresentation): void {
+      bgPresentation = {
+        ...presentation,
+        offset: presentation.offset ?? { x: 0, y: 0 },
+        scale: Number.isFinite(presentation.scale) && (presentation.scale ?? 0) > 0 ? presentation.scale ?? 1 : 1,
+        padding: Number.isFinite(presentation.padding) ? Math.max(0, Math.min(1, presentation.padding ?? 0)) : 0,
+      };
+      if (presentation.color && /^#[0-9a-f]{6}$/i.test(presentation.color)) {
+        bgColor = Number.parseInt(presentation.color.slice(1), 16);
+        bgFill.clear().rect(0, 0, viewport.width, viewport.height).fill(bgColor);
+      }
+      if (bgSprite) {
+        bgSprite.position.set(bgPresentation.offset?.x ?? 0, bgPresentation.offset?.y ?? 0);
+        bgSprite.scale.set(bgPresentation.scale ?? 1);
+      }
+      const margin = Math.max(0, bgPresentation.padding ?? 0) * Math.max(bgPresentation.width, bgPresentation.height);
+      bgPadding.clear();
+      if (margin > 0) {
+        const w = bgPresentation.width;
+        const h = bgPresentation.height;
+        bgPadding.rect(-margin, -margin, w + margin * 2, margin)
+          .rect(-margin, h, w + margin * 2, margin)
+          .rect(-margin, 0, margin, h)
+          .rect(w, 0, margin, h)
+          .fill({ color: 0x080a0f, alpha: 0.9 });
+      }
     },
     clearBackgroundImage(): void {
       bgRevision++;
@@ -569,8 +625,55 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       if (revision !== bgRevision) { texture.destroy(true); return; }
       bgSprite?.destroy({ texture: true, textureSource: true });
       bgSprite = new Sprite(texture);
+      bgSprite.position.set(bgPresentation.offset?.x ?? 0, bgPresentation.offset?.y ?? 0);
+      bgSprite.scale.set(bgPresentation.scale ?? 1);
       backgroundLayer.addChildAt(bgSprite, 0);
       bgFill.clear();
+    },
+    async setBackgroundUrl(url: string): Promise<void> {
+      const revision = ++bgRevision;
+      const texture = await imageUrlTexture(url);
+      if (revision !== bgRevision) { texture.destroy(true); return; }
+      bgSprite?.destroy({ texture: true, textureSource: true });
+      bgSprite = new Sprite(texture);
+      bgSprite.position.set(bgPresentation.offset?.x ?? 0, bgPresentation.offset?.y ?? 0);
+      bgSprite.scale.set(bgPresentation.scale ?? 1);
+      backgroundLayer.addChildAt(bgSprite, 0);
+      bgFill.clear();
+    },
+    clearForegroundImage(): void {
+      foregroundRevision++;
+      foregroundSprite?.destroy({ texture: true, textureSource: true });
+      foregroundSprite = null;
+    },
+    async setForegroundImage(bytes: Uint8Array, mime = "image/png"): Promise<void> {
+      const revision = ++foregroundRevision;
+      const texture = await imageTexture(bytes, mime);
+      if (revision !== foregroundRevision) { texture.destroy(true); return; }
+      foregroundSprite?.destroy({ texture: true, textureSource: true });
+      foregroundSprite = new Sprite(texture);
+      foregroundLayer.addChild(foregroundSprite);
+      this.setForegroundSceneSize(foregroundWidth, foregroundHeight, foregroundElevation);
+    },
+    async setForegroundUrl(url: string): Promise<void> {
+      const revision = ++foregroundRevision;
+      const texture = await imageUrlTexture(url);
+      if (revision !== foregroundRevision) { texture.destroy(true); return; }
+      foregroundSprite?.destroy({ texture: true, textureSource: true });
+      foregroundSprite = new Sprite(texture);
+      foregroundLayer.addChild(foregroundSprite);
+      this.setForegroundSceneSize(foregroundWidth, foregroundHeight, foregroundElevation);
+    },
+    setForegroundSceneSize(width: number, height: number, elevation = 0): void {
+      foregroundWidth = width; foregroundHeight = height; foregroundElevation = elevation;
+      if (foregroundSprite) {
+        foregroundSprite.position.set(0, 0);
+        foregroundSprite.width = width; foregroundSprite.height = height;
+        foregroundSprite.zIndex = elevation;
+      }
+    },
+    setTokenImageLoader(loader: ((image: string) => Promise<Texture | null>) | null): void {
+      tokenImageLoader = loader;
     },
     setGrid(next: GridSpec | null): void {
       grid = next;
@@ -713,6 +816,30 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           view.addChild(body, label);
           tokenLayer.addChild(view);
           tokenViews.set(token._id, view);
+          tokenArtwork.set(token._id, { image: null, revision: 0, sprite: null });
+        }
+        const artwork = tokenArtwork.get(token._id);
+        if (artwork && artwork.image !== token.img) {
+          artwork.revision++;
+          artwork.sprite?.destroy({ texture: false, textureSource: false });
+          artwork.sprite = null;
+          artwork.image = token.img;
+        }
+        if (artwork && token.img && tokenImageLoader && !artwork.sprite) {
+          const image = token.img;
+          const revision = ++artwork.revision;
+          void tokenImageLoader(image).then((texture) => {
+            const current = tokenArtwork.get(token._id);
+            const currentView = tokenViews.get(token._id);
+            if (!texture || !current || current.revision !== revision || current.image !== image || !currentView) return;
+            const sprite = new Sprite(texture);
+            sprite.label = "tokenArtwork";
+            sprite.anchor.set(0.5);
+            current.sprite = sprite;
+            currentView.addChildAt(sprite, Math.min(1, currentView.children.length));
+            sprite.position.set(token.width / 2, token.height / 2);
+            sprite.width = token.width; sprite.height = token.height;
+          }).catch(() => undefined);
         }
         let animation = tokenMovement.get(token._id);
         if (!animation) { animation = new MovementAnimation(); tokenMovement.set(token._id, animation); }
@@ -749,6 +876,12 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           body.pivot.set(cx, cy); body.position.set(cx, cy);
           body.rotation = angle * Math.PI / 180;
         }
+        const artworkSprite = tokenArtwork.get(token._id)?.sprite;
+        if (artworkSprite) {
+          artworkSprite.position.set(rect.width / 2, rect.height / 2);
+          artworkSprite.width = rect.width; artworkSprite.height = rect.height;
+          artworkSprite.rotation = angle * Math.PI / 180;
+        }
         const label = view.children.find((c) => c instanceof Text) as
           Text | undefined;
         if (label && label.text !== token.name) label.text = token.name;
@@ -773,6 +906,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           tokenTargets.delete(id);
           tokenMovement.delete(id);
           tokenRotation.delete(id);
+          const artwork = tokenArtwork.get(id);
+          artwork?.sprite?.destroy({ texture: false, textureSource: false });
+          tokenArtwork.delete(id);
           tokenRects.delete(id);
           badgeChips.delete(id);
           hpBarSignatures.delete(id);
@@ -905,6 +1041,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       lightingLayer = null;
       fogLayer?.destroy();
       fogLayer = null;
+      for (const artwork of tokenArtwork.values()) {
+        artwork.revision++;
+        artwork.sprite?.destroy({ texture: false, textureSource: false });
+      }
+      tokenArtwork.clear();
       tokenViews.clear();
       tokenMovement.clear();
       tokenRotation.clear();
@@ -913,6 +1054,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       bgRevision++; // pending image decodes must not touch a destroyed canvas
       bgSprite?.destroy({ texture: true, textureSource: true });
       bgSprite = null;
+      foregroundRevision++;
+      foregroundSprite?.destroy({ texture: true, textureSource: true });
+      foregroundSprite = null;
       app.destroy({ removeView: true }, { children: true });
     },
   };

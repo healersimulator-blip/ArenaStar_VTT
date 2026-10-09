@@ -51,6 +51,7 @@ import {
   validateScriptMacro,
   type ScriptPolicy,
 } from "../../src/core/scriptMacros";
+import { pngHeaderForTest } from "../helpers/imageBytes";
 
 const token = (id: string, x: number, y: number): TokenDocument => ({
   _id: id,
@@ -746,11 +747,11 @@ describe("world.zip export/import (§8)", () => {
     const app = await boot(root);
     await addToken(app, token("t-1", 100, 100));
     await addToken(app, token("t-2", 400, 300));
-    const { hash } = await app.pipeline.importImage(
-      new Uint8Array([1, 2, 3, 4]),
-      "map.png",
-      "image/png",
-    );
+    const mapBytes = pngHeaderForTest(2000, 1500, [1, 2, 3, 4]);
+    const { hash } = await app.pipeline.importImage(mapBytes, "map.png", "image/png", {
+      source: { kind: "file", originalName: "map.png", originalMime: "image/png", importedBy: "u-gm", uploadedBytes: mapBytes.length },
+      logicalFile: { folder: "Maps", name: "Map" },
+    });
     app.gm.client.submit([
       {
         kind: "update",
@@ -899,6 +900,17 @@ describe("world.zip export/import (§8)", () => {
     expect(scene?.tokens.length).toBe(2); // post-export token rolled back
     expect(scene?.tokens.map((t) => t._id).sort()).toEqual(["t-1", "t-2"]);
     expect(scene?.img).toBe(hash);
+    const restoredAsset = (await listAssets(db, worldId)).find((asset) => asset.hash === hash);
+    expect(restoredAsset?.source).toMatchObject({
+      kind: "file",
+      originalName: "map.png",
+      originalMime: "image/png",
+      importedBy: "u-gm",
+      uploadedBytes: mapBytes.length,
+      uploadedBytesByUser: { "u-gm": mapBytes.length },
+    });
+    expect(restoredAsset?.ingest).toEqual({ format: "original" });
+    expect(restoredAsset?.logicalFiles).toEqual([{ folder: "Maps", name: "Map" }]);
 
     // every exported document row survived, byte-identical semantics
     const rows = new Map(
@@ -911,7 +923,7 @@ describe("world.zip export/import (§8)", () => {
 
     // assets still stream from the restored world (blobs + manifest intact)
     const bytes = await restored.gm.fetcher.request(hash, "scene");
-    expect([...bytes]).toEqual([1, 2, 3, 4]);
+    expect([...bytes]).toEqual([...mapBytes]);
     await restored.persister.flush();
     await restored.close();
   });

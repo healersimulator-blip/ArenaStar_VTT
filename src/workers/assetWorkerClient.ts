@@ -24,7 +24,7 @@ async function mainThreadDecode(bytes: Uint8Array): Promise<ImageBitmap> {
   const copy = new Uint8Array(bytes);
   const blob = new Blob([copy.buffer as ArrayBuffer]);
   try {
-    return await createImageBitmap(blob);
+    return await createImageBitmap(blob, { imageOrientation: "from-image" });
   } catch {
     let binary = "";
     const CHUNK = 0x8000;

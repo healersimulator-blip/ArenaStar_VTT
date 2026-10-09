@@ -28,6 +28,7 @@ import { pf1eSheetView } from "../../src/ui/sheets/pf1eSheetModel";
 import { pf1eSpellbookEdit, pf1eSpellbookView } from "../../src/ui/sheets/pf1eSpellbook";
 import { InlineSimRunner } from "../../src/workers/simWorkerClient";
 import { FakeCodec, settle } from "../app/fakes";
+import { pngHeaderForTest } from "../helpers/imageBytes";
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -183,7 +184,8 @@ describe("world file keeps characters whole (tokens ↔ actors ↔ sheets ↔ im
     await settle();
 
     // ── images: a real pipeline import (full + derived thumb/mid, each its own asset) ──
-    const portrait = await a.pipeline.importImage(new Uint8Array([137, 80, 78, 71, 1, 2, 3, 4, 5, 6]), "ezren.png", "image/png");
+    const portraitBytes = pngHeaderForTest(2000, 1500, [1, 2, 3, 4, 5, 6]);
+    const portrait = await a.pipeline.importImage(portraitBytes, "ezren.png", "image/png");
     expect(portrait.entry.thumb?.assetId).toBeTruthy();
     expect(portrait.entry.mid?.assetId).toBeTruthy();
 
@@ -303,7 +305,7 @@ describe("world file keeps characters whole (tokens ↔ actors ↔ sheets ↔ im
 
       // images: the token's image, its thumb and its mid are all served from the copied world
       const full = await b.gm.fetcher.request(portrait.hash, "scene");
-      expect([...full]).toEqual([137, 80, 78, 71, 1, 2, 3, 4, 5, 6]);
+      expect([...full]).toEqual([...portraitBytes]);
       const record = await getAsset(db, copied.worldId, portrait.hash);
       expect(record?.thumb?.assetId).toBe(portrait.entry.thumb?.assetId);
       expect(record?.mid?.assetId).toBe(portrait.entry.mid?.assetId);

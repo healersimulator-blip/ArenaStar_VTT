@@ -284,6 +284,10 @@ export interface AssetRecord {
   visibility?: AssetManifestEntry["visibility"];
   /** FX import's explicit world-archive rights declaration (absent on legacy blobs). */
   exportRights?: AssetManifestEntry["exportRights"];
+  /** GM-only importer attribution/provenance; persisted with the content-addressed record. */
+  source?: AssetManifestEntry["source"];
+  ingest?: AssetManifestEntry["ingest"];
+  logicalFiles?: AssetManifestEntry["logicalFiles"];
   /** Present only when OPFS is unavailable (D-037). */
   bytes?: Uint8Array;
   /** §7 image descriptors (set via AssetServer.describe; absent on plain blobs). */

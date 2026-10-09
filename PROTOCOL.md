@@ -16,7 +16,7 @@ frame := [u8 MsgKind][msgpack payload]
 | ----------- | ----------------------------- | -------------------------------------------------------------- |
 | `ops`       | reliable + ordered            | hello/welcome/snapshot/ops/rejected/roll/chat/control/kick/ban |
 | `ephemeral` | unreliable, maxRetransmits: 0 | ephemeral (cursors, pings, drags, ruler, typing) ≤ 20 Hz       |
-| `assets`    | reliable + ordered            | asset.get / asset.chunk (16–64 KB chunks, backpressure)        |
+| `assets`    | reliable + ordered            | asset.get / asset.chunk / authorized image upload and share (24 KB upload chunks, backpressure) |
 | `sim`       | reliable + ordered            | sim.delta / sim.snapshot / turn.report (backpressure-aware)    |
 
 - Ephemeral traffic never touches the Document Store or OpLog (§5).
@@ -816,6 +816,96 @@ interface AssetGetMsg {
   offset: number;
   priority: AssetPriority;
 }
+```
+
+Persistent image imports use a host-authorized transfer, not client-written asset blobs. The host checks
+the current role/quota before accepting bytes, enforces ordered 24 KiB chunks and a 64 MiB source cap,
+expires incomplete uploads after ten minutes, validates magic bytes and decoded pixels before storage, and
+records a GM-visible audit message. Trusted uploads remain GM-only until explicitly shared. Direct client
+`ephemeral.image` publications are discarded.
+
+### asset.upload.start (0x15 · client → host · assets)
+
+Begin a bounded image transfer. The host checks the current role, player restriction, quota, exact metadata,
+and collision policy before reserving upload memory; no bytes are accepted until `ready` is returned.
+
+```ts
+interface AssetUploadStartMsg {
+  kind: "asset.upload.start";
+  uploadId: string;
+  name: string;
+  displayName: string;
+  size: number;
+  folder: string;
+  sourceKind: "file" | "paste" | "url";
+  collisionBehavior: "stop" | "reuse" | "overwrite";
+  convertToWebp: boolean;
+  webpQuality: number;
+}
+```
+
+### asset.upload.chunk (0x16 · client → host · assets)
+
+Ordered, contiguous chunk; at most 24 KiB. The host rechecks authorization on every chunk and acknowledges
+progress in 1 MiB windows.
+
+```ts
+interface AssetUploadChunkMsg {
+  kind: "asset.upload.chunk";
+  uploadId: string;
+  offset: number;
+  bytes: Uint8Array;
+}
+```
+
+### asset.upload.finish (0x17 · client → host · assets)
+
+Finish the current upload. The declared length must match exactly; the host sniffs the format, enforces the
+decoded-pixel cap, derives variants and stores the content-addressed asset before returning `complete`.
+
+```ts
+interface AssetUploadFinishMsg { kind: "asset.upload.finish"; uploadId: string; }
+```
+
+### asset.upload.result (0x18 · host → client · assets)
+
+Progress or terminal result for an upload. `asset` is a public, provenance-free descriptor.
+
+```ts
+interface AssetUploadResultMsg {
+  kind: "asset.upload.result";
+  uploadId: string;
+  status: "ready" | "progress" | "complete" | "error";
+  received: number;
+  error?: string;
+  asset?: { hash: AssetId; name: string; mime: string; size: number; width?: number; height?: number; thumbnail?: AssetId };
+}
+```
+
+### asset.share (0x19 · client → host · assets)
+
+Update the sender's durable per-user share slot, then make the image available and broadcast its reference
+to entitled connected viewers. The ephemeral broadcast is emitted only after the slot commit and asset
+manifest update succeed.
+
+```ts
+interface AssetShareMsg { kind: "asset.share"; requestId: string; assetId: AssetId; }
+```
+
+### asset.share.result (0x1a · host → client · assets)
+
+Acknowledge whether the durable slot update and live broadcast succeeded.
+
+```ts
+interface AssetShareResultMsg { kind: "asset.share.result"; requestId: string; ok: boolean; error?: string; }
+```
+
+### asset.upload.cancel (0x1b · client → host · assets)
+
+Discard an incomplete in-memory upload reservation. Closing the session also cancels any pending upload.
+
+```ts
+interface AssetUploadCancelMsg { kind: "asset.upload.cancel"; uploadId: string; }
 ```
 
 ### fog.put (0x06 · client → host · ops)

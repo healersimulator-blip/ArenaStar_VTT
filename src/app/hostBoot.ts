@@ -451,6 +451,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     verifyHelloSig: (hello, roomId) => verifyHello(hello, roomId),
     now,
     assets,
+    pipeline,
     // Stable package/file/entry addressing: resolve only from this world's
     // imported actor pack, on the host, at invocation time. Never import or
     // mutate a compendium entry just to summon it.

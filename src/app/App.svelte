@@ -45,6 +45,12 @@
     selectedEncounter,
   } from "../ui/combat/encounters";
   import { JournalsPanel } from "../ui/journals";
+  import ImageHandlingPanel from "../ui/images/ImageHandlingPanel.svelte";
+  import ScenesImagesPanel from "../ui/images/ScenesImagesPanel.svelte";
+  import ImageImportDialog from "../ui/images/ImageImportDialog.svelte";
+  import SharedImageNotice from "../ui/images/SharedImageNotice.svelte";
+  import type { ImageSource } from "../ui/images/imageSources";
+  import { imageSourcesFromClipboard, imageSourcesFromTransfer } from "../ui/images/imageSources";
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
   import { selectedMacroItem } from "../core/macroItems";
@@ -152,6 +158,9 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     type PlacementPoint,
   } from "../core/hexcrawl/placement";
   import { planDuplicateSceneOps } from "../core/sceneCopy";
+  import { DEFAULT_IMAGE_HANDLING_PREFERENCES, imageHandlingPreferencesOf, loadImageHandlingPreferences, saveImageHandlingPreferences, sceneExpressDefaultsOf, type ImageAction, type ImageHandlingPreferences } from "../core/imageHandling";
+  import { sniffImage, assertImageByteLength, normalizeImageName } from "../core/imageSizing";
+  import { sha256Hex } from "../host/assets";
   import { prototypeTokenTagsOf } from "../core/tags";
   import { logEncounterOps } from "../core/hexcrawl/encounter";
   import { cellAtPoint } from "../core/hexcrawl/cells";
@@ -203,6 +212,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { DEFAULT_BINDINGS, actionForCombo, comboOf, isTypingTarget } from "../core/keys";
   import { globalHooks } from "../core/events";
   import type { GridSpec } from "../canvas/grid";
+  import type { AssetId } from "../core/ids";
   import { TablesPanel } from "../ui/tables";
   import { PlaylistsPanel } from "../ui/playlists";
   import { AudioPlayer } from "../client/audioPlayer";
@@ -216,6 +226,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     AssetManifestEntry,
     CellFeature,
     CombatDocument,
+    JournalDocument,
     LightDocument,
     NoteDocument,
     SceneDocument,
@@ -325,6 +336,8 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   const TABS: Array<{ id: string; label: string }> = [
     { id: "chat", label: "Chat" },
     { id: "combat", label: "Combat" },
+    { id: "scenes", label: "Scenes" },
+    { id: "images", label: "Images" },
     { id: "journals", label: "Journals" },
     { id: "tables", label: "Tables" },
     { id: "playlists", label: "Playlists" },
@@ -332,6 +345,110 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     { id: "compendia", label: "Compendia" },
   ];
   let canvasError = $state<string | null>(null);
+  let imagePreferences = $state<ImageHandlingPreferences>(imageHandlingPreferencesOf(DEFAULT_IMAGE_HANDLING_PREFERENCES));
+  let imageDialogSources = $state<ImageSource[]>([]);
+  let imageDialogOpen = $state(false);
+  let sharedImageAnnouncement = $state<{ assetId: string; name: string; senderName: string } | null>(null);
+  let imageDialogOrigin = $state<"file" | "paste" | "url">("file");
+  let imageDialogAction = $state<ImageAction | null>(null);
+  let imageDragActive = $state(false);
+  let imageDragDepth = 0;
+
+  const imageSceneDefaults = $derived.by(() => {
+    void storeVersion;
+    const current = app;
+    return sceneExpressDefaultsOf(current ? worldSettingsFrom(current.gm.client.store.getAll("settings")).sceneExpressDefaults : null);
+  });
+  const restrictedPlayerImageMode = $derived.by(() => {
+    void storeVersion;
+    const current = app;
+    return current ? worldSettingsFrom(current.gm.client.store.getAll("settings")).restrictedPlayerImageMode === true : false;
+  });
+  const imageCanWriteDocuments = $derived(["GM", "ASSISTANT"].includes(app?.gm.client.user?.role ?? ""));
+  const imageCanUpload = $derived(imageCanWriteDocuments || (app?.gm.client.user?.role === "TRUSTED" && !restrictedPlayerImageMode));
+  const imageCanShare = $derived(imageCanUpload);
+
+  function saveImagePreferences(next: ImageHandlingPreferences): void {
+    const current = app;
+    if (!current) return;
+    imagePreferences = saveImageHandlingPreferences(current.meta.worldId, current.gm.client.user?.id ?? GM_USER_ID, next);
+  }
+
+  function chooseImageAction(requested: ImageAction | null): ImageAction {
+    if (!imageCanWriteDocuments) return requested === "showPlayers" && imageCanShare ? "showPlayers" : "preview";
+    return requested ?? imagePreferences.lastUsedAction ?? imagePreferences.defaultAction;
+  }
+
+  function openImageImport(sources: ImageSource[], requested: ImageAction | null = null, origin: "file" | "paste" | "url" = "file"): void {
+    if (!app || imageDialogOpen || sources.length === 0) return;
+    imageDialogSources = sources;
+    imageDialogOrigin = origin;
+    imageDialogAction = chooseImageAction(requested);
+    imageDialogOpen = true;
+  }
+
+  function closeImageImport(): void {
+    imageDialogOpen = false;
+    imageDialogSources = [];
+    imageDialogAction = null;
+  }
+
+  function isInternalAppDrag(transfer: DataTransfer | null): boolean {
+    const types = Array.from(transfer?.types ?? []);
+    return types.includes("application/x-vtt-compendium") || types.includes("application/x-vtt-encounter");
+  }
+
+  function hasImageDragData(transfer: DataTransfer | null): boolean {
+    if (!transfer || isInternalAppDrag(transfer)) return false;
+    const types = Array.from(transfer.types ?? []);
+    return types.includes("Files") || types.includes("text/uri-list") || types.includes("text/html") || types.includes("text/plain");
+  }
+
+  function onWindowDragEnter(event: DragEvent): void {
+    if (!hasImageDragData(event.dataTransfer)) return;
+    imageDragDepth++;
+    if (imagePreferences.dropEnabled) imageDragActive = true;
+  }
+
+  function onWindowDragLeave(event: DragEvent): void {
+    if (!hasImageDragData(event.dataTransfer)) return;
+    imageDragDepth = Math.max(0, imageDragDepth - 1);
+    if (imageDragDepth === 0) imageDragActive = false;
+  }
+
+  function onWindowDragOver(event: DragEvent): void {
+    if (hasImageDragData(event.dataTransfer)) event.preventDefault();
+  }
+
+  function onWindowDrop(event: DragEvent): void {
+    if (isInternalAppDrag(event.dataTransfer)) return;
+    const sources = imageSourcesFromTransfer(event.dataTransfer);
+    if (!sources.length) return;
+    event.preventDefault();
+    imageDragActive = false;
+    imageDragDepth = 0;
+    if (!imagePreferences.dropEnabled) {
+      notifyLog = [...notifyLog.slice(-49), { message: "Image drop is disabled in your image preferences.", level: "warn" }];
+      return;
+    }
+    const droppedOnCanvas = !!canvasHost && event.target instanceof Node && canvasHost.contains(event.target);
+    const action = droppedOnCanvas ? "tileNatural" : null;
+    const origin = sources.some((source) => source.kind === "url") && !sources.some((source) => source.kind === "file") ? "url" : "file";
+    openImageImport(sources, action, origin);
+  }
+
+  function onWindowPaste(event: ClipboardEvent): void {
+    if (isTypingTarget(event.target) || imageDialogOpen) return;
+    const sources = imageSourcesFromClipboard(event.clipboardData);
+    if (!sources.length) return;
+    event.preventDefault();
+    if (!imagePreferences.pasteEnabled) {
+      notifyLog = [...notifyLog.slice(-49), { message: "Image paste is disabled in your image preferences.", level: "warn" }];
+      return;
+    }
+    const origin = sources.some((source) => source.kind === "url") && !sources.some((source) => source.kind === "file") ? "url" : "paste";
+    openImageImport(sources, null, origin);
+  }
   /**
    * §3.2 the agent desk. Null until a host app exists (and for a joined player, who has no host to
    * mint agent users on — agents are a GM surface). The Settings window shows the section only
@@ -2745,6 +2862,7 @@ const WALL_PICK_RADIUS = 12;
     const tokens = scene?.tokens ?? [];
     // E06 (D-147): condition/effect chips derive on read from the client replica, so apply,
     // suppress and expiry all re-render the badges with no invalidation step.
+    view.setTokenImageLoader(tileImages.load);
     view.syncTokens(
       tokens,
       tokenBadgesMap(tokens, {
@@ -2804,9 +2922,9 @@ const WALL_PICK_RADIUS = 12;
     view
       .getTilesLayer({ loadTexture: tileImages.load })
       .sync(scene?.tiles ?? [], occupied, scene?.regions ?? []);
-    tileImages.retain((scene?.tiles ?? []).map((tile) => tile.img));
+    tileImages.retain([...(scene?.tiles ?? []).map((tile) => tile.img), ...(scene?.tokens ?? []).map((token) => token.img)]);
     sceneBackground.sync(scene?.img ?? null, current.gm.client.store.world.assetManifest,
-      (hash, priority) => current.gm.fetcher.request(hash, priority), view);
+      (hash, priority) => current.gm.fetcher.request(hash, priority), view, scene);
     view.setGrid(sceneGridSpec(scene?.grid));
   }
 
@@ -2893,25 +3011,26 @@ const WALL_PICK_RADIUS = 12;
     }
   }
 
-  /**
-   * D-270: the file goes into the world's assets and comes back as a hash — one helper, because
-   * both the sidebar's **Import map** and the hexcrawl wizard's map step need exactly this.
-   */
-  async function importMapFile(
-    file: File,
-  ): Promise<{ hash: string; width?: number; height?: number }> {
+  /** Hexcrawl map pickers need an immediate asset reference; they still use the same host upload gate. */
+  async function importMapFile(file: File): Promise<{ hash: string; width?: number; height?: number }> {
     const current = app;
     if (!current) throw new Error("the world is not open");
+    assertImageByteLength(file.size);
     const bytes = new Uint8Array(await file.arrayBuffer());
-    const { hash, entry } = await current.pipeline.importImage(
-      bytes,
-      file.name,
-      file.type || "image/png",
-    );
+    sniffImage(bytes);
+    const uploaded = await current.gm.client.uploadImageAsset(bytes, {
+      name: file.name,
+      displayName: normalizeImageName(file.name),
+      folder: imagePreferences.defaultUploadFolder,
+      sourceKind: "file",
+      collisionBehavior: "stop",
+      convertToWebp: imagePreferences.webpConvert,
+      webpQuality: imagePreferences.webpQuality,
+    });
     return {
-      hash,
-      ...(entry.width !== undefined ? { width: entry.width } : {}),
-      ...(entry.height !== undefined ? { height: entry.height } : {}),
+      hash: uploaded.hash,
+      ...(uploaded.width !== undefined ? { width: uploaded.width } : {}),
+      ...(uploaded.height !== undefined ? { height: uploaded.height } : {}),
     };
   }
 
@@ -2922,6 +3041,30 @@ const WALL_PICK_RADIUS = 12;
     if (!/^(image\/(png|jpeg|webp|gif|avif)|video\/(webm|mp4)|audio\/(mpeg|mp3|wav|ogg|webm|mp4|aac))$/.test(file.type))
       throw new Error(`Unsupported FX media type: ${file.type || "unknown"}`);
     const bytes = new Uint8Array(await file.arrayBuffer());
+    if (file.type.startsWith("image/")) {
+      assertImageByteLength(bytes.byteLength);
+      const image = sniffImage(bytes);
+      const hash = await sha256Hex(bytes) as AssetId;
+      const visibility = permissions.shareWithPlayers ? "referenced" : "gm";
+      const exportRights = permissions.includeInWorldFile ? "granted" : "restricted";
+      const existing = await current.assets.meta(hash);
+      if (existing && (existing.visibility !== visibility || existing.exportRights !== exportRights))
+        throw new Error("Media already exists with different sharing/export permissions; existing rights were not changed");
+      const uploaded = await current.gm.client.uploadImageAsset(bytes, {
+        name: file.name,
+        displayName: file.name.slice(0, 160) || "Image",
+        folder: "FX",
+        sourceKind: "file",
+        collisionBehavior: "overwrite",
+        convertToWebp: false,
+        webpQuality: 0.8,
+      });
+      if (uploaded.hash !== hash) throw new Error("The FX image did not retain its content hash during upload.");
+      if (uploaded.auditWarning)
+        notifyLog = [...notifyLog.slice(-49), { message: uploaded.auditWarning, level: "warn" }];
+      const entry = await current.assets.describe(hash, { visibility, exportRights });
+      return { hash, mime: image.mime, name: entry.name };
+    }
     const { hash, entry } = await current.assets.import(bytes, file.name, file.type,
       permissions.shareWithPlayers ? "referenced" : "gm",
       permissions.includeInWorldFile ? "granted" : "restricted");
@@ -2941,23 +3084,10 @@ const WALL_PICK_RADIUS = 12;
    * hardcode `DEFAULT_SCENE_ID`, which meant a hexcrawl map uploaded while standing on a new
    * scene landed on scene 1 — 1,000 px away and invisible.
    */
-  async function importMap(ev: Event): Promise<void> {
+  function importMap(ev: Event): void {
     const input = ev.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
-    if (!app || !file) return;
-    const target = activeScene()?._id ?? DEFAULT_SCENE_ID;
-    const imported = await importMapFile(file);
-    app.gm.client.submit([
-      {
-        kind: "update",
-        ref: { coll: "scenes", id: target },
-        diff: {
-          img: imported.hash,
-          ...(imported.width !== undefined ? { width: imported.width } : {}),
-          ...(imported.height !== undefined ? { height: imported.height } : {}),
-        },
-      },
-    ]);
+    if (app && file) openImageImport([{ kind: "file", file, name: file.name || "Image" }], "replaceBackground", "file");
     input.value = "";
   }
 
@@ -3076,6 +3206,7 @@ const WALL_PICK_RADIUS = 12;
   onMount(() => {
     const current = app;
     if (!current) return;
+    imagePreferences = loadImageHandlingPreferences(current.meta.worldId, current.gm.client.user?.id ?? GM_USER_ID);
     // §3.2 the agent desk, built here rather than in `$props` init: it needs the live HostSync to
     // mint agent users on, and it is torn down with the app (onDestroy above).
     agents = createAgentManager({
@@ -3877,6 +4008,19 @@ const WALL_PICK_RADIUS = 12;
           }
         });
         current.gm.bus.on("ephemeral", (m) => {
+          if (m.t === "image") {
+            const assetId = m.data.assetId;
+            if (typeof assetId === "string" && /^[a-f0-9]{64}$/i.test(assetId) &&
+                m.from !== current.gm.client.user?.id) {
+              const sender = current.gm.client.store.get("users", m.from);
+              sharedImageAnnouncement = {
+                assetId,
+                name: typeof m.data.name === "string" ? m.data.name.slice(0, 160) : "Shared image",
+                senderName: sender?.name ?? "A table participant",
+              };
+            }
+            return;
+          }
           if (m.t === "ping") {
             const x = Number(m.data.x);
             const y = Number(m.data.y);
@@ -4441,6 +4585,8 @@ const WALL_PICK_RADIUS = 12;
   });
 </script>
 
+<svelte:window ondragenter={onWindowDragEnter} ondragleave={onWindowDragLeave} ondragover={onWindowDragOver} ondrop={onWindowDrop} onpaste={onWindowPaste} />
+
 <main class="vtt-ui gm-app">
   <header class="app-header">
     <div class="brand-badge" aria-hidden="true">✦</div>
@@ -4978,6 +5124,22 @@ const WALL_PICK_RADIUS = 12;
               selection={tokenSelection}
               onClearSelection={clearTokenSelection}
             />
+          {:else if activeTab === "scenes"}
+            <ScenesImagesPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              {resolveAsset}
+              onActivate={activateScene}
+              onRequestImages={(sources, action) => openImageImport(sources, action, "file")}
+            />
+          {:else if activeTab === "images"}
+            <ImageHandlingPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              preferences={imagePreferences}
+              onPreferencesChange={saveImagePreferences}
+              onRequestImages={(sources, action, origin) => openImageImport(sources, action ?? null, origin ?? "file")}
+            />
           {:else if activeTab === "journals"}
             <JournalsPanel
               client={app.gm.client}
@@ -5144,7 +5306,41 @@ const WALL_PICK_RADIUS = 12;
     {/if}
   {/if}
 </main>
+{#if imageDragActive}
+  <div class="image-drop-hint" aria-live="polite">Drop image files or a browser-readable HTTPS image link to preview and import</div>
+{/if}
+{#if imageDialogOpen && app}
+  <ImageImportDialog
+    sources={imageDialogSources}
+    sourceOrigin={imageDialogOrigin}
+    initialAction={imageDialogAction}
+    client={app.gm.client}
+    scene={activeScene()}
+    {scenes}
+    journals={app.gm.client.store.getAll("journals") as readonly JournalDocument[]}
+    selectedTokenIds={tokenSelection.sceneId === activeScene()?._id ? tokenSelection.ids : []}
+    manifest={app.gm.client.store.world.assetManifest}
+    preferences={imagePreferences}
+    sceneDefaults={imageSceneDefaults}
+    restrictedPlayerMode={restrictedPlayerImageMode}
+    canUpload={imageCanUpload}
+    canWriteDocuments={imageCanWriteDocuments}
+    canShare={imageCanShare}
+    onActivateScene={activateScene}
+    onPreferencesChange={saveImagePreferences}
+    onWarning={(message) => { notifyLog = [...notifyLog.slice(-49), { message, level: "warn" }]; }}
+    onClose={closeImageImport}
+  />
+{/if}
+{#if sharedImageAnnouncement}
+  <SharedImageNotice
+    announcement={sharedImageAnnouncement}
+    resolveAsset={(assetId) => resolveAsset(assetId)}
+    onDismiss={() => (sharedImageAnnouncement = null)}
+  />
+{/if}
 <style>
+  .image-drop-hint { position:fixed; inset:18px; z-index:4999; display:grid; place-items:center; border:3px dashed #78dccc; border-radius:18px; background:#10201edb; color:#e5fff9; font-size:clamp(18px,3vw,30px); font-weight:700; text-align:center; pointer-events:none; box-shadow:inset 0 0 0 1px #ffffff22; }
   .dice3d-host {
     position: absolute;
     inset: 0;

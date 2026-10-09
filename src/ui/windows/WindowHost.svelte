@@ -296,6 +296,7 @@
             {client}
             journalId={win.data.journalId ?? ""}
             pageId={win.data.pageId ?? ""}
+            {resolveAsset}
           />
         {:else if win.kind === "gmextras"}
           <GmExtrasPanel {client} {bus} {sceneId} />

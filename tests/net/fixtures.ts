@@ -99,6 +99,22 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
       return { kind: "asset.manifest", manifest: { ["a".repeat(64)]: { name: "texture.png", mime: "image/png", size: 2, chunks: 1 } } };
     case "asset.get":
       return { kind: "asset.get", assetId: "f".repeat(64), offset: 0, priority: "scene" };
+    case "asset.upload.start":
+      return { kind: "asset.upload.start", uploadId: "upload-1", name: "map.png", displayName: "Map",
+        size: 42, folder: "Images", sourceKind: "file", collisionBehavior: "stop", convertToWebp: false, webpQuality: 0.8 };
+    case "asset.upload.chunk":
+      return { kind: "asset.upload.chunk", uploadId: "upload-1", offset: 0, bytes: new Uint8Array([1, 2]) };
+    case "asset.upload.finish":
+      return { kind: "asset.upload.finish", uploadId: "upload-1" };
+    case "asset.upload.cancel":
+      return { kind: "asset.upload.cancel", uploadId: "upload-1" };
+    case "asset.upload.result":
+      return { kind: "asset.upload.result", uploadId: "upload-1", status: "complete", received: 42,
+        asset: { hash: "f".repeat(64), name: "map.png", mime: "image/png", size: 42 } };
+    case "asset.share":
+      return { kind: "asset.share", requestId: "share-1", assetId: "f".repeat(64) };
+    case "asset.share.result":
+      return { kind: "asset.share.result", requestId: "share-1", ok: true };
     case "fog.put":
       return { kind: "fog.put", sceneId: "s1", png: new Uint8Array([1, 2, 3]) };
     case "relay.offer":
