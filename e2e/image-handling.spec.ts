@@ -138,6 +138,49 @@ test.describe("image ingest UI (design §5, §8)", () => {
       .toBeVisible({ timeout: 20_000 });
   });
 
+  test("a pre-gridded map sets the grid from its width, aligns in preview, and keeps its aspect (Phase 3)", async ({ page }) => {
+    await hostUser(page);
+    await page.locator('[data-tab="scenes"]').click();
+    const before = await imageState(page);
+    // 22 squares of 140 px across a 3080 × 2520 image: 22 columns and 18 rows.
+    const grid = solidPng(3080, 2520, [120, 150, 90]);
+
+    await dispatchDrop(page, '[aria-label="Drop one or more images here to create scenes"]', {
+      files: [{ name: "pregridded.png", type: "image/png", bytes: [...grid] }],
+    });
+    const dialog = page.locator("[data-image-import-dialog]");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("3,080 × 2,520 px", { exact: false })).toBeVisible({ timeout: 30_000 });
+
+    // Lock the aspect ratio: narrowing the width narrows the height in proportion.
+    await dialog.getByLabel("Lock image aspect ratio").check();
+    await dialog.getByLabel("Width", { exact: true }).fill("1540");
+    await expect(dialog.getByLabel("Height", { exact: true })).toHaveValue("1260");
+    await dialog.getByRole("button", { name: "Reset to image size" }).click();
+    await expect(dialog.getByLabel("Width", { exact: true })).toHaveValue("3080");
+    await expect(dialog.getByLabel("Height", { exact: true })).toHaveValue("2520");
+
+    await dialog.getByLabel("Squares across").fill("22");
+    await dialog.getByRole("button", { name: "Grid from image" }).click();
+    await expect(dialog.getByLabel("Grid size (px)")).toHaveValue("140");
+    await expect(dialog.getByText("Grid size calculated from image width.")).toBeVisible();
+
+    await dialog.getByRole("button", { name: /Show grid alignment preview/ }).click();
+    await expect(dialog.getByAltText("Map with grid alignment preview")).toBeVisible();
+    await expect(dialog.locator(".grid-overlay")).toBeVisible();
+
+    await dialog.getByRole("button", { name: "Apply to image" }).click();
+    await expect(dialog).toHaveCount(0, { timeout: 30_000 });
+    await expect.poll(() => hostCall<number>(page, "sceneCount"), { timeout: 30_000 })
+      .toBe(before.scenes.length + 1);
+    const sceneGrid = await page.evaluate(() => {
+      const store = (globalThis as { __vttE2E?: { app?: { gm?: { client?: { store?: { getAll: (c: "scenes") => Array<{ name: string; width: number; height: number; grid?: { size: number } }> } } } } } }).__vttE2E?.app?.gm?.client?.store;
+      const scene = store?.getAll("scenes").find((entry) => entry.name === "pregridded");
+      return scene ? { width: scene.width, height: scene.height, size: scene.grid?.size } : null;
+    });
+    expect(sceneGrid).toEqual({ width: 3080, height: 2520, size: 140 });
+  });
+
   test("undo removes the scene reference, and the imported bytes stay in the library (§6.8)", async ({ page }) => {
     await hostUser(page);
     await page.locator('[data-tab="scenes"]').click();

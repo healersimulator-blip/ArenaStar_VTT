@@ -295,6 +295,28 @@ describe("host-authorized image uploads and sharing", () => {
     expect(h.importer).not.toHaveBeenCalled();
   });
 
+  test("a rejected document intent after an upload leaves a detectable unreferenced asset (§6.8)", async () => {
+    const h = await createHarness();
+    const bytes = pngHeaderForTest(2, 2, [41, 42]);
+    const uploaded = await h.gm.client.uploadImageAsset(bytes, uploadOptions("orphan.png"));
+
+    // The bytes are stored first (AssetServer, outside Ops). A TRUSTED player may not create a scene,
+    // so the document intent that would reference them is refused and leaves no scene behind.
+    const scene = {
+      _id: "orphan-scene", type: "scene", name: "orphan", ownership: { default: 0 }, flags: {}, system: {},
+      img: uploaded.hash, thumbnail: uploaded.hash, width: 2, height: 2,
+    };
+    h.trusted.client.submit([{ kind: "create", coll: "scenes", data: scene as never }]);
+    await flushMicrotasks();
+    expect(h.store.get("scenes", "orphan-scene")).toBeUndefined();
+
+    // Detection: the manifest still lists the stored image and no document references it.
+    expect(h.store.world.assetManifest[uploaded.hash]).toBeDefined();
+    const referenced = h.store.getAll("scenes").some((entry) =>
+      entry.img === uploaded.hash || entry.thumbnail === uploaded.hash);
+    expect(referenced).toBe(false);
+  });
+
   test("uploads are attributed in a GM-visible OpLog record; sharing updates one stable slot and broadcasts", async () => {
     const h = await createHarness();
     const shared: Array<ClientEvents["ephemeral"]> = [];
