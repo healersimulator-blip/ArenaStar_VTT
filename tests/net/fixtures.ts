@@ -115,6 +115,14 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
       return { kind: "asset.share", requestId: "share-1", assetId: "f".repeat(64) };
     case "asset.share.result":
       return { kind: "asset.share.result", requestId: "share-1", ok: true };
+    case "asset.library":
+      return { kind: "asset.library", requestId: "library-1" };
+    case "asset.library.result":
+      return { kind: "asset.library.result", requestId: "library-1", ok: true, assets: [] };
+    case "asset.cleanup":
+      return { kind: "asset.cleanup", requestId: "cleanup-1", hashes: ["f".repeat(64)] };
+    case "asset.cleanup.result":
+      return { kind: "asset.cleanup.result", requestId: "cleanup-1", ok: true, removed: [], skipped: [], bytes: 0 };
     case "fog.put":
       return { kind: "fog.put", sceneId: "s1", png: new Uint8Array([1, 2, 3]) };
     case "relay.offer":

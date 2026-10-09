@@ -900,6 +900,44 @@ Acknowledge whether the durable slot update and live broadcast succeeded.
 interface AssetShareResultMsg { kind: "asset.share.result"; requestId: string; ok: boolean; error?: string; }
 ```
 
+### asset.library (0x1c · client → host · assets)
+
+GM-only. Ask for every stored image with whether a live world document still uses it. Usage is the
+current world's documents, with a derived thumbnail or tile counted as used when its parent is used.
+Undo history is not a root. Audit messages' recorded hash is provenance, not a use.
+
+```ts
+interface AssetLibraryMsg { kind: "asset.library"; requestId: string; }
+```
+
+### asset.library.result (0x1d · host → client · assets)
+
+Answer `asset.library` with the stored images. Non-GM senders get `ok: false`.
+
+```ts
+interface AssetLibraryResultMsg { kind: "asset.library.result"; requestId: string; ok: boolean; error?: string;
+  assets?: Array<{ hash: AssetId; name: string; mime: string; size: number; inUse: boolean; derived: boolean }>; }
+```
+
+### asset.cleanup (0x1e · client → host · assets)
+
+GM-only. Delete the listed images that are unused. The host re-checks usage immediately before each
+delete, so an image used since the list was shown is skipped, not removed. Connected players receive
+the updated manifest.
+
+```ts
+interface AssetCleanupMsg { kind: "asset.cleanup"; requestId: string; hashes: AssetId[]; }
+```
+
+### asset.cleanup.result (0x1f · host → client · assets)
+
+Report what was removed, what was skipped because it is in use, and the bytes freed.
+
+```ts
+interface AssetCleanupResultMsg { kind: "asset.cleanup.result"; requestId: string; ok: boolean; error?: string;
+  removed?: AssetId[]; skipped?: AssetId[]; bytes?: number; }
+```
+
 ### asset.upload.cancel (0x1b · client → host · assets)
 
 Discard an incomplete in-memory upload reservation. Closing the session also cancels any pending upload.

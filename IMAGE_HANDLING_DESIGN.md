@@ -645,6 +645,14 @@ e2e spec for the user-visible parts.
 **Phase 4: polish and extras (not current module-parity scope).**
 - Clean-up command, video backgrounds (Mini Uploader support is unverified), asset library view, i18n of
   new strings, and an e2e run in Chromium on file:// and https. Audio ingestion remains an explicit non-goal.
+- **Status (2026-10-09).** Done: the GM library with list, download and a confirmed **Clean up unused images**
+  (§6.8, `e2e/image_library.spec.ts`, `tests/core/assetUsage.test.ts`). A deleted image is one that no live
+  document uses; Undo history is not a root, because the OpLog is never compacted in the app and keeping it
+  would make a replaced background undeletable. The confirmation says that Undo can no longer restore it.
+  Upload audit records are provenance, not use. The file:// and https origin checks
+  (`e2e/origins.spec.ts`). Not done: video backgrounds (a host upload branch must go through the same
+  quota, audit and format gate, so it needs its own design pass), i18n of new strings (the project has no
+  string catalogue yet, D-263 / G-38), and placing a stored image onto the canvas from the library (IN-5).
 
 ---
 

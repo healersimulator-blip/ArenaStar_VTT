@@ -5145,6 +5145,7 @@ const WALL_PICK_RADIUS = 12;
               preferences={imagePreferences}
               onPreferencesChange={saveImagePreferences}
               onRequestImages={(sources, action, origin) => openImageImport(sources, action ?? null, origin ?? "file")}
+              fetchAsset={(hash) => app.gm.fetcher.request(hash, "scene")}
             />
           {:else if activeTab === "journals"}
             <JournalsPanel

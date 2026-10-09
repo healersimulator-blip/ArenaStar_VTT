@@ -82,6 +82,10 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "asset.upload.result":
     case "asset.share":
     case "asset.share.result":
+    case "asset.library":
+    case "asset.library.result":
+    case "asset.cleanup":
+    case "asset.cleanup.result":
     case "fog.put":
     case "fog.get":
     case "fog.state":
@@ -144,6 +148,10 @@ export function channelFor(kind: MsgName): ChannelName {
     case "asset.upload.result":
     case "asset.share":
     case "asset.share.result":
+    case "asset.library":
+    case "asset.library.result":
+    case "asset.cleanup":
+    case "asset.cleanup.result":
       return "assets";
     case "sim.delta":
     case "sim.snapshot":

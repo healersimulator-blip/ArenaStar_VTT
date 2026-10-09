@@ -11,46 +11,7 @@
 import { DocumentStore, type StoreMeta } from "../core/store";
 import { estimateClockOffset, type ClockSample } from "../core/audio";
 import type { Op, OpEnvelope } from "../core/ops";
-import type {
-  AssetChunkMsg,
-  AssetPriority,
-  AssetUploadResultMsg,
-  AssetShareResultMsg,
-  AudioCmdMsg,
-  ClockMsg,
-  EphemeralKind,
-  EphemeralMsg,
-  FxStartMsg,
-  FxRunMsg,
-  FxEndMsg,
-  FxDeliveryMsg,
-  FxMediaAckState,
-  AutomationTraceMsg,
-  TaggerRulesResultMsg,
-  PrefabResultMsg,
-  SummonResultMsg,
-  MacroResultMsg,
-  FogStateMsg,
-  HelloMsg,
-  PongMsg,
-  RollChallengeMsg,
-  OpsMsg,
-  RejectedMsg,
-  PF1ePoisonActionRequest,
-  PF1eConditionActionRequest,
-  PF1eConditionActionResultMsg,
-  CodexPurchaseResultMsg,
-  RollMode,
-  SimControlAction,
-  SimDeltaMsg,
-  SimSnapshotMsg,
-  SnapshotMsg,
-  TurnPhaseMsg,
-  TurnReportMsg,
-  WelcomeMsg,
-  WelcomeSimInfo,
-  WireMessage,
-} from "../core/messages";
+import type { AssetChunkMsg, AssetPriority, AssetUploadResultMsg, AssetShareResultMsg, AudioCmdMsg, ClockMsg, EphemeralKind, EphemeralMsg, FxStartMsg, FxRunMsg, FxEndMsg, FxDeliveryMsg, FxMediaAckState, AutomationTraceMsg, TaggerRulesResultMsg, PrefabResultMsg, SummonResultMsg, MacroResultMsg, FogStateMsg, HelloMsg, PongMsg, RollChallengeMsg, OpsMsg, RejectedMsg, PF1ePoisonActionRequest, PF1eConditionActionRequest, PF1eConditionActionResultMsg, CodexPurchaseResultMsg, RollMode, SimControlAction, SimDeltaMsg, SimSnapshotMsg, SnapshotMsg, TurnPhaseMsg, TurnReportMsg, WelcomeMsg, WelcomeSimInfo, WireMessage, AssetLibraryResultMsg, AssetCleanupResultMsg, AssetLibraryMsg, AssetCleanupMsg } from "../core/messages";
 import type { AssetManifest, Json } from "../core/documents";
 import { assertImageByteLength } from "../core/imageSizing";
 import { randomSeedHex, sha256Hex } from "../dice/commitReveal";
@@ -181,12 +142,16 @@ export interface ClientSyncOptions {
   simSceneId?: DocId;
 }
 
+/** One stored image as the GM library shows it (§6.8). */
+export type AssetLibraryItem = NonNullable<AssetLibraryResultMsg["assets"]>[number];
+
 export class ClientSync {
   /** §11 pending client seeds, keyed by committed rollId. */
   private readonly committedRolls = new Map<string, string>();
   /** D-250: `requestFog` waiters per sceneId. */
   private readonly fogWaiters = new Map<DocId, Array<(png: Uint8Array | null) => void>>();
   private readonly assetUploadWaiters = new Map<string, Set<AssetUploadWaiter>>();
+  private readonly assetHostWaiters = new Map<string, { resolve: (msg: AssetLibraryResultMsg | AssetCleanupResultMsg) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private readonly assetShareWaiters = new Map<string, { resolve: (msg: AssetShareResultMsg) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   readonly store: DocumentStore;
   private echoImpl: DocumentStore;
@@ -717,6 +682,48 @@ export class ClientSync {
     });
   }
 
+  /** §6.8 GM-only: every stored image with whether undo or a live document still uses it. */
+  async requestAssetLibrary(): Promise<AssetLibraryItem[]> {
+    const msg = await this.requestAssetHost((requestId) => ({ kind: "asset.library", requestId }), 30_000);
+    if (msg.kind !== "asset.library.result" || !msg.ok) throw new Error(msg.error ?? "The host could not list stored images");
+    return msg.assets ?? [];
+  }
+
+  /** §6.8 GM-only: delete the unused images among `hashes`. Anything the host finds in use is skipped. */
+  async requestAssetCleanup(hashes: AssetId[]): Promise<{ removed: AssetId[]; skipped: AssetId[]; bytes: number }> {
+    const msg = await this.requestAssetHost((requestId) => ({ kind: "asset.cleanup", requestId, hashes }), 120_000);
+    if (msg.kind !== "asset.cleanup.result" || !msg.ok) throw new Error(msg.error ?? "The host could not clean up stored images");
+    return { removed: msg.removed ?? [], skipped: msg.skipped ?? [], bytes: msg.bytes ?? 0 };
+  }
+
+  private requestAssetHost(
+    build: (requestId: string) => AssetLibraryMsg | AssetCleanupMsg,
+    timeoutMs: number,
+  ): Promise<AssetLibraryResultMsg | AssetCleanupResultMsg> {
+    const requestId = globalThis.crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = globalThis.setTimeout(() => {
+        this.assetHostWaiters.delete(requestId);
+        reject(new Error("The host did not answer the image request"));
+      }, timeoutMs);
+      this.assetHostWaiters.set(requestId, { resolve, reject, timer });
+      try { this.send(build(requestId)); }
+      catch (error) {
+        globalThis.clearTimeout(timer);
+        this.assetHostWaiters.delete(requestId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  private resolveAssetHost(msg: AssetLibraryResultMsg | AssetCleanupResultMsg): void {
+    const waiter = this.assetHostWaiters.get(msg.requestId);
+    if (!waiter) return;
+    this.assetHostWaiters.delete(msg.requestId);
+    globalThis.clearTimeout(waiter.timer);
+    waiter.resolve(msg);
+  }
+
   private waitForAssetUpload(
     uploadId: string,
     predicate: (msg: AssetUploadResultMsg) => boolean,
@@ -903,6 +910,10 @@ export class ClientSync {
         return;
       case "asset.upload.result":
         this.receiveAssetUpload(msg);
+        return;
+      case "asset.library.result":
+      case "asset.cleanup.result":
+        this.resolveAssetHost(msg);
         return;
       case "asset.share.result": {
         this.bus.emit("assetShare", msg);

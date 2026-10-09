@@ -94,6 +94,11 @@ export const MsgKind = {
   "asset.share": 0x19,
   "asset.share.result": 0x1a,
   "asset.upload.cancel": 0x1b,
+  // §6.8 GM library: list stored images and whether undo/live documents still use them, then clean up.
+  "asset.library": 0x1c,
+  "asset.library.result": 0x1d,
+  "asset.cleanup": 0x1e,
+  "asset.cleanup.result": 0x1f,
   // host → client
   welcome: 0x20,
   snapshot: 0x21,
@@ -706,6 +711,37 @@ export interface AssetShareResultMsg {
   error?: string;
 }
 
+/** GM-only: list every stored image and whether it is still in use. */
+export interface AssetLibraryMsg {
+  kind: "asset.library";
+  requestId: string;
+}
+
+export interface AssetLibraryResultMsg {
+  kind: "asset.library.result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  assets?: Array<{ hash: AssetId; name: string; mime: string; size: number; inUse: boolean; derived: boolean }>;
+}
+
+/** GM-only: delete the listed images. The host recomputes usage and skips anything now in use. */
+export interface AssetCleanupMsg {
+  kind: "asset.cleanup";
+  requestId: string;
+  hashes: AssetId[];
+}
+
+export interface AssetCleanupResultMsg {
+  kind: "asset.cleanup.result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  removed?: AssetId[];
+  skipped?: AssetId[];
+  bytes?: number;
+}
+
 /**
  * §8/§9: the sender's explored-fog map for a scene as a PNG (opaque = unexplored). The host
  * keeps the latest per user + scene and persists it (D-250: `fog` store, world file `fog/`).
@@ -1016,6 +1052,10 @@ export type WireMessage =
   | AssetUploadResultMsg
   | AssetShareMsg
   | AssetShareResultMsg
+  | AssetLibraryMsg
+  | AssetLibraryResultMsg
+  | AssetCleanupMsg
+  | AssetCleanupResultMsg
   | FogPutMsg
   | FogGetMsg
   | FogStateMsg

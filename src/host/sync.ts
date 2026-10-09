@@ -45,6 +45,8 @@ import type {
 import type { Op, OpEnvelope } from "../core/ops";
 import type {
   AssetShareMsg,
+  AssetLibraryMsg,
+  AssetCleanupMsg,
   AssetUploadChunkMsg,
   AssetUploadFinishMsg,
   AssetUploadStartMsg,
@@ -167,7 +169,7 @@ import {
   planRollApply,
   readRollApplications,
 } from "../packages/pf1e/rollApply";
-import type { DocId, PeerId, TxId, UserId } from "../core/ids";
+import type { DocId, PeerId, TxId, UserId, AssetId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { actionOpRef, actionStaleReason, extendActionReceipt, missingActionMessageDeletes,
   type ActionAudit } from "../core/actionRevert";
@@ -190,6 +192,7 @@ import {
   planCodexPurchase,
 } from "../core/campaignCodexEconomy";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
+import { assetLibrary, assetUsageRoots, unusedAssetIds } from "../core/assetUsage";
 import { MAX_IMAGE_BYTES, normalizeLogicalFolder, sniffImage } from "../core/imageSizing";
 import { playerUploadQuotaMBOf } from "../core/imageHandling";
 import { FX_FINISH_OFFSET_MAX_MS, fxAudienceAllows, fxResolveSyncOrigins, fxSectionsForViewer,
@@ -1194,6 +1197,12 @@ export class HostSync {
         return;
       case "asset.share":
         void this.handleAssetShare(session, msg);
+        return;
+      case "asset.library":
+        void this.handleAssetLibrary(session, msg);
+        return;
+      case "asset.cleanup":
+        void this.handleAssetCleanup(session, msg);
         return;
       case "fog.put":
         this.handleFogPut(session, msg);
@@ -8523,6 +8532,68 @@ export class HostSync {
       this.send(session, { kind: "asset.share.result", requestId: msg.requestId, ok: false,
         error: error instanceof Error ? error.message : String(error) });
     }
+  }
+
+  /** §6.8: what counts as live is the world's documents, minus audit provenance (see assetUsageRoots). */
+  private liveAssetRoots(): unknown[] {
+    return assetUsageRoots(this.store.world as unknown as Record<string, unknown>);
+  }
+
+  private async handleAssetLibrary(session: Session, msg: AssetLibraryMsg): Promise<void> {
+    if (!session.user || session.user.role !== "GM" || !this.assets) {
+      this.send(session, { kind: "asset.library.result", requestId: msg.requestId, ok: false,
+        error: "Only the GM can list stored images" });
+      return;
+    }
+    const manifest = await this.assets.manifest();
+    const assets = assetLibrary(manifest, this.liveAssetRoots());
+    this.send(session, { kind: "asset.library.result", requestId: msg.requestId, ok: true, assets });
+  }
+
+  /**
+   * §6.8 GM-only clean-up. The client's list is advisory: each image is re-checked against the live
+   * documents immediately before its bytes are removed, and anything now in use is reported as
+   * skipped instead of deleted.
+   */
+  private async handleAssetCleanup(session: Session, msg: AssetCleanupMsg): Promise<void> {
+    const fail = (error: string): void => {
+      this.send(session, { kind: "asset.cleanup.result", requestId: msg.requestId, ok: false, error });
+    };
+    if (!session.user || session.user.role !== "GM" || !this.assets) {
+      fail("Only the GM can clean up stored images");
+      return;
+    }
+    if (!Array.isArray(msg.hashes) || msg.hashes.length > 5000 ||
+        !msg.hashes.every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash))) {
+      fail("The clean-up list is not valid");
+      return;
+    }
+    const removed: AssetId[] = [];
+    const skipped: AssetId[] = [];
+    let bytes = 0;
+    try {
+      for (const hash of new Set(msg.hashes)) {
+        const manifest = await this.assets.manifest();
+        const unused = new Set(unusedAssetIds(manifest, this.liveAssetRoots()));
+        if (!unused.has(hash) || !manifest[hash]) {
+          skipped.push(hash);
+          continue;
+        }
+        bytes += manifest[hash].size;
+        await this.assets.remove(hash);
+        removed.push(hash);
+      }
+    } catch (error) {
+      this.broadcastAssetManifest();
+      fail(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.broadcastAssetManifest();
+    this.send(session, { kind: "asset.cleanup.result", requestId: msg.requestId, ok: true, removed, skipped, bytes });
+  }
+
+  private broadcastAssetManifest(): void {
+    for (const recipient of this.sessions.values()) this.sendProjectedManifest(recipient);
   }
 
   private handleAssetGet(session: Session, msg: AssetGetMsg): void {

@@ -5,6 +5,7 @@
   import type { ImageAction, ImageHandlingPreferences } from "../../core/imageHandling";
   import { IMAGE_ACTIONS } from "../../core/imageHandling";
   import type { ImageSource } from "./imageSources";
+  import ImageLibraryPanel from "./ImageLibraryPanel.svelte";
 
   let {
     client,
@@ -12,12 +13,14 @@
     preferences,
     onPreferencesChange,
     onRequestImages,
+    fetchAsset,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     preferences: ImageHandlingPreferences;
     onPreferencesChange: (next: ImageHandlingPreferences) => void;
     onRequestImages: (sources: ImageSource[], action?: ImageAction, origin?: "file" | "paste" | "url") => void;
+    fetchAsset?: (hash: string) => Promise<Uint8Array>;
   } = $props();
 
   let journals = $state<JournalDocument[]>([]);
@@ -142,6 +145,8 @@
     </div>
     <p class="hint">Original bytes are kept unless WebP conversion is enabled. Previews never write to the world.</p>
   </details>
+
+  <ImageLibraryPanel {client} {fetchAsset} />
 </section>
 
 <style>
