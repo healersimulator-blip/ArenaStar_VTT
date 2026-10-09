@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { entry, hostCall, playerCall, surfaceCallArg, waitForSurface } from "./lib";
+import { applySidebarMap, entry, hostCall, playerCall, surfaceCallArg, waitForSurface } from "./lib";
 
 const TINY_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -25,6 +25,7 @@ test.describe("assets: thumbnail-first + cache hit on rejoin (§7, §19 M1)", ()
       mimeType: "image/png",
       buffer: TINY_PNG,
     });
+    await applySidebarMap(host);
     await expect.poll(() => hostCall<string | null>(host, "sceneImg")).not.toBeNull();
     const mapHash = await hostCall<string | null>(host, "sceneImg");
 

@@ -630,7 +630,7 @@
 
 <svelte:window onkeydown={keydown} />
 <div class="backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) cancel(); }}>
-  <section
+  <div
     bind:this={dialogElement}
     class="dialog"
     role="dialog"
@@ -797,7 +797,7 @@
       <button type="button" class="primary" disabled={running || loading || !prepared || !actionAllowed} onclick={() => processBatch(false)}>{selectedAction === "preview" && !shareAfter ? "Close preview" : "Apply to image"}</button>
       {#if sources.length > 1}<button type="button" class="primary" disabled={running || loading || !prepared || !actionAllowed} onclick={() => processBatch(true)}>{selectedAction === "preview" && !shareAfter ? `Preview ${sources.length} images` : `Apply to all ${sources.length}`}</button>{/if}
     </footer>
-  </section>
+  </div>
 </div>
 
 <style>

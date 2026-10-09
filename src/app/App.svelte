@@ -3063,6 +3063,12 @@ const WALL_PICK_RADIUS = 12;
       if (uploaded.auditWarning)
         notifyLog = [...notifyLog.slice(-49), { message: uploaded.auditWarning, level: "warn" }];
       const entry = await current.assets.describe(hash, { visibility, exportRights });
+      // The thumbnail, mid-res copy and tiles are separate assets. A GM-only image must not leave
+      // them player-visible, so they take the primary's audience (narrowing only; never widened).
+      if (visibility === "gm") {
+        const derived = new Set([entry.thumb?.assetId, entry.mid?.assetId, ...(entry.tiles?.ids ?? [])]);
+        for (const id of derived) if (id) await current.assets.describe(id, { visibility: "gm" });
+      }
       return { hash, mime: image.mime, name: entry.name };
     }
     const { hash, entry } = await current.assets.import(bytes, file.name, file.type,

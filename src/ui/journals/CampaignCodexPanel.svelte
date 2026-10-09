@@ -77,6 +77,7 @@
   } from "../../core/campaignCodexBundle";
   import { exportCodexMarkdownZip } from "../../core/campaignCodexMarkdown";
   import { projectAssetManifest } from "../../core/assetAccess";
+import { derivedAssetIds } from "../../core/imageHandling";
   import { normalizeTags } from "../../core/tags";
   import {
     codexQuestBoardRows,
@@ -466,6 +467,12 @@
       }))
       .sort((a, b) => a.name.localeCompare(b.name)),
   );
+  // Thumbnails, mid-res copies and tiles are stored assets too, but they are not separate pictures
+  // to choose: listing them beside their primary image duplicates every choice.
+  const pickableWidgetAssetChoices = $derived.by(() => {
+    const derived = derivedAssetIds(client.store.world.assetManifest);
+    return widgetAssetChoices.filter((asset) => !derived.has(asset.assetId));
+  });
   const widgetRollTables = $derived(
     (client.store.getAll("rollTables") as readonly RollTableDocument[])
       .filter(
@@ -2134,7 +2141,7 @@
           label: table.name,
         }));
       case "gallery-image":
-        return widgetAssetChoices.map((asset) => ({
+        return pickableWidgetAssetChoices.map((asset) => ({
           id: asset.assetId,
           label: asset.name,
         }));
@@ -3916,7 +3923,7 @@
                       <label
                         >Local image <select bind:value={widgetAssetId}
                           ><option value="">Choose an image…</option>
-                          {#each widgetAssetChoices as asset (asset.assetId)}<option
+                          {#each pickableWidgetAssetChoices as asset (asset.assetId)}<option
                               value={asset.assetId}
                               >{asset.name} · {asset.mime}</option
                             >{/each}
@@ -4781,7 +4788,7 @@
               >Cover image
               <select aria-label="Codex cover image" bind:value={basicsCover}>
                 <option value="">No cover</option>
-                {#each widgetAssetChoices as asset (asset.assetId)}<option
+                {#each pickableWidgetAssetChoices as asset (asset.assetId)}<option
                     value={asset.assetId}>{asset.name} · {asset.mime}</option
                   >{/each}
               </select>

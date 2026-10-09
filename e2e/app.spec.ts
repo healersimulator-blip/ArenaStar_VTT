@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { applySidebarMap } from "./lib";
 import { fileURLToPath } from "node:url";
 
 const entry = "file://" + fileURLToPath(new URL("../dist/index.html", import.meta.url));
@@ -108,6 +109,7 @@ test.describe("GM tab app shell (§2, §14 M1)", () => {
       mimeType: "image/png",
       buffer: TINY_PNG,
     });
+    await applySidebarMap(page);
     await expect.poll(() => appCall<string | null>(page, "sceneImg")).not.toBeNull();
     const hash = await appCall<string | null>(page, "sceneImg");
     expect(hash).toMatch(/^[0-9a-f]{64}$/); // sha256 content-addressed (§7)

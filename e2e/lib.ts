@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 import { deflateSync as zlibDeflate } from "node:zlib";
 
@@ -191,4 +191,17 @@ export function solidPng(
     chunk("IDAT", zlibDeflate(raw)),
     chunk("IEND", Buffer.alloc(0)),
   ]);
+}
+
+/**
+ * The sidebar's **Import map** input opens the image preview first (IMAGE_HANDLING_DESIGN §6.1: the
+ * sidebar is one of the input adapters into the preview dialog). This confirms the default
+ * "replace the scene background" action once the preview is ready.
+ */
+export async function applySidebarMap(page: Page): Promise<void> {
+  const dialog = page.locator("[data-image-import-dialog]");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".preview-frame img")).toBeVisible();
+  await dialog.getByRole("button", { name: "Apply to image" }).click();
+  await expect(dialog).toHaveCount(0);
 }

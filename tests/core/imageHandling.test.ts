@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   DEFAULT_IMAGE_HANDLING_PREFERENCES,
   DEFAULT_SCENE_EXPRESS_DEFAULTS,
+  derivedAssetIds,
   imageHandlingPreferencesKey,
   imageHandlingPreferencesOf,
   loadImageHandlingPreferences,
@@ -113,5 +114,27 @@ describe("image workflow preferences and world defaults", () => {
     expect(playerUploadQuotaMBOf({ playerUploadQuotaMB: 0 })).toBe(0);
     expect(playerUploadQuotaMBOf({ playerUploadQuotaMB: 0.25 })).toBe(0.25);
     expect(playerUploadQuotaMBOf({ playerUploadQuotaMB: -1 })).toBeNull();
+  });
+});
+
+describe("derived image variants are not separate picker choices", () => {
+  test("thumbnails, mid-res copies and tiles are listed as derived; originals are not", () => {
+    const original = "a".repeat(64);
+    const thumb = "b".repeat(64);
+    const mid = "c".repeat(64);
+    const tile = "d".repeat(64);
+    const plain = "e".repeat(64);
+    const entry = (name: string) => ({ name, mime: "image/png", size: 1, visibility: "referenced" as const, createdAt: 0 });
+    const manifest = {
+      [original]: { ...entry("map.png"), thumb: { assetId: thumb, width: 1, height: 1 }, mid: { assetId: mid, width: 1, height: 1 },
+        tiles: { size: 1024, cols: 1, rows: 1, ids: [tile] } },
+      [thumb]: entry("map.png#thumb"),
+      [mid]: entry("map.png#mid"),
+      [tile]: entry("map.png#tile0"),
+      [plain]: entry("standalone.png"),
+    } as unknown as Parameters<typeof derivedAssetIds>[0];
+    expect([...derivedAssetIds(manifest)].sort()).toEqual([thumb, mid, tile].sort());
+    expect(derivedAssetIds(manifest).has(original)).toBe(false);
+    expect(derivedAssetIds(manifest).has(plain)).toBe(false);
   });
 });

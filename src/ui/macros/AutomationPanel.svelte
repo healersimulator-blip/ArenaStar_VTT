@@ -5,6 +5,7 @@
   import type { AssetManifest, AutomationDocument, DocRef, Json, MacroDocument, RollTableDocument, SceneDocument,
     RegionDocument, TileDocument } from "../../core/documents";
   import { listTaggable } from "../../core/tags";
+  import { derivedAssetIds } from "../../core/imageHandling";
   import { COMBAT_TRIGGER_METHODS } from "../../core/combat";
   import {
     PINNABLE_COLLECTIONS, automationImageError, isHostDispatchedMethod, validateAutomation, type AutomationDefinition, type AutomationGates, type AutomationMethod,
@@ -53,6 +54,9 @@
   let rollTables = $state<RollTableDocument[]>([]);
   let assets = $state<AssetManifest>({});
   const imageAssets = $derived(Object.entries(assets).filter(([hash]) => !automationImageError(hash, assets)));
+  const derivedImageIds = $derived(derivedAssetIds(assets));
+  /** Pickers offer originals; a derived thumb/mid/tile of another image is not a separate choice. */
+  const pickableImageAssets = $derived(imageAssets.filter(([hash]) => !derivedImageIds.has(hash)));
   let saved = $state<AutomationDocument[]>([]);
   let editing = $state("");
   let name = $state("");
@@ -783,7 +787,7 @@
         {#if tileTriggerShape === "alpha"}
           <label>Alpha mask image <select bind:value={tileTriggerImage} data-zone-alpha-image>
             <option value="">Choose an imported image…</option>
-            {#each imageAssets as [hash, asset] (hash)}<option value={hash}>{asset.name} ({hash.slice(0, 8)})</option>{/each}
+            {#each pickableImageAssets as [hash, asset] (hash)}<option value={hash}>{asset.name} ({hash.slice(0, 8)})</option>{/each}
           </select></label>
         {/if}
         <label><input type="checkbox" bind:checked={tileElevationLimited} />Limit trigger elevation</label>
@@ -1463,15 +1467,15 @@
                   <label>Image {imageIndex + 1} <select aria-label={`Tile list image ${imageIndex + 1}`} value={image}
                     onchange={(e) => { if (step.kind === "tileImage" && step.images) step.images[imageIndex] = e.currentTarget.value; }}>
                     {#if !imageAssets.some(([hash]) => hash === image)}<option value={image}>Unavailable image</option>{/if}
-                    {#each imageAssets as [hash, asset] (hash)}<option value={hash}>{asset.name} ({hash.slice(0, 8)})</option>{/each}
+                    {#each pickableImageAssets as [hash, asset] (hash)}<option value={hash}>{asset.name} ({hash.slice(0, 8)})</option>{/each}
                   </select></label>
                   <button type="button" aria-label={`Remove tile list image ${imageIndex + 1}`}
                     onclick={() => { if (step.kind === "tileImage" && step.images) step.images.splice(imageIndex, 1); }}>Remove</button>
                 </div>
               {/each}
-              <button type="button" aria-label="Add tile list image" disabled={step.images.length >= 32 || !imageAssets.some(([hash]) => !step.images?.includes(hash))}
+              <button type="button" aria-label="Add tile list image" disabled={step.images.length >= 32 || !pickableImageAssets.some(([hash]) => !step.images?.includes(hash))}
                 onclick={() => { if (step.kind === "tileImage" && step.images) {
-                  const next = imageAssets.find(([hash]) => !step.images?.includes(hash));
+                  const next = pickableImageAssets.find(([hash]) => !step.images?.includes(hash));
                   if (next) step.images.push(next[0]);
                 } }}>Add image</button>
               <small>1–32 distinct images, stored privately on this action. Each tile uses its current image to find the next/previous entry; if absent, Next starts at first and Previous at last. Number is 1-based. Random other requires at least two images. The host chooses separately per tile and validates every entry on every fire. No transitions, temporary art or loops yet.</small>
@@ -1484,7 +1488,7 @@
               {#if step.image && !imageAssets.some(([hash]) => hash === step.image)}
                 <option value={step.image}>Unavailable image — import or approve sharing</option>
               {/if}
-              {#each imageAssets as [hash, asset] (hash)}<option value={hash}>{asset.name} ({hash.slice(0, 8)})</option>{/each}
+              {#each pickableImageAssets as [hash, asset] (hash)}<option value={hash}>{asset.name} ({hash.slice(0, 8)})</option>{/each}
             </select></label>
             {/if}
             <small>Import images in FX timelines and approve player sharing first. Only owned PNG/JPEG/WebP/GIF/AVIF assets are accepted; no remote URLs. The host rechecks availability and sharing on every fire. {step.kind === "tileImage" ? "Select 1–32 tiles first (This tile or Tagger); geometry, visibility and other fields are unchanged." : "Changes the selected saved scene's background without activating it or changing dimensions/grid. A deleted target rejects the whole graph."} Changes and history share one undoable transaction; export rights remain separate.</small>

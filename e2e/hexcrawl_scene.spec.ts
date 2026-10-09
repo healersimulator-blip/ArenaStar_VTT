@@ -10,6 +10,7 @@
  */
 import { expect, test } from "@playwright/test";
 import {
+  applySidebarMap,
   entry,
   hostCall,
   solidPng,
@@ -156,6 +157,7 @@ test.describe("hexcrawl scene (§9 Phase 1, D-270)", () => {
       mimeType: "image/png",
       buffer: solidPng(800, 600),
     });
+    await applySidebarMap(page);
     await expect
       .poll(read, { timeout: 20_000 })
       .toMatchObject({ width: 800, height: 600 });

@@ -1,5 +1,5 @@
 /** Shared preferences, world defaults and duplicate policies for the image ingest UI. */
-import type { AssetManifestEntry, Json, SceneGrid } from "./documents";
+import type { AssetManifest, AssetManifestEntry, Json, SceneGrid } from "./documents";
 
 export type ImageAction =
   | "newScene"
@@ -285,4 +285,18 @@ export function uniqueLogicalFileName(
 export function playerUploadQuotaMBOf(settings: Record<string, Json>): number | null {
   const value = settings.playerUploadQuotaMB;
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * Asset ids that are derived variants (thumbnail, mid-res copy or map tile) of another asset.
+ * Pickers offer originals only; validation still accepts any owned hash.
+ */
+export function derivedAssetIds(manifest: AssetManifest): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const entry of Object.values(manifest)) {
+    if (entry.thumb) ids.add(entry.thumb.assetId);
+    if (entry.mid) ids.add(entry.mid.assetId);
+    for (const id of entry.tiles?.ids ?? []) ids.add(id);
+  }
+  return ids;
 }

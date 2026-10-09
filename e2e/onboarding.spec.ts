@@ -8,7 +8,7 @@
  * the DOM between each one, on the GM's shell and on a joined player's.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { entry, gmCall, hostCall, manualFragment, playerCall, waitForSurface } from "./lib";
+import { applySidebarMap, entry, gmCall, hostCall, manualFragment, playerCall, waitForSurface } from "./lib";
 
 const TINY_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -53,6 +53,7 @@ test.describe("first-run onboarding (§2.3, G-41)", () => {
 
     // ── step 1: a map, through the sidebar's own import control ──
     await host.setInputFiles("#map-input", { name: "map.png", mimeType: "image/png", buffer: TINY_PNG });
+    await applySidebarMap(host);
     await expect.poll(() => hostCall<string | null>(host, "sceneImg"), { timeout: 20_000 }).not.toBeNull();
     await expect(host.locator('[data-onboarding-step="map"]')).toHaveAttribute("data-onboarding-done", "true");
 

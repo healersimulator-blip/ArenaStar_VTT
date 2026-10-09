@@ -6,6 +6,7 @@
   import type { AssetManifestEntry } from "../../core/documents";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
+  import { derivedAssetIds } from "../../core/imageHandling";
 
   let { client, bus, getAsset = null, useAsset } : {
     client: ClientSync;
@@ -36,8 +37,12 @@
   }));
 
   function refresh(): void {
-    assets = Object.entries(client.store.world.assetManifest).filter(([, entry]) =>
-      /^(image\/(png|jpeg|webp|gif|avif)|video\/(webm|mp4)|audio\/(mpeg|mp3|wav|ogg|webm|mp4|aac))$/.test(entry.mime)
+    // Derived variants (thumbnail, mid-res, tiles) are stored assets, but "Use in timeline" should
+    // offer the imported media itself, not each of its copies.
+    const manifest = client.store.world.assetManifest;
+    const derived = derivedAssetIds(manifest);
+    assets = Object.entries(manifest).filter(([hash, entry]) =>
+      !derived.has(hash) && /^(image\/(png|jpeg|webp|gif|avif)|video\/(webm|mp4)|audio\/(mpeg|mp3|wav|ogg|webm|mp4|aac))$/.test(entry.mime)
     ).map(([hash, entry]) => ({ hash, entry })).sort((a, b) => a.entry.name.localeCompare(b.entry.name));
     const known = new Set(assets.map((asset) => asset.hash));
     for (const preview of previews) if (!known.has(preview.hash)) URL.revokeObjectURL(preview.url);
