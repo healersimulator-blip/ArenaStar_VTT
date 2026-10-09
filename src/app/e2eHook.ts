@@ -73,6 +73,7 @@ import { hexcrawlProfileOf } from "../core/hexcrawl/types";
 import { readWorldClock } from "../packages/pf1e/worldClock";
 import { validatePF1ePoisonTargetState } from "../packages/pf1e/afflictions";
 import { readPF1eConditionApplications } from "../packages/pf1e/conditionApplications";
+import { spellAreasFromFlags } from "../packages/pf1e/spellAreas";
 import { actionCardOf } from "../core/action";
 import { selectedEncounter } from "../ui/combat/encounters";
 import {
@@ -722,6 +723,22 @@ export interface AppSurface {
     sourceKind: string;
     removal: string;
     supported: boolean;
+  }>;
+  /** D-408: one scene's persisted spell areas, as the host replica holds them (validated read). */
+  pf1eSpellAreas(sceneId: string): Array<{
+    id: string;
+    effectId: string;
+    actionId: string;
+    sceneId: string;
+    casterActorId: string;
+    dc: number;
+    casterLevel: number;
+    spellLevel: number;
+    origin: { x: number; y: number };
+    radiusFt: number;
+    startsAt: number;
+    endsAt: number;
+    difficultTerrain: boolean;
   }>;
   /** D-186: the public chat cards containing `needle`, for the resolution cards. */
   pf1eCardsContaining(needle: string): { count: number; first: string | null };
@@ -3612,6 +3629,11 @@ function appSurface(app: HostApp): AppSurface {
         removal: application.removal.kind,
         supported: application.supported,
       }));
+    },
+    pf1eSpellAreas: (sceneId) => {
+      const scene = client.store.get("scenes", sceneId) as SceneDocument | undefined;
+      if (scene === undefined) return [];
+      return Object.values(spellAreasFromFlags(scene.flags));
     },
     pf1eCardsContaining: (needle) => {
       const hits = client.store

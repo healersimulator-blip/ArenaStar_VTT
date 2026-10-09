@@ -19,6 +19,7 @@ import { worldSettingsFrom } from "../../core/worldSettings";
 import { consumableCastAuthored } from "../../packages/pf1e/consumables";
 import { pf1eAttackRollGroups } from "../../packages/pf1e/rollData";
 import { resolveCastFlow } from "../sheets/pf1eCastFlow";
+import { resolveAreaCastFlow } from "../sheets/pf1eAreaCastFlow";
 import { pf1eSpellEffectByName } from "../../packages/pf1e/spellEffects";
 import { castSpellCueNote, fireBoundItemCue, fxCastOutcome, fxItemCueNote } from "../sheets/fxItemCue";
 import { attackLineItemId, pf1eItemView } from "../sheets/pf1eItemsTab";
@@ -217,7 +218,12 @@ async function runSpellSlot(input: {
     outcome.result.passed ? " made" : " failed"}${cue}` };
 }
 
-/** Resolve one Entangle area as one slot expenditure and one host-verified row/card per creature. */
+/**
+ * D-408 — resolve one Entangle area as one slot expenditure, one card and one commit across
+ * every affected creature. The loop over single-target casts is gone: a mid-area failure used to
+ * leave earlier rows committed while later ones never resolved, and the area flow fails the whole
+ * cast before anything is spent instead.
+ */
 export async function runQuickbarEntangleArea(input: {
   client: ClientSync;
   actor: ActorDocument;
@@ -244,44 +250,97 @@ export async function runQuickbarEntangleArea(input: {
     radius: 40,
     units: "ft",
   };
+  // The binding resolution mirrors a single-target slot cast (`runSpellSlot`): catalogue
+  // mechanics when the spell is modeled, else the binding's reviewed profile — never invented.
+  const effect = pf1eSpellEffectByName(name);
+  const profile = effect === null ? input.entry.spellProfile : undefined;
+  if (effect === null && profile === undefined)
+    return { ok: false, error: `${name} needs a reviewed save, severity and damage profile in its quickbar binding` };
+  const spellName = effect?.name ?? name;
+  const saveType = effect?.save?.type ?? profile?.saveType ?? "ref";
+  const severity = effect !== null
+    ? effect.save?.severity ?? "none"
+    : profile?.severity ?? "none";
+  const damageFormula = profile?.damageFormula ?? "";
+  const energyType = profile?.energyType;
+  const preparedIndex = input.entry.preparedIndex ?? null;
   const settings = worldSettingsFrom(input.client.store.getAll("settings"));
   const view = pf1eSheetView(input.actor, { settings });
-  const reports: string[] = [];
-  let firstResolved: { tokenId: string; actor: ActorDocument } | undefined;
-  for (const [index, target] of input.targets.entries()) {
-    const targetView = pf1eSheetView(target.actor, { settings });
-    const outcome = await runSpellSlot({
-      client: input.client,
-      actor: input.actor,
-      view,
-      target: target.actor,
-      targetView,
-      entry: input.entry,
-      resourceAlreadySpent: index > 0,
-      suppressSpellCue: true,
-      context: {
-        sceneId: input.scene._id,
-        casterTokenId: input.casterTokenId,
-        targetTokenId: target.tokenId,
-        area,
-      },
-    });
-    if (!outcome.ok) {
-      return { ok: false, error: index === 0
-        ? outcome.error
-        : `Entangle has resolved ${String(index)} target row(s), but stopped at ${target.actor.name}: ${outcome.error}` };
-    }
-    if (!firstResolved) firstResolved = target;
-    reports.push(outcome.note);
+  const prepared = preparedIndex === null
+    ? null : pf1eSpellbookView(input.actor, view.derived).prepared[preparedIndex] ?? null;
+  if (preparedIndex !== null && prepared === null)
+    return { ok: false, error: "the bound prepared row is gone — re-prepare and re-bind" };
+  if (prepared !== null && fxSpellKeyFromName(prepared.name) !== fxSpellKeyFromName(spellName))
+    return { ok: false, error: `the bound row now holds ${prepared.name}, not ${spellName}` };
+  const level = prepared?.slotLevel ?? prepared?.level ?? input.entry.spellLevel ?? 0;
+  const components = prepared?.components.trim() || input.entry.spellComponents?.trim() || "";
+  const gate = components === "" ? undefined : {
+    components,
+    caster: { canSpeak: true, hasFreeHand: true, componentsInHand: true,
+      deafened: false, grappled: false, pinned: false },
+    castingTime: "standard" as const,
+    declarations: [],
+  };
+  if (preparedIndex === null) {
+    const pf1e = (input.actor.system as Record<string, unknown>).pf1e;
+    const spells = pf1e && typeof pf1e === "object" && !Array.isArray(pf1e)
+      ? (pf1e as Record<string, unknown>).spells : undefined;
+    const known = spells && typeof spells === "object" && !Array.isArray(spells)
+      ? (spells as Record<string, unknown>).known : undefined;
+    if (!Array.isArray(known) || !known.some((raw) => raw && typeof raw === "object" && !Array.isArray(raw) &&
+        typeof (raw as Record<string, unknown>).name === "string" &&
+        fxSpellKeyFromName((raw as Record<string, unknown>).name as string) === fxSpellKeyFromName(spellName) &&
+        ((raw as Record<string, unknown>).slotLevel === level ||
+          (raw as Record<string, unknown>).slotLevel === undefined && (raw as Record<string, unknown>).level === level)))
+      return { ok: false, error: `${spellName} is no longer in this caster's known spells at level ${String(level)}` };
   }
+  const outcome = await resolveAreaCastFlow(input.client, input.client.user, {
+    casterActor: input.actor,
+    casterDerived: view.derived,
+    casterTokenId: input.casterTokenId,
+    spell: {
+      name: spellName,
+      level,
+      ...(preparedIndex !== null ? { preparedIndex } : {}),
+    },
+    ...(effect !== null ? { spellEffectId: effect.id } : {}),
+    ...(gate !== undefined ? { gate } : {}),
+    authored: {
+      saveType,
+      severity,
+      damageFormula,
+      ...(energyType !== undefined ? { energyType } : {}),
+    },
+    area,
+    targets: input.targets.map((target) => {
+      const targetView = pf1eSheetView(target.actor, { settings });
+      return {
+        name: target.actor.name,
+        actor: target.actor,
+        derived: targetView.derived,
+        feats: Array.isArray(targetView.authored.feats)
+          ? (targetView.authored.feats as string[])
+          : [],
+        tokenId: target.tokenId,
+      };
+    }),
+  });
+  if (!outcome.ok) return { ok: false, error: outcome.error };
+  const first = input.targets[0] as { tokenId: string; actor: ActorDocument };
   // One spell-bound area timeline per cast, not one copy per creature row. Its target anchor is the
   // first affected token; the host plays the saved 40-ft-area visual to this scene's entitled peers.
-  const cue = firstResolved ? castSpellCueNote({ client: input.client, spellName: "Entangle",
-    outcome: "success", caster: input.actor, target: firstResolved.actor,
-    sceneId: input.scene._id, sourceTokenId: input.casterTokenId,
-    targetTokenId: firstResolved.tokenId }) : "";
+  // The thicket appears whether the saves fail or not — the zone outlives every row.
+  const cue = (cueOutcome: "success" | "failure"): string => castSpellCueNote({
+    client: input.client, spellName, outcome: cueOutcome, caster: input.actor, target: first.actor,
+    sceneId: input.scene._id, sourceTokenId: input.casterTokenId, targetTokenId: first.tokenId,
+  });
+  if (outcome.lost)
+    return { ok: false, error: `${spellName} was lost before it resolved${cue("failure")}` };
+  const saveDescription = severity === "none" ? "no save" : `${saveType.toUpperCase()} save`;
+  const reports = outcome.rows.map((row) =>
+    `${spellName} → ${row.targetName} — DC ${String(outcome.dc)}, ${saveDescription}${row.result.passed ? " made" : " failed"}`);
   return { ok: true, note: `Entangle — 40-ft-radius spread at (${String(input.origin.x)}, ${
-    String(input.origin.y)}); ${String(input.targets.length)} target row(s): ${reports.join("; ")}${cue}` };
+    String(input.origin.y)}); ${String(outcome.rows.length)} target row(s): ${reports.join("; ")}${cue("success")}` };
 }
 
 /** Resolve a caster-level-six Lightning Bolt line once across all intersected creature footprints. */

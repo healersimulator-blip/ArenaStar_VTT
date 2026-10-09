@@ -12357,3 +12357,45 @@ slice are green as a set — `pf1e_poison` 2/2, `pf1e_inventory`, `pf1e_acceptan
 `pf1e_wizard_combat` (1) fail **identically at the base commit `95ba883`** (re-run in a clean worktree:
 the chat no longer prints the old "casts <spell>" narration line for a version-2 cast card), so they
 are pre-existing and not attributable to this slice.
+
+## D-408 — Area casts: one card, one row per affected actor, one derived zone (S3, 2026-10-09)
+
+**Context.** D-407's hot-bar Entangle (S6, minimal) fired one `resolveCastFlow` per affected actor: a
+spread over seven footprints wrote seven cards and spent the slot seven times, and no persistent zone
+existed — the area was a loop, not a fact. The plan's S3 asked for the spread as one atomic card with
+one row per affected actor and a zone the table can read back.
+
+**Decision.** The area cast is one flow call producing one committed envelope:
+
+- `resolveAreaCastFlow` (`src/ui/sheets/pf1eAreaCastFlow.ts`) takes the bound prepared row, the
+  resolved preview cells and the affected token keys and commits once: a single `cast` card (one
+  `targets` row per actor, each resolved through the same save/severity/SR chain as a single-target
+  cast), a single derived zone, a single slot spend. A duplicate actor key or more than 24 targets is
+  a named refusal, never a partial write; off-path callers keep the old per-row errors verbatim.
+- The zone is derived from the committed card, not from the request (D-405's discipline):
+  `spellAreasFromFlags` (`src/packages/pf1e/spellAreas.ts`) is the validated read, the id is
+  `spellarea-<cardId>`, and duration is catalogue × caster level (Entangle: CL × 1 minute).
+  Difficult movement reads the union of zones and walls (`difficultCellsFromSpellAreas` in the host
+  sync path), and expired zone ids sweep by the same derivation — the card stays the durable fact,
+  the zone its shadow.
+- Per-row card notes keep the single-target shape (`Entangle → <name> — DC 14, REF save made/failed`),
+  the status line keeps the spread sentence (`Entangle — 40-ft-radius spread…`), and the cue note
+  keeps `success` while the lost branch stays `failure` — the zone exists regardless of saves, so the
+  outcome is about the casting, not the saving.
+
+**Delivery.** `runQuickbarEntangleArea` (`src/ui/quickbar/run.ts`) now resolves the binding exactly
+like `runSpellSlot` (catalogue/profile, prepared/known presence, level match, the components gate)
+and makes the one flow call; its contract (status text, cue note, per-row notes, the preserved
+`runSpellSlot` loop for the line spell) is unchanged. The readback hook `pf1eSpellAreas(sceneId)`
+(`src/app/e2eHook.ts`) exposes the host replica's validated zones next to `pf1eConditionApps`.
+`e2e/pf1e_spell_demo.spec.ts` pins the one-card contract through the live canvas (`targets.length ≥
+2`, every row `provenance: "host"`, the zone's id/dc/CL/radius/difficult-terrain and its CL × 1
+minute span); `e2e/pf1e_entangle.spec.ts` still owns the single-target landed/made-save pair and now
+points at the demo spec for area coverage. S4 (break-free move action, end-of-caster's-turn re-save),
+S5b (condition↔FX teardown on removal) and the Phase 2b/3/4 remainders stay deferred.
+
+**Evidence.** `pnpm exec tsc --noEmit` exit 0 · `eslint` on the four touched files exit 0 ·
+`tests/host/pf1eAreaCast.test.ts` **4/4** · `pnpm build` + `build:systems` + `build:worlds` green.
+The two browser specs were extended but **not executed here**: this sandbox has no Playwright browser
+and the CDN download is outside the network allowlist (no system Chrome either), so
+`pf1e_spell_demo` and `pf1e_entangle` must run in CI before merge.

@@ -10,17 +10,27 @@
  * condition (Entangle) cannot be answered that way: the condition, its save and the reason it was
  * applied are spell facts, not table facts.
  *
- * Shape, deliberately minimal:
+ * Shape:
  *
  * - `save` — the saving throw the target is allowed and what a successful save means for the
  *   condition (`negates`), or `null` for a spell with no save. Damage is still the cast form's
  *   business; the tactical half is the condition.
  * - `conditions` — canonical `PF1E_CONDITIONS` names applied to a target whose save failed. Names
  *   are validated against the library, never free text, and the list is bounded.
+ * - `duration` (v2) — the printed duration as data (`value`/`unit`, optionally per caster level),
+ *   or absent when the spell is instantaneous or the table still adjudicates it. The host derives
+ *   the spell-area expiry from it; nothing trusts a client-supplied end time.
+ * - `area` (v2) — the printed area as data (a radius spread today), or absent for a spell with no
+ *   area the engine persists. The host re-resolves it against the live scene.
+ * - `range` (v2) — the printed range as data (`baseFt` plus `perLevelFt`), or absent when range is
+ *   not host-checked. The host bounds the area origin from the caster's derived caster level.
+ * - `difficultTerrain` (v2) — true when the spell's area is difficult terrain while it persists
+ *   (Entangle's whole area, CRB p.278). Absent means ordinary ground.
  *
- * What is deliberately absent until its consumer exists: duration/expiry, area re-saves and the
- * printed break-free action (plan S4), and area targeting (plan S3). The pack's `automationNote`
- * names the parts a table must still adjudicate rather than pretending they are modeled.
+ * What is deliberately absent until its consumer exists: the printed break-free action and the
+ * end-of-caster's-turn re-save (plan S4 — the pack's `automationNote` names them), anything
+ * beyond a radius spread for `area`, and fractional per-level ranges (close: 25 + 5/2 levels —
+ * refused by the whole-number bounds rather than rounded).
  *
  * The same rows ship as content in `systems/pf1e-core/packs/spells.json` (`system.tacticalEffect`,
  * one entry per catalogue id); no source file loads pack data at runtime (M18), so this module is
@@ -31,7 +41,7 @@ import { err, okVal, type Result } from "../../core/result";
 import type { PF1eSaveSeverity, PF1eSaveType } from "./casting";
 import { pf1eConditionDef } from "./conditions";
 
-export const PF1E_SPELL_EFFECT_VERSION = 1 as const;
+export const PF1E_SPELL_EFFECT_VERSION = 2 as const;
 
 /** A spell applies a bounded set of conditions; the library itself is the ceiling. */
 export const PF1E_SPELL_EFFECT_MAX_CONDITIONS = 4;
@@ -40,6 +50,27 @@ export interface PF1eSpellEffectSource {
   readonly title: string;
   readonly citation: string;
   readonly url?: string;
+}
+
+export interface PF1eSpellEffectDuration {
+  /** Whole-number duration in `unit`s; multiplied by caster level when `perLevel` is true. */
+  readonly value: number;
+  readonly unit: "round" | "minute";
+  readonly perLevel: boolean;
+}
+
+export interface PF1eSpellEffectArea {
+  /** Only radius spreads ship today; cone/line shapes stay refused until a row needs one. */
+  readonly shape: "spread";
+  /** Radius in feet. */
+  readonly radiusFt: number;
+}
+
+export interface PF1eSpellEffectRange {
+  /** Printed base range in feet (long: 400, as in "400 ft. + 40 ft./level"). */
+  readonly baseFt: number;
+  /** Additional feet per caster level (long: 40). */
+  readonly perLevelFt: number;
 }
 
 export interface PF1eSpellEffect {
@@ -59,6 +90,36 @@ export interface PF1eSpellEffect {
   readonly conditions: readonly string[];
   /** Optional starter-world persistent visual, linked to the exact condition application at runtime. */
   readonly conditionFxMacroId?: string;
+  /** Printed duration as data; absent when the spell is instantaneous or unmodeled. */
+  readonly duration?: PF1eSpellEffectDuration;
+  /** Printed area as data; absent when the engine persists no area for the spell. */
+  readonly area?: PF1eSpellEffectArea;
+  /** Printed range as data; absent when the host does not bound the area origin. */
+  readonly range?: PF1eSpellEffectRange;
+  /** True when the spell's persisted area is difficult terrain. Absent means ordinary ground. */
+  readonly difficultTerrain?: boolean;
+}
+
+/** Duration in milliseconds for a validated duration at a whole caster level (≥ 1). */
+export function pf1eSpellEffectDurationMs(
+  duration: PF1eSpellEffectDuration,
+  casterLevel: number,
+): number | null {
+  if (!Number.isInteger(casterLevel) || casterLevel < 1 || casterLevel > 100) return null;
+  const units = duration.perLevel ? duration.value * casterLevel : duration.value;
+  const msPerUnit = duration.unit === "minute" ? 60_000 : 6_000;
+  const ms = units * msPerUnit;
+  return Number.isSafeInteger(ms) && ms > 0 ? ms : null;
+}
+
+/** Maximum range in feet for a validated range at a whole caster level (≥ 1). */
+export function pf1eSpellEffectRangeFt(
+  range: PF1eSpellEffectRange,
+  casterLevel: number,
+): number | null {
+  if (!Number.isInteger(casterLevel) || casterLevel < 1 || casterLevel > 100) return null;
+  const ft = range.baseFt + range.perLevelFt * casterLevel;
+  return Number.isSafeInteger(ft) && ft >= 0 ? ft : null;
 }
 
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -80,9 +141,17 @@ function isText(value: unknown, max: number): value is string {
  */
 const CONDITION_SAVE_SEVERITY: PF1eSaveSeverity = "negates";
 
-const EFFECT_KEYS = ["id", "version", "name", "source", "save", "conditions", "conditionFxMacroId"] as const;
+const EFFECT_KEYS = ["id", "version", "name", "source", "save", "conditions", "conditionFxMacroId",
+  "duration", "area", "range", "difficultTerrain"] as const;
 const SOURCE_KEYS = ["title", "citation", "url"] as const;
 const SAVE_KEYS = ["type", "severity"] as const;
+const DURATION_KEYS = ["value", "unit", "perLevel"] as const;
+const AREA_KEYS = ["shape", "radiusFt"] as const;
+const RANGE_KEYS = ["baseFt", "perLevelFt"] as const;
+
+function isWhole(value: unknown, min: number, max: number): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
+}
 
 /**
  * Validate one authored tactical effect. Closed shape: an unknown key is refused by name, a
@@ -124,6 +193,34 @@ export function validatePF1eSpellEffect(raw: unknown): Result<PF1eSpellEffect> {
     if (conditions.includes(def.name)) return err(`spell effect repeats condition ${def.name}`);
     conditions.push(def.name);
   }
+  let duration: PF1eSpellEffectDuration | undefined;
+  if (raw.duration !== undefined) {
+    if (!isRecord(raw.duration) ||
+        Object.keys(raw.duration).some((key) => !(DURATION_KEYS as readonly string[]).includes(key)) ||
+        !isWhole(raw.duration.value, 1, 1000) ||
+        (raw.duration.unit !== "round" && raw.duration.unit !== "minute") ||
+        typeof raw.duration.perLevel !== "boolean")
+      return err("a spell effect duration must be { value: 1–1000, unit: round|minute, perLevel: boolean }");
+    duration = { value: raw.duration.value, unit: raw.duration.unit, perLevel: raw.duration.perLevel };
+  }
+  let area: PF1eSpellEffectArea | undefined;
+  if (raw.area !== undefined) {
+    if (!isRecord(raw.area) ||
+        Object.keys(raw.area).some((key) => !(AREA_KEYS as readonly string[]).includes(key)) ||
+        raw.area.shape !== "spread" || !isWhole(raw.area.radiusFt, 5, 500))
+      return err("a spell effect area must be { shape: \"spread\", radiusFt: 5–500 }");
+    area = { shape: "spread", radiusFt: raw.area.radiusFt };
+  }
+  let range: PF1eSpellEffectRange | undefined;
+  if (raw.range !== undefined) {
+    if (!isRecord(raw.range) ||
+        Object.keys(raw.range).some((key) => !(RANGE_KEYS as readonly string[]).includes(key)) ||
+        !isWhole(raw.range.baseFt, 0, 10000) || !isWhole(raw.range.perLevelFt, 0, 1000))
+      return err("a spell effect range must be { baseFt: 0–10000, perLevelFt: 0–1000 }");
+    range = { baseFt: raw.range.baseFt, perLevelFt: raw.range.perLevelFt };
+  }
+  if (raw.difficultTerrain !== undefined && typeof raw.difficultTerrain !== "boolean")
+    return err("a spell effect difficultTerrain must be a boolean");
   const source: PF1eSpellEffectSource = {
     title: raw.source.title.trim(),
     citation: raw.source.citation.trim(),
@@ -139,6 +236,10 @@ export function validatePF1eSpellEffect(raw: unknown): Result<PF1eSpellEffect> {
       : { type: raw.save.type as PF1eSaveType, severity: raw.save.severity as PF1eSaveSeverity },
     conditions,
     ...(typeof raw.conditionFxMacroId === "string" ? { conditionFxMacroId: raw.conditionFxMacroId } : {}),
+    ...(duration !== undefined ? { duration } : {}),
+    ...(area !== undefined ? { area } : {}),
+    ...(range !== undefined ? { range } : {}),
+    ...(raw.difficultTerrain !== undefined ? { difficultTerrain: raw.difficultTerrain } : {}),
   });
 }
 
@@ -149,17 +250,21 @@ export function validatePF1eSpellEffect(raw: unknown): Result<PF1eSpellEffect> {
 export const PF1E_SPELL_EFFECT_ROWS: readonly unknown[] = [
   {
     id: "entangle",
-    version: 1,
+    version: 2,
     name: "Entangle",
     source: {
       title: "PRPG Core Rulebook p.278 (Entangle)",
       citation:
-        "Reflex partial, see text; a creature that fails its save gains the entangled condition. The printed difficult-terrain half of \"partial\" is named as unmodeled in the pack's automationNote.",
+        "Long range; 40-ft.-radius spread; 1 min./level; Reflex partial, see text; SR no; difficult terrain throughout. Failure entangles; break-free and the caster-turn re-save are named in the pack automationNote.",
       url: "https://www.aonprd.com/SpellDisplay.aspx?ItemName=Entangle",
     },
     save: { type: "ref", severity: "negates" },
     conditions: ["Entangled"],
     conditionFxMacroId: "macro-entangled-vines",
+    duration: { value: 1, unit: "minute", perLevel: true },
+    area: { shape: "spread", radiusFt: 40 },
+    range: { baseFt: 400, perLevelFt: 40 },
+    difficultTerrain: true,
   },
 ];
 

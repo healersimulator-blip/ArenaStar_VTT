@@ -10,11 +10,11 @@
  *  - **made save**    ⇒ no condition, and the bound cue is not requested (a made save is the
  *    failure branch, which is "nothing" unless the author bound one).
  *
- * What this spec does **not** cover, because the tree does not implement it yet and the plan says so
- * (`DECISIONS.md` D-407, S3/S4/S5b): the 40-ft. **area** cast (one row per affected actor), the
- * printed **break-free / end-of-caster's-turn re-save** cadence, and the condition↔FX teardown when a
- * condition is removed. The removal demonstrated here is the card's own Revert, which is D-405's
- * contract and does undo both the condition and the rider.
+ * What this spec does **not** cover: the printed **break-free / end-of-caster's-turn re-save**
+ * cadence (S4) and the condition↔FX teardown when a condition is removed (S5b). The removal
+ * demonstrated here is the card's own Revert, which is D-405's contract and does undo both the
+ * condition and the rider. The 40-ft. **area** cast (D-408, S3 — one card, one row per affected
+ * actor, one derived zone) is covered through the live canvas in `pf1e_spell_demo.spec.ts`.
  *
  * Every assertion reads the **host replica** (`pf1eLastActionCard`, `pf1eConditionApps`) or the real
  * DOM (`[data-action-rider]`, `[data-quickbar-status]`) or the Pixi stage (`__stage`), never a toast.

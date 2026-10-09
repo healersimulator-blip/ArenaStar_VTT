@@ -1410,14 +1410,14 @@
      "savingThrow": "Reflex partial",
      "spellResistance": false,
      "automation": "descriptive",
-     "automationNote": "Mass-battle side: descriptive — the battle resolver has no per-square area that restrains for rounds, and D-1 deleted the old scatter-area version of exactly this spell. Tactical side: the save and the condition ship as `system.tacticalEffect` (mirrored by src/packages/pf1e/spellEffects.ts), so a cast resolved through the hero-level flow applies Entangled to a target whose Reflex save failed. Still table-adjudicated and deliberately not modeled: the difficult-terrain half of the printed \"Reflex partial\" line, the end-of-the-caster's-turn re-save for a creature that saved but remains in the area, the move-action break-free (Strength or Escape Artist against the spell DC), and the requirement that plants be present.",
+     "automationNote": "Mass-battle side: descriptive — the battle resolver has no per-square area that restrains for rounds, and D-1 deleted the old scatter-area version of exactly this spell. Tactical side: the save, the condition, the 40-ft.-radius spread, the long range, the 1 min./level duration and the difficult terrain ship as `system.tacticalEffect` (mirrored by src/packages/pf1e/spellEffects.ts), so an area cast resolved through the hero-level flow posts one card with a row per affected actor, applies Entangled to each target whose Reflex save failed, persists the spread for its duration and prices its squares as difficult terrain. Still table-adjudicated and deliberately not modeled: the end-of-the-caster's-turn re-save for a creature that saved but remains in the area, the move-action break-free (Strength or Escape Artist against the spell DC), and the requirement that plants be present.",
      "tacticalEffect": {
       "id": "entangle",
-      "version": 1,
+      "version": 2,
       "name": "Entangle",
       "source": {
        "title": "PRPG Core Rulebook p.278 (Entangle)",
-       "citation": "Reflex partial, see text; a creature that fails its save gains the entangled condition. The printed difficult-terrain half of \"partial\" is named as unmodeled in the pack's automationNote.",
+       "citation": "Long range; 40-ft.-radius spread; 1 min./level; Reflex partial, see text; SR no; difficult terrain throughout. Failure entangles; break-free and the caster-turn re-save are named in the pack automationNote.",
        "url": "https://www.aonprd.com/SpellDisplay.aspx?ItemName=Entangle"
       },
       "save": {
@@ -1427,7 +1427,21 @@
       "conditions": [
        "Entangled"
       ],
-      "conditionFxMacroId": "macro-entangled-vines"
+      "conditionFxMacroId": "macro-entangled-vines",
+      "duration": {
+       "value": 1,
+       "unit": "minute",
+       "perLevel": true
+      },
+      "area": {
+       "shape": "spread",
+       "radiusFt": 40
+      },
+      "range": {
+       "baseFt": 400,
+       "perLevelFt": 40
+      },
+      "difficultTerrain": true
      }
     },
     "items": [],

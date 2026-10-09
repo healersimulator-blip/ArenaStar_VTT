@@ -244,12 +244,30 @@ test.describe("JungleEntrance2 spell demo in the browser", () => {
       await expect.poll(() => playerCall(player, "lastFxCue"), { timeout: 5_000 })
         .toMatchObject({ macroId: "macro-entangle-area" });
 
-      const entangleCard = await hostCall<{ action: {
+      const entangleCard = await hostCall<{ messageId: string; action: {
         label: string;
         area?: { shape: string; radius?: number; units?: string };
+        targets: Array<{ key: string; outcome: string; provenance?: string }>;
       } } | null>(host, "pf1eLastActionCard");
       expect(entangleCard?.action).toMatchObject({ label: "Entangle",
         area: { shape: "spread", radius: 40, units: "ft" } });
+      // D-408 — one card carries every affected footprint as its own host-verified row.
+      expect(entangleCard?.action.targets.length).toBeGreaterThanOrEqual(2);
+      expect(entangleCard?.action.targets.every((row) => row.provenance === "host")).toBe(true);
+      // D-408 — the zone derives atomically with its card: catalogue duration × Vacorg's CL 6.
+      await expect.poll(async () => (await surfaceCallArg<Array<{ id: string }>>(
+        host, "app", "pf1eSpellAreas", "scene-jungle")).length, { timeout: 10_000 }).toBe(1);
+      const zones = await surfaceCallArg<Array<{
+        id: string; effectId: string; actionId: string; sceneId: string; casterActorId: string;
+        dc: number; casterLevel: number; spellLevel: number;
+        origin: { x: number; y: number }; radiusFt: number;
+        startsAt: number; endsAt: number; difficultTerrain: boolean;
+      }>>(host, "app", "pf1eSpellAreas", "scene-jungle");
+      expect(zones[0]).toMatchObject({ id: `spellarea-${entangleCard?.messageId}`,
+        effectId: "entangle", actionId: entangleCard?.messageId, sceneId: "scene-jungle",
+        casterActorId: "vacorg", dc: 15, casterLevel: 6, spellLevel: 1,
+        radiusFt: 40, difficultTerrain: true });
+      expect(zones[0]!.endsAt - zones[0]!.startsAt).toBe(6 * 60_000);
       const macros = JSON.parse(await hostCall<string>(host, "worldMacros")) as Array<{
         _id: string;
         sequence?: { sections?: Array<{ scale?: number }> };

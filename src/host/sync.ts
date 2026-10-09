@@ -125,8 +125,17 @@ import {
   validatePF1eConditionApplications,
 } from "../packages/pf1e/conditionApplications";
 import { pf1eConditionDef, conditionRefusalFor } from "../packages/pf1e/conditions";
-import { pf1eSpellEffectById, pf1eSpellEffectLanded, type PF1eSpellEffect }
+import { pf1eSpellEffectById, pf1eSpellEffectDurationMs, pf1eSpellEffectLanded, type PF1eSpellEffect }
   from "../packages/pf1e/spellEffects";
+import {
+  expiredPF1eSpellAreaIds,
+  spellAreaAddDiff,
+  spellAreaRemoveDiff,
+  spellAreasFromFlags,
+  difficultCellsFromSpellAreas,
+  validatePF1eSpellArea,
+  type PF1eSpellArea,
+} from "../packages/pf1e/spellAreas";
 import { sightBlockedBetween } from "../core/crosshair";
 import { affectedTokens, lineIntersectsTokenFootprint, pf1eAreaGridFromScene, resolveAreaCells } from "../packages/pf1e/targeting";
 import { combinedTacticalEffects, resolveTacticalEffects } from "../packages/pf1e/effectOps";
@@ -1491,6 +1500,14 @@ export class HostSync {
         x1: wall.c[0] ?? 0, y1: wall.c[1] ?? 0, x2: wall.c[2] ?? 0, y2: wall.c[3] ?? 0,
       }));
       const terrain = sceneDifficultCells(visibleScene);
+      // D-408 — live spell areas (entangle's zone) price their squares ×2 alongside authored
+      // ground; move-blocking walls bound the spread, the same seam the area preview uses.
+      const spellTerrain = difficultCellsFromSpellAreas(spellAreasFromFlags(visibleScene?.flags), {
+        grid: beforeScene.grid,
+        nowMs: readWorldClock(this.store.getAll("settings")) * 1000,
+        segments: walls,
+      });
+      const pricedCells = [...(terrain?.difficultCells ?? []), ...spellTerrain];
       for (const row of rows) {
         const endpoint = afterById.get(row.tokenId);
         const actorStats = moverFacts.get(row.tokenId);
@@ -1499,7 +1516,8 @@ export class HostSync {
           ? { ...token, x: row.before.x, y: row.before.y } : token);
         const plan = pf1eMovePlan({ grid: beforeScene.grid, tokens: tokenList,
           mover: { tokenId: row.tokenId, to: { x: endpoint.x, y: endpoint.y }, speedFt: actorStats.speedFt,
-            size: actorStats.size }, walls, ...(terrain ? { difficultCells: terrain.difficultCells } : {}),
+            size: actorStats.size }, walls, ...(terrain !== null || spellTerrain.length > 0
+            ? { difficultCells: pricedCells } : {}),
           ...(isAlly ? { isAlly } : {}) });
         if (plan.refusal !== null)
           return `${row.before.name} can't move there — ${plan.refusal}`;
@@ -2031,7 +2049,9 @@ export class HostSync {
   private pf1eSpellAreaTargetVerified(action: ActionCard, target: ActionTarget, effectId: unknown): boolean {
     const area = action.area;
     if (!area) return action.targets.length === 1;
-    if (action.targets.length !== 1 || area.sceneId !== action.sceneId ||
+    // D-408 — an area card carries one row per affected creature; each row verifies its own token
+    // against the area, independently of its siblings.
+    if (area.sceneId !== action.sceneId ||
         !action.sceneId || !target.tokenId) return false;
     const scene = this.store.get("scenes", action.sceneId) as SceneDocument | undefined;
     const token = scene?.tokens.find((candidate) => candidate._id === target.tokenId);
@@ -2084,7 +2104,7 @@ export class HostSync {
   ): boolean {
     const evidence = target.evidence;
     if (evidence?.adapter !== "pf1e.spellTarget.v1" || !isRecord(evidence.payload) ||
-        action.kind !== "cast" || action.targets.length !== 1 || !action.source.actorId ||
+        action.kind !== "cast" || !action.source.actorId ||
         action.source.itemId !== undefined || !target.actorId || target.state !== "resolved" ||
         target.healing !== undefined || target.conditions !== undefined)
       return false;
@@ -2162,14 +2182,29 @@ export class HostSync {
     if (freshSrSuccess && (!evidenceCombat || evidenceCombat.round < 1)) return false;
     const expectedLedger = freshSrSuccess && evidenceCombat
       ? srOvercomeDiff(source._id, defender._id, evidenceCombat.round) : null;
+    // D-408 — an area card commits one row per affected creature in a single envelope, so the
+    // batch carries every row's ledger key. This row allows its siblings' keys (same caster, same
+    // round, another card row's actor) alongside its own; anything else still fails the row. Ledger
+    // BITS were never integrity-gated here — combat ownership is that boundary, since anyone who
+    // can update the combat can write its flags raw — so this scan keeps gating host provenance
+    // while each row's own dice, composition and HP checks below stay exactly as strict.
+    const siblingLedger: Record<string, number> = {};
+    if (evidenceCombat) {
+      for (const row of action.targets) {
+        if (row.actorId === undefined || row.actorId === defender._id) continue;
+        Object.assign(siblingLedger, srOvercomeDiff(source._id, row.actorId, evidenceCombat.round));
+      }
+    }
+    const allowedLedger = expectedLedger === null && Object.keys(siblingLedger).length === 0
+      ? null : { ...siblingLedger, ...expectedLedger };
     if (evidenceCombat) {
       for (const op of ops) {
         if ((op.kind === "create" && op.coll === "combats" && op.data._id === evidenceCombat._id) ||
             (op.kind === "delete" && op.ref.coll === "combats" && op.ref.id === evidenceCombat._id))
           return false;
         if (op.kind !== "update" || op.ref.coll !== "combats" || op.ref.id !== evidenceCombat._id) continue;
-        if (!expectedLedger || Object.entries(op.diff).some(([key, value]) =>
-          !Object.hasOwn(expectedLedger, key) || expectedLedger[key] !== value)) return false;
+        if (allowedLedger === null || Object.entries(op.diff).some(([key, value]) =>
+          !Object.hasOwn(allowedLedger, key) || allowedLedger[key] !== value)) return false;
       }
     }
     if (expectedLedger && !ops.some((op) => op.kind === "update" && op.ref.coll === "combats" &&
@@ -2448,6 +2483,10 @@ export class HostSync {
     const sourceItem = action.source.itemId
       ? sourceActor?.items.find((item) => item._id === action.source.itemId) : undefined;
     const sourceName = sourceItem?.name ?? token(action.source.tokenId)?.name ?? sourceActor?.name ?? action.source.name;
+    // D-408 — first-wins roll claims extend within a card: two spell rows citing one die share a
+    // fact the area cast flow never shares (every row rolls fresh), so the later row degrades to
+    // reported and can never claim another row's die. Rows process in card order: first citer wins.
+    const cardSpellRolls = new Set<string>();
     return {
       ...action,
       source: { ...action.source, name: sourceName },
@@ -2455,10 +2494,20 @@ export class HostSync {
         const actor = target.actorId
           ? this.store.get("actors", target.actorId) as ActorDocument | undefined : undefined;
         const name = token(target.tokenId)?.name ?? actor?.name ?? target.name;
+        let dupDie = false;
+        if (target.evidence?.adapter === "pf1e.spellTarget.v1" && isRecord(target.evidence.payload)) {
+          const payload = target.evidence.payload;
+          for (const key of ["damageRollId", "srRollId", "saveRollId"] as const) {
+            const id = payload[key];
+            if (typeof id !== "string") continue;
+            if (cardSpellRolls.has(id)) dupDie = true;
+            else cardSpellRolls.add(id);
+          }
+        }
         // A non-mechanical pending stage is a host-normalized lifecycle fact. Pending check inputs
         // and terminal mechanics become host facts only when a versioned adapter rederives them.
-        const provenance = (target.state === "pending" && target.check === undefined) ||
-          this.actionTargetEvidenceVerified(action, target, ops, by, reserved)
+        const provenance = !dupDie && ((target.state === "pending" && target.check === undefined) ||
+          this.actionTargetEvidenceVerified(action, target, ops, by, reserved))
           ? "host" as const : "reported" as const;
         return { ...target, name, provenance };
       }),
@@ -2562,6 +2611,9 @@ export class HostSync {
             }
           }
           data.system.action = actionAsJson(action);
+          // D-408 — a durable spell area (entangle's zone) derives atomically with its card.
+          const areaOp = this.spellAreaDerivationOp(action);
+          if (areaOp) hostOps.push(areaOp);
           const rawPending = data.system.pendingRoll;
           const rawPendingMany = data.system.pendingRolls;
           if ((rawPending !== undefined && rawPendingMany !== undefined) ||
@@ -3691,6 +3743,8 @@ export class HostSync {
     if (!restoring && this.poisonSweepDepth === 0 &&
         ((clockBefore !== null && clockAfter !== clockBefore) || poisonTurnActors.size > 0))
       this.sweepPF1ePoisonDue(clockAfter ?? readWorldClock(this.store.getAll("settings")), poisonTurnActors);
+    if (!restoring && clockBefore !== null && clockAfter !== clockBefore)
+      this.sweepPF1eSpellAreasDue((clockAfter ?? 0) * 1000);
     for (const [actorId, beforeIds] of conditionApplicationsBefore) {
       const after = this.store.get("actors", actorId) as ActorDocument | undefined;
       const pf1e = after && isRecord(after.system?.pf1e) ? after.system.pf1e as Record<string, unknown> : {};
@@ -4145,6 +4199,82 @@ export class HostSync {
     if ((row.riders?.length ?? 0) >= ACTION_RIDER_MAX)
       return { ok: false, error: "That action target already carries the maximum number of riders" };
     return { ok: true, value: { messageId: message._id, targetKey: raw.targetKey, card, targetIndex, effect } };
+  }
+
+  /**
+   * D-408 — derive a persisted spell area from a newly committed cast card. Every fact is
+   * host-derived: the effect from the versioned catalogue, the DC from a host-verified row check,
+   * the origin/radius from the card's area (per-row host verification already re-resolved it
+   * against the live scene), the duration from the catalogue × the derived caster level. Null
+   * when the card carries no durable area — the cast still resolved its rows; there is simply no
+   * zone to stand in afterward. The first qualifying row wins; a card owns at most one area, and
+   * re-derivation is idempotent, so an envelope retry never extends the duration.
+   */
+  private spellAreaDerivationOp(action: ActionCard): Op | null {
+    if (action.kind !== "cast" || action.area === undefined || action.sceneId === undefined) return null;
+    const row = action.targets.find((target) =>
+      target.provenance === "host" && target.state === "resolved" &&
+      target.evidence?.adapter === "pf1e.spellTarget.v1" && isRecord(target.evidence.payload) &&
+      typeof target.evidence.payload.effectId === "string" && typeof target.check?.dc === "number");
+    if (!row || !isRecord(row.evidence?.payload)) return null;
+    const payload = row.evidence.payload;
+    const effect = pf1eSpellEffectById(payload.effectId as string);
+    if (!effect || effect.area === undefined || effect.duration === undefined) return null;
+    const area = action.area;
+    if (area.shape !== effect.area.shape || area.radius !== effect.area.radiusFt || area.units !== "ft")
+      return null;
+    const scene = this.store.get("scenes", action.sceneId) as SceneDocument | undefined;
+    if (!scene || scene.type !== "scene") return null;
+    const id = `spellarea-${action.id}`;
+    if (Object.hasOwn(spellAreasFromFlags(scene.flags), id)) return null;
+    const caster = action.source.actorId
+      ? this.store.get("actors", action.source.actorId) as ActorDocument | undefined : undefined;
+    if (!caster) return null;
+    const casterLevel = deriveFromActorDocument(caster).spellCasterLevel;
+    const durationMs = pf1eSpellEffectDurationMs(effect.duration, casterLevel);
+    const spellLevel = payload.spellLevel;
+    if (durationMs === null || !Number.isSafeInteger(spellLevel) ||
+        (spellLevel as number) < 0 || (spellLevel as number) > 9) return null;
+    // World-clock milliseconds: the replicated clock reads seconds, durations count milliseconds.
+    const startsAt = readWorldClock(this.store.getAll("settings")) * 1000;
+    const record: PF1eSpellArea = {
+      id, effectId: effect.id, actionId: action.id, sceneId: scene._id,
+      casterActorId: caster._id, dc: row.check?.dc as number, casterLevel,
+      spellLevel: spellLevel as number,
+      origin: { x: area.origin.x, y: area.origin.y }, radiusFt: effect.area.radiusFt,
+      startsAt, endsAt: startsAt + durationMs, difficultTerrain: effect.difficultTerrain === true,
+    };
+    const checked = validatePF1eSpellArea(record);
+    if (!checked.ok) {
+      console.warn(`PF1e spell area derivation refused for ${action.id}: ${checked.error}`);
+      return null;
+    }
+    const diff = spellAreaAddDiff(scene.flags, checked.value);
+    if (!diff.ok) {
+      console.warn(`PF1e spell area derivation refused for ${action.id}: ${diff.error}`);
+      return null;
+    }
+    return { kind: "update", ref: { coll: "scenes", id: scene._id }, diff: diff.value };
+  }
+
+  /**
+   * D-408 — expire spell areas whose duration ran out, anchored to the replicated world clock.
+   * Malformed entries read as absent, the sweep only deletes, and a failed commit warns without
+   * failing any envelope. Runs when the clock advances; the round wrap drives it through the
+   * clock, and a GM rewind is a correction, never an expiry driver.
+   */
+  private sweepPF1eSpellAreasDue(nowMs: number): void {
+    if (!Number.isSafeInteger(nowMs) || nowMs < 0) return;
+    for (const scene of this.store.getAll("scenes")) {
+      if (scene.type !== "scene") continue;
+      const expired = expiredPF1eSpellAreaIds(spellAreasFromFlags(scene.flags), nowMs);
+      if (expired.length === 0) continue;
+      const diff = spellAreaRemoveDiff(scene.flags, expired);
+      if (!diff) continue;
+      const removed = this.commitSystem(
+        [{ kind: "update", ref: { coll: "scenes", id: scene._id }, diff }], false);
+      if (!removed.ok) console.warn(`PF1e spell area expiry failed for ${scene._id}: ${removed.error}`);
+    }
   }
 
   /** Bounded display facts for a delivered condition; never machine-consumed. */

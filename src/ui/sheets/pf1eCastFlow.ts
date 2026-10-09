@@ -283,8 +283,11 @@ export interface PF1eCastGateInput {
   declarations?: readonly PF1eConcentrationDeclaration[];
 }
 
-/** The caster's authored tradition: "arcane" unless the actor says divine. */
-function spellsTraditionOf(actor: ActorDocument): PF1eSpellTradition {
+/**
+ * The caster's authored tradition: "arcane" unless the actor says divine. Shared with the area
+ * cast flow (D-408), which runs the same gate before resolving its rows.
+ */
+export function spellsTraditionOf(actor: ActorDocument): PF1eSpellTradition {
   const pf1e = sheetRecord((actor.system as Record<string, unknown>).pf1e);
   const spells = pf1e ? sheetRecord(pf1e.spells) : null;
   return spells?.tradition === "divine" ? "divine" : "arcane";
@@ -292,9 +295,9 @@ function spellsTraditionOf(actor: ActorDocument): PF1eSpellTradition {
 
 /**
  * The authored armour's arcane spell failure percentage, or null when absent
- * or out of range (a refused value is not a guessed one).
+ * or out of range (a refused value is not a guessed one). Shared with the area cast flow.
  */
-function armorSpellFailureOf(actor: ActorDocument): number | null {
+export function armorSpellFailureOf(actor: ActorDocument): number | null {
   const pf1e = sheetRecord((actor.system as Record<string, unknown>).pf1e);
   const armor = pf1e ? sheetRecord(pf1e.armor) : null;
   const chance = armor?.spellFailure;
@@ -306,6 +309,91 @@ function armorSpellFailureOf(actor: ActorDocument): number | null {
   )
     return null;
   return chance;
+}
+
+export interface PF1eCastGateLegality {
+  tradition: PF1eSpellTradition;
+  needsSomatic: boolean;
+}
+
+/**
+ * D-408 — the C03a gate's diceless half (D-157), shared by the single-target and area cast flows:
+ * an illegal casting is refused before any die rolls and spends nothing.
+ */
+export function checkCastGateLegality(input: {
+  casterActor: ActorDocument;
+  gate: PF1eCastGateInput;
+  spellName: string;
+}): { ok: true; legality: PF1eCastGateLegality } | { ok: false; error: string } {
+  const tradition = spellsTraditionOf(input.casterActor);
+  const parsed = parseSpellComponents(input.gate.components);
+  if (!parsed.ok)
+    return { ok: false, error: `Components "${input.gate.components}": ${parsed.issues
+      .map((i) => `${i.field}: ${i.message}`).join("; ")}` };
+  const needs = componentNeeds(parsed.segments, tradition);
+  const legality = checkCastingLegality({
+    needs,
+    caster: input.gate.caster,
+    castingTime: input.gate.castingTime,
+  });
+  if (!legality.legal)
+    return { ok: false, error: `Cannot cast "${input.spellName}": ${legality.reasons.join("; ")}.` };
+  return { ok: true, legality: { tradition, needsSomatic: needs.codes.includes("S") } };
+}
+
+/**
+ * D-408 — the daily bookkeeping shared by the single-target and area cast flows: the slot spend
+ * plus the prepared-row expense (D-155 builders). Appends to `ops`/`warnings`; the consumable
+ * charge path stays in the single-target flow (area casts are actor casts, never item casts).
+ */
+export function spendCastSlotAndPrepared(
+  params: Pick<PF1eCastFlowParams, "casterActor" | "spell">,
+  casterDerived: PF1eDerived,
+  user: PermissionUser | null,
+  slotLevel: number,
+  ops: Op[],
+  warnings: string[],
+): string | null {
+  const spend = pf1eSpellbookEdit(params.casterActor, casterDerived, user, {
+    kind: "spend",
+    level: slotLevel,
+  });
+  if (spend.error !== null) return spend.error;
+  if (spend.warning !== null) warnings.push(spend.warning);
+  ops.push(...spend.ops);
+  if (params.spell.preparedIndex !== undefined) {
+    const row = preparedRowAt(params.casterActor, params.spell.preparedIndex);
+    if (row === null) return "That prepared spell no longer exists.";
+    if (row.expended === true)
+      return `"${params.spell.name}" is already expended — restore it before casting it again.`;
+    const expend = pf1eSpellbookEdit(params.casterActor, casterDerived, user, {
+      kind: "preparedToggle",
+      index: params.spell.preparedIndex,
+    });
+    if (expend.error !== null) return expend.error;
+    ops.push(...expend.ops);
+  }
+  return null;
+}
+
+/**
+ * D-408 — held-charge dissipation (D-158), shared by the single-target and area cast flows: "If
+ * you cast another spell, the touch spell dissipates."
+ */
+export function dissipateHeldChargeIfAny(
+  casterActor: ActorDocument,
+  spellName: string,
+  ops: Op[],
+  warnings: string[],
+): void {
+  const priorCharge = heldChargeFromSystem(casterActor.system as Record<string, unknown>);
+  if (priorCharge === null) return;
+  ops.push({
+    kind: "update",
+    ref: { coll: "actors", id: casterActor._id },
+    diff: heldChargeDiff(null),
+  });
+  warnings.push(`the held ${priorCharge.name} charge dissipates as ${spellName} is cast`);
 }
 
 /** The declared touch attempt on the cast card (D-158, extended by D-159). */
@@ -382,7 +470,11 @@ export type PF1eCastFlowOutcome =
     }
   | { ok: false; error: string };
 
-function castSpatialContext(client: CastFlowClient, params: PF1eCastFlowParams): NonNullable<PF1eCastFlowParams["context"]> {
+/**
+ * D-408 — shared with the area cast flow, which re-derives the spatial context per affected
+ * actor so hidden tokens can never enter the public card through a blind replica.
+ */
+export function castSpatialContext(client: CastFlowClient, params: PF1eCastFlowParams): NonNullable<PF1eCastFlowParams["context"]> {
   const authored = params.context ?? {};
   if (authored.sceneId && authored.casterTokenId && authored.targetTokenId) return authored;
   const scenes = (client as unknown as { store?: { getAll?: (coll: string) => readonly unknown[] } })
@@ -415,7 +507,11 @@ function castActionSource(params: PF1eCastFlowParams): ActionCard["source"] {
   };
 }
 
-function castActionTargetBase(params: PF1eCastFlowParams): Pick<ActionTarget, "key" | "name" | "actorId" | "tokenId"> {
+/**
+ * D-408 — shared with the area cast flow, which synthesizes one single-target params object per
+ * affected actor and reuses every row builder below unchanged.
+ */
+export function castActionTargetBase(params: PF1eCastFlowParams): Pick<ActionTarget, "key" | "name" | "actorId" | "tokenId"> {
   return {
     key: params.targetActor._id,
     name: params.targetName,
@@ -441,7 +537,7 @@ export interface PF1eSpellEffectDelivery {
   note: string | null;
 }
 
-function plannedSpellEffectDelivery(
+export function plannedSpellEffectDelivery(
   client: CastFlowClient,
   params: PF1eCastFlowParams,
   row: ActionTarget,
@@ -481,25 +577,29 @@ function plannedSpellEffectDelivery(
  * derives the source (caster, item, card) itself; nothing here is trusted as a mechanic. The request
  * id is deterministic per card and condition, so a retry cannot double-apply.
  */
-function requestSpellEffectDelivery(
+export function requestSpellEffectDelivery(
   client: CastFlowClient,
   params: PF1eCastFlowParams,
   delivery: PF1eSpellEffectDelivery,
   cardId: string,
+  requestIdPrefix?: string,
 ): void {
   if (delivery.effect === null || typeof client.requestPF1eConditionAction !== "function") return;
+  // The request id is the host's idempotency key: one card delivers one condition per row, so an
+  // area cast prefixes each row's requests (single-target casts keep the unprefixed form).
+  const prefix = requestIdPrefix === undefined ? `speffect-${cardId}` : requestIdPrefix;
   delivery.conditions.forEach((condition, index) => {
     client.requestPF1eConditionAction?.({
       action: "apply",
       actorId: params.targetActor._id,
       condition,
       spell: { effectId: delivery.effectId, actionId: cardId, targetKey: params.targetActor._id },
-    }, `speffect-${cardId}-${String(index)}`);
+    }, `${prefix}-${String(index)}`);
   });
 }
 
 /** One canonical card constructor for immediate and deferred cast resolution. */
-function castActionCard(params: PF1eCastFlowParams, id: string, targets: ActionTarget[],
+export function castActionCard(params: PF1eCastFlowParams, id: string, targets: ActionTarget[],
   notes: readonly string[] = [], state: ActionCard["state"] = deriveActionState(targets)): ActionCard {
   const now = Date.now();
   return {
@@ -519,7 +619,7 @@ function castActionCard(params: PF1eCastFlowParams, id: string, targets: ActionT
   };
 }
 
-function resolvedCastActionTarget(params: PF1eCastFlowParams, input: {
+export function resolvedCastActionTarget(params: PF1eCastFlowParams, input: {
   dc: number;
   saveBonus: number;
   saveTotal: number | null;
@@ -587,7 +687,7 @@ function preparedRowAt(
 }
 
 /** The effect pipeline's inputs: everything after the touch has landed. */
-interface SpellEffectInput {
+export interface SpellEffectInput {
   casterActor: ActorDocument;
   casterDerived: PF1eDerived;
   spellName: string;
@@ -623,7 +723,7 @@ interface SpellEffectInput {
   allowHostVerifiedHpWrite?: boolean;
 }
 
-type SpellEffectResult =
+export type SpellEffectResult =
   | {
       ok: true;
       /** State writes (SR ledger + HP), to be batched by the caller. */
@@ -646,10 +746,10 @@ type SpellEffectResult =
 /**
  * The shared effect pipeline (D-158 extraction of the D-156 body): damage
  * roll → SR check → saving throw → authoritative composition → SR-ledger and
- * HP writes. Used by both the cast flow and held-charge delivery, so the two
- * cannot drift apart.
+ * HP writes. Used by the cast flow, held-charge delivery and (D-408) the area cast flow, so the
+ * three cannot drift apart.
  */
-async function runSpellEffect(
+export async function runSpellEffect(
   client: CastFlowClient,
   user: PermissionUser | null,
   input: SpellEffectInput,
@@ -959,25 +1059,10 @@ export async function resolveCastFlow(
   let gateTradition: PF1eSpellTradition = "arcane";
   let gateNeedsSomatic = false;
   if (gateActive && gate !== undefined) {
-    gateTradition = spellsTraditionOf(params.casterActor);
-    const parsed = parseSpellComponents(gate.components);
-    if (!parsed.ok)
-      return fail(
-        `Components "${gate.components}": ${parsed.issues
-          .map((i) => `${i.field}: ${i.message}`)
-          .join("; ")}`,
-      );
-    const needs = componentNeeds(parsed.segments, gateTradition);
-    gateNeedsSomatic = needs.codes.includes("S");
-    const legality = checkCastingLegality({
-      needs,
-      caster: gate.caster,
-      castingTime: gate.castingTime,
-    });
-    if (!legality.legal)
-      return fail(
-        `Cannot cast "${spell.name}": ${legality.reasons.join("; ")}.`,
-      );
+    const legality = checkCastGateLegality({ casterActor: params.casterActor, gate, spellName: spell.name });
+    if (!legality.ok) return fail(legality.error);
+    gateTradition = legality.legality.tradition;
+    gateNeedsSomatic = legality.legality.needsSomatic;
   }
 
   // ── the daily bookkeeping, validated BEFORE any die is rolled so a refused
@@ -1015,27 +1100,8 @@ export async function resolveCastFlow(
       diff: { "system.uses.value": Math.max(0, consumable.charges - 1) },
     } as unknown as Op);
   } else if (!params.resourceAlreadySpent) {
-    const spend = pf1eSpellbookEdit(params.casterActor, casterDerived, user, {
-      kind: "spend",
-      level: slotLevel,
-    });
-    if (spend.error !== null) return fail(spend.error);
-    if (spend.warning !== null) warnings.push(spend.warning);
-    ops.push(...spend.ops);
-  }
-  if (!params.resourceAlreadySpent && consumable === null && spell.preparedIndex !== undefined) {
-    const row = preparedRowAt(params.casterActor, spell.preparedIndex);
-    if (row === null) return fail("That prepared spell no longer exists.");
-    if (row.expended === true)
-      return fail(
-        `"${spell.name}" is already expended — restore it before casting it again.`,
-      );
-    const expend = pf1eSpellbookEdit(params.casterActor, casterDerived, user, {
-      kind: "preparedToggle",
-      index: spell.preparedIndex,
-    });
-    if (expend.error !== null) return fail(expend.error);
-    ops.push(...expend.ops);
+    const spendError = spendCastSlotAndPrepared(params, casterDerived, user, slotLevel, ops, warnings);
+    if (spendError !== null) return fail(spendError);
   }
 
   // ── the C03a gate, dice half (D-157): arcane spell failure, deafened
@@ -1311,19 +1377,7 @@ export async function resolveCastFlow(
   // ── held-charge dissipation (D-158): "If you cast another spell, the
   //    touch spell dissipates." Clearing first also lets a new touch spell's
   //    held charge replace it when this cast misses below ───────────────────
-  const priorCharge = heldChargeFromSystem(
-    params.casterActor.system as Record<string, unknown>,
-  );
-  if (priorCharge !== null) {
-    ops.push({
-      kind: "update",
-      ref: { coll: "actors", id: params.casterActor._id },
-      diff: heldChargeDiff(null),
-    });
-    warnings.push(
-      `the held ${priorCharge.name} charge dissipates as ${spell.name} is cast`,
-    );
-  }
+  dissipateHeldChargeIfAny(params.casterActor, spell.name, ops, warnings);
 
   // ── multi-round casting (D-161): a spell whose casting time is 1 round ──
   // ── or longer begins now; the effect comes into effect "just before the ──

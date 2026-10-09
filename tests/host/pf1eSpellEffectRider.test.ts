@@ -263,7 +263,7 @@ describe("D-407 spell effects deliver conditions on the landed cast", () => {
       kind: "condition", label: "Entangled", state: "applied",
       facts: ["spell: Entangle", "REF negates (DC 15)", "condition: Entangled"],
       evidence: { adapter: "pf1e.spellEffect.v1", payload: {
-        effectId: "entangle", version: 1, condition: "Entangled",
+        effectId: "entangle", version: 2, condition: "Entangled",
         actionId: "cast-one", targetKey: "orc" } },
     });
     // The GM-visible record names the spell that delivered it (D4's policy, one step further).

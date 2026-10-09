@@ -469,6 +469,19 @@ export function deriveActionState(targets: readonly ActionTarget[], fallback: Ac
   return fallback === "failed" || fallback === "cancelled" ? fallback : "resolved";
 }
 
+/**
+ * D-408 — the area cast flow refuses a malformed spell area before any die
+ * rolls. The rule stays the card's own `areaError`; this is only the public
+ * entry point so the flow checks the same predicate the host re-checks.
+ */
+export function validateActionArea(value: unknown):
+  { ok: true; area: ActionArea } | { ok: false; error: string } {
+  const error = areaError(value);
+  return error === null
+    ? { ok: true, area: value as unknown as ActionArea }
+    : { ok: false, error };
+}
+
 export function validateActionCard(value: unknown):
   { ok: true; action: ActionCard } | { ok: false; error: string } {
   const bad = (error: string) => ({ ok: false as const, error });
