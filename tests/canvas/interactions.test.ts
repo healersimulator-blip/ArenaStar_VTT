@@ -729,3 +729,41 @@ describe("token context menu gesture (T01)", () => {
     expect(h.contextMenus.length).toBe(0);
   });
 });
+
+describe("background gestures (Map & background layer)", () => {
+  test("a handle press captures the pointer, so a release outside the canvas still commits", () => {
+    const stage = new FakeStage();
+    const source = new FakeSource();
+    const commits: Array<{ x: number; y: number; scaleX: number; scaleY: number }> = [];
+    const captures: number[] = [];
+    new CanvasController({
+      stage,
+      source,
+      client: new RecordingClient(),
+      getTokens: () => [],
+      getGrid: () => null,
+      canMove: () => true,
+      backgroundEdit: {
+        active: () => true,
+        state: () => ({
+          natural: { width: 100, height: 100 },
+          transform: { x: 0, y: 0, scaleX: 1, scaleY: 1 },
+        }),
+        snap: () => "off",
+        gridSize: () => null,
+        mapGrid: () => null,
+        keepAspect: () => false,
+        onCommit: (next) => commits.push(next),
+      },
+    });
+    // East edge at (100, 50); the panel can cover the canvas, so the release may land elsewhere.
+    source.down(100, 50, { capturePointer: () => captures.push(1) });
+    source.move(150, 50);
+    source.up(150, 50);
+    expect(captures).toEqual([1]);
+    expect(commits).toHaveLength(1);
+    expect(commits[0]?.scaleX).toBeCloseTo(1.5, 6);
+    expect(commits[0]?.scaleY).toBeCloseTo(1, 6);
+  });
+});
+

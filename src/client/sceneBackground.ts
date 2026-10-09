@@ -47,6 +47,8 @@ export class SceneBackgroundPlayer {
       height: scene?.height ?? 1500,
       offset: scene?.background?.offset ?? { x: 0, y: 0 },
       scale: scene?.background?.scale ?? 1,
+      ...(scene?.background?.scaleX !== undefined ? { scaleX: scene.background.scaleX } : {}),
+      ...(scene?.background?.scaleY !== undefined ? { scaleY: scene.background.scaleY } : {}),
       padding: scene?.background?.padding ?? 0,
       color: scene?.background?.color ?? "#ffffff",
     };

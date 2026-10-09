@@ -15,6 +15,17 @@
  * to grid intersections when a grid is set).
  */
 import type { Camera } from "../camera";
+import {
+  hitBackground,
+  moveBackground,
+  resizeBackground,
+  snapBackgroundPosition,
+  type BackgroundHandle,
+  type BackgroundTransform,
+  type MapGridEstimate,
+  type NaturalSize,
+  type BackgroundSnap,
+} from "../../core/backgroundTransform";
 import { screenToWorld, zoomAt } from "../camera";
 import type { GridSpec } from "../grid";
 import { snapPoint, snapTokenCenter } from "../grid";
@@ -34,6 +45,8 @@ export interface StageLike {
     a: { x: number; y: number } | null,
     b?: { x: number; y: number },
   ): void;
+  /** Background editor overlay/preview (Map & background layer); optional for simple stages. */
+  setBackgroundEditor?(state: { natural: NaturalSize; transform: BackgroundTransform } | null): void;
 }
 
 export interface PointerEvt {
@@ -46,6 +59,8 @@ export interface PointerEvt {
   altKey?: boolean;
   ctrlKey?: boolean;
   preventDefault(): void;
+  /** Routes pointermove/pointerup to the canvas even when the pointer leaves it (DOM sources). */
+  capturePointer?(): void;
 }
 
 export interface WheelEvt {
@@ -226,9 +241,31 @@ export interface ControllerOptions {
    * content instead). Defaults to true so every existing caller keeps its behaviour.
    */
   tokenLayerActive?: () => boolean;
+  /**
+   * Map & background editing (GM, Map layer). While `active()` is true and the press lands on the
+   * background's frame or handles, the gesture moves/resizes the image instead of selecting.
+   * Each gesture previews live through the stage and commits exactly one `onCommit` (one op).
+   */
+  backgroundEdit?: BackgroundEditOptions;
 }
 
-type Mode = "idle" | "pan" | "marquee" | "drag";
+export interface BackgroundEditOptions {
+  active: () => boolean;
+  /** The current image and its scene transform; null when there is no background to edit. */
+  state: () => { natural: NaturalSize; transform: BackgroundTransform } | null;
+  snap: () => BackgroundSnap;
+  /** The scene grid size, or null when the scene has no square grid. */
+  gridSize: () => number | null;
+  mapGrid: () => MapGridEstimate | null;
+  /** Aspect lock from the panel. Holding Shift inverts it for the gesture. */
+  keepAspect: () => boolean;
+  onCommit: (transform: BackgroundTransform) => void;
+}
+
+type Mode = "idle" | "pan" | "marquee" | "drag" | "background";
+
+/** Screen-pixel radius within which a press grabs a background handle. */
+const BACKGROUND_HANDLE_PX = 9;
 
 const RULER_MAX_WAYPOINTS = 12;
 
@@ -243,6 +280,10 @@ export class CanvasController {
   private panButton = 0;
   private readonly selection = new Set<DocId>();
   private rulerPoints: Array<{ x: number; y: number }> = [];
+  private bgHandle: BackgroundHandle | null = null;
+  private bgStart: BackgroundTransform = { x: 0, y: 0, scaleX: 1, scaleY: 1 };
+  private bgCurrent: BackgroundTransform = { x: 0, y: 0, scaleX: 1, scaleY: 1 };
+  private bgNatural: NaturalSize = { width: 1, height: 1 };
 
   private readonly onDown = (ev: PointerEvt): void => this.pointerDown(ev);
   private readonly onMove = (ev: PointerEvt): void => this.pointerMove(ev);
@@ -344,6 +385,30 @@ export class CanvasController {
       this.startCamera = { ...camera };
       return;
     }
+    const bgEdit = this.options.backgroundEdit;
+    const bgState = ev.button === 0 && bgEdit?.active() ? bgEdit.state() : null;
+    if (bgState) {
+      const handle = hitBackground(
+        bgState.natural,
+        bgState.transform,
+        world,
+        BACKGROUND_HANDLE_PX / (camera.scale || 1),
+      );
+      if (handle) {
+        ev.preventDefault();
+        // The panel can sit over the canvas: without capture, a release outside it never ends the gesture.
+        ev.capturePointer?.();
+        this.mode = "background";
+        this.bgHandle = handle;
+        this.bgStart = bgState.transform;
+        this.bgCurrent = bgState.transform;
+        this.bgNatural = bgState.natural;
+        this.startWorld = world;
+        this.startScreen = { x: ev.x, y: ev.y };
+        this.dragged = false;
+        return;
+      }
+    }
     const hit = this.options.tokenLayerActive?.() === false
       ? null
       : pickToken(this.options.getTokens(), world, (id) => this.options.stage.tokenVisualPosition?.(id));
@@ -401,9 +466,49 @@ export class CanvasController {
         this.options.stage.setMarquee(this.startWorld, world);
         return;
       }
+      case "background": {
+        const bg = this.options.backgroundEdit;
+        if (!this.bgHandle || !bg) return;
+        if (
+          !this.dragged &&
+          Math.abs(ev.x - this.startScreen.x) <= 3 &&
+          Math.abs(ev.y - this.startScreen.y) <= 3
+        )
+          return;
+        this.dragged = true;
+        const world = screenToWorld(this.options.stage.camera, ev.x, ev.y);
+        this.bgCurrent = this.backgroundTarget(bg, this.bgHandle, world, ev.shiftKey);
+        this.options.stage.setBackgroundEditor?.({ natural: this.bgNatural, transform: this.bgCurrent });
+        return;
+      }
       case "idle":
         return;
     }
+  }
+
+  /** Where a background gesture would leave the image now (snapped, aspect-locked as configured). */
+  private backgroundTarget(
+    bg: BackgroundEditOptions,
+    handle: BackgroundHandle,
+    world: { x: number; y: number },
+    invertLock: boolean,
+  ): BackgroundTransform {
+    const snap = bg.snap();
+    const grid = bg.gridSize();
+    if (handle === "move") {
+      let next = moveBackground(
+        this.bgStart,
+        world.x - this.startWorld.x,
+        world.y - this.startWorld.y,
+      );
+      if (grid && snap !== "off") next = snapBackgroundPosition(next, grid, snap, bg.mapGrid());
+      return next;
+    }
+    const lock = invertLock ? !bg.keepAspect() : bg.keepAspect();
+    return resizeBackground(this.bgNatural, this.bgStart, handle, world, {
+      keepAspect: lock,
+      gridSize: grid && snap === "grid" ? grid : undefined,
+    });
   }
 
   private pointerUp(ev: PointerEvt): void {
@@ -461,6 +566,22 @@ export class CanvasController {
           return;
         }
         commit();
+        return;
+      }
+      case "background": {
+        const handle = this.bgHandle;
+        const moved = this.dragged;
+        this.bgHandle = null;
+        this.mode = "idle";
+        const bg = this.options.backgroundEdit;
+        if (!handle || !bg) return;
+        if (moved) {
+          // One gesture, one op. The stage keeps showing the committed transform until the
+          // replica echoes the scene back; the app re-syncs the editor from the scene then.
+          bg.onCommit(this.bgCurrent);
+        } else {
+          this.options.stage.setBackgroundEditor?.({ natural: this.bgNatural, transform: this.bgStart });
+        }
         return;
       }
       case "marquee": {
@@ -630,6 +751,13 @@ export function domPointerSource(
           ctrlKey: ev.ctrlKey,
           pointerId: ev.pointerId,
           preventDefault: () => ev.preventDefault(),
+          capturePointer: () => {
+            try {
+              canvas.setPointerCapture(ev.pointerId);
+            } catch {
+              // Synthetic or already-released pointers cannot be captured; the gesture then ends on the canvas.
+            }
+          },
         });
       };
       pointerList(type).set(cb, wrapped as EventListener);

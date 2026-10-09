@@ -701,9 +701,25 @@ export interface SceneDocument extends BaseDocument {
   /** Optional Foundry-style background presentation; legacy scenes use origin, scale 1, no padding, white. */
   background?: {
     offset?: { x: number; y: number };
+    /** Uniform scale. `scaleX`/`scaleY` (when present) are the exact per-axis transform. */
     scale?: number;
+    scaleX?: number;
+    scaleY?: number;
     padding?: number;
     color?: string;
+    /** GM lock: the map ignores editor handles, drags and nudges until unlocked. */
+    locked?: boolean;
+    /**
+     * The map's own square grid in native image pixels, detected or entered by the GM. It is only
+     * valid for the image it was measured on (`image`), so a replaced background drops it.
+     */
+    mapGrid?: {
+      image: string;
+      sizeX: number;
+      sizeY: number;
+      offsetX: number;
+      offsetY: number;
+    };
   };
   /** Optional full-scene foreground layer; the source may be an asset hash or HTTPS URL. */
   foreground?: { img: string | null; elevation: number };

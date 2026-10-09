@@ -23,6 +23,13 @@ import {
 import "pixi.js/unsafe-eval";
 import { imageTexture, imageUrlTexture, videoTexture } from "./imageTexture";
 import { isVideoMime } from "../core/imageSizing";
+import {
+  backgroundHandlePoints,
+  backgroundRect,
+  backgroundTransformOf,
+  type BackgroundTransform,
+  type NaturalSize,
+} from "../core/backgroundTransform";
 import type { TokenDocument } from "../core/documents";
 import type { Camera, Viewport } from "./camera";
 import { fitRect, screenToWorld } from "./camera";
@@ -89,9 +96,21 @@ export interface StageBackgroundPresentation {
   width: number;
   height: number;
   offset?: { x: number; y: number };
+  /** Uniform scale; `scaleX`/`scaleY` override it when present (map stretch). */
   scale?: number;
+  scaleX?: number;
+  scaleY?: number;
   padding?: number;
   color?: string;
+}
+
+/**
+ * The GM's background editor (Map & background layer). While set, the background sprite follows
+ * `transform` (live preview while dragging) and the frame and handles are drawn on top.
+ */
+export interface BackgroundEditorState {
+  natural: NaturalSize;
+  transform: BackgroundTransform;
 }
 
 export interface StageOptions {
@@ -163,6 +182,10 @@ export interface Stage {
   /** Fit the camera to a scene rect (§9 scene load). */
   fit(width: number, height: number): void;
   setCamera(camera: Camera): void;
+  /** Show the background editor frame/handles, or hide them (null). */
+  setBackgroundEditor(state: BackgroundEditorState | null): void;
+  /** Reports the loaded background's natural pixel size (null when none is loaded). */
+  onBackgroundNaturalSize(listener: ((size: NaturalSize | null) => void) | null): void;
   /**
    * A per-frame subscription on the stage's own ticker (FX camera cues animate
    * here rather than in a second rAF loop, so a viewer's cursor drag and a
@@ -411,14 +434,42 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     bgSprite?.destroy({ texture: true, textureSource: true });
     bgSprite = null;
   };
+  let bgEditor: BackgroundEditorState | null = null;
+  let naturalSizeListener: ((size: NaturalSize | null) => void) | null = null;
+  const bgEditorGraphics = new Graphics();
+  // Sprite placement: the editor's transform while editing, otherwise the stored presentation.
+  const applyBackgroundSprite = (): void => {
+    if (!bgSprite) return;
+    const t = bgEditor ? bgEditor.transform : backgroundTransformOf(bgPresentation);
+    bgSprite.position.set(t.x, t.y);
+    bgSprite.scale.set(t.scaleX, t.scaleY);
+  };
+  const drawBackgroundEditor = (): void => {
+    bgEditorGraphics.clear();
+    if (!bgEditor) return;
+    const { natural, transform } = bgEditor;
+    const r = backgroundRect(natural, transform);
+    const zoom = state.camera.scale || 1;
+    bgEditorGraphics
+      .rect(r.left, r.top, r.width, r.height)
+      .stroke({ width: 2 / zoom, color: 0x4ea1ff, alpha: 0.95 });
+    const handle = 10 / zoom;
+    for (const p of Object.values(backgroundHandlePoints(natural, transform))) {
+      bgEditorGraphics
+        .rect(p.x - handle / 2, p.y - handle / 2, handle, handle)
+        .fill(0xffffff)
+        .stroke({ width: 1 / zoom, color: 0x1a1d24 });
+    }
+  };
   const placeBackground = (texture: Texture, stop: (() => void) | null): void => {
     releaseBackground();
     bgVideoStop = stop;
     bgSprite = new Sprite(texture);
-    bgSprite.position.set(bgPresentation.offset?.x ?? 0, bgPresentation.offset?.y ?? 0);
-    bgSprite.scale.set(bgPresentation.scale ?? 1);
+    applyBackgroundSprite();
     backgroundLayer.addChildAt(bgSprite, 0);
     bgFill.clear();
+    naturalSizeListener?.({ width: texture.width, height: texture.height });
+    drawBackgroundEditor();
   };
   let bgColor = options.background ?? 0x14171c;
   let bgPresentation: StageBackgroundPresentation = { width: 2000, height: 1500, offset: { x: 0, y: 0 }, scale: 1, padding: 0 };
@@ -536,7 +587,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const controlsLayer = new Container();
   controlsLayer.label = "controls";
   const marqueeGraphics = new Graphics();
-  controlsLayer.addChild(marqueeGraphics);
+  controlsLayer.addChild(bgEditorGraphics, marqueeGraphics);
   root.addChild(controlsLayer);
 
   const state: { camera: Camera } = { camera: { x: 0, y: 0, scale: 1 } };
@@ -617,10 +668,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         bgColor = Number.parseInt(presentation.color.slice(1), 16);
         bgFill.clear().rect(0, 0, viewport.width, viewport.height).fill(bgColor);
       }
-      if (bgSprite) {
-        bgSprite.position.set(bgPresentation.offset?.x ?? 0, bgPresentation.offset?.y ?? 0);
-        bgSprite.scale.set(bgPresentation.scale ?? 1);
-      }
+      applyBackgroundSprite();
       const margin = Math.max(0, bgPresentation.padding ?? 0) * Math.max(bgPresentation.width, bgPresentation.height);
       bgPadding.clear();
       if (margin > 0) {
@@ -636,6 +684,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     clearBackgroundImage(): void {
       bgRevision++;
       releaseBackground();
+      naturalSizeListener?.(null);
+      bgEditorGraphics.clear();
       bgFill.clear().rect(0, 0, viewport.width, viewport.height).fill(bgColor);
     },
     async setBackgroundImage(bytes: Uint8Array, mime = "image/png"): Promise<void> {
@@ -801,6 +851,16 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     setCamera(camera: Camera): void {
       state.camera = { ...camera };
       applyCamera();
+      // Handle and line widths are in screen pixels, so the editor redraws at each zoom.
+      if (bgEditor) drawBackgroundEditor();
+    },
+    setBackgroundEditor(next: BackgroundEditorState | null): void {
+      bgEditor = next ? { natural: { ...next.natural }, transform: { ...next.transform } } : null;
+      applyBackgroundSprite();
+      drawBackgroundEditor();
+    },
+    onBackgroundNaturalSize(listener: ((size: NaturalSize | null) => void) | null): void {
+      naturalSizeListener = listener;
     },
     onFrame(cb: (deltaMs: number) => void): () => void {
       frameSinks.add(cb);

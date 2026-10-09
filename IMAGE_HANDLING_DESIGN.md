@@ -550,6 +550,33 @@ session credentials to the cross-origin read; use the anonymous-CORS texture mod
 contain userinfo or query tokens: it is stored in a document and projected to players who need to load it,
 so disclose that before sharing. Store mode should not retain the source URL in provenance by default.
 
+### 6.10 Background placement and alignment
+
+The scene background is a separately editable object. It is edited in the **Map & background** layer
+(`Shift+M`). Tokens do not answer pointer input there, so a map drag or handle cannot move a token by accident.
+The frame and the panel appear only in that layer, and only once the image has decoded.
+
+- **Gestures:** dragging inside the frame moves the image. Eight handles resize it. Corners keep the aspect
+  ratio by default. Edges stretch one axis when the lock is off. Shift inverts the lock for one gesture. Each
+  gesture is one undo step. The pointer is captured on press, so a release over the panel still ends the gesture.
+- **Keyboard:** arrow keys move 1 scene px, Shift moves 10 px, and Ctrl/⌘ moves one grid square. A burst of
+  presses ends as one undo step after a short pause.
+- **Panel:** numeric X, Y, width, height and scale fields, an aspect lock, a snap mode (off, grid, or map grid),
+  and a background lock. The lock blocks handles, drags and fields until it is released.
+- **Stored data:** `scene.background` keeps `offset`, `scale`, and optional `scaleX`/`scaleY`, `locked`, and
+  `mapGrid`. The scene width and height are not changed by alignment. Grid origin is 0,0, with lines at multiples
+  of `grid.size`. Rotation is out of scope.
+- **Automatic grid detection (prototype, suggestion only):** the detector reads the image at native resolution
+  in row strips and looks for periodic line energy. It reports a square pitch and an offset with a confidence
+  equal to the lower of the two axes. It proposes a result only at confidence 0.6 or above. Two actions are
+  offered, and nothing is applied until the GM confirms the preview:
+  - **Match map to grid** (default): scales the background so one map square equals `grid.size`. The grid is
+    unchanged.
+  - **Use map squares as grid:** changes `grid.size` to the detected square size.
+- **Limits:** square grids only. Hex grids and rotated maps are out of scope. Maps without clear line structure
+  are reported as having no detectable square grid, with a reason. On synthetic grids the detector recovers the
+  pitch to within 0.05 px. On three sample maps in the prototype, one was accepted (75 px) and three were rejected.
+
 ## 7. Module capability parity
 
 This is a **design-spec review**, not an implementation checklist. `✓` means the feature is documented or

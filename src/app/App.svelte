@@ -1,6 +1,21 @@
 <script lang="ts">
   import { SceneLightingPlayer } from "../client/sceneLighting";
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
+  import { detectMapGridFromBytes } from "../client/gridDetection";
+  import BackgroundPanel from "../ui/canvas/BackgroundPanel.svelte";
+  import type { BackgroundDetectionView } from "../ui/canvas/backgroundPanelTypes";
+  import {
+    backgroundTransformOf,
+    backgroundWriteFields,
+    mapSquaresAsGrid,
+    matchMapToGrid,
+    moveBackground,
+    placeBackground as placeBackgroundInScene,
+    type BackgroundSnap,
+    type BackgroundTransform,
+    type MapGridEstimate,
+    type NaturalSize,
+  } from "../core/backgroundTransform";
   import { onMount, untrack } from "svelte";
   import { detectCapabilities } from "./capabilities";
   import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
@@ -2640,6 +2655,141 @@ const WALL_PICK_RADIUS = 12;
   }
 
   /** §9 full grid spec for the stage + snapping (square/hex/gridless). */
+  // ── Map & background (GM, Map & background layer) ──────────────────────────
+  // The background is a separately editable object: it only answers pointers and keys while the
+  // Map & background layer is active, so tokens are never moved by accident from there.
+  let backgroundNatural = $state<NaturalSize | null>(null);
+  let backgroundSnap = $state<BackgroundSnap>("off");
+  let backgroundKeepAspect = $state(true);
+  let backgroundDetection = $state<BackgroundDetectionView>({ status: "idle" });
+  let backgroundPanelOpen = $state(true);
+  /** Arrow-key nudges are batched: one undo step per pause, not one per key repeat. */
+  let backgroundNudge: { transform: BackgroundTransform; timer: ReturnType<typeof setTimeout> } | null = null;
+
+  /** The panel's view of the active scene. Re-derived on every store change (`storeVersion`). */
+  const backgroundPanelScene = $derived.by((): SceneDocument | null => {
+    void storeVersion;
+    return canvasLayer === "map" ? activeScene() : null;
+  });
+
+  function backgroundEditable(scene: SceneDocument | null = activeScene()): boolean {
+    return !!scene && !viewingAs && canvasLayer === "map" && scene.background?.locked !== true;
+  }
+  function backgroundGridSize(scene: SceneDocument | null): number | null {
+    return scene && scene.grid.type === "square" && scene.grid.size > 0 ? scene.grid.size : null;
+  }
+  function backgroundMapGrid(scene: SceneDocument | null): MapGridEstimate | null {
+    const measured = scene?.background?.mapGrid;
+    if (!scene || !measured || measured.image !== scene.img) return null;
+    return { sizeX: measured.sizeX, sizeY: measured.sizeY, offsetX: measured.offsetX, offsetY: measured.offsetY };
+  }
+  function backgroundCurrent(scene: SceneDocument | null): BackgroundTransform {
+    return backgroundNudge?.transform ?? backgroundTransformOf(scene?.background);
+  }
+  /** Push the editor frame (or hide it) to the stage. Called from scene refresh and mode changes. */
+  function syncBackgroundEditor(): void {
+    const scene = activeScene();
+    if (!stage || !backgroundNatural || !backgroundEditable(scene)) {
+      stage?.setBackgroundEditor(null);
+      return;
+    }
+    stage.setBackgroundEditor({ natural: backgroundNatural, transform: backgroundCurrent(scene) });
+  }
+  function flushBackgroundNudge(): void {
+    if (!backgroundNudge) return;
+    clearTimeout(backgroundNudge.timer);
+    const pending = backgroundNudge.transform;
+    backgroundNudge = null;
+    writeBackground({ ...backgroundWriteFields(pending) });
+  }
+  /** One scene update per call: the whole background object, so stored fields stay consistent. */
+  function writeBackground(patch: Record<string, unknown>, extra: Record<string, unknown> = {}): void {
+    const scene = activeScene();
+    if (!scene || !app) return;
+    app.gm.client.submit([
+      {
+        kind: "update",
+        ref: { coll: "scenes", id: scene._id },
+        diff: { background: { ...(scene.background ?? {}), ...patch }, ...extra },
+      },
+    ]);
+  }
+  function commitBackground(next: BackgroundTransform, extra: Record<string, unknown> = {}): void {
+    flushBackgroundNudge();
+    writeBackground(backgroundWriteFields(next), extra);
+  }
+  function patchBackground(patch: Record<string, unknown>): void {
+    flushBackgroundNudge();
+    writeBackground(patch);
+  }
+  function nudgeBackground(dx: number, dy: number): void {
+    const scene = activeScene();
+    if (!backgroundEditable(scene) || !backgroundNatural) return;
+    const next = moveBackground(backgroundCurrent(scene), dx, dy);
+    if (backgroundNudge) clearTimeout(backgroundNudge.timer);
+    const timer = setTimeout(flushBackgroundNudge, 350);
+    backgroundNudge = { transform: next, timer };
+    stage?.setBackgroundEditor({ natural: backgroundNatural, transform: next });
+  }
+  // Entering the Map & background layer shows its panel; leaving it hides the frame at once.
+  $effect(() => {
+    if (canvasLayer === "map") backgroundPanelOpen = true;
+    void backgroundNatural;
+    void canvasLayer;
+    syncBackgroundEditor();
+  });
+
+  function placeBackgroundMode(mode: "fit" | "cover" | "native" | "center"): void {
+    const scene = activeScene();
+    if (!scene || !backgroundNatural) return;
+    commitBackground(
+      placeBackgroundInScene(
+        backgroundNatural,
+        { width: scene.width, height: scene.height },
+        mode,
+        backgroundTransformOf(scene.background),
+      ),
+    );
+  }
+  async function detectBackgroundGrid(): Promise<void> {
+    const scene = activeScene();
+    if (!scene?.img || !app) return;
+    backgroundDetection = { status: "running" };
+    try {
+      const bytes = await app.gm.fetcher.request(scene.img, "scene");
+      const mime = app.gm.client.store.world.assetManifest[scene.img]?.mime ?? "image/png";
+      const result = await detectMapGridFromBytes(bytes, mime);
+      if (!result.found) {
+        backgroundDetection = {
+          status: "none",
+          message: `No square grid found (confidence ${Math.round(result.confidence * 100)}%). Align by hand with the frame or the fields.`,
+        };
+        return;
+      }
+      patchBackground({ mapGrid: { image: scene.img, ...result.grid } });
+      backgroundDetection = { status: "found", confidence: result.confidence };
+    } catch (error) {
+      backgroundDetection = {
+        status: "error",
+        message: error instanceof Error ? error.message : "Grid detection failed.",
+      };
+    }
+  }
+  function alignMapToGrid(): void {
+    const scene = activeScene();
+    const grid = backgroundGridSize(scene);
+    const measured = backgroundMapGrid(scene);
+    if (!scene || !grid || !measured) return;
+    commitBackground(matchMapToGrid(backgroundTransformOf(scene.background), measured, grid));
+  }
+  function useSquaresAsGrid(): void {
+    const scene = activeScene();
+    const measured = backgroundMapGrid(scene);
+    if (!scene || !measured || scene.grid.type !== "square") return;
+    const { gridSize, transform } = mapSquaresAsGrid(backgroundTransformOf(scene.background), measured);
+    commitBackground(transform, { grid: { ...scene.grid, size: gridSize } });
+  }
+
   function sceneGridSpec(grid: SceneGrid | undefined): GridSpec | null {
     if (!grid || grid.size <= 0) return null;
     if (grid.type === "square") return { type: "square", size: grid.size };
@@ -2929,6 +3079,7 @@ const WALL_PICK_RADIUS = 12;
     sceneBackground.sync(scene?.img ?? null, current.gm.client.store.world.assetManifest,
       (hash, priority) => current.gm.fetcher.request(hash, priority), view, scene);
     view.setGrid(sceneGridSpec(scene?.grid));
+    syncBackgroundEditor();
   }
 
   async function beginShare(): Promise<void> {
@@ -3275,6 +3426,22 @@ const WALL_PICK_RADIUS = 12;
       }
     };
     globalThis.addEventListener("keydown", onKey);
+    // Arrow nudges move the background only while its layer is active; Shift = 10 px, Ctrl/⌘ = one grid square.
+    const onBackgroundKey = (e: KeyboardEvent): void => {
+      if (isTypingTarget(e.target) || !backgroundEditable()) return;
+      const steps: Record<string, [number, number]> = {
+        ArrowLeft: [-1, 0],
+        ArrowRight: [1, 0],
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1],
+      };
+      const step = steps[e.key];
+      if (!step) return;
+      e.preventDefault();
+      const unit = e.ctrlKey || e.metaKey ? (backgroundGridSize(activeScene()) ?? 1) : e.shiftKey ? 10 : 1;
+      nudgeBackground(step[0] * unit, step[1] * unit);
+    };
+    globalThis.addEventListener("keydown", onBackgroundKey);
     onDestroy(() => {
       settleSummonPick(null);
       settleSpellAim({ ok: false, error: "The session closed before aiming completed; no slot was spent." });
@@ -3293,6 +3460,7 @@ const WALL_PICK_RADIUS = 12;
       offRejected();
       offWm();
       globalThis.removeEventListener("keydown", onKey);
+      globalThis.removeEventListener("keydown", onBackgroundKey);
       toolCleanup?.();
     });
     void (async () => {
@@ -3308,6 +3476,10 @@ const WALL_PICK_RADIUS = 12;
           hostElement,
         });
         stage = view;
+        view.onBackgroundNaturalSize((size) => {
+          backgroundNatural = size;
+          syncBackgroundEditor();
+        });
         fxPlayer = new FxPlayer({
           client: current.gm.client, bus: current.gm.bus, stage: view,
           // Live FX are imminent current-scene work; do not leave their lead window behind
@@ -3957,6 +4129,20 @@ const WALL_PICK_RADIUS = 12;
             canvasTool === "select" ? "select" : canvasTool === "pan" ? "pan" : "suppress",
           // D-256: only the Objects & Tokens layer answers a token pointer (Roll20's layers).
           tokenLayerActive: () => canvasLayer === "tokens",
+          backgroundEdit: {
+            active: () => backgroundEditable(),
+            state: () => {
+              const scene = activeScene();
+              return backgroundNatural && scene
+                ? { natural: backgroundNatural, transform: backgroundCurrent(scene) }
+                : null;
+            },
+            snap: () => backgroundSnap,
+            gridSize: () => backgroundGridSize(activeScene()),
+            mapGrid: () => backgroundMapGrid(activeScene()),
+            keepAspect: () => backgroundKeepAspect,
+            onCommit: (next) => commitBackground(next),
+          },
           canMove: () => true, // GM (players get the ownership gate, §5/§10)
           onPing: (world) => {
             const at = { x: Math.round(world.x), y: Math.round(world.y) };
@@ -4973,6 +5159,29 @@ const WALL_PICK_RADIUS = 12;
               pick={(placement) => settleAnchorPick(placement)} cancel={() => settleAnchorPick(null)} />
           {/if}
         {/if}
+          {#if backgroundPanelScene && backgroundNatural && !viewingAs && backgroundPanelOpen && backgroundPanelScene.img}
+            {@const bgScene = backgroundPanelScene}
+            <BackgroundPanel
+              natural={backgroundNatural}
+              transform={backgroundTransformOf(bgScene.background)}
+              gridSize={backgroundGridSize(bgScene)}
+              locked={bgScene.background?.locked === true}
+              keepAspect={backgroundKeepAspect}
+              snap={backgroundSnap}
+              mapGrid={backgroundMapGrid(bgScene)}
+              detection={backgroundDetection}
+              onTransform={(next) => commitBackground(next)}
+              onPlace={placeBackgroundMode}
+              onSnap={(next) => (backgroundSnap = next)}
+              onKeepAspect={(next) => (backgroundKeepAspect = next)}
+              onLock={(next) => patchBackground({ locked: next })}
+              onDetect={() => void detectBackgroundGrid()}
+              onAlignToGrid={alignMapToGrid}
+              onUseSquaresAsGrid={useSquaresAsGrid}
+              onForgetMapGrid={() => patchBackground({ mapGrid: null })}
+              onClose={() => (backgroundPanelOpen = false)}
+            />
+          {/if}
           </div>
         </div>
           {#if hexMenu}
