@@ -50,7 +50,7 @@
   import ImageImportDialog from "../ui/images/ImageImportDialog.svelte";
   import SharedImageNotice from "../ui/images/SharedImageNotice.svelte";
   import type { ImageSource } from "../ui/images/imageSources";
-  import { imageSourcesFromClipboard, imageSourcesFromTransfer } from "../ui/images/imageSources";
+  import { imageSourcesFromClipboard, imageSourcesFromTransfer, isVideoFile } from "../ui/images/imageSources";
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
   import { selectedMacroItem } from "../core/macroItems";
@@ -158,7 +158,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     type PlacementPoint,
   } from "../core/hexcrawl/placement";
   import { planDuplicateSceneOps } from "../core/sceneCopy";
-  import { DEFAULT_IMAGE_HANDLING_PREFERENCES, imageHandlingPreferencesOf, loadImageHandlingPreferences, saveImageHandlingPreferences, sceneExpressDefaultsOf, type ImageAction, type ImageHandlingPreferences } from "../core/imageHandling";
+  import { DEFAULT_IMAGE_HANDLING_PREFERENCES, imageHandlingPreferencesOf, loadImageHandlingPreferences, saveImageHandlingPreferences, sceneExpressDefaultsOf, type ImageAction, type ImageHandlingPreferences, VIDEO_SOURCE_ACTIONS } from "../core/imageHandling";
   import { sniffImage, assertImageByteLength, normalizeImageName } from "../core/imageSizing";
   import { sha256Hex } from "../host/assets";
   import { prototypeTokenTagsOf } from "../core/tags";
@@ -383,7 +383,10 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     if (!app || imageDialogOpen || sources.length === 0) return;
     imageDialogSources = sources;
     imageDialogOrigin = origin;
-    imageDialogAction = chooseImageAction(requested);
+    // A video can only be a scene background, so the dialog opens on that action whatever was asked for.
+    const hasVideo = sources.some((item) => item.kind === "file" && isVideoFile(item.file));
+    const forced = hasVideo && (requested === null || !VIDEO_SOURCE_ACTIONS.includes(requested)) ? "replaceBackground" : requested;
+    imageDialogAction = chooseImageAction(forced);
     imageDialogOpen = true;
   }
 
@@ -4608,7 +4611,7 @@ const WALL_PICK_RADIUS = 12;
     <div class="header-actions" aria-label="Game master actions">
       <label class="header-icon file-control" title="Import map" aria-label="Import map">
         <Icon name="mapImport" /><span class="sr-only">Import map</span>
-        <input id="map-input" type="file" accept="image/*" onchange={importMap} hidden />
+        <input id="map-input" type="file" accept="image/*,video/webm,video/mp4" onchange={importMap} hidden />
       </label>
       <button data-icon-button id="add-token" class="header-icon" aria-label="Add token" title="Add token" onclick={addToken}><Icon name="addToken" /></button>
       <span class="header-separator" aria-hidden="true"></span>

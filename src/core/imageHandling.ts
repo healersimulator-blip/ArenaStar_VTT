@@ -12,6 +12,9 @@ export type ImageAction =
   | "tokenArt"
   | "showPlayers"
   | "preview";
+
+/** Video sources (Phase 4) can only become a scene background. Nothing else takes video. */
+export const VIDEO_SOURCE_ACTIONS: readonly ImageAction[] = ["replaceBackground", "newScene"];
 export type ImageSourceMode = "store" | "link";
 export type DuplicateFileBehavior = "stop" | "reuse" | "overwrite" | "ask";
 

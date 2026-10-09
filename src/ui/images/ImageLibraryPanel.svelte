@@ -1,5 +1,8 @@
 <script lang="ts">
   import type { ClientSync, AssetLibraryItem } from "../../client/sync";
+  import type { ImageAction } from "../../core/imageHandling";
+  import type { ImageSource } from "./imageSources";
+  import { imageString } from "./strings";
 
   /**
    * §6.8 GM-only library: lists stored images, downloads them, and runs the confirmed clean-up of
@@ -8,9 +11,12 @@
   let {
     client,
     fetchAsset,
+    onPlace,
   }: {
     client: ClientSync;
     fetchAsset?: (hash: string) => Promise<Uint8Array>;
+    /** Opens the image dialog on a stored original, with the chosen action (Phase 4, IN-5). */
+    onPlace?: (sources: ImageSource[], action: ImageAction) => void;
   } = $props();
 
   const isGm = $derived(client.user?.role === "GM");
@@ -63,6 +69,23 @@
     }
   }
 
+  /**
+   * Puts a stored original into the image dialog, so placing from the library runs the same plan,
+   * scene and duplicate rules as an import. The dialog's reuse choice keeps the stored hash as is.
+   */
+  async function place(item: AssetLibraryItem, action: ImageAction): Promise<void> {
+    if (!fetchAsset || !onPlace) return;
+    error = "";
+    try {
+      const bytes = await fetchAsset(item.hash);
+      const name = item.name || "image";
+      const file = new File([new Uint8Array(bytes)], name, { type: item.mime });
+      onPlace([{ kind: "file", file, name }], action);
+    } catch (err) {
+      error = `${imageString("libraryPlaceFailed")}: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
   async function cleanUp(): Promise<void> {
     if (unused.length === 0) return;
     busy = true;
@@ -109,6 +132,20 @@
             <span class="meta">{item.mime} · {formatBytes(item.size)}{item.derived ? " · variant" : ""}</span>
             <span class="state" class:unused={!item.inUse}>{item.inUse ? "In use" : "Unused"}</span>
             {#if fetchAsset}<button type="button" onclick={() => download(item)} disabled={busy}>Download</button>{/if}
+            {#if onPlace && fetchAsset}
+              <div class="actions">
+                {#if item.derived}
+                  <span class="note">{imageString("libraryVariantNotPlaceable")}</span>
+                {:else}
+                  <button type="button" onclick={() => place(item, "replaceBackground")} disabled={busy}>{imageString("libraryUseAsBackground")}</button>
+                  {#if item.mime.startsWith("video/")}
+                    <span class="note">{imageString("libraryVideoNote")}</span>
+                  {:else}
+                    <button type="button" onclick={() => place(item, "tileNatural")} disabled={busy}>{imageString("libraryPlaceAsTile")}</button>
+                  {/if}
+                {/if}
+              </div>
+            {/if}
           </li>
         {:else}
           <li class="empty">No images in this view.</li>
@@ -148,6 +185,8 @@
   .items { list-style:none; margin:0; padding:0; max-height:260px; overflow:auto; display:flex; flex-direction:column; gap:4px; }
   .items li { display:grid; grid-template-columns:1fr auto; gap:2px 8px; align-items:center; padding:5px; border:1px solid #29313b; border-radius:5px; }
   .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .actions { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:4px; align-items:center; }
+  .note { color:#9da9b7; font-size:10px; }
   .meta { color:#8592a3; grid-column:1; }
   .state { grid-column:2; grid-row:1; justify-self:end; color:#9fd7c8; }
   .state.unused { color:#f0b9a8; }

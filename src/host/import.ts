@@ -6,7 +6,7 @@
 import type { AssetId } from "../core/ids";
 import type { AssetManifestEntry, AssetTiles } from "../core/documents";
 import { addLogicalFileAlias, type LogicalFileAlias } from "../core/imageHandling";
-import { normalizeLogicalFolder, sniffImage, validateDecodedDimensions } from "../core/imageSizing";
+import { normalizeLogicalFolder, sniffMedia, validateDecodedDimensions } from "../core/imageSizing";
 import { sha256Hex, type AssetServer, type ImportedAsset } from "./assets";
 import type { DerivedImage, ImageCodec } from "../workers/assetJob";
 
@@ -71,7 +71,8 @@ export class ImportPipeline {
     _callerMime: string,
     options: ImageImportOptions = {},
   ): Promise<ImportedImage> {
-    const sniffed = sniffImage(bytes);
+    const sniffed = sniffMedia(bytes);
+    if (sniffed.kind === "video") return this.importVideo(bytes, name, sniffed.mime, options);
     const quality = clampQuality(options.webpQuality ?? QUALITY);
     // Header dimensions (pre-EXIF) are a first guard before browser decoding. The codec's bitmap
     // dimensions are checked again below; EXIF orientation may legitimately swap width and height.
@@ -160,6 +161,71 @@ export class ImportPipeline {
       patch.tiles = tiles;
     }
 
+    if (logicalFile) {
+      const existing = await this.server.meta(full.hash);
+      patch.logicalFiles = addLogicalFileAlias(existing?.logicalFiles, logicalFile);
+    }
+    const entry = await this.server.describe(full.hash, patch);
+    return { hash: full.hash, entry };
+  }
+
+  /**
+   * Phase 4 video background: the original bytes are stored unchanged. There is no codec step, no
+   * thumbnail, mid-size copy or tile grid, and no WebP option. The same visibility, source, logical
+   * file and collision rules apply as for images, so the caller's gate and audit still run first.
+   */
+  private async importVideo(
+    bytes: Uint8Array,
+    name: string,
+    mime: string,
+    options: ImageImportOptions,
+  ): Promise<ImportedImage> {
+    const visibility = options.visibility ?? "referenced";
+    const source = options.source ? structuredClone(options.source) : undefined;
+    const logicalFile = options.logicalFile
+      ? { folder: normalizeLogicalFolder(options.logicalFile.folder), name: options.logicalFile.name.trim().slice(0, 1024) }
+      : undefined;
+    const logicalBehavior = options.logicalFileBehavior ?? "stop";
+    const fullHash = await sha256Hex(bytes);
+    const preparedHash = fullHash as AssetId;
+    const logicalConflicts = logicalFile
+      ? Object.entries(await this.server.manifest())
+          .filter(([hash, entry]) => hash !== fullHash && entry.logicalFiles?.some((file) =>
+            file.folder === logicalFile.folder && file.name.toLocaleLowerCase() === logicalFile.name.toLocaleLowerCase()))
+          .sort(([a], [b]) => a.localeCompare(b))
+      : [];
+    if (logicalConflicts.length > 0 && logicalBehavior === "stop") {
+      throw new Error(`A file named “${logicalFile?.name ?? name}” already exists in “${logicalFile?.folder ?? ""}”`);
+    }
+    if (logicalConflicts.length > 0 && logicalBehavior === "reuse") {
+      const existing = logicalConflicts[0];
+      if (!existing) throw new Error("Logical video collision disappeared before reuse");
+      const hash = existing[0] as AssetId;
+      await options.beforeStore?.({ assetHash: hash, preparedHash, reused: true });
+      return { hash, entry: existing[1] };
+    }
+    await options.beforeStore?.({ assetHash: preparedHash, preparedHash, reused: false });
+    const full = await this.server.import(
+      bytes,
+      name,
+      mime,
+      visibility,
+      undefined,
+      {
+        ...(source ? { source } : {}),
+        ingest: { format: "original" },
+        ...(logicalFile ? { logicalFiles: [logicalFile] } : {}),
+      },
+    );
+    if (logicalConflicts.length > 0 && logicalBehavior === "overwrite" && logicalFile) {
+      for (const [oldHash, oldEntry] of logicalConflicts) {
+        await this.server.describe(oldHash as AssetId, {
+          logicalFiles: (oldEntry.logicalFiles ?? []).filter((file) =>
+            file.folder !== logicalFile.folder || file.name.toLocaleLowerCase() !== logicalFile.name.toLocaleLowerCase()),
+        });
+      }
+    }
+    const patch: Partial<AssetManifestEntry> = {};
     if (logicalFile) {
       const existing = await this.server.meta(full.hash);
       patch.logicalFiles = addLogicalFileAlias(existing?.logicalFiles, logicalFile);

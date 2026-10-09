@@ -645,14 +645,25 @@ e2e spec for the user-visible parts.
 **Phase 4: polish and extras (not current module-parity scope).**
 - Clean-up command, video backgrounds (Mini Uploader support is unverified), asset library view, i18n of
   new strings, and an e2e run in Chromium on file:// and https. Audio ingestion remains an explicit non-goal.
-- **Status (2026-10-09).** Done: the GM library with list, download and a confirmed **Clean up unused images**
-  (§6.8, `e2e/image_library.spec.ts`, `tests/core/assetUsage.test.ts`). A deleted image is one that no live
-  document uses; Undo history is not a root, because the OpLog is never compacted in the app and keeping it
-  would make a replaced background undeletable. The confirmation says that Undo can no longer restore it.
-  Upload audit records are provenance, not use. The file:// and https origin checks
-  (`e2e/origins.spec.ts`). Not done: video backgrounds (a host upload branch must go through the same
-  quota, audit and format gate, so it needs its own design pass), i18n of new strings (the project has no
-  string catalogue yet, D-263 / G-38), and placing a stored image onto the canvas from the library (IN-5).
+- **Status (2026-10-10).** Done:
+  - The GM library with list, download and a confirmed **Clean up unused images** (§6.8, `e2e/image_library.spec.ts`,
+    `tests/core/assetUsage.test.ts`). A deleted image is one that no live document uses. Undo history is not a root,
+    because the OpLog is never compacted in the app and keeping it would make a replaced background undeletable. The
+    confirmation says that Undo can no longer restore it. Upload audit records are provenance, not use.
+  - Video backgrounds (WebM or MP4, `e2e/video_background.spec.ts`). A video goes through the same host gate as an
+    image: the same audit, quota and logical-name rules. It is stored as its original container, with no thumbnail,
+    mid-size copy, tiles or WebP step. The dialog offers only *Replace scene background* and *New scene* for it. The
+    stage plays it muted and looping. Limits: the host checks the container, not the codecs, and the 64 MB
+    byte cap is the only size limit on the host. The browser decodes the video, so a bad codec fails on the GM's
+    machine, not on the server.
+  - Placing a stored original from the library (IN-5, *Use as background* and *Place as tile*,
+    `e2e/library_placement.spec.ts`). Placement opens the same import dialog with the stored bytes, so the plan and
+    the reuse rule are the same as for an import. Thumbnails and mid-size copies cannot be placed.
+  - The file:// and https origin checks (`e2e/origins.spec.ts`).
+  - The new strings are gathered in one table, `src/ui/images/strings.ts`. There is still no catalogue and no
+    translation (D-263 / G-38).
+  - Open: the Pinterest test scene (blocked, since the three source images could not be fetched in the sandbox).
+    Also a player-side video check. The video path is covered on the GM stage only.
 
 ---
 

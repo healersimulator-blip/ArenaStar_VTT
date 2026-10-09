@@ -6,8 +6,11 @@
   import type { ImageAction, ImageHandlingPreferences, SceneExpressDefaults } from "../../core/imageHandling";
   import { IMAGE_ACTIONS, uniqueLogicalFileName, uniqueSceneName } from "../../core/imageHandling";
   import { imageHandlingPreferencesOf } from "../../core/imageHandling";
-  import { MAX_IMAGE_BYTES, aspectLockedSize, assertImageByteLength, gridFromImage, normalizeImageName, normalizeLogicalFolder, sniffImage, validateDecodedDimensions, validateHttpsImageUrl, isPinterestPinPage } from "../../core/imageSizing";
+  import { MAX_IMAGE_BYTES, aspectLockedSize, assertImageByteLength, gridFromImage, normalizeImageName, normalizeLogicalFolder, sniffMedia, isVideoMime, validateDecodedDimensions, validateHttpsImageUrl, isPinterestPinPage } from "../../core/imageSizing";
+  import { readVideoSize } from "../../client/videoMedia";
+  import { imageString } from "./strings";
   import { planImageAction } from "../../core/imageActions";
+  import { VIDEO_SOURCE_ACTIONS } from "../../core/imageHandling";
   import type { ImageSource } from "./imageSources";
 
   const CORS_FALLBACK = "The browser couldn't read or load this image (it may be blocked by CORS). Save the image to your computer and drop the file here.";
@@ -125,6 +128,7 @@
   const imageUrl = $derived(source?.kind === "url" ? source.url : "");
   const actionAllowed = $derived.by(() => {
     if (selectedAction === "preview") return true;
+    if (videoBlocks(selectedAction)) return false;
     if (selectedAction === "showPlayers") return canShare && (!restrictedPlayerMode || canWriteDocuments);
     if (canWriteDocuments) {
       if (["replaceBackground", "replaceForeground", "tileNatural", "tileFit", "tileGrid", "tokenArt"].includes(selectedAction) && !scene) return false;
@@ -290,13 +294,17 @@
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
     }
-    const sniffed = sniffImage(bytes);
+    const sniffed = sniffMedia(bytes);
     let width: number;
     let height: number;
     const blob = new Blob([bytes.slice().buffer as ArrayBuffer], { type: sniffed.mime });
     const previewUrl = URL.createObjectURL(blob);
     try {
-      if (typeof createImageBitmap === "function") {
+      if (sniffed.kind === "video") {
+        // Video sizes come from the container's metadata; there is no bitmap to decode.
+        ({ width, height } = await readVideoSize(previewUrl));
+        validateDecodedDimensions(width, height);
+      } else if (typeof createImageBitmap === "function") {
         const bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" });
         try {
           width = bitmap.width;
@@ -361,8 +369,14 @@
     else folderDraft = prefs.defaultUploadFolder;
   }
 
+  /** Video sources are scene backgrounds only (Phase 4); they have no thumbnail, tiles or token art. */
+  function videoBlocks(action: ImageAction): boolean {
+    return !!prepared && isVideoMime(prepared.mime) && !VIDEO_SOURCE_ACTIONS.includes(action);
+  }
+
   function available(action: ImageAction): boolean {
     if (action === "preview") return true;
+    if (videoBlocks(action)) return false;
     if (action === "showPlayers") return canShare && (!restrictedPlayerMode || canWriteDocuments);
     if (!canWriteDocuments) return false;
     if (["replaceBackground", "replaceForeground", "tileNatural", "tileFit", "tileGrid", "tokenArt"].includes(action) && !scene) return false;
@@ -435,7 +449,8 @@
         folder: normalizeLogicalFolder(folderDraft),
         sourceKind: item.kind === "url" ? "url" : sourceOrigin === "paste" ? "paste" : "file",
         collisionBehavior: logicalBehavior(),
-        convertToWebp: prefs.webpConvert,
+        // Video is stored as its original container; WebP conversion applies to images only.
+        convertToWebp: isVideoMime(current.mime) ? false : prefs.webpConvert,
         webpQuality: prefs.webpQuality,
       });
       storedHash = uploaded.hash;
@@ -449,6 +464,7 @@
     if (!imageRef) imageRef = item.kind === "url" ? item.url : storedHash ?? "";
 
     if (action !== "preview" && actualAction !== "showPlayers") {
+      if (videoBlocks(actualAction)) throw new Error(imageString("videoOnlyBackground"));
       const plan = planImageAction({
         action: actualAction,
         image: imageRef,
@@ -648,7 +664,11 @@
       <aside class="preview-column">
         <div class="preview-frame">
           {#if prepared}
-            <img src={prepared.previewUrl} alt={`Preview of ${source?.name ?? "image"}`} />
+            {#if isVideoMime(prepared.mime)}
+              <video src={prepared.previewUrl} muted loop autoplay playsinline aria-label={imageString("videoPreviewLabel")}></video>
+            {:else}
+              <img src={prepared.previewUrl} alt={`Preview of ${source?.name ?? "image"}`} />
+            {/if}
           {:else if loading}<span>Loading image…</span>
           {:else}<span>Preview unavailable</span>{/if}
         </div>
@@ -766,7 +786,11 @@
               <button type="button" class="align-toggle" aria-expanded={alignmentOpen} onclick={() => (alignmentOpen = !alignmentOpen)}>{alignmentOpen ? "Hide" : "Show"} grid alignment preview</button>
               {#if alignmentOpen && prepared}
                 <div class="alignment-preview" style={`width:${previewWidth}px;height:${previewHeight}px`}>
+                  {#if isVideoMime(prepared.mime)}
+                    <video src={prepared.previewUrl} muted loop autoplay playsinline aria-label="Map with grid alignment preview" style={`width:${prepared.width * backgroundScale * previewScale}px;height:${prepared.height * backgroundScale * previewScale}px;left:${offsetX * previewScale}px;top:${offsetY * previewScale}px`}></video>
+                  {:else}
                   <img src={prepared.previewUrl} alt="Map with grid alignment preview" style={`width:${prepared.width * backgroundScale * previewScale}px;height:${prepared.height * backgroundScale * previewScale}px;left:${offsetX * previewScale}px;top:${offsetY * previewScale}px`} />
+                  {/if}
                   {#if gridType === "square"}<div class="grid-overlay" style={`background-size:${previewGridSize}px ${previewGridSize}px`}></div>{/if}
                 </div>
               {/if}

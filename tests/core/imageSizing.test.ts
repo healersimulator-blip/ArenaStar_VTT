@@ -12,6 +12,8 @@ import {
   rescaleScenePlaceables,
   sceneSizeFromImage,
   sniffImage,
+  sniffMedia,
+  sniffVideo,
   tileAtAssetGridSize,
   tileAtNaturalSize,
   validateDecodedDimensions,
@@ -100,6 +102,31 @@ function emptyScene(): SceneDocument {
       c: [0, 0, 100, 50], door: 0, oneWay: false, move: 1, sight: 1, light: 1, sound: 1 }],
     lights: [], sounds: [], tiles: [], drawings: [], templates: [], notes: [],
   };
+}
+
+describe("video background containers (Phase 4)", () => {
+  test("recognises WebM and MP4 containers by magic bytes", () => {
+    const webm = new Uint8Array(64);
+    webm.set([0x1a, 0x45, 0xdf, 0xa3, 0x9f, 0x42, 0x86, 0x81]);
+    expect(sniffVideo(webm)).toEqual({ kind: "video", mime: "video/webm" });
+    const mp4 = new Uint8Array(64);
+    writeAscii(mp4, 4, "ftypisom");
+    expect(sniffVideo(mp4)).toEqual({ kind: "video", mime: "video/mp4" });
+  });
+
+  test("AVIF stays an image, and sniffMedia keeps images and rejects anything else", () => {
+    expect(sniffVideo(avifHeader(120, 90))).toBeNull();
+    expect(sniffMedia(avifHeader(120, 90))).toMatchObject({ kind: "image", format: "avif" });
+    expect(sniffMedia(pngHeaderForTest(2, 3))).toMatchObject({ kind: "image", format: "png", width: 2, height: 3 });
+    expect(sniffMedia(webm())).toMatchObject({ kind: "video", mime: "video/webm" });
+    expect(() => sniffMedia(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]))).toThrow();
+  });
+});
+
+function webm(): Uint8Array {
+  const bytes = new Uint8Array(64);
+  bytes.set([0x1a, 0x45, 0xdf, 0xa3]);
+  return bytes;
 }
 
 describe("image validation, dimensions and geometry", () => {

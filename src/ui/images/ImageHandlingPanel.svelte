@@ -85,7 +85,7 @@
   <header><div><h3>Images</h3><p>Drop, paste or choose an image. Every import opens with a preview.</p></div></header>
   <div class="actions">
     <button type="button" class="primary" onclick={() => picker?.click()}>Choose images…</button>
-    <input bind:this={picker} type="file" accept="image/*" multiple hidden onchange={chooseFiles} />
+    <input bind:this={picker} type="file" accept="image/*,video/webm,video/mp4" multiple hidden onchange={chooseFiles} />
     <label class="url">Image URL
       <span><input type="url" placeholder="https://…" bind:value={urlDraft} onkeydown={(event) => { if (event.key === "Enter") addUrl(); }} /><button type="button" onclick={addUrl} disabled={!urlDraft.trim()}>Preview</button></span>
     </label>
@@ -146,7 +146,7 @@
     <p class="hint">Original bytes are kept unless WebP conversion is enabled. Previews never write to the world.</p>
   </details>
 
-  <ImageLibraryPanel {client} {fetchAsset} />
+  <ImageLibraryPanel {client} {fetchAsset} onPlace={(sources, action) => onRequestImages(sources, action, "file")} />
 </section>
 
 <style>

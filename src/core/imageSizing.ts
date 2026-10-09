@@ -223,6 +223,38 @@ export function sniffImage(bytes: Uint8Array): SniffedImage {
 }
 
 /** Check post-decode (EXIF-oriented) dimensions as a second decompression-bomb guard. */
+/** A video background container (Phase 4, §11 decision 7). Only the container is recognised here. */
+export interface SniffedVideo {
+  kind: "video";
+  mime: "video/webm" | "video/mp4";
+}
+
+export type SniffedMedia = ({ kind: "image" } & SniffedImage) | SniffedVideo;
+
+/**
+ * WebM (EBML header) or MP4 (ISO BMFF `ftyp` box). AVIF also uses `ftyp`, so it is excluded here and
+ * stays an image. The codecs inside the container are the browser's to decode, not the host's.
+ */
+export function sniffVideo(bytes: Uint8Array): SniffedVideo | null {
+  assertImageByteLength(bytes.byteLength);
+  if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
+    return { kind: "video", mime: "video/webm" };
+  }
+  if (ascii(bytes, 4, 4) === "ftyp" && !isAvif(bytes)) return { kind: "video", mime: "video/mp4" };
+  return null;
+}
+
+/** Image or video container, by magic bytes. Anything else is rejected with the image message. */
+export function sniffMedia(bytes: Uint8Array): SniffedMedia {
+  const video = sniffVideo(bytes);
+  if (video) return video;
+  return { kind: "image", ...sniffImage(bytes) };
+}
+
+export function isVideoMime(mime: string): boolean {
+  return mime === "video/webm" || mime === "video/mp4";
+}
+
 export function validateDecodedDimensions(width: number, height: number): void {
   assertDimensions(width, height);
 }

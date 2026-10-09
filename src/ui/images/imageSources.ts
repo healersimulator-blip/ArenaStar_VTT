@@ -5,8 +5,17 @@ export type ImageSource =
 
 const IMAGE_NAME = /\.(?:png|jpe?g|webp|gif|avif|svg)$/i;
 
+const VIDEO_NAME = /\.(?:webm|mp4)$/i;
+
+/** A WebM or MP4 file, which the dialog accepts only as a scene background (Phase 4). */
+export function isVideoFile(file: File): boolean {
+  const type = file.type.toLowerCase();
+  if (type) return type === "video/webm" || type === "video/mp4";
+  return VIDEO_NAME.test(file.name);
+}
+
 export function isPotentialImageFile(file: File): boolean {
-  return file.type.toLowerCase().startsWith("image/") || IMAGE_NAME.test(file.name);
+  return file.type.toLowerCase().startsWith("image/") || IMAGE_NAME.test(file.name) || isVideoFile(file);
 }
 
 export function imageSourcesFromTransfer(transfer: DataTransfer | null | undefined): ImageSource[] {

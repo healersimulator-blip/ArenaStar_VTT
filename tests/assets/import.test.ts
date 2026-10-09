@@ -103,6 +103,52 @@ describe("pure geometry (§7)", () => {
   });
 });
 
+describe("ImportPipeline video backgrounds (Phase 4)", () => {
+  function webmBytes(tag: number): Uint8Array {
+    const bytes = new Uint8Array(96);
+    bytes.set([0x1a, 0x45, 0xdf, 0xa3, 0x9f, tag]);
+    return bytes;
+  }
+
+  test("stores the original container with no codec variants, tiles or WebP step", async () => {
+    const { server, store } = await makeServer("w-imp-video");
+    const codec = new FakeCodec(1920, 1080);
+    const derive = vi.spyOn(codec, "derive");
+    const tile = vi.spyOn(codec, "tile");
+    const pipeline = new ImportPipeline(server, codec);
+    const bytes = webmBytes(1);
+    const { hash, entry } = await pipeline.importImage(bytes, "loop.webm", "video/webm", { convertToWebp: true });
+
+    expect(derive).not.toHaveBeenCalled();
+    expect(tile).not.toHaveBeenCalled();
+    expect(entry.thumb).toBeUndefined();
+    expect(entry.mid).toBeUndefined();
+    expect(entry.tiles).toBeUndefined();
+    expect(entry.mime).toBe("video/webm");
+    expect(entry.name).toBe("loop.webm");
+    expect(Object.keys(store.world.assetManifest)).toEqual([hash]);
+    expect(await server.get(hash)).toEqual(bytes);
+    server.close();
+  });
+
+  test("calls beforeStore with the audit identifiers before the write, and stops on a logical name clash", async () => {
+    const { server } = await makeServer("w-imp-video-logical");
+    const pipeline = new ImportPipeline(server, new FakeCodec(640, 360));
+    const seen: string[] = [];
+    const first = await pipeline.importImage(webmBytes(2), "intro.webm", "video/webm", {
+      logicalFile: { folder: "Bg", name: "intro.webm" },
+      beforeStore: ({ assetHash, reused }) => { seen.push(`${assetHash}:${reused}`); },
+    });
+    expect(seen).toEqual([`${first.hash}:false`]);
+    await expect(
+      pipeline.importImage(webmBytes(3), "other.webm", "video/webm", {
+        logicalFile: { folder: "Bg", name: "INTRO.webm" },
+      }),
+    ).rejects.toThrow(/already exists/);
+    server.close();
+  });
+});
+
 describe("ImportPipeline (§7)", () => {
   test("stores full + thumb + mid as hash-addressed assets; manifest carries descriptors", async () => {
     const { server, store } = await makeServer("w-imp-a");

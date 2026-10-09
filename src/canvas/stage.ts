@@ -21,7 +21,8 @@ import {
 // file:// and CSP-restricted contexts forbid unsafe-eval; this side-effect
 // import swaps Pixi's Function()-based fast paths for eval-free ones (D-058).
 import "pixi.js/unsafe-eval";
-import { imageTexture, imageUrlTexture } from "./imageTexture";
+import { imageTexture, imageUrlTexture, videoTexture } from "./imageTexture";
+import { isVideoMime } from "../core/imageSizing";
 import type { TokenDocument } from "../core/documents";
 import type { Camera, Viewport } from "./camera";
 import { fitRect, screenToWorld } from "./camera";
@@ -198,6 +199,8 @@ export interface Stage {
   setTokenVisibility(visible: ReadonlySet<string> | null): void;
   /** Ids of the token views actually drawn right now (sorted; e2e readback). */
   drawnTokenIds(): string[];
+  /** What the scene background is showing: a looping video, a still image, or nothing (Phase 4). */
+  backgroundMedia(): "video" | "image" | null;
   /** Rubber-band selection rectangle in world coords (null clears). */
   setMarquee(
     a: { x: number; y: number } | null,
@@ -399,7 +402,24 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const bgPadding = new Graphics();
   backgroundLayer.addChild(bgFill, bgPadding);
   let bgSprite: Sprite | null = null;
+  // A video background keeps its element playing; releasing the sprite must stop it too.
+  let bgVideoStop: (() => void) | null = null;
   let bgRevision = 0;
+  const releaseBackground = (): void => {
+    bgVideoStop?.();
+    bgVideoStop = null;
+    bgSprite?.destroy({ texture: true, textureSource: true });
+    bgSprite = null;
+  };
+  const placeBackground = (texture: Texture, stop: (() => void) | null): void => {
+    releaseBackground();
+    bgVideoStop = stop;
+    bgSprite = new Sprite(texture);
+    bgSprite.position.set(bgPresentation.offset?.x ?? 0, bgPresentation.offset?.y ?? 0);
+    bgSprite.scale.set(bgPresentation.scale ?? 1);
+    backgroundLayer.addChildAt(bgSprite, 0);
+    bgFill.clear();
+  };
   let bgColor = options.background ?? 0x14171c;
   let bgPresentation: StageBackgroundPresentation = { width: 2000, height: 1500, offset: { x: 0, y: 0 }, scale: 1, padding: 0 };
   root.addChild(backgroundLayer);
@@ -615,31 +635,26 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     },
     clearBackgroundImage(): void {
       bgRevision++;
-      bgSprite?.destroy({ texture: true, textureSource: true });
-      bgSprite = null;
+      releaseBackground();
       bgFill.clear().rect(0, 0, viewport.width, viewport.height).fill(bgColor);
     },
     async setBackgroundImage(bytes: Uint8Array, mime = "image/png"): Promise<void> {
       const revision = ++bgRevision;
+      if (isVideoMime(mime)) {
+        const { texture, stop } = await videoTexture(bytes, mime);
+        if (revision !== bgRevision) { stop(); texture.destroy(true); return; }
+        placeBackground(texture, stop);
+        return;
+      }
       const texture = await imageTexture(bytes, mime);
       if (revision !== bgRevision) { texture.destroy(true); return; }
-      bgSprite?.destroy({ texture: true, textureSource: true });
-      bgSprite = new Sprite(texture);
-      bgSprite.position.set(bgPresentation.offset?.x ?? 0, bgPresentation.offset?.y ?? 0);
-      bgSprite.scale.set(bgPresentation.scale ?? 1);
-      backgroundLayer.addChildAt(bgSprite, 0);
-      bgFill.clear();
+      placeBackground(texture, null);
     },
     async setBackgroundUrl(url: string): Promise<void> {
       const revision = ++bgRevision;
       const texture = await imageUrlTexture(url);
       if (revision !== bgRevision) { texture.destroy(true); return; }
-      bgSprite?.destroy({ texture: true, textureSource: true });
-      bgSprite = new Sprite(texture);
-      bgSprite.position.set(bgPresentation.offset?.x ?? 0, bgPresentation.offset?.y ?? 0);
-      bgSprite.scale.set(bgPresentation.scale ?? 1);
-      backgroundLayer.addChildAt(bgSprite, 0);
-      bgFill.clear();
+      placeBackground(texture, null);
     },
     clearForegroundImage(): void {
       foregroundRevision++;
@@ -949,6 +964,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         }
       }
     },
+    /** What the scene background is showing (Phase 4 video backgrounds; read by e2e). */
+    backgroundMedia(): "video" | "image" | null {
+      if (!bgSprite) return null;
+      return bgVideoStop ? "video" : "image";
+    },
     drawnTokenIds(): string[] {
       return [...tokenViews]
         .filter(([, view]) => view.visible)
@@ -1052,8 +1072,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       frameSinks.clear();
       app.canvas.removeEventListener("pointermove", onStagePointerMove);
       bgRevision++; // pending image decodes must not touch a destroyed canvas
-      bgSprite?.destroy({ texture: true, textureSource: true });
-      bgSprite = null;
+      releaseBackground();
       foregroundRevision++;
       foregroundSprite?.destroy({ texture: true, textureSource: true });
       foregroundSprite = null;

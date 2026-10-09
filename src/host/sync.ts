@@ -193,7 +193,7 @@ import {
 } from "../core/campaignCodexEconomy";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
 import { assetLibrary, assetUsageRoots, unusedAssetIds } from "../core/assetUsage";
-import { MAX_IMAGE_BYTES, normalizeLogicalFolder, sniffImage } from "../core/imageSizing";
+import { MAX_IMAGE_BYTES, normalizeLogicalFolder, sniffMedia } from "../core/imageSizing";
 import { playerUploadQuotaMBOf } from "../core/imageHandling";
 import { FX_FINISH_OFFSET_MAX_MS, fxAudienceAllows, fxResolveSyncOrigins, fxSectionsForViewer,
   resolveFxSequence, validateFxSequence, type FxAudience } from "../core/fx";
@@ -8402,7 +8402,7 @@ export class HostSync {
     let uploadWasReused = false;
     try {
       // Validate the real container/header at the host before any bitmap decode or asset write.
-      const sniffed = sniffImage(bytes);
+      const sniffed = sniffMedia(bytes);
       const imported = await this.pipeline?.importImage(bytes, upload.name, sniffed.mime, {
         visibility: isPrivileged ? "referenced" : "gm",
         source: { kind: upload.sourceKind, originalName: upload.name, originalMime: sniffed.mime,
