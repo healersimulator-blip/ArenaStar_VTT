@@ -12417,3 +12417,23 @@ recorded in `IMAGE_HANDLING_DESIGN.md` §6.3 and is not decided here.
 
 **Tests.** `tests/core/imageSizing.test.ts` (fit placement), `e2e/hexcrawl_scene.spec.ts` ("a map fitted into a
 chosen size lands centred, with the image system's defaults and a unique name").
+
+## D-411 — Floating UI keeps to the table side of the chat dock and clear of the tool rail (2026-10-10)
+
+**Context.** Review screenshots showed three collisions. Floating windows opened under the canvas tool rail, so
+their left edges and titles were clipped. The per-action toast stack was pinned to the viewport's right edge and
+covered the chat composer and Send. The tool-options flyout (travel path hint, and the other tools' options) was
+also pinned to the viewport's right edge, over the chat dock.
+
+**Decision.**
+- `WindowManager` takes an optional `leftInset` (the rail's width). With an inset, windows open, drag and resize
+  only to its right. Without one, behaviour is unchanged, so existing callers and tests keep their semantics. The App
+  sets the inset to 56 px, the rail's width.
+- The toast stack and the tool-options flyout are anchored to `--gm-dock-width` from the right, so they sit over the
+  table and never over the dock.
+
+**Not done.** The window layer still sits in the board's coordinate space, not the canvas's. Moving it inside the
+canvas box was tried and reverted: it changed pointer and drag behaviour (the fog spec's token drag and the
+image-preview flow both broke). Verified by `tests/core/windows.test.ts` (inset) and the hexcrawl, windows,
+canvas-toolbar, campaign-codex and image-handling Chromium e2e runs. `e2e/hexcrawl_fog.spec.ts` now closes the
+GM settings window before its drag, because that window now opens clear of the rail and can cover the target hex.

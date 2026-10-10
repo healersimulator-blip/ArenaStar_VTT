@@ -343,7 +343,9 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     queueMicrotask(() => sessionTrigger?.focus());
   }
   let player = $state<AudioPlayer | null>(null);
-  const wm = new WindowManager({ width: 900, height: 700 });
+  // 56 px: the canvas tool rail. Windows open and drag to its right, never under it (the rail's
+  // icons and a window's title would otherwise fight for the same pixels).
+  const wm = new WindowManager({ width: 900, height: 700, leftInset: 56 });
   (globalThis as unknown as { __wm?: WindowManager }).__wm = wm;
   /** Bumped on every store ops/snapshot so non-panel reads re-render. */
   let storeVersion = $state(0);
@@ -5224,6 +5226,38 @@ const WALL_PICK_RADIUS = 12;
             />
           {/if}
           </div>
+        <WindowHost
+          manager={wm}
+          windows={wmWindows}
+          client={app.gm.client}
+          bus={app.gm.bus}
+          sceneId={activeScene()?._id ?? null}
+          selectedTokenId={singleSelectedTokenId()}
+          {selectedItemRef}
+          importImage={importMapFile}
+          importSceneImage={importSceneMapFile}
+          sceneDefaults={imageSceneDefaults}
+          onFxImport={importFxFile}
+          onPickSummon={requestSummonPick}
+          onPickAnchor={requestAnchorPick}
+          onPreviewFx={previewFxSequence}
+          onStopFxPreview={stopFxPreview}
+          listFxAssets={() => Promise.resolve(app?.assets.manifest() ?? {})}
+          {setFxAssetRights}
+          getFxAsset={(hash) => app?.assets.get(hash) ?? Promise.resolve(undefined)}
+          onUndo={undo}
+          onRedo={redo}
+          packages={app.packages}
+          rulesBoot={app.rulesBoot}
+          {agents}
+          bindings={DEFAULT_BINDINGS}
+          isGM={true}
+          onHexRollTable={rollHexTable}
+          onHexOpenScene={activateScene}
+          onEncounterPlaceAll={(resultId) => void placeEncounterAt({ resultId })}
+          onEncounterBattleScene={(resultId) => void createBattleScene({ resultId })}
+          {resolveAsset}
+        />
         </div>
           {#if hexMenu}
             <!--
@@ -5262,38 +5296,6 @@ const WALL_PICK_RADIUS = 12;
               {/each}
             </div>
           {/if}
-        <WindowHost
-          manager={wm}
-          windows={wmWindows}
-          client={app.gm.client}
-          bus={app.gm.bus}
-          sceneId={activeScene()?._id ?? null}
-          selectedTokenId={singleSelectedTokenId()}
-          {selectedItemRef}
-          importImage={importMapFile}
-          importSceneImage={importSceneMapFile}
-          sceneDefaults={imageSceneDefaults}
-          onFxImport={importFxFile}
-          onPickSummon={requestSummonPick}
-          onPickAnchor={requestAnchorPick}
-          onPreviewFx={previewFxSequence}
-          onStopFxPreview={stopFxPreview}
-          listFxAssets={() => Promise.resolve(app?.assets.manifest() ?? {})}
-          {setFxAssetRights}
-          getFxAsset={(hash) => app?.assets.get(hash) ?? Promise.resolve(undefined)}
-          onUndo={undo}
-          onRedo={redo}
-          packages={app.packages}
-          rulesBoot={app.rulesBoot}
-          {agents}
-          bindings={DEFAULT_BINDINGS}
-          isGM={true}
-          onHexRollTable={rollHexTable}
-          onHexOpenScene={activateScene}
-          onEncounterPlaceAll={(resultId) => void placeEncounterAt({ resultId })}
-          onEncounterBattleScene={(resultId) => void createBattleScene({ resultId })}
-          {resolveAsset}
-        />
         {#if pendingReaction}
           <!--
             D-187: the held move's queue. Nothing has moved yet — each row is the seam's
@@ -5648,12 +5650,13 @@ const WALL_PICK_RADIUS = 12;
   }
   .notify-stack {
     position: fixed;
-    right: 16px;
+    /* Clear the chat dock: the stack sits over the table, never over the composer and Send. */
+    right: calc(var(--gm-dock-width) + 16px);
     bottom: 16px;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    width: min(420px, calc(100vw - 32px));
+    width: min(420px, calc(100vw - var(--gm-dock-width) - 48px));
     z-index: 60;
     pointer-events: none;
   }

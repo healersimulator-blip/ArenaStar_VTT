@@ -436,6 +436,10 @@ test.describe("hexcrawl canvas (§8 Phase 2, D-271)", () => {
     );
     if (!dragFrom || !dragTo)
       throw new Error("no screen geometry for the drag");
+    // The settings window is still open over the board; close it so the drag reaches the map (windows
+    // open to the right of the tool rail, so this one can sit over the destination hex).
+    await settings.locator("[data-window-close]").click();
+    await expect(settings).toBeHidden();
     // A real drag, because "the party token moved" is the trigger the sight reconcile hangs off
     // (the plan's own words: the ring adds to the open set every time the party moves).
     await host.mouse.move(dragFrom.x, dragFrom.y);

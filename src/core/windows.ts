@@ -21,6 +21,11 @@ export interface WindowSpec {
 export interface WindowBounds {
   width: number;
   height: number;
+  /**
+   * The width of a fixed column on the left the windows must not slide under (the GM's tool rail).
+   * Windows never open, drag or drop with their left edge inside it.
+   */
+  leftInset?: number;
 }
 
 export const MIN_WINDOW_W = 180;
@@ -73,7 +78,7 @@ export class WindowManager {
     }
     const width = clamp(spec.width, MIN_WINDOW_W, Math.max(MIN_WINDOW_W, this.bounds.width));
     const height = clamp(spec.height, MIN_WINDOW_H, Math.max(MIN_WINDOW_H, this.bounds.height));
-    const x = clamp(spec.x, 0, Math.max(0, this.bounds.width - width));
+    const x = clamp(spec.x, this.leftInset(), Math.max(this.leftInset(), this.bounds.width - width));
     const y = clamp(spec.y, 0, Math.max(0, this.bounds.height - height));
     const win: WindowSpec = {
       ...spec,
@@ -113,11 +118,19 @@ export class WindowManager {
     return best?.id ?? null;
   }
 
+  private leftInset(): number {
+    return Math.max(0, this.bounds.leftInset ?? 0);
+  }
+
   /** Drag by delta; keeps the title bar reachable (never fully off-screen). */
   move(id: string, dx: number, dy: number): void {
     this.windows = this.windows.map((w) => {
       if (w.id !== id) return w;
-      const x = clamp(w.x + dx, -(w.width - 60), Math.max(0, this.bounds.width - 60));
+      // Without an inset a window may hang off the left edge (its title stays reachable); with one,
+      // it stops at the rail.
+      const minX =
+        this.bounds.leftInset === undefined ? -(w.width - 60) : this.leftInset();
+      const x = clamp(w.x + dx, minX, Math.max(minX, this.bounds.width - 60));
       const y = clamp(w.y + dy, 0, Math.max(0, this.bounds.height - 24));
       return { ...w, x, y };
     });
@@ -148,10 +161,12 @@ export class WindowManager {
 
   /** Update bounds on viewport resize (windows re-clamped). */
   setBounds(bounds: WindowBounds): void {
-    this.bounds = bounds;
+    // Merge, so a size-only update keeps the left inset the app set at construction.
+    this.bounds = { ...this.bounds, ...bounds };
+    const left = this.leftInset();
     this.windows = this.windows.map((w) => ({
       ...w,
-      x: clamp(w.x, 0, Math.max(0, bounds.width - 60)),
+      x: clamp(w.x, left, Math.max(left, bounds.width - 60)),
       y: clamp(w.y, 0, Math.max(0, bounds.height - 24)),
       width: clamp(w.width, MIN_WINDOW_W, bounds.width),
       height: clamp(w.height, MIN_WINDOW_H, bounds.height),

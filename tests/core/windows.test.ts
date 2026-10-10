@@ -64,6 +64,20 @@ describe("window manager (§10)", () => {
     expect(w2.y).toBe(300 - 24);
   });
 
+  test("with a left inset (the tool rail), windows open and drag only to its right", () => {
+    const wm = new WindowManager({ width: 400, height: 300, leftInset: 56 });
+    const opened = wm.open({ id: "a", title: "A", kind: "test", x: 0, y: 0, width: 200, height: 150 });
+    expect(opened.x).toBe(56);
+    wm.move("a", -500, 0);
+    expect((wm.get("a") as { x: number }).x).toBe(56);
+    wm.move("a", 5000, 0);
+    expect((wm.get("a") as { x: number }).x).toBe(400 - 60);
+    // a size-only update keeps the inset
+    wm.setBounds({ width: 300, height: 300 });
+    wm.move("a", -500, 0);
+    expect((wm.get("a") as { x: number }).x).toBe(56);
+  });
+
   test("resize respects min sizes and the parent", () => {
     const wm = new WindowManager({ width: 400, height: 300 });
     wm.open({ id: "a", title: "A", kind: "test", x: 100, y: 100, width: 200, height: 150 });
