@@ -711,9 +711,11 @@
   .icon { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; }
   .danger { color: #e6a7a5 !important; }
   .tool-popover {
+    /* A flyout on the table side of the chat dock: it sits over the map's right edge and never
+       over the dock, and the map's left side (where the rail's tools are drawn) stays clickable. */
     position: fixed;
     left: auto;
-    right: 12px;
+    right: calc(var(--gm-dock-width, 340px) + 12px);
     top: 186px;
     width: calc(clamp(312px, 25vw, 376px) - 24px);
     max-height: min(590px, calc(100dvh - 210px));
@@ -802,7 +804,7 @@
     pointer-events: none;
   }
   @media (max-width: 930px) {
-    .tool-popover { right: 8px; width: 290px; }
+    .tool-popover { right: calc(var(--gm-dock-width, 340px) + 8px); width: 290px; }
   }
   @media (max-width: 710px) {
     .tool-popover {

@@ -183,6 +183,9 @@
             journalId={journal._id}
             pageId={page._id}
             text={page.text}
+            src={page.src}
+            imageAlt={page.name}
+            {resolveAsset}
             revealSecrets
           />
         </div>

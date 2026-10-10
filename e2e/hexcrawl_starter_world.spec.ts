@@ -13,9 +13,10 @@
  * scenes. This one asks whether the world a new GM opens first is a hexcrawl they can play in.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { strFromU8, unzipSync } from "fflate";
 import { entry, hostCall, surfaceCallArg, waitForSurface } from "./lib";
 
 const distWorlds = fileURLToPath(new URL("../dist/worlds", import.meta.url));
@@ -25,6 +26,18 @@ const starterZip = (): string | null => {
   return name ? join(distWorlds, name) : null;
 };
 const NEED = "run `pnpm build:worlds` (or the whole `pnpm test:e2e` chain)";
+
+/**
+ * The seq the artifact must report: `documents.json`'s own `seq`, which the builder sets to the
+ * number of documents it wrote (`scripts/buildStarterWorlds.mjs`). Read from the zip, not pinned:
+ * a pinned number went stale every time the starter grew.
+ */
+const artifactSeq = (zipPath: string): number => {
+  const files = unzipSync(new Uint8Array(readFileSync(zipPath)));
+  const bytes = files["documents.json"];
+  if (!bytes) throw new Error("the starter artifact has no documents.json");
+  return (JSON.parse(strFromU8(bytes)) as { seq: number }).seq;
+};
 
 interface HexcrawlReadback {
   sceneId: string | null;
@@ -66,7 +79,7 @@ async function openStarterWorld(page: Page, zipPath: string): Promise<void> {
   await expect(page.locator("#status")).toContainText("Pathfinder 1e Mass Battles", {
     timeout: 60_000,
   });
-  await expect(page.locator("#status")).toContainText("seq 17");
+  await expect(page.locator("#status")).toContainText(`seq ${artifactSeq(zipPath)}`);
 }
 
 /** The screen point of a hex centre — the app's own geometry, not the spec's arithmetic. */

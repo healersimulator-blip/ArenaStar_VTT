@@ -154,6 +154,8 @@ export interface TileDocument extends BaseDocument {
   rotation?: number;
   /** Optional trigger priority/z-sort; ties default to zero and then tile ID. */
   sort?: number;
+  /** The image's authored pixels per grid square when placed from Asset Grid Size. */
+  assetGridSize?: number;
   /** Optional convex tile-local trigger polygon; absent preserves the rectangular trigger shape. */
   triggerZone?: import("./tileTriggerZone").TileTriggerZone;
   /** Inclusive active vertical band in scene grid units; absent has no elevation restriction. */
@@ -277,6 +279,12 @@ export interface CellDocument extends BaseDocument {
   playerText?: string;
   /** Encounter table ids attached to this cell (`encounterTables`). */
   tables?: string[];
+  /**
+   * Campaign Codex entries (journal ids with a `codex` sheet) this hex is about: a town, a lair's
+   * NPC, a region. GM-side context only: a player's replica never receives this list, in the same
+   * way it never receives `description`.
+   */
+  codexEntries?: string[];
   features?: CellFeature[];
 }
 
@@ -690,12 +698,46 @@ export interface SceneGrid {
 export interface SceneDocument extends BaseDocument {
   type: "scene";
   active: boolean;
-  /** Background image — asset hash or external URL. */
+  /** Background image — asset hash or HTTPS URL. */
   img: string | null;
   width: number;
   height: number;
   grid: SceneGrid;
   darkness: number;
+  /** Optional Foundry-style background presentation; legacy scenes use origin, scale 1, no padding, white. */
+  background?: {
+    offset?: { x: number; y: number };
+    /** Uniform scale. `scaleX`/`scaleY` (when present) are the exact per-axis transform. */
+    scale?: number;
+    scaleX?: number;
+    scaleY?: number;
+    padding?: number;
+    color?: string;
+    /** GM lock: the map ignores editor handles, drags and nudges until unlocked. */
+    locked?: boolean;
+    /**
+     * The map's own square grid in native image pixels, detected or entered by the GM. It is only
+     * valid for the image it was measured on (`image`), so a replaced background drops it.
+     */
+    mapGrid?: {
+      image: string;
+      sizeX: number;
+      sizeY: number;
+      offsetX: number;
+      offsetY: number;
+    };
+  };
+  /** Optional full-scene foreground layer; the source may be an asset hash or HTTPS URL. */
+  foreground?: { img: string | null; elevation: number };
+  /** Optional scene-list thumbnail. It points to an immutable asset variant. */
+  thumbnail?: AssetId | null;
+  /** Logical scene collection; not a server filesystem path. */
+  logicalFolder?: string;
+  /** Scene Express defaults retained for future compatible UI/automation. */
+  navigation?: boolean;
+  tokenVision?: boolean;
+  fogExploration?: boolean;
+
   /** flags.core.scale: "tactical" | "strategic" selects §9A behaviour. */
   tokens: TokenDocument[];
   walls: WallDocument[];
@@ -749,6 +791,25 @@ export interface AssetTiles {
 }
 
 /** assetManifest entry: hash → { name, mime, size, chunks } + image variants (§4, §7). */
+export interface AssetImportSource {
+  kind: "file" | "paste" | "url" | "tile-browser";
+  originalName?: string;
+  originalMime?: string;
+  /** Optional provenance only; Store-by-URL intentionally omits it by default. */
+  url?: string;
+  /** Uploader attribution; removed from non-GM projections. */
+  importedBy?: UserId;
+  /** Original source byte count for the first upload, even when WebP conversion is on. */
+  uploadedBytes?: number;
+  /** Cumulative original bytes uploaded by each user for this content hash. GM-only metadata. */
+  uploadedBytesByUser?: Record<UserId, number>;
+}
+
+export interface AssetLogicalFile {
+  folder: string;
+  name: string;
+}
+
 export interface AssetManifestEntry {
   name: string;
   mime: string;
@@ -759,6 +820,12 @@ export interface AssetManifestEntry {
   /** Explicit FX-import consent for redistribution in a world archive. Absence means legacy asset,
    * NOT proof that any external premium-pack license permits sharing. */
   exportRights?: "restricted" | "granted";
+  /** GM-only import context; never widened or replaced on a content-hash reuse. */
+  source?: AssetImportSource;
+  /** How the full asset was stored; derived thumb/mid/tiles remain WebP. */
+  ingest?: { format: "original" | "webp"; quality?: number };
+  /** Virtual aliases. The same content hash may belong to multiple names/folders. */
+  logicalFiles?: AssetLogicalFile[];
   /** Intrinsic pixel dimensions (present on image assets after import). */
   width?: number;
   height?: number;

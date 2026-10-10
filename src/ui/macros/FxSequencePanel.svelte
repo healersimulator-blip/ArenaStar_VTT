@@ -34,6 +34,7 @@
   import { rememberPlacement, type NamedPlacement, type RequestCrosshairPick } from "./crosshairPicker";
   import type { CrosshairShape } from "../../core/crosshair";
   import type { PreviewFxSequence } from "./fxPreview";
+  import { derivedAssetIds } from "../../core/imageHandling";
 
   let {
     client, bus, onImport = null, listAssets = null, onAssetRights = null, pickedAsset = null,
@@ -217,7 +218,11 @@
   async function refreshAssets(): Promise<void> {
     if (!listAssets) return;
     try {
-      media = Object.entries(await listAssets()).filter(([, e]) =>
+      // Thumbnails, mid-res copies and tiles are stored assets, but the rights target and the
+      // pickers must only ever name the imported media itself (a rights save on a copy is lost).
+      const manifest = await listAssets();
+      const derived = derivedAssetIds(manifest);
+      media = Object.entries(manifest).filter(([hash, e]) => !derived.has(hash) &&
         /^(image\/(png|jpeg|webp|gif|avif)|video\/(webm|mp4)|audio\/(mpeg|mp3|wav|ogg|webm|mp4|aac))$/.test(e.mime)
       ).map(([hash, e]) => ({ hash, name: e.name, mime: e.mime,
         visibility: e.visibility, exportRights: e.exportRights }));

@@ -5,6 +5,7 @@ import { openVttDb } from "../../src/storage/idb";
 import { MemDirHandle } from "../../src/storage/opfs";
 import type { DerivedImage, DeriveTarget, ImageCodec } from "../../src/workers/assetJob";
 import type { TokenDocument } from "../../src/core/documents";
+import { pngHeaderForTest } from "../helpers/imageBytes";
 
 const settle = async (times = 3): Promise<void> => {
   for (let i = 0; i < times; i++) await new Promise((r) => setTimeout(r, 0));
@@ -132,11 +133,8 @@ describe("GM-tab boot (§2/§8/§14)", () => {
   test("map import → manifest + scene.img; bytes stream back over the loopback (§7)", async () => {
     const app = await boot();
     await settle();
-    const { hash, entry } = await app.pipeline.importImage(
-      new Uint8Array([1, 2, 3, 4]),
-      "map.png",
-      "image/png",
-    );
+    const mapBytes = pngHeaderForTest(2000, 1500, [1, 2, 3, 4]);
+    const { hash, entry } = await app.pipeline.importImage(mapBytes, "map.png", "image/png");
     expect(entry.width).toBe(2000);
     app.gm.client.submit([
       { kind: "update", ref: { coll: "scenes", id: DEFAULT_SCENE_ID }, diff: { img: hash } },
@@ -145,7 +143,7 @@ describe("GM-tab boot (§2/§8/§14)", () => {
     expect(app.gm.client.store.get("scenes", DEFAULT_SCENE_ID)?.img).toBe(hash);
 
     const bytes = await app.gm.fetcher.request(hash, "scene"); // loopback fetch
-    expect([...bytes]).toEqual([1, 2, 3, 4]);
+    expect([...bytes]).toEqual([...mapBytes]);
     await app.persister.drain();
     await app.close();
   });

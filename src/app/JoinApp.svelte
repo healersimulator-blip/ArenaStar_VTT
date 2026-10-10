@@ -5,7 +5,7 @@
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
   import { TileImageCache } from "../canvas/imageTexture";
   import { tokenRect } from "../canvas/tokens";
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
   import { parseInvite } from "./hostShare";
   import { createStage, type Stage } from "../canvas/stage";
@@ -58,6 +58,11 @@
   import OnboardingPanel from "../ui/onboarding/OnboardingPanel.svelte";
   import Icon from "../ui/icons/Icon.svelte";
   import { ChatPanel } from "../ui/chat";
+  import ImageHandlingPanel from "../ui/images/ImageHandlingPanel.svelte";
+  import ImageImportDialog from "../ui/images/ImageImportDialog.svelte";
+  import SharedImageNotice from "../ui/images/SharedImageNotice.svelte";
+  import type { ImageSource } from "../ui/images/imageSources";
+  import { imageSourcesFromClipboard, imageSourcesFromTransfer } from "../ui/images/imageSources";
   import { QuickbarRow, prefetchQuickbarSpellFx, runQuickbarEntangleArea, runQuickbarLightningBoltLine,
     type PF1eQuickbarEntry, type PF1eQuickbarRunResult } from "../ui/quickbar";
   import { MacroHotbar, macroResultText, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
@@ -73,6 +78,7 @@
   import { SheetPanel } from "../ui/sheets";
   import type {
     ActorDocument,
+    JournalDocument,
     SceneDocument,
     SceneGrid,
     TileDocument,
@@ -91,6 +97,7 @@
   import { lineIntersectsTokenFootprint, pf1eAreaGridFromScene } from "../packages/pf1e/targeting";
   import { sightSegments } from "../canvas/vision";
   import { tokenHpBarsOf, worldSettingsFrom } from "../core/worldSettings";
+  import { DEFAULT_IMAGE_HANDLING_PREFERENCES, imageHandlingPreferencesOf, loadImageHandlingPreferences, saveImageHandlingPreferences, sceneExpressDefaultsOf, type ImageAction, type ImageHandlingPreferences } from "../core/imageHandling";
 
   let app = $state<PlayerApp | null>(null);
   let phase = $state<"invite" | "exchange" | "live" | "dead">("invite");
@@ -103,7 +110,7 @@
   let seq = $state(0);
   let tokenCount = $state(0);
   let playerName = $state("");
-  let playerTab = $state<"chat" | "actors">("chat");
+  let playerTab = $state<"chat" | "actors" | "images">("chat");
   let guideOpen = $state(false);
   /** SQ-13: one-line FX delivery warnings for this viewer (max 4, newest last). */
   let fxNotices = $state<string[]>([]);
@@ -132,6 +139,115 @@
   let wmVersion = $state(0);
   /** Bumped by `refresh()` (snapshot/ops) so `$derived` blocks re-read the store. */
   let storeVersion = $state(0);
+  let imagePreferences = $state<ImageHandlingPreferences>(imageHandlingPreferencesOf(DEFAULT_IMAGE_HANDLING_PREFERENCES));
+  let imagePreferencesKey = "";
+  let imageDialogSources = $state<ImageSource[]>([]);
+  let imageDialogOpen = $state(false);
+  let sharedImageAnnouncement = $state<{ assetId: string; name: string; senderName: string } | null>(null);
+  let imageDialogOrigin = $state<"file" | "paste" | "url">("file");
+  let imageDialogAction = $state<ImageAction | null>(null);
+  let imageDragActive = $state(false);
+  let imageDragDepth = 0;
+  let imageNotice = $state("");
+  let imageNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const imageSceneDefaults = $derived.by(() => {
+    void storeVersion;
+    return sceneExpressDefaultsOf(app?.client ? worldSettingsFrom(app.client.store.getAll("settings")).sceneExpressDefaults : null);
+  });
+  const restrictedPlayerImageMode = $derived.by(() => {
+    void storeVersion;
+    return app?.client ? worldSettingsFrom(app.client.store.getAll("settings")).restrictedPlayerImageMode === true : false;
+  });
+  const imageCanUpload = $derived(app?.client?.user?.role === "TRUSTED" && !restrictedPlayerImageMode);
+  const imageCanWriteDocuments = false;
+  const imageCanShare = $derived(imageCanUpload);
+  const imageScenes = $derived.by(() => {
+    void storeVersion;
+    return [...(app?.client?.store.getAll("scenes") as readonly SceneDocument[] | undefined ?? [])];
+  });
+  const imageJournals = $derived.by(() => {
+    void storeVersion;
+    return [...(app?.client?.store.getAll("journals") as readonly JournalDocument[] | undefined ?? [])];
+  });
+
+  function saveImagePreferences(next: ImageHandlingPreferences): void {
+    const current = app?.client;
+    if (!current?.user) return;
+    imagePreferences = saveImageHandlingPreferences(current.store.meta.worldId, current.user.id, next);
+  }
+
+  function showImageNotice(message: string): void {
+    imageNotice = message;
+    if (imageNoticeTimer !== null) clearTimeout(imageNoticeTimer);
+    imageNoticeTimer = setTimeout(() => { imageNotice = ""; imageNoticeTimer = null; }, 4500);
+  }
+
+  function openImageImport(sources: ImageSource[], requested: ImageAction | null = null, origin: "file" | "paste" | "url" = "file"): void {
+    if (!app?.client || imageDialogOpen || sources.length === 0) return;
+    imageDialogSources = sources;
+    imageDialogOrigin = origin;
+    imageDialogAction = requested === "showPlayers" && imageCanShare ? "showPlayers" : "preview";
+    imageDialogOpen = true;
+  }
+
+  function closeImageImport(): void {
+    imageDialogOpen = false;
+    imageDialogSources = [];
+    imageDialogAction = null;
+  }
+
+  function isInternalAppDrag(transfer: DataTransfer | null): boolean {
+    const types = Array.from(transfer?.types ?? []);
+    return types.includes("application/x-vtt-compendium") || types.includes("application/x-vtt-encounter");
+  }
+  function hasImageDragData(transfer: DataTransfer | null): boolean {
+    if (!transfer || isInternalAppDrag(transfer)) return false;
+    const types = Array.from(transfer.types ?? []);
+    return types.includes("Files") || types.includes("text/uri-list") || types.includes("text/html") || types.includes("text/plain");
+  }
+  function onWindowDragEnter(event: DragEvent): void {
+    if (!hasImageDragData(event.dataTransfer)) return;
+    imageDragDepth++;
+    if (imagePreferences.dropEnabled) imageDragActive = true;
+  }
+  function onWindowDragLeave(event: DragEvent): void {
+    if (!hasImageDragData(event.dataTransfer)) return;
+    imageDragDepth = Math.max(0, imageDragDepth - 1);
+    if (!imageDragDepth) imageDragActive = false;
+  }
+  function onWindowDragOver(event: DragEvent): void {
+    if (hasImageDragData(event.dataTransfer)) event.preventDefault();
+  }
+  function onWindowDrop(event: DragEvent): void {
+    if (isInternalAppDrag(event.dataTransfer)) return;
+    const sources = imageSourcesFromTransfer(event.dataTransfer);
+    if (!sources.length) return;
+    event.preventDefault();
+    imageDragActive = false;
+    imageDragDepth = 0;
+    if (!imagePreferences.dropEnabled) { showImageNotice("Image drop is disabled in your image preferences."); return; }
+    openImageImport(sources, null, sources.every((source) => source.kind === "url") ? "url" : "file");
+  }
+  function onWindowPaste(event: ClipboardEvent): void {
+    if (isTypingTarget(event.target) || imageDialogOpen) return;
+    const sources = imageSourcesFromClipboard(event.clipboardData);
+    if (!sources.length) return;
+    event.preventDefault();
+    if (!imagePreferences.pasteEnabled) { showImageNotice("Image paste is disabled in your image preferences."); return; }
+    openImageImport(sources, null, sources.some((source) => source.kind === "file") ? "paste" : "url");
+  }
+
+  $effect(() => {
+    void storeVersion;
+    const client = app?.client;
+    const user = client?.user;
+    if (!client || !user) return;
+    const key = `${client.store.meta.worldId}:${user.id}`;
+    if (key === imagePreferencesKey) return;
+    imagePreferencesKey = key;
+    imagePreferences = loadImageHandlingPreferences(client.store.meta.worldId, user.id);
+  });
 
   // A player's macro hotbar answers 1-5 like the GM's keymap does. The keys are
   // claimed only when the matching slot actually holds a macro, so an unbound key
@@ -934,6 +1050,7 @@
     const tokens = scene?.tokens ?? [];
     const hpBarMode = tokenHpBarsOf(worldSettingsFrom(client.store.getAll("settings")));
     view.setTokenHpBarMode(hpBarMode === "hover" ? "hover" : "all");
+    view.setTokenImageLoader(tileImages.load);
     view.syncTokens(
       tokens,
       undefined,
@@ -958,10 +1075,10 @@
     // Only projected tiles are present; hidden GM tiles and their images never arrive.
     view.getTilesLayer({ loadTexture: tileImages.load }).sync(scene?.tiles ?? [],
       (scene?.tokens ?? []).filter((token) => token.vision).map(tokenRect), scene?.regions ?? []);
-    tileImages.retain((scene?.tiles ?? []).map((tile) => tile.img));
+    tileImages.retain([...(scene?.tiles ?? []).map((tile) => tile.img), ...(scene?.tokens ?? []).map((token) => token.img)]);
     const fetcher = current.fetcher;
     if (fetcher) sceneBackground.sync(scene?.img ?? null, client.store.world.assetManifest,
-      (hash, priority) => fetcher.request(hash, priority), view);
+      (hash, priority) => fetcher.request(hash, priority), view, scene);
     const grid = squareGrid(scene?.grid);
     if (grid) view.setGrid(grid);
   }
@@ -1335,6 +1452,17 @@
         });
         client.bus.on("snapshot", refresh);
         client.bus.on("ops", refresh);
+        client.bus.on("ephemeral", (message) => {
+          if (message.t !== "image" || message.from === client.user?.id) return;
+          const assetId = message.data.assetId;
+          if (typeof assetId !== "string" || !/^[a-f0-9]{64}$/i.test(assetId)) return;
+          const sender = client.store.get("users", message.from);
+          sharedImageAnnouncement = {
+            assetId,
+            name: typeof message.data.name === "string" ? message.data.name.slice(0, 160) : "Shared image",
+            senderName: sender?.name ?? "A table participant",
+          };
+        });
         refresh();
         // D-271: the hex overlay's outlines are screen-constant, so a zoom restrokes them; the
         // plan itself is untouched (the layer's zoom bucket keeps this to one redraw per notch).
@@ -1400,7 +1528,12 @@
       app?.close();
     };
   });
+  onDestroy(() => {
+    if (imageNoticeTimer !== null) clearTimeout(imageNoticeTimer);
+  });
 </script>
+
+<svelte:window ondragenter={onWindowDragEnter} ondragleave={onWindowDragLeave} ondragover={onWindowDragOver} ondrop={onWindowDrop} onpaste={onWindowPaste} />
 
 <main class="vtt-ui" class:player-live={phase === "live" || phase === "dead"}>
   <header class="join-header" class:live-header={phase === "live" || phase === "dead"}>
@@ -1434,6 +1567,7 @@
     {/if}
   </header>
   {#if joinError}<p class="error" role="alert">{joinError}</p>{/if}
+  {#if imageNotice}<p class="image-notice" role="status">{imageNotice}</p>{/if}
   {#if phase === "invite"}
     <section class="join-panel" aria-label="Join a game">
       <div class="panel-heading">
@@ -1682,20 +1816,30 @@
         {/if}
       </div>
       <aside class="sidebar" data-player-dock aria-label="Player content">
-        <div class="dock-heading"><div><span class="dock-eyebrow">AT YOUR TABLE</span><h2>{playerTab === "chat" ? "Chat" : "Characters"}</h2></div></div>
+        <div class="dock-heading"><div><span class="dock-eyebrow">AT YOUR TABLE</span><h2>{playerTab === "chat" ? "Chat" : playerTab === "actors" ? "Characters" : "Images"}</h2></div></div>
         <nav class="player-tabs" aria-label="Player content tabs">
           <button data-player-tab="chat" type="button" class:active={playerTab === "chat"}
             aria-label="Chat" title="Chat" onclick={() => (playerTab = "chat")}><Icon name="chat" size={19}/><span>Chat</span></button>
           <button data-player-tab="actors" type="button" class:active={playerTab === "actors"}
             aria-label="Characters" title="Characters" onclick={() => (playerTab = "actors")}><Icon name="actors" size={19}/><span>Characters</span></button>
+          <button data-player-tab="images" type="button" class:active={playerTab === "images"}
+            aria-label="Images" title="Images" onclick={() => (playerTab = "images")}><Icon name="images" size={19}/><span>Images</span></button>
         </nav>
         <div class="tabbody" data-player-active-tab={playerTab}>
           {#if app?.client}
             {#if playerTab === "chat"}
               <ChatPanel client={app.client} bus={app.bus}
                 targetTokenId={selection.length === 1 ? (selection[0] ?? null) : null} {selectedItemRef} />
-            {:else}
+            {:else if playerTab === "actors"}
               <SheetPanel client={app.client} bus={app.bus} onOpenActor={openActorSheet} />
+            {:else}
+              <ImageHandlingPanel
+                client={app.client}
+                bus={app.bus}
+                preferences={imagePreferences}
+                onPreferencesChange={saveImagePreferences}
+                onRequestImages={(sources, action, origin) => openImageImport(sources, action ?? null, origin ?? "file")}
+              />
             {/if}
           {/if}
         </div>
@@ -1737,8 +1881,43 @@
     {/if}
   {/if}
 </main>
+{#if imageDragActive}
+  <div class="image-drop-hint" aria-live="polite">Drop an image to preview it. The GM controls whether players may upload or share.</div>
+{/if}
+{#if imageDialogOpen && app?.client}
+  <ImageImportDialog
+    sources={imageDialogSources}
+    sourceOrigin={imageDialogOrigin}
+    initialAction={imageDialogAction}
+    client={app.client}
+    scene={activeScene()}
+    scenes={imageScenes}
+    journals={imageJournals}
+    selectedTokenIds={selection}
+    manifest={app.client.store.world.assetManifest}
+    preferences={imagePreferences}
+    sceneDefaults={imageSceneDefaults}
+    restrictedPlayerMode={restrictedPlayerImageMode}
+    canUpload={imageCanUpload}
+    canWriteDocuments={imageCanWriteDocuments}
+    canShare={imageCanShare}
+    onActivateScene={() => undefined}
+    onPreferencesChange={saveImagePreferences}
+    onWarning={showImageNotice}
+    onClose={closeImageImport}
+  />
+{/if}
+{#if sharedImageAnnouncement}
+  <SharedImageNotice
+    announcement={sharedImageAnnouncement}
+    resolveAsset={(assetId) => resolveAsset(assetId)}
+    onDismiss={() => (sharedImageAnnouncement = null)}
+  />
+{/if}
 <style>
-  main {
+  .image-drop-hint { position:fixed; inset:18px; z-index:4999; display:grid; place-items:center; border:3px dashed #78dccc; border-radius:18px; background:#10201edb; color:#e5fff9; font-size:clamp(18px,3vw,30px); font-weight:700; text-align:center; pointer-events:none; }
+  .image-notice { position:fixed; z-index:4500; top:16px; left:50%; transform:translateX(-50%); padding:9px 14px; border:1px solid #8c7542; border-radius:6px; background:#2b261a; color:#f0dfad; box-shadow:0 4px 18px #0007; }
+  main { 
     min-height: 100vh;
     display: flex;
     flex-direction: column;

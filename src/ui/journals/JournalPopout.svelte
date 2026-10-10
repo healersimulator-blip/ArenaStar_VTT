@@ -4,8 +4,17 @@
   import type { JournalDocument } from "../../core/documents";
   import JournalPage from "./JournalPage.svelte";
 
-  let { client, journalId, pageId }: { client: ClientSync; journalId: string; pageId: string } =
-    $props();
+  let {
+    client,
+    journalId,
+    pageId,
+    resolveAsset = null,
+  }: {
+    client: ClientSync;
+    journalId: string;
+    pageId: string;
+    resolveAsset?: ((assetId: string) => string | null) | null;
+  } = $props();
 
   const journal = $derived(
     (client.store.get("journals", journalId) as JournalDocument | undefined) ?? null,
@@ -15,8 +24,16 @@
 </script>
 
 {#if page && journal}
-  <JournalPage {client} journalId={journal._id} pageId={page._id} text={page.text}
-    revealSecrets={isGm} />
+  <JournalPage
+    {client}
+    journalId={journal._id}
+    pageId={page._id}
+    text={page.text}
+    src={page.src}
+    imageAlt={page.name}
+    {resolveAsset}
+    revealSecrets={isGm}
+  />
 {:else}
   <p class="empty">Page not found.</p>
 {/if}

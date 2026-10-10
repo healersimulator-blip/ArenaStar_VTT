@@ -574,20 +574,21 @@ export function newHexcrawlSceneOps(input: NewHexcrawlSceneInput): Op[] {
     }
   }
 
-  if (input.settingsDocs) {
-    // The terrain catalog is world data, installed the first time a world gets a hexcrawl scene.
-    // An existing catalog — a GM's own prices — is never overwritten by a new scene, so the key is
-    // *checked* rather than written and compared: `worldSettingsOps` compares by reference, and a
-    // freshly serialized ladder is never the same object as the one already stored.
-    const docs = [...input.settingsDocs];
-    if (worldSettingsFrom(docs)["hexTerrain"] === undefined) {
-      ops.push(
-        ...worldSettingsOps(docs, { hexTerrain: catalogToJson(PF1E_TERRAIN_CATALOG) }),
-      );
-    }
-  }
+  if (input.settingsDocs) ops.push(...hexTerrainSettingsOps(input.settingsDocs));
 
   return ops;
+}
+
+/**
+ * The world's terrain catalog, installed the first time a world gets a hexcrawl scene. An existing
+ * catalog — a GM's own prices — is never overwritten, so the key is *checked* rather than written
+ * and compared: `worldSettingsOps` compares by reference, and a freshly serialized ladder is never
+ * the same object as the one already stored. Shared by every way a hexcrawl scene is created.
+ */
+export function hexTerrainSettingsOps(settingsDocs: Iterable<unknown>): Op[] {
+  const docs = [...settingsDocs] as Parameters<typeof worldSettingsFrom>[0];
+  if (worldSettingsFrom(docs)["hexTerrain"] !== undefined) return [];
+  return worldSettingsOps(docs, { hexTerrain: catalogToJson(PF1E_TERRAIN_CATALOG) });
 }
 
 export interface NewHexcrawlPartyInput {

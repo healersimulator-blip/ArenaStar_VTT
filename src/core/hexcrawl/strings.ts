@@ -69,7 +69,7 @@ export const hexFeature = {
 export const hexTravel = {
   hint: "Every button spends the world clock; the party camps where the road ends.",
   pathHint:
-    "Click hexes to extend the route; click the last one again to take it back. Esc clears, and the itinerary under the rail commits it.",
+    "Click hexes to extend the route; click the last one again to take it back. Commit the itinerary under the rail, or press Esc to clear the route and leave path mode.",
   routeTooShort: "A route needs at least a second hex — click one, then Commit.",
   committed: (hexes: number, duration: string): string =>
     `Route committed: ${hexes} hexes, ${duration} on the road.`,

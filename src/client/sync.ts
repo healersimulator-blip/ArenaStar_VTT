@@ -11,45 +11,9 @@
 import { DocumentStore, type StoreMeta } from "../core/store";
 import { estimateClockOffset, type ClockSample } from "../core/audio";
 import type { Op, OpEnvelope } from "../core/ops";
-import type {
-  AssetChunkMsg,
-  AssetPriority,
-  AudioCmdMsg,
-  ClockMsg,
-  EphemeralKind,
-  EphemeralMsg,
-  FxStartMsg,
-  FxRunMsg,
-  FxEndMsg,
-  FxDeliveryMsg,
-  FxMediaAckState,
-  AutomationTraceMsg,
-  TaggerRulesResultMsg,
-  PrefabResultMsg,
-  SummonResultMsg,
-  MacroResultMsg,
-  FogStateMsg,
-  HelloMsg,
-  PongMsg,
-  RollChallengeMsg,
-  OpsMsg,
-  RejectedMsg,
-  PF1ePoisonActionRequest,
-  PF1eConditionActionRequest,
-  PF1eConditionActionResultMsg,
-  CodexPurchaseResultMsg,
-  RollMode,
-  SimControlAction,
-  SimDeltaMsg,
-  SimSnapshotMsg,
-  SnapshotMsg,
-  TurnPhaseMsg,
-  TurnReportMsg,
-  WelcomeMsg,
-  WelcomeSimInfo,
-  WireMessage,
-} from "../core/messages";
+import type { AssetChunkMsg, AssetPriority, AssetUploadResultMsg, AssetShareResultMsg, AudioCmdMsg, ClockMsg, EphemeralKind, EphemeralMsg, FxStartMsg, FxRunMsg, FxEndMsg, FxDeliveryMsg, FxMediaAckState, AutomationTraceMsg, TaggerRulesResultMsg, PrefabResultMsg, SummonResultMsg, MacroResultMsg, FogStateMsg, HelloMsg, PongMsg, RollChallengeMsg, OpsMsg, RejectedMsg, PF1ePoisonActionRequest, PF1eConditionActionRequest, PF1eConditionActionResultMsg, CodexPurchaseResultMsg, RollMode, SimControlAction, SimDeltaMsg, SimSnapshotMsg, SnapshotMsg, TurnPhaseMsg, TurnReportMsg, WelcomeMsg, WelcomeSimInfo, WireMessage, AssetLibraryResultMsg, AssetCleanupResultMsg, AssetLibraryMsg, AssetCleanupMsg } from "../core/messages";
 import type { AssetManifest, Json } from "../core/documents";
+import { assertImageByteLength } from "../core/imageSizing";
 import { randomSeedHex, sha256Hex } from "../dice/commitReveal";
 import type { AssetId, TxId, UserId } from "../core/ids";
 import type { Role } from "../core/documents";
@@ -77,6 +41,10 @@ export interface ClientEvents {
   kick: { reason: string };
   /** §7: one chunk of a streamed asset (AssetFetcher consumes these). */
   asset: AssetChunkMsg;
+  /** Host-authorized image upload progress/results. */
+  assetUpload: AssetUploadResultMsg;
+  /** Host-authorized image share-slot result. */
+  assetShare: AssetShareResultMsg;
   /** §5A: strategic pool replica updated (delta applied or snapshot replaced). */
   sim: { version: number; count: number; kind: "delta" | "snapshot" };
   /** §5A phase announcements. */
@@ -145,6 +113,23 @@ function sameSimSchema(
   return true;
 }
 
+export interface ClientImageUploadOptions {
+  name: string;
+  displayName: string;
+  folder: string;
+  sourceKind: "file" | "paste" | "url";
+  collisionBehavior: "stop" | "reuse" | "overwrite";
+  convertToWebp: boolean;
+  webpQuality: number;
+}
+
+type AssetUploadWaiter = {
+  predicate: (result: AssetUploadResultMsg) => boolean;
+  resolve: (result: AssetUploadResultMsg) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
 export interface ClientSyncOptions {
   transport: Transport;
   bus: EventBus<ClientEvents>;
@@ -157,11 +142,17 @@ export interface ClientSyncOptions {
   simSceneId?: DocId;
 }
 
+/** One stored image as the GM library shows it (§6.8). */
+export type AssetLibraryItem = NonNullable<AssetLibraryResultMsg["assets"]>[number];
+
 export class ClientSync {
   /** §11 pending client seeds, keyed by committed rollId. */
   private readonly committedRolls = new Map<string, string>();
   /** D-250: `requestFog` waiters per sceneId. */
   private readonly fogWaiters = new Map<DocId, Array<(png: Uint8Array | null) => void>>();
+  private readonly assetUploadWaiters = new Map<string, Set<AssetUploadWaiter>>();
+  private readonly assetHostWaiters = new Map<string, { resolve: (msg: AssetLibraryResultMsg | AssetCleanupResultMsg) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private readonly assetShareWaiters = new Map<string, { resolve: (msg: AssetShareResultMsg) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   readonly store: DocumentStore;
   private echoImpl: DocumentStore;
   private transport: Transport;
@@ -245,6 +236,52 @@ export class ClientSync {
   /** Submit an intent; optimistic ops are echoed locally (§5). */
   submit(ops: Op[]): TxId {
     const txId = globalThis.crypto.randomUUID();
+    this.sendIntent(txId, ops);
+    return txId;
+  }
+
+  /** Submit and wait until the host commits this transaction or explicitly rejects it. */
+  submitAndWait(ops: Op[], timeoutMs = 30_000): Promise<TxId> {
+    const txId = globalThis.crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let offOps: () => void = () => {};
+      let offRejected: () => void = () => {};
+      const finish = (settle: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        offOps();
+        offRejected();
+        settle();
+      };
+      offOps = this.bus.on("ops", ({ envelope }) => {
+        if (envelope.txId === txId) finish(() => resolve(txId));
+      });
+      offRejected = this.bus.on("rejected", ({ txId: rejectedId, reason, detail }) => {
+        if (rejectedId === txId) finish(() => reject(new Error(`${reason}: ${detail}`)));
+      });
+      const timer = setTimeout(() => {
+        // Drop the optimistic echo for an intent the host never answered. A late commit still
+        // lands through applyCommitted; a late rejection only emits, so nothing is left stuck.
+        if (settled) return;
+        this.pending.delete(txId);
+        this.inFlight.delete(txId);
+        this.rebuildEcho();
+        finish(() => reject(new Error("The host did not acknowledge this image action in time.")));
+      }, timeoutMs);
+      try {
+        this.sendIntent(txId, ops);
+      } catch (error) {
+        this.pending.delete(txId);
+        this.inFlight.delete(txId);
+        this.rebuildEcho();
+        finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+      }
+    });
+  }
+
+  private sendIntent(txId: TxId, ops: Op[]): void {
     this.inFlight.add(txId);
     const optimistic = ops.filter((op) => this.policy(op));
     if (optimistic.length > 0) {
@@ -252,7 +289,6 @@ export class ClientSync {
       this.rebuildEcho();
     }
     this.send({ kind: "intent", txId, ops });
-    return txId;
   }
 
   // ─── §7 audio + clock sync ──────────────────────────────────────────────────
@@ -571,6 +607,157 @@ export class ClientSync {
     this.send({ kind: "asset.get", assetId, offset, priority });
   }
 
+  /**
+   * Upload through the host's role/quota/format gate. Reliable 24 KiB chunks are acknowledged in
+   * 1 MiB windows to respect WebRTC DataChannel backpressure and keep the in-memory request bounded.
+   */
+  async uploadImageAsset(bytes: Uint8Array, options: ClientImageUploadOptions): Promise<NonNullable<AssetUploadResultMsg["asset"]>> {
+    if (!this.user || !["GM", "ASSISTANT", "TRUSTED"].includes(this.user.role))
+      throw new Error("Only a GM-granted Trusted player may persist an image");
+    assertImageByteLength(bytes.byteLength);
+    const uploadId = globalThis.crypto.randomUUID();
+    let started = false;
+    try {
+      const readyWait = this.waitForAssetUpload(uploadId, (msg) => msg.status === "ready" || msg.status === "error", 30_000);
+      this.send({
+        kind: "asset.upload.start", uploadId, name: options.name, displayName: options.displayName, size: bytes.byteLength,
+        folder: options.folder, sourceKind: options.sourceKind,
+        collisionBehavior: options.collisionBehavior,
+        convertToWebp: options.convertToWebp, webpQuality: options.webpQuality,
+      });
+      const ready = await readyWait;
+      if (ready.status === "error") throw new Error(ready.error ?? "The host rejected this image upload");
+      started = true;
+      const chunkSize = 24 * 1024;
+      const ackWindow = 1024 * 1024;
+      let offset = 0;
+      while (offset < bytes.byteLength) {
+        const checkpoint = Math.min(bytes.byteLength, Math.ceil((offset + 1) / ackWindow) * ackWindow);
+        const ack = checkpoint < bytes.byteLength
+          ? this.waitForAssetUpload(uploadId, (msg) => msg.status === "error" || (msg.status === "progress" && msg.received >= checkpoint), 120_000)
+          : null;
+        while (offset < checkpoint) {
+          const end = Math.min(checkpoint, offset + chunkSize);
+          this.send({ kind: "asset.upload.chunk", uploadId, offset, bytes: bytes.slice(offset, end) });
+          offset = end;
+        }
+        if (ack) {
+          const result = await ack;
+          if (result.status === "error") throw new Error(result.error ?? "The host stopped this image upload");
+        }
+      }
+      const completeWait = this.waitForAssetUpload(uploadId, (msg) => msg.status === "complete" || msg.status === "error", 180_000);
+      this.send({ kind: "asset.upload.finish", uploadId });
+      const completed = await completeWait;
+      if (completed.status === "error" || !completed.asset)
+        throw new Error(completed.error ?? "The host could not finish this image upload");
+      return completed.asset;
+    } catch (error) {
+      if (started) {
+        try { this.send({ kind: "asset.upload.cancel", uploadId }); } catch { /* connection may already be closed */ }
+      }
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  /** Publish this user's current share slot; the host commits the durable mapping before broadcasting. */
+  shareImageToPlayers(assetId: string): Promise<void> {
+    if (!/^[a-f0-9]{64}$/i.test(assetId)) return Promise.reject(new Error("Invalid image asset reference"));
+    const requestId = globalThis.crypto.randomUUID();
+    return new Promise<void>((resolve, reject) => {
+      const timer = globalThis.setTimeout(() => {
+        this.assetShareWaiters.delete(requestId);
+        reject(new Error("The host did not acknowledge the image share"));
+      }, 30_000);
+      this.assetShareWaiters.set(requestId, { resolve: (msg) => {
+        globalThis.clearTimeout(timer);
+        if (msg.ok) resolve(); else reject(new Error(msg.error ?? "The host refused this image share"));
+      }, reject, timer });
+      try { this.send({ kind: "asset.share", requestId, assetId: assetId as AssetId }); }
+      catch (error) {
+        globalThis.clearTimeout(timer);
+        this.assetShareWaiters.delete(requestId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  /** §6.8 GM-only: every stored image with whether undo or a live document still uses it. */
+  async requestAssetLibrary(): Promise<AssetLibraryItem[]> {
+    const msg = await this.requestAssetHost((requestId) => ({ kind: "asset.library", requestId }), 30_000);
+    if (msg.kind !== "asset.library.result" || !msg.ok) throw new Error(msg.error ?? "The host could not list stored images");
+    return msg.assets ?? [];
+  }
+
+  /** §6.8 GM-only: delete the unused images among `hashes`. Anything the host finds in use is skipped. */
+  async requestAssetCleanup(hashes: AssetId[]): Promise<{ removed: AssetId[]; skipped: AssetId[]; bytes: number }> {
+    const msg = await this.requestAssetHost((requestId) => ({ kind: "asset.cleanup", requestId, hashes }), 120_000);
+    if (msg.kind !== "asset.cleanup.result" || !msg.ok) throw new Error(msg.error ?? "The host could not clean up stored images");
+    return { removed: msg.removed ?? [], skipped: msg.skipped ?? [], bytes: msg.bytes ?? 0 };
+  }
+
+  private requestAssetHost(
+    build: (requestId: string) => AssetLibraryMsg | AssetCleanupMsg,
+    timeoutMs: number,
+  ): Promise<AssetLibraryResultMsg | AssetCleanupResultMsg> {
+    const requestId = globalThis.crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = globalThis.setTimeout(() => {
+        this.assetHostWaiters.delete(requestId);
+        reject(new Error("The host did not answer the image request"));
+      }, timeoutMs);
+      this.assetHostWaiters.set(requestId, { resolve, reject, timer });
+      try { this.send(build(requestId)); }
+      catch (error) {
+        globalThis.clearTimeout(timer);
+        this.assetHostWaiters.delete(requestId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  private resolveAssetHost(msg: AssetLibraryResultMsg | AssetCleanupResultMsg): void {
+    const waiter = this.assetHostWaiters.get(msg.requestId);
+    if (!waiter) return;
+    this.assetHostWaiters.delete(msg.requestId);
+    globalThis.clearTimeout(waiter.timer);
+    waiter.resolve(msg);
+  }
+
+  private waitForAssetUpload(
+    uploadId: string,
+    predicate: (msg: AssetUploadResultMsg) => boolean,
+    timeoutMs: number,
+  ): Promise<AssetUploadResultMsg> {
+    return new Promise((resolve, reject) => {
+      const waiter: AssetUploadWaiter = {
+        predicate, resolve, reject,
+        timer: globalThis.setTimeout(() => {
+          const waiters = this.assetUploadWaiters.get(uploadId);
+          waiters?.delete(waiter);
+          if (waiters?.size === 0) this.assetUploadWaiters.delete(uploadId);
+          reject(new Error("Timed out waiting for the host image-upload service"));
+        }, timeoutMs),
+      };
+      const waiters = this.assetUploadWaiters.get(uploadId) ?? new Set<AssetUploadWaiter>();
+      waiters.add(waiter);
+      this.assetUploadWaiters.set(uploadId, waiters);
+    });
+  }
+
+  private receiveAssetUpload(result: AssetUploadResultMsg): void {
+    this.bus.emit("assetUpload", result);
+    const waiters = this.assetUploadWaiters.get(result.uploadId);
+    if (!waiters) return;
+    for (const waiter of [...waiters]) {
+      if (!waiter.predicate(result)) continue;
+      globalThis.clearTimeout(waiter.timer);
+      waiters.delete(waiter);
+      waiter.resolve(result);
+    }
+    if (waiters.size === 0) this.assetUploadWaiters.delete(result.uploadId);
+  }
+
   sendEphemeral(t: EphemeralKind, data: Record<string, Json>): void {
     if (!this.ephemeralBucket.tryRemove()) return; // client-side pre-limit (§5)
     const msg: EphemeralMsg = { kind: "ephemeral", from: this.user?.id ?? "anonymous", t, data };
@@ -582,6 +769,16 @@ export class ClientSync {
     // nothing more can arrive: release fog restores as "nothing stored"
     for (const waiters of this.fogWaiters.values()) for (const w of waiters) w(null);
     this.fogWaiters.clear();
+    for (const waiters of this.assetUploadWaiters.values()) for (const waiter of waiters) {
+      globalThis.clearTimeout(waiter.timer);
+      waiter.reject(new Error("The connection closed during image upload"));
+    }
+    this.assetUploadWaiters.clear();
+    for (const waiter of this.assetShareWaiters.values()) {
+      globalThis.clearTimeout(waiter.timer);
+      waiter.reject(new Error("The connection closed during image share"));
+    }
+    this.assetShareWaiters.clear();
   }
 
   private send(msg: WireMessage): void {
@@ -688,6 +885,11 @@ export class ClientSync {
       case "fx.stop":
       case "fx.stopMatching":
       case "asset.get":
+      case "asset.upload.start":
+      case "asset.upload.chunk":
+      case "asset.upload.finish":
+      case "asset.upload.cancel":
+      case "asset.share":
       case "fog.put":
       case "fog.get":
       case "relay.offer":
@@ -706,6 +908,23 @@ export class ClientSync {
       case "asset.chunk":
         this.bus.emit("asset", msg);
         return;
+      case "asset.upload.result":
+        this.receiveAssetUpload(msg);
+        return;
+      case "asset.library.result":
+      case "asset.cleanup.result":
+        this.resolveAssetHost(msg);
+        return;
+      case "asset.share.result": {
+        this.bus.emit("assetShare", msg);
+        const waiter = this.assetShareWaiters.get(msg.requestId);
+        if (waiter) {
+          this.assetShareWaiters.delete(msg.requestId);
+          globalThis.clearTimeout(waiter.timer);
+          waiter.resolve(msg);
+        }
+        return;
+      }
       case "sim.delta":
         this.applySimDelta(msg);
         return;

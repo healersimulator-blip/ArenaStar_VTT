@@ -1087,9 +1087,9 @@ function updateVisible(
 }
 
 /**
- * The player-shaped subset of a cell diff: the GM's `description` never travels, and the
- * `features` array travels only with the entries this viewer may see. Returns null when nothing
- * is left to say.
+ * The player-shaped subset of a cell diff: the GM's `description` and the Campaign Codex links
+ * (`codexEntries`) never travel, and the `features` array travels only with the entries this
+ * viewer may see. Returns null when nothing is left to say.
  */
 function projectCellDiff(
   diff: Record<string, Json | null>,
@@ -1099,7 +1099,7 @@ function projectCellDiff(
   let changed = false;
   for (const [key, value] of Object.entries(diff)) {
     const path = key.startsWith("-=") ? key.slice(2) : key;
-    if (path === "description") {
+    if (path === "description" || path === "codexEntries") {
       changed = true;
       continue;
     }

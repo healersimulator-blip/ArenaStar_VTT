@@ -49,6 +49,8 @@ function references(collections: Partial<WorldCollections>, manifest: AssetManif
   }
   for (const scene of collections.scenes ?? []) {
     add(scene.img);
+    add(scene.thumbnail);
+    add(scene.foreground?.img);
     for (const token of scene.tokens ?? []) { add(token.img); custom(token); }
     for (const tile of scene.tiles ?? []) { add(tile.img); custom(tile); }
     for (const sound of scene.sounds ?? []) { add(sound.audio); custom(sound); }
@@ -149,7 +151,13 @@ export function projectAssetManifest(
     // Unclassified legacy assets with no known media reference retain their old
     // world policy. A known hidden-only reference is protected on old worlds.
     const policy = entry.visibility ?? (full.has(hash) ? "referenced" : "world");
-    if (policy !== "gm" && (policy === "world" || visible.has(hash))) allowed[hash] = entry;
+    if (policy !== "gm" && (policy === "world" || visible.has(hash))) {
+      // Import provenance and logical folder aliases are GM metadata, not player-facing asset data.
+      const projected = { ...entry };
+      delete projected.source;
+      delete projected.logicalFiles;
+      allowed[hash] = projected;
+    }
   }
   return allowed;
 }

@@ -130,8 +130,8 @@ export function sightReconcileOps(
  * has to exist on the player's replica for the map to render correctly.
  *
  * An **open** cell keeps its `playerText` and its `tables`, still loses the GM's `description`
- * (which is never a player's to read), and keeps only the features whose own `state.revealed`
- * is true.
+ * (which is never a player's to read), loses its Campaign Codex links (`codexEntries`, GM-side
+ * context), and keeps only the features whose own `state.revealed` is true.
  */
 export function projectCellForViewer(
   cell: CellDocument,
@@ -141,11 +141,14 @@ export function projectCellForViewer(
   const all = cell.features ?? [];
   const features = all.filter((f) => f.state?.revealed === true);
   const featuresHidden = features.length !== all.length;
+  const hasCodex = cell.codexEntries !== undefined;
   // Nothing to strip: hand back the very same document, so a scene that is already
   // player-shaped keeps its identity and a replica is not rebuilt for no reason.
-  if (cell.description === undefined && !featuresHidden) return cell;
+  if (cell.description === undefined && !featuresHidden && !hasCodex)
+    return cell;
   const out: CellDocument = { ...cell };
   delete out.description;
+  delete out.codexEntries;
   if (featuresHidden) out.features = features;
   return out;
 }

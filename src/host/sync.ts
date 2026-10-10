@@ -44,6 +44,12 @@ import type {
 } from "../core/documents";
 import type { Op, OpEnvelope } from "../core/ops";
 import type {
+  AssetShareMsg,
+  AssetLibraryMsg,
+  AssetCleanupMsg,
+  AssetUploadChunkMsg,
+  AssetUploadFinishMsg,
+  AssetUploadStartMsg,
   AudioCmdMsg,
   EphemeralMsg,
   AutomationRequestMsg,
@@ -163,7 +169,7 @@ import {
   planRollApply,
   readRollApplications,
 } from "../packages/pf1e/rollApply";
-import type { DocId, PeerId, TxId, UserId } from "../core/ids";
+import type { DocId, PeerId, TxId, UserId, AssetId } from "../core/ids";
 import { DocumentStore } from "../core/store";
 import { actionOpRef, actionStaleReason, extendActionReceipt, missingActionMessageDeletes,
   type ActionAudit } from "../core/actionRevert";
@@ -186,6 +192,9 @@ import {
   planCodexPurchase,
 } from "../core/campaignCodexEconomy";
 import { canFetchAsset, projectAssetManifest } from "../core/assetAccess";
+import { assetLibrary, assetUsageRoots, unusedAssetIds } from "../core/assetUsage";
+import { MAX_IMAGE_BYTES, normalizeLogicalFolder, sniffMedia } from "../core/imageSizing";
+import { playerUploadQuotaMBOf } from "../core/imageHandling";
 import { FX_FINISH_OFFSET_MAX_MS, fxAudienceAllows, fxResolveSyncOrigins, fxSectionsForViewer,
   resolveFxSequence, validateFxSequence, type FxAudience } from "../core/fx";
 import type { FxSyncGroupMember, ResolvedFxSection } from "../core/fx";
@@ -242,6 +251,7 @@ import { axisBlocks, soundSegments } from "../canvas/vision/wallSight";
 import { segmentsCross } from "../canvas/vision/polygon";
 import { MAX_FOG_PNG_BYTES } from "../core/fogExploration";
 import type { AssetServer } from "./assets";
+import type { ImportPipeline } from "./import";
 import { AssetTransfer } from "../net/transfer";
 import type { EventBus, PermissionUser } from "../core";
 import type { Transport } from "../core/net";
@@ -303,6 +313,8 @@ export interface HostSyncOptions {
    * AssetTransfer (priority queue + per-peer bandwidth cap).
    */
   assets?: AssetServer;
+  /** Host-side image validation/derivation/storage used only after the upload gate succeeds. */
+  pipeline?: Pick<ImportPipeline, "importImage">;
   /** Transfer overrides (tests): chunk size, bandwidth cap, clock. */
   assetTransfer?: {
     chunkSize?: number;
@@ -388,6 +400,24 @@ interface FxMediaReceipt {
   warnKey: string;
 }
 
+interface ImageUploadState {
+  uploadId: string;
+  userId: UserId;
+  name: string;
+  displayName: string;
+  size: number;
+  folder: string;
+  sourceKind: "file" | "paste" | "url";
+  collisionBehavior: "stop" | "reuse" | "overwrite";
+  convertToWebp: boolean;
+  webpQuality: number;
+  chunks: Uint8Array[];
+  received: number;
+  lastAck: number;
+  expiresAt: number;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 interface Session {
   peerId: PeerId;
   transport: Transport;
@@ -398,6 +428,7 @@ interface Session {
   assetBucket: TokenBucket;
   /** Last projected metadata sent to this peer (not asset bytes). */
   manifestFingerprint: string | null;
+  imageUpload: ImageUploadState | null;
 }
 
 /**
@@ -773,7 +804,9 @@ export class HostSync {
     roomId: string,
   ) => Promise<boolean>;
   private readonly manifestSource: NonNullable<HostSyncOptions["manifest"]>;
+  private readonly assets: AssetServer | null;
   private readonly transfer: AssetTransfer | null;
+  private readonly pipeline: HostSyncOptions["pipeline"];
   private readonly rng: RngFn;
   private readonly now: () => number;
   private readonly scriptRunner: ScriptRunner;
@@ -889,7 +922,8 @@ export class HostSync {
     this.verifySig = options.verifyHelloSig ?? verifyHello;
     this.manifestSource =
       options.manifest ?? (() => this.store.world.assetManifest);
-    this.transfer = options.assets
+    this.assets = options.assets ?? null;
+    this.transfer = this.assets
       ? new AssetTransfer(
           async (hash, offset, length, peerId) => {
             const user = peerId ? this.sessions.get(peerId)?.user : null;
@@ -909,6 +943,7 @@ export class HostSync {
           options.assetTransfer ?? {},
         )
       : null;
+    this.pipeline = options.pipeline;
     this.fogStore = options.fogStore ?? null;
     this.rng = options.rng ?? cryptoRng;
     this.now = options.now ?? (() => Date.now());
@@ -931,6 +966,7 @@ export class HostSync {
       ephemeralBucket: createEphemeralRateLimiter(this.now),
       assetBucket: createAssetRateLimiter(this.now),
       manifestFingerprint: null,
+      imageUpload: null,
     };
     this.sessions.set(peerId, session);
     transport.onMessage = (_channel, bytes) => this.onFrame(session, bytes);
@@ -940,6 +976,7 @@ export class HostSync {
   removeSession(peerId: PeerId, reason = "closed"): void {
     const session = this.sessions.get(peerId);
     if (!session) return;
+    this.cancelImageUpload(session);
     this.sessions.delete(peerId);
     for (const viewers of this.fxViewers.values()) viewers.peers.delete(peerId);
     try {
@@ -1112,6 +1149,8 @@ export class HostSync {
       case "ops":
       case "rejected":
       case "asset.chunk":
+      case "asset.upload.result":
+      case "asset.share.result":
       case "fx.start":
       case "fx.run":
       case "fx.end":
@@ -1143,6 +1182,27 @@ export class HostSync {
         return; // wired in their units (sim/turn/clock), or host-only
       case "asset.get":
         this.handleAssetGet(session, msg);
+        return;
+      case "asset.upload.start":
+        this.handleAssetUploadStart(session, msg);
+        return;
+      case "asset.upload.chunk":
+        this.handleAssetUploadChunk(session, msg);
+        return;
+      case "asset.upload.finish":
+        void this.handleAssetUploadFinish(session, msg);
+        return;
+      case "asset.upload.cancel":
+        if (session.imageUpload?.uploadId === msg.uploadId) this.cancelImageUpload(session);
+        return;
+      case "asset.share":
+        void this.handleAssetShare(session, msg);
+        return;
+      case "asset.library":
+        void this.handleAssetLibrary(session, msg);
+        return;
+      case "asset.cleanup":
+        void this.handleAssetCleanup(session, msg);
         return;
       case "fog.put":
         this.handleFogPut(session, msg);
@@ -8182,6 +8242,360 @@ export class HostSync {
 
   // ─── Assets (§7) ─────────────────────────────────────────────────────────────
 
+  private currentUploadUser(session: Session): SessionUser | null {
+    const sessionUser = session.user;
+    if (!sessionUser) return null;
+    const stored = this.store.get("users", sessionUser.id) as UserDocument | undefined;
+    // Loopback/legacy tests may provide a session without a stored users row. When a row exists,
+    // its current role is authoritative so a just-revoked TRUSTED grant fails closed.
+    return stored
+      ? { id: stored._id, role: stored.role, name: stored.name }
+      : sessionUser;
+  }
+
+  private imageUploadAllowed(user: SessionUser): boolean {
+    if (user.role === "GM" || user.role === "ASSISTANT") return true;
+    if (user.role !== "TRUSTED") return false;
+    return worldSettingsFrom(this.store.getAll("settings")).restrictedPlayerImageMode !== true;
+  }
+
+  private uploadQuotaError(user: SessionUser, size: number, excludeUploadId?: string): string | null {
+    if (user.role === "GM" || user.role === "ASSISTANT") return null;
+    const quota = playerUploadQuotaMBOf(worldSettingsFrom(this.store.getAll("settings")));
+    if (quota === null) return null;
+    const used = Object.values(this.manifestSource()).reduce((sum, entry) => {
+      const source = entry.source;
+      const recorded = source?.uploadedBytesByUser?.[user.id];
+      const legacy = source?.importedBy === user.id ? source.uploadedBytes ?? entry.size : 0;
+      return sum + (recorded ?? legacy);
+    }, 0);
+    // Reserve the declared size of active uploads so concurrent sessions cannot race past a quota.
+    const reserved = [...this.sessions.values()].reduce((sum, peer) => {
+      const pending = peer.imageUpload;
+      return pending && pending.userId === user.id && pending.uploadId !== excludeUploadId
+        ? sum + pending.size : sum;
+    }, 0);
+    return used + reserved + size > quota * 1024 * 1024
+      ? `Image upload quota reached (${((used + reserved) / (1024 * 1024)).toFixed(1)} MB used or reserved of ${quota} MB)`
+      : null;
+  }
+
+  private sendImageUploadResult(session: Session, result: import("../core/messages").AssetUploadResultMsg): void {
+    this.send(session, result);
+  }
+
+  private failImageUpload(session: Session, uploadId: string, error: string): void {
+    const received = session.imageUpload?.uploadId === uploadId ? session.imageUpload.received : 0;
+    if (session.imageUpload?.uploadId === uploadId) this.cancelImageUpload(session);
+    this.sendImageUploadResult(session, { kind: "asset.upload.result", uploadId, status: "error", received, error });
+  }
+
+  private cancelImageUpload(session: Session): void {
+    const upload = session.imageUpload;
+    if (!upload) return;
+    globalThis.clearTimeout(upload.timer);
+    upload.chunks.length = 0;
+    session.imageUpload = null;
+  }
+
+  private handleAssetUploadStart(session: Session, msg: AssetUploadStartMsg): void {
+    if (!session.user) return;
+    if (!this.assets || !this.pipeline) {
+      this.failImageUpload(session, msg.uploadId, "The host image-import service is unavailable");
+      return;
+    }
+    const user = this.currentUploadUser(session);
+    if (!user || !this.imageUploadAllowed(user)) {
+      this.failImageUpload(session, msg.uploadId, "Image persistence requires GM permission or the TRUSTED upload grant");
+      return;
+    }
+    if (session.imageUpload) {
+      this.failImageUpload(session, msg.uploadId, "Finish or cancel the current image upload first");
+      return;
+    }
+    if ([...this.sessions.values()].filter((peer) => peer.imageUpload !== null).length >= 4) {
+      this.failImageUpload(session, msg.uploadId, "The host is already processing the maximum number of image uploads");
+      return;
+    }
+    if (typeof msg.uploadId !== "string" || msg.uploadId.length < 8 || msg.uploadId.length > 128 ||
+        typeof msg.name !== "string" || msg.name.trim() === "" || msg.name.length > 1024 ||
+        typeof msg.displayName !== "string" || msg.displayName.trim() === "" || msg.displayName.length > 160 ||
+        !Number.isSafeInteger(msg.size) || msg.size < 1 || msg.size > MAX_IMAGE_BYTES ||
+        typeof msg.folder !== "string" || msg.folder.length > 512 ||
+        (msg.sourceKind !== "file" && msg.sourceKind !== "paste" && msg.sourceKind !== "url") ||
+        (msg.collisionBehavior !== "stop" && msg.collisionBehavior !== "reuse" && msg.collisionBehavior !== "overwrite") ||
+        (user.role === "TRUSTED" && msg.collisionBehavior !== "stop") ||
+        typeof msg.convertToWebp !== "boolean" || !Number.isFinite(msg.webpQuality) ||
+        msg.webpQuality < 0.1 || msg.webpQuality > 1) {
+      this.failImageUpload(session, msg.uploadId, "The image-upload request has invalid metadata or exceeds the 64 MB limit");
+      return;
+    }
+    const quotaError = this.uploadQuotaError(user, msg.size);
+    if (quotaError) { this.failImageUpload(session, msg.uploadId, quotaError); return; }
+    const uploadId = msg.uploadId;
+    const timer = globalThis.setTimeout(() => {
+      if (session.imageUpload?.uploadId === uploadId)
+        this.failImageUpload(session, uploadId, "Image upload expired before it completed");
+    }, 10 * 60_000);
+    session.imageUpload = {
+      uploadId, userId: user.id, name: msg.name, displayName: msg.displayName, size: msg.size,
+      folder: normalizeLogicalFolder(msg.folder), sourceKind: msg.sourceKind,
+      collisionBehavior: msg.collisionBehavior,
+      convertToWebp: msg.convertToWebp, webpQuality: msg.webpQuality,
+      chunks: [], received: 0, lastAck: 0, expiresAt: this.now() + 10 * 60_000, timer,
+    };
+    this.sendImageUploadResult(session, { kind: "asset.upload.result", uploadId, status: "ready", received: 0 });
+  }
+
+  private handleAssetUploadChunk(session: Session, msg: AssetUploadChunkMsg): void {
+    const upload = session.imageUpload;
+    if (!session.user || !upload || upload.uploadId !== msg.uploadId) return;
+    if (this.now() > upload.expiresAt) {
+      this.failImageUpload(session, msg.uploadId, "Image upload expired before it completed");
+      return;
+    }
+    const user = this.currentUploadUser(session);
+    if (!user || user.id !== upload.userId || !this.imageUploadAllowed(user)) {
+      this.failImageUpload(session, msg.uploadId, "The uploader's TRUSTED permission was revoked");
+      return;
+    }
+    if (!(msg.bytes instanceof Uint8Array) || msg.bytes.byteLength < 1 || msg.bytes.byteLength > 32 * 1024 ||
+        msg.offset !== upload.received || upload.received + msg.bytes.byteLength > upload.size) {
+      this.failImageUpload(session, msg.uploadId, "Image upload chunk order or size is invalid");
+      return;
+    }
+    upload.chunks.push(new Uint8Array(msg.bytes));
+    upload.received += msg.bytes.byteLength;
+    if (upload.received - upload.lastAck >= 1024 * 1024) {
+      upload.lastAck = upload.received;
+      this.sendImageUploadResult(session, { kind: "asset.upload.result", uploadId: upload.uploadId,
+        status: "progress", received: upload.received });
+    }
+  }
+
+  private async handleAssetUploadFinish(session: Session, msg: AssetUploadFinishMsg): Promise<void> {
+    const upload = session.imageUpload;
+    if (!session.user || !upload || upload.uploadId !== msg.uploadId) return;
+    if (this.now() > upload.expiresAt) {
+      this.failImageUpload(session, msg.uploadId, "Image upload expired before it completed");
+      return;
+    }
+    if (upload.received !== upload.size) {
+      this.failImageUpload(session, msg.uploadId, "The image upload was incomplete; no bytes were imported");
+      return;
+    }
+    const user = this.currentUploadUser(session);
+    if (!user || user.id !== upload.userId || !this.imageUploadAllowed(user)) {
+      this.failImageUpload(session, msg.uploadId, "The uploader's TRUSTED permission was revoked");
+      return;
+    }
+    const quotaError = this.uploadQuotaError(user, upload.size, upload.uploadId);
+    if (quotaError) { this.failImageUpload(session, msg.uploadId, quotaError); return; }
+    const bytes = new Uint8Array(upload.size);
+    let offset = 0;
+    for (const chunk of upload.chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const uploadId = upload.uploadId;
+    const isPrivileged = user.role === "GM" || user.role === "ASSISTANT";
+    let uploadAuditId: string | null = null;
+    let uploadAuditHash: string | null = null;
+    let uploadPreparedHash: string | null = null;
+    let uploadWasReused = false;
+    try {
+      // Validate the real container/header at the host before any bitmap decode or asset write.
+      const sniffed = sniffMedia(bytes);
+      const imported = await this.pipeline?.importImage(bytes, upload.name, sniffed.mime, {
+        visibility: isPrivileged ? "referenced" : "gm",
+        source: { kind: upload.sourceKind, originalName: upload.name, originalMime: sniffed.mime,
+          importedBy: user.id, uploadedBytes: upload.size },
+        logicalFile: { folder: upload.folder, name: upload.displayName },
+        logicalFileBehavior: upload.collisionBehavior,
+        convertToWebp: upload.convertToWebp, webpQuality: upload.webpQuality,
+        beforeStore: ({ assetHash, preparedHash, reused }) => {
+          const current = this.currentUploadUser(session);
+          if (!current || current.id !== upload.userId || !this.imageUploadAllowed(current))
+            throw new Error("The uploader's TRUSTED permission was revoked before the image was stored");
+          const currentQuota = this.uploadQuotaError(current, upload.size, upload.uploadId);
+          if (currentQuota) throw new Error(currentQuota);
+          const gmIds = [...new Set([this.systemUserId, ...(this.store.getAll("users") as UserDocument[])
+            .filter((entry) => entry.role === "GM" || entry.role === "ASSISTANT")
+            .map((entry) => entry._id)])];
+          const auditMessage: MessageDocument = {
+            _id: randomId(), type: "message", name: "Image upload audit",
+            ownership: { default: 0 }, flags: {},
+            system: { auditKind: "image-upload", auditStatus: "pending", assetId: assetHash,
+              preparedHash, uploadId, uploadedBytes: upload.size, sourceKind: upload.sourceKind },
+            author: user.id,
+            content: `${user.name} started uploading image “${upload.displayName}” (${assetHash.slice(0, 12)}).`,
+            whisper: gmIds, roll: null, flavor: "Image upload audit",
+          };
+          const auditCommit = this.commitOps([{ kind: "create", coll: "messages", data: auditMessage }],
+            user.id, `image-upload-start-${uploadId}`, false);
+          if (!auditCommit.ok)
+            throw new Error(`Image upload audit could not be committed; no bytes were stored: ${auditCommit.error}`);
+          uploadAuditId = auditMessage._id;
+          uploadAuditHash = assetHash;
+          uploadPreparedHash = preparedHash;
+          uploadWasReused = reused;
+        },
+      });
+      if (!imported) throw new Error("The host image-import service is unavailable");
+      let auditWarning: string | undefined;
+      if (uploadAuditId) {
+        const auditStatus = uploadWasReused ? "reused" : "stored";
+        const auditMessage: MessageDocument = {
+          ...((this.store.get("messages", uploadAuditId) as MessageDocument | undefined) ?? {
+            _id: uploadAuditId, type: "message", name: "Image upload audit",
+            ownership: { default: 0 }, flags: {}, system: {}, author: user.id,
+            content: "Image upload", whisper: [], roll: null, flavor: "Image upload audit",
+          }),
+          system: { auditKind: "image-upload", auditStatus, assetId: imported.hash,
+            ...(uploadPreparedHash ? { preparedHash: uploadPreparedHash } : {}), uploadId,
+            uploadedBytes: upload.size, sourceKind: upload.sourceKind },
+          content: `${user.name} ${uploadWasReused ? "reused" : "uploaded"} image “${upload.displayName}” (${imported.hash.slice(0, 12)}).`,
+        };
+        const audited = this.commitOps([{ kind: "update", ref: { coll: "messages", id: uploadAuditId },
+          diff: { system: auditMessage.system as unknown as Json, content: auditMessage.content } }],
+        user.id, `image-upload-complete-${uploadId}`, false);
+        if (!audited.ok) auditWarning = `Image stored, but the audit entry remains pending: ${audited.error}`;
+      }
+      this.cancelImageUpload(session);
+      this.sendImageUploadResult(session, { kind: "asset.upload.result", uploadId, status: "complete",
+        received: upload.size, asset: { hash: imported.hash, name: imported.entry.name, mime: imported.entry.mime,
+          size: imported.entry.size, ...(imported.entry.width !== undefined ? { width: imported.entry.width } : {}),
+          ...(imported.entry.height !== undefined ? { height: imported.entry.height } : {}),
+          ...(imported.entry.thumb ? { thumbnail: imported.entry.thumb.assetId } : {}),
+          ...(auditWarning ? { auditWarning } : {}) } });
+    } catch (error) {
+      if (uploadAuditId) {
+        const detail = error instanceof Error ? error.message : String(error);
+        const failedAudit: Op[] = [{ kind: "update", ref: { coll: "messages", id: uploadAuditId },
+          diff: { system: { auditKind: "image-upload", auditStatus: "failed",
+            ...(uploadAuditHash ? { assetId: uploadAuditHash } : {}),
+            ...(uploadPreparedHash ? { preparedHash: uploadPreparedHash } : {}),
+            uploadId, uploadedBytes: upload.size, sourceKind: upload.sourceKind,
+            error: detail.slice(0, 1000) }, content: `${user.name}'s image upload failed: ${detail.slice(0, 1000)}` } }];
+        try { this.commitOps(failedAudit, user.id, `image-upload-failed-${uploadId}`, false); }
+        catch { /* the pre-import pending audit entry remains as a durable failure signal */ }
+      }
+      this.failImageUpload(session, uploadId, error instanceof Error ? error.message : String(error));
+    } finally {
+      bytes.fill(0);
+    }
+  }
+
+  private async handleAssetShare(session: Session, msg: AssetShareMsg): Promise<void> {
+    const user = this.currentUploadUser(session);
+    if (!session.user || !user || !this.assets || !/^[a-f0-9]{64}$/i.test(msg.assetId)) {
+      this.send(session, { kind: "asset.share.result", requestId: msg.requestId, ok: false, error: "Image sharing is unavailable" });
+      return;
+    }
+    if (!this.imageUploadAllowed(user)) {
+      this.send(session, { kind: "asset.share.result", requestId: msg.requestId, ok: false, error: "Image sharing requires GM permission or the TRUSTED upload grant" });
+      return;
+    }
+    const entry = await this.assets.meta(msg.assetId);
+    const uploadedByUser = entry?.source?.uploadedBytesByUser?.[user.id];
+    if (!entry || (user.role === "TRUSTED" && entry.source?.importedBy !== user.id &&
+        !(typeof uploadedByUser === "number" && uploadedByUser > 0))) {
+      this.send(session, { kind: "asset.share.result", requestId: msg.requestId, ok: false, error: "This image is not available to share" });
+      return;
+    }
+    const settingsDoc = this.store.get("settings", "world-settings");
+    const priorSystem = settingsDoc?.system ?? {};
+    const priorSlots = priorSystem.imageShareSlots;
+    const slots = typeof priorSlots === "object" && priorSlots !== null && !Array.isArray(priorSlots)
+      ? priorSlots as Record<string, Json> : {};
+    const nextSlots = { ...slots, [user.id]: msg.assetId };
+    const settingOp: Op = settingsDoc
+      ? { kind: "update", ref: { coll: "settings", id: "world-settings" }, diff: { system: { ...priorSystem, imageShareSlots: nextSlots } } }
+      : { kind: "create", coll: "settings", data: { _id: "world-settings", type: "settings", name: "World Settings",
+          ownership: { default: OWNERSHIP_LEVELS.NONE }, flags: {}, system: { imageShareSlots: nextSlots } } };
+    const committed = this.commitOps([settingOp], user.id, `image-share-slot-${msg.requestId}`, false);
+    if (!committed.ok) {
+      this.send(session, { kind: "asset.share.result", requestId: msg.requestId, ok: false, error: committed.error });
+      return;
+    }
+    try {
+      // Persist the stable per-user slot first; make the asset world-readable only for the explicit
+      // share action, then send the ephemeral cue after the asset manifest is available.
+      await this.assets.describe(msg.assetId, { visibility: "world" });
+      if (!(await this.assets.has(msg.assetId))) throw new Error("Shared image bytes are missing");
+      const data: Record<string, Json> = { assetId: msg.assetId, name: entry.name };
+      const ephemeral: EphemeralMsg = { kind: "ephemeral", from: user.id, t: "image", data };
+      const manifest = this.manifestSource();
+      for (const recipient of this.sessions.values()) {
+        if (!recipient.user || !canFetchAsset(this.store.world, manifest, recipient.user, msg.assetId)) continue;
+        this.send(recipient, ephemeral);
+      }
+      this.send(session, { kind: "asset.share.result", requestId: msg.requestId, ok: true });
+    } catch (error) {
+      this.send(session, { kind: "asset.share.result", requestId: msg.requestId, ok: false,
+        error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  /** §6.8: what counts as live is the world's documents, minus audit provenance (see assetUsageRoots). */
+  private liveAssetRoots(): unknown[] {
+    return assetUsageRoots(this.store.world as unknown as Record<string, unknown>);
+  }
+
+  private async handleAssetLibrary(session: Session, msg: AssetLibraryMsg): Promise<void> {
+    if (!session.user || session.user.role !== "GM" || !this.assets) {
+      this.send(session, { kind: "asset.library.result", requestId: msg.requestId, ok: false,
+        error: "Only the GM can list stored images" });
+      return;
+    }
+    const manifest = await this.assets.manifest();
+    const assets = assetLibrary(manifest, this.liveAssetRoots());
+    this.send(session, { kind: "asset.library.result", requestId: msg.requestId, ok: true, assets });
+  }
+
+  /**
+   * §6.8 GM-only clean-up. The client's list is advisory: each image is re-checked against the live
+   * documents immediately before its bytes are removed, and anything now in use is reported as
+   * skipped instead of deleted.
+   */
+  private async handleAssetCleanup(session: Session, msg: AssetCleanupMsg): Promise<void> {
+    const fail = (error: string): void => {
+      this.send(session, { kind: "asset.cleanup.result", requestId: msg.requestId, ok: false, error });
+    };
+    if (!session.user || session.user.role !== "GM" || !this.assets) {
+      fail("Only the GM can clean up stored images");
+      return;
+    }
+    if (!Array.isArray(msg.hashes) || msg.hashes.length > 5000 ||
+        !msg.hashes.every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash))) {
+      fail("The clean-up list is not valid");
+      return;
+    }
+    const removed: AssetId[] = [];
+    const skipped: AssetId[] = [];
+    let bytes = 0;
+    try {
+      for (const hash of new Set(msg.hashes)) {
+        const manifest = await this.assets.manifest();
+        const unused = new Set(unusedAssetIds(manifest, this.liveAssetRoots()));
+        if (!unused.has(hash) || !manifest[hash]) {
+          skipped.push(hash);
+          continue;
+        }
+        bytes += manifest[hash].size;
+        await this.assets.remove(hash);
+        removed.push(hash);
+      }
+    } catch (error) {
+      this.broadcastAssetManifest();
+      fail(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.broadcastAssetManifest();
+    this.send(session, { kind: "asset.cleanup.result", requestId: msg.requestId, ok: true, removed, skipped, bytes });
+  }
+
+  private broadcastAssetManifest(): void {
+    for (const recipient of this.sessions.values()) this.sendProjectedManifest(recipient);
+  }
+
   private handleAssetGet(session: Session, msg: AssetGetMsg): void {
     if (!session.user) return; // requires an approved session (§16)
     if (!session.assetBucket.tryRemove()) return; // §16: silently dropped
@@ -9279,6 +9693,8 @@ export class HostSync {
 
   private handleEphemeral(session: Session, msg: EphemeralMsg): void {
     if (!session.user) return;
+    // Image publication must go through asset.share so the stable slot, visibility and audit gates run.
+    if (msg.t === "image") return;
     if (!session.ephemeralBucket.tryRemove()) return; // silently drop (§5 rate limit)
     // Invariant: ephemeral traffic never touches the DocumentStore or OpLog.
     const relay: EphemeralMsg = { ...msg, from: session.user.id };

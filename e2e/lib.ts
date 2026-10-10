@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 import { deflateSync as zlibDeflate } from "node:zlib";
 
@@ -153,6 +153,15 @@ export function solidPng(
   height: number,
   rgb: [number, number, number] = [64, 92, 68],
 ): Buffer {
+  return rgbPng(width, height, () => rgb);
+}
+
+/** A PNG whose colour at each pixel comes from `pixel(x, y)` (used for grid fixtures). */
+export function rgbPng(
+  width: number,
+  height: number,
+  pixel: (x: number, y: number) => [number, number, number],
+): Buffer {
   const crcTable: number[] = [];
   for (let n = 0; n < 256; n++) {
     let c = n;
@@ -178,17 +187,35 @@ export function solidPng(
   ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 8; // bit depth
   ihdr[9] = 2; // truecolor RGB
-  const row = Buffer.alloc(1 + width * 3);
-  for (let x = 0; x < width; x++) {
-    row[1 + x * 3] = rgb[0];
-    row[2 + x * 3] = rgb[1];
-    row[3 + x * 3] = rgb[2];
+  const rows: Buffer[] = [];
+  for (let y = 0; y < height; y++) {
+    const row = Buffer.alloc(1 + width * 3);
+    for (let x = 0; x < width; x++) {
+      const [r, g, b] = pixel(x, y);
+      row[1 + x * 3] = r;
+      row[2 + x * 3] = g;
+      row[3 + x * 3] = b;
+    }
+    rows.push(row);
   }
-  const raw = Buffer.concat(Array.from({ length: height }, () => row));
+  const raw = Buffer.concat(rows);
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk("IHDR", ihdr),
     chunk("IDAT", zlibDeflate(raw)),
     chunk("IEND", Buffer.alloc(0)),
   ]);
+}
+
+/**
+ * The sidebar's **Import map** input opens the image preview first (IMAGE_HANDLING_DESIGN §6.1: the
+ * sidebar is one of the input adapters into the preview dialog). This confirms the default
+ * "replace the scene background" action once the preview is ready.
+ */
+export async function applySidebarMap(page: Page): Promise<void> {
+  const dialog = page.locator("[data-image-import-dialog]");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".preview-frame img")).toBeVisible();
+  await dialog.getByRole("button", { name: "Apply to image" }).click();
+  await expect(dialog).toHaveCount(0);
 }

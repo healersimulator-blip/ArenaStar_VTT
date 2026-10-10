@@ -86,6 +86,19 @@ export const MsgKind = {
   "fx.run": 0x52,
   // D-250 — explored fog restore: the client asks, the host answers from its fog store
   "fog.get": 0x0e,
+  // §6 image ingest: chunked Trusted/GM uploads and a host-audited stable share slot.
+  "asset.upload.start": 0x15,
+  "asset.upload.chunk": 0x16,
+  "asset.upload.finish": 0x17,
+  "asset.upload.result": 0x18,
+  "asset.share": 0x19,
+  "asset.share.result": 0x1a,
+  "asset.upload.cancel": 0x1b,
+  // §6.8 GM library: list stored images and whether undo/live documents still use them, then clean up.
+  "asset.library": 0x1c,
+  "asset.library.result": 0x1d,
+  "asset.cleanup": 0x1e,
+  "asset.cleanup.result": 0x1f,
   // host → client
   welcome: 0x20,
   snapshot: 0x21,
@@ -612,7 +625,7 @@ export interface FxDeliveryMsg {
 }
 
 /** §5 ephemeral kinds: cursors, pings, drags, ruler, typing. */
-export type EphemeralKind = "cursor" | "ping" | "drag" | "ruler" | "typing";
+export type EphemeralKind = "cursor" | "ping" | "drag" | "ruler" | "typing" | "image";
 
 /** §5: never touches the Document Store or OpLog; unreliable channel, ≤ 20 Hz. */
 export interface EphemeralMsg {
@@ -631,6 +644,102 @@ export interface AssetGetMsg {
   /** Resume offset in bytes. */
   offset: number;
   priority: AssetPriority;
+}
+
+/** Begin a bounded image upload. Host authorizes before retaining any chunk bytes. */
+export interface AssetUploadStartMsg {
+  kind: "asset.upload.start";
+  uploadId: string;
+  name: string;
+  displayName: string;
+  size: number;
+  folder: string;
+  sourceKind: "file" | "paste" | "url";
+  collisionBehavior: "stop" | "reuse" | "overwrite";
+  convertToWebp: boolean;
+  webpQuality: number;
+}
+
+/** One ordered chunk of the currently authorized upload. */
+export interface AssetUploadChunkMsg {
+  kind: "asset.upload.chunk";
+  uploadId: string;
+  offset: number;
+  bytes: Uint8Array;
+}
+
+export interface AssetUploadFinishMsg {
+  kind: "asset.upload.finish";
+  uploadId: string;
+}
+
+export interface AssetUploadCancelMsg {
+  kind: "asset.upload.cancel";
+  uploadId: string;
+}
+
+/** Host response/progress. `asset` is deliberately a provenance-free public descriptor. */
+export interface AssetUploadResultMsg {
+  kind: "asset.upload.result";
+  uploadId: string;
+  status: "ready" | "progress" | "complete" | "error";
+  received: number;
+  error?: string;
+  asset?: {
+    hash: AssetId;
+    name: string;
+    mime: string;
+    size: number;
+    width?: number;
+    height?: number;
+    thumbnail?: AssetId;
+    auditWarning?: string;
+  };
+}
+
+/** Publish/update the caller's stable per-user image slot and then broadcast its asset reference. */
+export interface AssetShareMsg {
+  kind: "asset.share";
+  requestId: string;
+  assetId: AssetId;
+}
+
+export interface AssetShareResultMsg {
+  kind: "asset.share.result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+}
+
+/** GM-only: list every stored image and whether it is still in use. */
+export interface AssetLibraryMsg {
+  kind: "asset.library";
+  requestId: string;
+}
+
+export interface AssetLibraryResultMsg {
+  kind: "asset.library.result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  assets?: Array<{ hash: AssetId; name: string; mime: string; size: number; inUse: boolean; derived: boolean }>;
+}
+
+/** GM-only: delete the listed images. The host recomputes usage and skips anything now in use. */
+export interface AssetCleanupMsg {
+  kind: "asset.cleanup";
+  requestId: string;
+  hashes: AssetId[];
+}
+
+export interface AssetCleanupResultMsg {
+  kind: "asset.cleanup.result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  removed?: AssetId[];
+  skipped?: AssetId[];
+  bytes?: number;
 }
 
 /**
@@ -936,6 +1045,17 @@ export type WireMessage =
   | FxMediaAckMsg
   | EphemeralMsg
   | AssetGetMsg
+  | AssetUploadStartMsg
+  | AssetUploadChunkMsg
+  | AssetUploadFinishMsg
+  | AssetUploadCancelMsg
+  | AssetUploadResultMsg
+  | AssetShareMsg
+  | AssetShareResultMsg
+  | AssetLibraryMsg
+  | AssetLibraryResultMsg
+  | AssetCleanupMsg
+  | AssetCleanupResultMsg
   | FogPutMsg
   | FogGetMsg
   | FogStateMsg

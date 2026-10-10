@@ -23,9 +23,18 @@
   import type { SceneDocument, SceneGrid } from "../../core/documents";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
+  import type { Op } from "../../core/ops";
+  import { planImageAction } from "../../core/imageActions";
+  import {
+    DEFAULT_SCENE_EXPRESS_DEFAULTS,
+    uniqueSceneName,
+    type SceneExpressDefaults,
+  } from "../../core/imageHandling";
+  import { fitImageToScene, normalizeLogicalFolder } from "../../core/imageSizing";
   import {
     DEFAULT_SPEED_PER_DAY,
     cellCensus,
+    hexTerrainSettingsOps,
     newHexcrawlPartyOps,
     newHexcrawlSceneOps,
   } from "../../core/hexcrawl";
@@ -34,14 +43,21 @@
     client,
     bus,
     importImage,
+    sceneDefaults = DEFAULT_SCENE_EXPRESS_DEFAULTS,
     onCreated,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
-    /** The app's asset pipeline (`ImportPipeline.importImage`), null when boot has no host yet. */
+    /**
+     * The map-import path for a **new scene** (the same upload the Scenes & Images panel's New scene
+     * uses: the destination folder, duplicate policy and WebP settings of the image system). Null
+     * when boot has no host yet.
+     */
     importImage:
-      | ((file: File) => Promise<{ hash: string; width?: number; height?: number }>)
+      | ((file: File) => Promise<{ hash: string; width?: number; height?: number; thumbnail?: string | null }>)
       | null;
+    /** The GM's new-scene defaults (design §5.2/SZ-13), from the world settings. */
+    sceneDefaults?: SceneExpressDefaults;
     onCreated: (sceneId: string) => void;
   } = $props();
 
@@ -62,7 +78,7 @@
   let error = $state("");
 
   /** The imported asset, once the host has it (the scene is created with this image). */
-  let mapImport = $state<{ hash: string; width?: number; height?: number } | null>(null);
+  let mapImport = $state<{ hash: string; width?: number; height?: number; thumbnail?: string | null } | null>(null);
   let mapName = $state("");
   let dragging = $state(false);
 
@@ -75,8 +91,36 @@
   let partyOn = $state(true);
   let partyName = $state("Party");
 
-  const widthOf = (): number => Math.max(1, Math.round(mapImport?.width ?? DEFAULT_WIDTH));
-  const heightOf = (): number => Math.max(1, Math.round(mapImport?.height ?? DEFAULT_HEIGHT));
+  /**
+   * Image maps only (design §6.3): **match** the scene to the picture's pixel size, or keep a chosen
+   * size and **fit** the picture into it, centred with its aspect kept. Without an image the scene is
+   * the usual open ground and there is nothing to choose.
+   */
+  let sizeMode = $state<"matchImage" | "fitImage">("matchImage");
+  let fitWidth = $state(DEFAULT_WIDTH);
+  let fitHeight = $state(DEFAULT_HEIGHT);
+
+  const imagePixels = $derived(
+    mapImport?.width && mapImport?.height
+      ? { width: Math.round(mapImport.width), height: Math.round(mapImport.height) }
+      : null,
+  );
+
+  const sceneSize = $derived.by(() => {
+    if (!mapImport) return { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+    if (sizeMode === "fitImage" && imagePixels) {
+      return { width: Math.max(1, Math.round(fitWidth)), height: Math.max(1, Math.round(fitHeight)) };
+    }
+    return imagePixels ?? { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+  });
+
+  /** The picture's placement inside the scene: identity when matching, the fitted rectangle otherwise. */
+  const placement = $derived.by(() => {
+    if (mapImport && sizeMode === "fitImage" && imagePixels) {
+      return fitImageToScene(imagePixels, sceneSize);
+    }
+    return { scale: 1, offset: { x: 0, y: 0 } };
+  });
 
   const grid = $derived<SceneGrid>({
     type: gridType,
@@ -101,8 +145,8 @@
     system: {},
     active: false,
     img: null,
-    width: widthOf(),
-    height: heightOf(),
+    width: sceneSize.width,
+    height: sceneSize.height,
     darkness: 0,
     grid,
     tokens: [],
@@ -151,6 +195,52 @@
   }
 
   /**
+   * The ops for a scene built from a picture. The image system's own planner writes the scene (its
+   * defaults, unique name, folder, thumbnail, background placement), and the hexcrawl settings ride
+   * along in the same batch. Two overrides are hexcrawl's, not the image system's: the map stays
+   * shared with the table (the party token is the viewer), and sight is hex-based, so token vision
+   * and core fog exploration are off whatever the image defaults say.
+   */
+  function imageSceneOps(id: string, sceneName: string, scenes: readonly SceneDocument[]): Op[] {
+    const image = mapImport;
+    if (!image) return [];
+    const plan = planImageAction({
+      action: "newScene",
+      image: image.hash,
+      name: sceneName,
+      width: imagePixels?.width ?? sceneSize.width,
+      height: imagePixels?.height ?? sceneSize.height,
+      scene: null,
+      scenes,
+      journals: [],
+      selectedTokenIds: [],
+      sceneDefaults: {
+        ...sceneDefaults,
+        ownership: "all",
+        tokenVision: false,
+        fogExploration: false,
+      },
+      newSceneId: id,
+      newTileId: "",
+      newJournalId: "",
+      newPageId: "",
+      targetJournalId: "",
+      autoCreateJournal: false,
+      autoCreateJournalName: "",
+      logicalFolder: normalizeLogicalFolder(sceneDefaults.destinationLogicalFolder),
+      thumbnail: image.thumbnail ?? null,
+      background: { offset: placement.offset, scale: placement.scale, padding: 0, color: "#ffffff" },
+      sceneSize,
+      resizeChoice: "keep",
+      grid,
+      assetGridSize: Math.max(1, Math.round(cellSize)),
+      foregroundElevation: 0,
+      activateNewScene: true,
+    });
+    return [...plan.ops, ...hexTerrainSettingsOps(client.store.getAll("settings"))];
+  }
+
+  /**
    * Two submits, because the host refuses an op that references a document created beside it
    * (`create: parent not found` — `newHexcrawlSceneOps` explains the rule). The second batch is
    * built from the scene **as it landed**, and it waits for the commit rather than for a timer:
@@ -159,6 +249,10 @@
   function create(): void {
     const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
     const id = `scene-${globalThis.crypto.randomUUID().slice(0, 6)}`;
+    const sceneName = uniqueSceneName(
+      name.trim() || "Overland map",
+      scenes.map((existing) => existing.name),
+    );
     busy = true;
     error = "";
     const offRejected = bus.on("rejected", (r) => {
@@ -181,17 +275,19 @@
       onCreated(id);
     });
     client.submit(
-      newHexcrawlSceneOps({
-        id,
-        name: name.trim() || "Overland map",
-        width: widthOf(),
-        height: heightOf(),
-        grid,
-        img: mapImport?.hash ?? null,
-        settingsDocs: client.store.getAll("settings"),
-        scenes,
-        activate: true,
-      }),
+      mapImport
+        ? imageSceneOps(id, sceneName, scenes)
+        : newHexcrawlSceneOps({
+            id,
+            name: sceneName,
+            width: sceneSize.width,
+            height: sceneSize.height,
+            grid,
+            img: null,
+            settingsDocs: client.store.getAll("settings"),
+            scenes,
+            activate: true,
+          }),
     );
   }
 </script>
@@ -226,7 +322,7 @@
     >
       {#if mapImport}
         <p class="ok" data-hx-map>
-          {mapName} · {widthOf()} × {heightOf()} px — imported into the world's assets.
+          {mapName} · {sceneSize.width} × {sceneSize.height} px — imported into the world's assets.
         </p>
       {:else}
         <p class="hint">
@@ -246,6 +342,47 @@
         />
       </label>
     </div>
+    {#if mapImport}
+      <fieldset class="size-mode" data-hx-size-mode={sizeMode}>
+        <legend>Scene size</legend>
+        <div class="chips">
+          <button
+            type="button"
+            class="chip"
+            class:on={sizeMode === "matchImage"}
+            aria-pressed={sizeMode === "matchImage"}
+            data-hx-size-option="matchImage"
+            onclick={() => (sizeMode = "matchImage")}>Match the scene to the image</button
+          >
+          <button
+            type="button"
+            class="chip"
+            class:on={sizeMode === "fitImage"}
+            aria-pressed={sizeMode === "fitImage"}
+            data-hx-size-option="fitImage"
+            onclick={() => (sizeMode = "fitImage")}>Fit the image to a chosen size</button
+          >
+        </div>
+        {#if sizeMode === "fitImage"}
+          <div class="row">
+            <label>
+              Width (px)
+              <input data-hx-fit-width type="number" min="1" step="1" bind:value={fitWidth} />
+            </label>
+            <label>
+              Height (px)
+              <input data-hx-fit-height type="number" min="1" step="1" bind:value={fitHeight} />
+            </label>
+          </div>
+          <p class="hint" data-hx-fit-readout>
+            The picture is scaled to {Math.round(placement.scale * 100)}% and centred, keeping its
+            shape; the rest of the scene is open ground.
+          </p>
+        {:else}
+          <p class="hint">The scene takes the picture's own pixel size.</p>
+        {/if}
+      </fieldset>
+    {/if}
     {#if !mapImport}
       <p class="hint">
         No image yet: the scene starts {DEFAULT_WIDTH} × {DEFAULT_HEIGHT} px of open ground.
@@ -404,6 +541,43 @@
   .drop.over {
     border-color: #68b9f2;
     background: #172433;
+  }
+  .size-mode {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 10px 12px 12px;
+    border: 1px solid #2f4453;
+    border-radius: 10px;
+    background: #14212b;
+  }
+  .size-mode legend {
+    padding: 0 6px;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: #a3b8bf;
+  }
+  .size-mode .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .size-mode .chip {
+    padding: 7px 11px;
+    border: 1px solid #465a68;
+    border-radius: 999px;
+    background: #253543;
+    color: #ebf3f3;
+    font: inherit;
+    font-size: 0.82rem;
+    cursor: pointer;
+  }
+  .size-mode .chip.on {
+    border-color: #4fb3a4;
+    background: #1f4a48;
+    color: #fff;
   }
   .hint,
   .readout,

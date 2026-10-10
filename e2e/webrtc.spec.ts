@@ -62,6 +62,7 @@ test.describe("canvas (§9 M1 subset)", () => {
       "tokens",
       "models",
       "tilesAbove",
+      "foreground", // §6.2 scene foreground: an overhead overlay with no occlusion
       "fxAboveTokens",
       "fog",
       "effects",

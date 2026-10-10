@@ -12357,3 +12357,83 @@ slice are green as a set — `pf1e_poison` 2/2, `pf1e_inventory`, `pf1e_acceptan
 `pf1e_wizard_combat` (1) fail **identically at the base commit `95ba883`** (re-run in a clean worktree:
 the chat no longer prints the old "casts <spell>" narration line for a version-2 cast card), so they
 are pre-existing and not attributable to this slice.
+
+## D-408 — Esc in path mode leaves path mode (amends D-275, 2026-10-10)
+
+**Context.** D-275 made `Esc` give up the route being drawn and leave the path tool armed, so the next click
+started a fresh route. In practice the key left the tool on, the hint stayed up, and the "click the path tool
+to arm it" gesture then toggled path mode *off*. The travel acceptance spec exercised exactly that sequence and
+failed at `drawRoute` (pre-existing at the base commit, not a regression).
+
+**Decision.** `Esc` in path mode clears the draft **and** returns to Select in one press, the same as every
+other canvas tool. Both key layers (the rail's `escape` action and the canvas key listener) call one
+idempotent helper, `leavePathMode`, so their order does not matter. The help sheet, the in-app path hint, and
+the spec comments say the same thing. Re-arming the path tool is then an ordinary tool click.
+
+**Commit ends the gesture too.** The second acceptance case (a time-ruled feature, three days) exposed the same
+problem one step later: *Commit route* left the tool armed, so the next day's route toggled path mode off. A
+committed route now also returns to Select, through the same `leavePathMode` helper.
+
+**Consequence.** Neither `Esc` nor *Commit route* keeps the route tool on. A GM who wants another route clicks
+Path again. The travel acceptance spec matches the app without a workaround.
+
+## D-409 — A hex links to Campaign Codex entries; the link is GM-side (2026-10-10)
+
+**Context.** A hex is about things the codex already describes: a town in the region, the NPC who keeps a
+lair, a location the party is looking for. Until now the only codex link to a map was `linksScene` on the codex
+sheet, and nothing on the hex said which codex entry it belonged to. A hex also cannot be a codex target,
+because `DocRef` has no hex-level address.
+
+**Decision.** `CellDocument.codexEntries?: string[]` holds the journal ids of codex sheets a hex is about. The
+hex window has a "Codex entries here" section (link from a picker, unlink from the row; unlinking never
+changes the codex entry), and the codex sheet has a "Hexes" section that lists every hex that names it.
+
+**Privacy.** The list is GM-side, like `description`. `projectCellForViewer` removes it from an open cell, and
+the per-op diff filter (`projectCellDiff`) drops it even when the cell is open, so a player's replica never holds
+which entries a hex is about. Tests: `tests/core/hexcrawlProjection.test.ts` (snapshot and per-op) and
+`e2e/hexcrawl_player_fields.spec.ts` ("a hex's Campaign Codex links (GM-side)").
+
+**Not done.** A codex entry cannot open from the hex window (no panel-to-panel open API exists yet), and
+deleting a codex entry leaves its id on the hex until it is unlinked; the hex window and the codex sheet both
+skip ids that no longer resolve.
+
+## D-410 — A hexcrawl map is built by the image system's new-scene planner (2026-10-10)
+
+**Context.** The hexcrawl wizard made its scene with `newHexcrawlSceneOps`, which read the raw image's pixel size,
+set `ownership` by hand, and skipped the image system's defaults: unique scene name, destination folder, thumbnail,
+and background placement. A map imported in the wizard therefore did not behave like a map added from the
+Scenes & Images panel.
+
+**Decision.** With a picture, the wizard builds the scene doc with `planImageAction({ action: "newScene" })`
+(design §5.3/§5.4), and then appends the hex grid, the terrain catalog (`hexTerrainSettingsOps`), and the party. The
+image system's upload path (`importSceneImage`, with the destination folder and duplicate policy) is used for the
+map step. The wizard offers two sizes (design §6.3): **match the scene to the image** (the default), or **fit the
+image to a chosen size** (centred, aspect kept, `fitImageToScene`). Without a picture the wizard is unchanged.
+
+Two overrides are hexcrawl's own and are kept: `ownership: "all"` (so a hexcrawl map stays shared with the
+table, as before), and token vision and core fog exploration are off (sight is hex-based). The image system's
+default for a new image scene is GM-only; the open question of whether hexcrawl maps should follow that default is
+recorded in `IMAGE_HANDLING_DESIGN.md` §6.3 and is not decided here.
+
+**Tests.** `tests/core/imageSizing.test.ts` (fit placement), `e2e/hexcrawl_scene.spec.ts` ("a map fitted into a
+chosen size lands centred, with the image system's defaults and a unique name").
+
+## D-411 — Floating UI keeps to the table side of the chat dock and clear of the tool rail (2026-10-10)
+
+**Context.** Review screenshots showed three collisions. Floating windows opened under the canvas tool rail, so
+their left edges and titles were clipped. The per-action toast stack was pinned to the viewport's right edge and
+covered the chat composer and Send. The tool-options flyout (travel path hint, and the other tools' options) was
+also pinned to the viewport's right edge, over the chat dock.
+
+**Decision.**
+- `WindowManager` takes an optional `leftInset` (the rail's width). With an inset, windows open, drag and resize
+  only to its right. Without one, behaviour is unchanged, so existing callers and tests keep their semantics. The App
+  sets the inset to 56 px, the rail's width.
+- The toast stack and the tool-options flyout are anchored to `--gm-dock-width` from the right, so they sit over the
+  table and never over the dock.
+
+**Not done.** The window layer still sits in the board's coordinate space, not the canvas's. Moving it inside the
+canvas box was tried and reverted: it changed pointer and drag behaviour (the fog spec's token drag and the
+image-preview flow both broke). Verified by `tests/core/windows.test.ts` (inset) and the hexcrawl, windows,
+canvas-toolbar, campaign-codex and image-handling Chromium e2e runs. `e2e/hexcrawl_fog.spec.ts` now closes the
+GM settings window before its drag, because that window now opens clear of the rail and can cover the target hex.

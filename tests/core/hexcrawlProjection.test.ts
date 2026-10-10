@@ -328,3 +328,61 @@ describe("the per-op path (projectEnvelope)", () => {
     expect(projectEnvelope(e, gm, resolver)).toBe(e);
   });
 });
+
+describe("Campaign Codex links on a hex are GM-side (codexEntries)", () => {
+  /** The open fixture cell, linked to two codex entries. */
+  function linkedScene() {
+    const s = scene();
+    const cell = s.cells?.find((c) => c.key === "0,0");
+    if (!cell) throw new Error("fixture has no open cell");
+    cell.codexEntries = ["journal-town", "journal-npc"];
+    return s;
+  }
+
+  test("a player's snapshot of an open hex carries no codex links, and the GM's keeps them", () => {
+    const s = linkedScene();
+    const world = { ...emptyWorld(), scenes: [s] };
+    const asPlayer = projectWorld(world, 1, player).collections.scenes?.find(
+      (d) => d._id === "s1",
+    ) as SceneDocument | undefined;
+    const open = asPlayer?.cells?.find((c) => c.key === "0,0");
+    expect(open?.playerText).toBe("A mossy shrine");
+    expect(open).not.toHaveProperty("codexEntries");
+
+    const asGm = projectWorld(world, 1, gm).collections.scenes?.find(
+      (d) => d._id === "s1",
+    ) as SceneDocument | undefined;
+    expect(asGm?.cells?.find((c) => c.key === "0,0")?.codexEntries).toEqual([
+      "journal-town",
+      "journal-npc",
+    ]);
+  });
+
+  test("linking or unlinking an entry on an open hex is never sent to a player", () => {
+    const resolver = resolverFor(linkedScene());
+    const link = env([
+      {
+        kind: "update",
+        ref: cellRef("cell-0-0"),
+        diff: { codexEntries: ["journal-town", "journal-npc", "journal-x"] },
+      },
+    ]);
+    expect(projectEnvelope(link, player, resolver)).toBeNull();
+
+    // The same diff alongside player-visible text keeps the text and drops the links.
+    const mixed = env([
+      {
+        kind: "update",
+        ref: cellRef("cell-0-0"),
+        diff: {
+          codexEntries: ["journal-town"],
+          playerText: "The shrine, swept",
+        },
+      },
+    ]);
+    const op = projectEnvelope(mixed, player, resolver)?.ops[0];
+    expect(op?.kind).toBe("update");
+    if (op?.kind !== "update") return;
+    expect(Object.keys(op.diff)).toEqual(["playerText"]);
+  });
+});

@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   fitWithin,
   tileGrid,
@@ -15,6 +15,7 @@ import { openVttDb } from "../../src/storage/idb";
 import { MemDirHandle } from "../../src/storage/opfs";
 import type { AssetManifest } from "../../src/core/documents";
 import type { AssetId } from "../../src/core/ids";
+import { pngHeaderForTest } from "../helpers/imageBytes";
 
 /** Deterministic fake codec: variant bytes = source bytes + tag, so hashes are stable. */
 class FakeCodec implements ImageCodec {
@@ -102,12 +103,58 @@ describe("pure geometry (§7)", () => {
   });
 });
 
+describe("ImportPipeline video backgrounds (Phase 4)", () => {
+  function webmBytes(tag: number): Uint8Array {
+    const bytes = new Uint8Array(96);
+    bytes.set([0x1a, 0x45, 0xdf, 0xa3, 0x9f, tag]);
+    return bytes;
+  }
+
+  test("stores the original container with no codec variants, tiles or WebP step", async () => {
+    const { server, store } = await makeServer("w-imp-video");
+    const codec = new FakeCodec(1920, 1080);
+    const derive = vi.spyOn(codec, "derive");
+    const tile = vi.spyOn(codec, "tile");
+    const pipeline = new ImportPipeline(server, codec);
+    const bytes = webmBytes(1);
+    const { hash, entry } = await pipeline.importImage(bytes, "loop.webm", "video/webm", { convertToWebp: true });
+
+    expect(derive).not.toHaveBeenCalled();
+    expect(tile).not.toHaveBeenCalled();
+    expect(entry.thumb).toBeUndefined();
+    expect(entry.mid).toBeUndefined();
+    expect(entry.tiles).toBeUndefined();
+    expect(entry.mime).toBe("video/webm");
+    expect(entry.name).toBe("loop.webm");
+    expect(Object.keys(store.world.assetManifest)).toEqual([hash]);
+    expect(await server.get(hash)).toEqual(bytes);
+    server.close();
+  });
+
+  test("calls beforeStore with the audit identifiers before the write, and stops on a logical name clash", async () => {
+    const { server } = await makeServer("w-imp-video-logical");
+    const pipeline = new ImportPipeline(server, new FakeCodec(640, 360));
+    const seen: string[] = [];
+    const first = await pipeline.importImage(webmBytes(2), "intro.webm", "video/webm", {
+      logicalFile: { folder: "Bg", name: "intro.webm" },
+      beforeStore: ({ assetHash, reused }) => { seen.push(`${assetHash}:${reused}`); },
+    });
+    expect(seen).toEqual([`${first.hash}:false`]);
+    await expect(
+      pipeline.importImage(webmBytes(3), "other.webm", "video/webm", {
+        logicalFile: { folder: "Bg", name: "INTRO.webm" },
+      }),
+    ).rejects.toThrow(/already exists/);
+    server.close();
+  });
+});
+
 describe("ImportPipeline (§7)", () => {
   test("stores full + thumb + mid as hash-addressed assets; manifest carries descriptors", async () => {
     const { server, store } = await makeServer("w-imp-a");
     const pipeline = new ImportPipeline(server, new FakeCodec(2000, 1000));
     const { hash, entry } = await pipeline.importImage(
-      new Uint8Array([1, 2, 3]),
+      pngHeaderForTest(2000, 1000, [1, 2, 3]),
       "map.png",
       "image/png",
     );
@@ -132,11 +179,37 @@ describe("ImportPipeline (§7)", () => {
     server.close();
   });
 
+  test("stores one normalized logical-folder/name alias without retaining unsafe input spellings", async () => {
+    const { server } = await makeServer("w-imp-logical-alias-normalized");
+    const pipeline = new ImportPipeline(server, new FakeCodec(320, 200));
+    const { hash, entry } = await pipeline.importImage(
+      pngHeaderForTest(320, 200, [8, 9]),
+      "map.png",
+      "image/png",
+      { logicalFile: { folder: " /Maps/../Dungeon\u0001/ ", name: "  crypt.png  " } },
+    );
+    expect(entry.logicalFiles).toEqual([{ folder: "Maps/Dungeon", name: "crypt.png" }]);
+    expect((await server.meta(hash))?.logicalFiles).toEqual(entry.logicalFiles);
+    server.close();
+  });
+
+  test("rejects oversized image dimensions from the header before invoking the decoder", async () => {
+    const { server } = await makeServer("w-imp-pixel-limit");
+    const codec = new FakeCodec(10_001, 10_000);
+    const metadata = vi.spyOn(codec, "metadata");
+    const pipeline = new ImportPipeline(server, codec);
+    await expect(pipeline.importImage(pngHeaderForTest(10_001, 10_000), "decompression-bomb.png", "image/png"))
+      .rejects.toThrow(/100,000,000-pixel limit/i);
+    expect(metadata).not.toHaveBeenCalled();
+    server.close();
+  });
+
   test("re-import of identical bytes is fully idempotent (hashes + entry stable)", async () => {
     const { server } = await makeServer("w-imp-b");
     const pipeline = new ImportPipeline(server, new FakeCodec(2000, 1000));
-    const first = await pipeline.importImage(new Uint8Array([9, 9]), "m.png", "image/png");
-    const second = await pipeline.importImage(new Uint8Array([9, 9]), "m.png", "image/png");
+    const bytes = pngHeaderForTest(2000, 1000, [9, 9]);
+    const first = await pipeline.importImage(bytes, "m.png", "image/png");
+    const second = await pipeline.importImage(bytes, "m.png", "image/png");
     expect(second.hash).toBe(first.hash);
     expect(second.entry).toEqual(first.entry);
     const manifest = await server.manifest();
@@ -144,10 +217,59 @@ describe("ImportPipeline (§7)", () => {
     server.close();
   });
 
+  test("identical uploads accrue quota bytes per uploader without changing the first provenance record", async () => {
+    const { server } = await makeServer("w-imp-upload-attribution");
+    const pipeline = new ImportPipeline(server, new FakeCodec(1200, 800));
+    const bytes = pngHeaderForTest(1200, 800, [4, 8, 15, 16, 23, 42]);
+    const first = await pipeline.importImage(bytes, "map.png", "image/png", {
+      source: { kind: "file", originalName: "map.png", importedBy: "player-a", uploadedBytes: bytes.length },
+    });
+    const second = await pipeline.importImage(bytes, "map-copy.png", "image/png", {
+      source: { kind: "paste", originalName: "map-copy.png", importedBy: "player-b", uploadedBytes: bytes.length },
+    });
+    const sameUploader = await pipeline.importImage(bytes, "map-again.png", "image/png", {
+      source: { kind: "url", originalName: "map-again.png", importedBy: "player-a", uploadedBytes: bytes.length },
+    });
+
+    expect(second.hash).toBe(first.hash);
+    expect(sameUploader.hash).toBe(first.hash);
+    expect(sameUploader.entry.source).toMatchObject({
+      importedBy: "player-a",
+      originalName: "map.png",
+      uploadedBytes: bytes.length,
+      uploadedBytesByUser: {
+        "player-a": bytes.length * 2,
+        "player-b": bytes.length,
+      },
+    });
+    server.close();
+  });
+
+  test("concurrent identical uploads preserve every uploader's quota attribution", async () => {
+    const { server } = await makeServer("w-imp-concurrent-attribution");
+    const pipeline = new ImportPipeline(server, new FakeCodec(900, 600));
+    const bytes = pngHeaderForTest(900, 600, [5, 6, 7]);
+    const [first, second] = await Promise.all([
+      pipeline.importImage(bytes, "one.png", "image/png", {
+        source: { kind: "file", importedBy: "player-one", uploadedBytes: bytes.length },
+      }),
+      pipeline.importImage(bytes, "two.png", "image/png", {
+        source: { kind: "file", importedBy: "player-two", uploadedBytes: bytes.length },
+      }),
+    ]);
+    const stored = await server.meta(first.hash);
+    expect(second.hash).toBe(first.hash);
+    expect(stored?.source?.uploadedBytesByUser).toEqual({
+      "player-one": bytes.length,
+      "player-two": bytes.length,
+    });
+    server.close();
+  });
+
   test("maps > 4096 px on a side are split into hash-addressed tiles", async () => {
     const { server, store } = await makeServer("w-imp-c");
     const pipeline = new ImportPipeline(server, new FakeCodec(6000, 3000), { tileSize: 1024 });
-    const { entry } = await pipeline.importImage(new Uint8Array([5]), "big.png", "image/png");
+    const { entry } = await pipeline.importImage(pngHeaderForTest(6000, 3000, [5]), "big.png", "image/png");
 
     expect(entry.tiles).toMatchObject({ size: 1024, cols: 6, rows: 3 });
     expect(entry.tiles?.ids).toHaveLength(18);
@@ -161,7 +283,7 @@ describe("ImportPipeline (§7)", () => {
   test("exactly 4096 px is not tiled", async () => {
     const { server } = await makeServer("w-imp-d");
     const pipeline = new ImportPipeline(server, new FakeCodec(4096, 512));
-    const { entry } = await pipeline.importImage(new Uint8Array([7]), "edge.png", "image/png");
+    const { entry } = await pipeline.importImage(pngHeaderForTest(4096, 512, [7]), "edge.png", "image/png");
     expect(entry.tiles).toBeUndefined();
     server.close();
   });

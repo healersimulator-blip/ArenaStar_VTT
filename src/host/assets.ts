@@ -11,7 +11,7 @@
  *   module implements the AssetChunkSource read interface.
  */
 import type { AssetId, WorldId } from "../core/ids";
-import type { AssetManifest, AssetManifestEntry } from "../core/documents";
+import type { AssetImportSource, AssetManifest, AssetManifestEntry } from "../core/documents";
 import type { DocumentStore } from "../core/store";
 import type { DirHandleLike } from "../storage/opfs";
 import { OpfsAssetStore } from "../storage/opfs";
@@ -19,7 +19,6 @@ import {
   getAsset,
   listAssets,
   openVttDb,
-  putAsset,
   deleteAsset,
   type AssetRecord,
   type IDBPDatabase,
@@ -48,6 +47,57 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+function validateUploadAttribution(source: AssetImportSource): void {
+  if (source.uploadedBytes !== undefined &&
+      (!Number.isSafeInteger(source.uploadedBytes) || source.uploadedBytes < 1))
+    throw new Error("Image upload attribution has an invalid byte count");
+  for (const value of Object.values(source.uploadedBytesByUser ?? {})) {
+    if (!Number.isSafeInteger(value) || value < 1)
+      throw new Error("Image upload attribution has an invalid cumulative byte count");
+  }
+}
+
+function initialUploadSource(source: AssetImportSource | undefined): AssetImportSource | undefined {
+  if (!source) return undefined;
+  const copy = structuredClone(source);
+  validateUploadAttribution(copy);
+  if (!copy.importedBy || copy.uploadedBytes === undefined) return copy;
+  const uploadedBytesByUser = { ...(copy.uploadedBytesByUser ?? {}) };
+  const total = (uploadedBytesByUser[copy.importedBy] ?? 0) + copy.uploadedBytes;
+  if (!Number.isSafeInteger(total))
+    throw new Error("Image upload attribution exceeds the safe byte-count limit");
+  Object.defineProperty(uploadedBytesByUser, copy.importedBy, {
+    value: total, enumerable: true, configurable: true, writable: true,
+  });
+  copy.uploadedBytesByUser = uploadedBytesByUser;
+  return copy;
+}
+
+/** Preserve the first provenance fields while atomically accruing duplicate uploads. */
+function appendUploadSource(
+  previous: AssetImportSource | undefined,
+  incoming: AssetImportSource,
+): AssetImportSource {
+  validateUploadAttribution(incoming);
+  const userId = incoming.importedBy;
+  const bytes = incoming.uploadedBytes;
+  if (!userId || bytes === undefined) return previous ?? structuredClone(incoming);
+  const base = previous ?? structuredClone(incoming);
+  const uploadedBytesByUser = { ...(previous?.uploadedBytesByUser ?? {}) };
+  if (previous?.uploadedBytesByUser === undefined && previous?.importedBy &&
+      previous.uploadedBytes !== undefined)
+    Object.defineProperty(uploadedBytesByUser, previous.importedBy, {
+      value: previous.uploadedBytes, enumerable: true, configurable: true, writable: true,
+    });
+  const total = (uploadedBytesByUser[userId] ?? 0) + bytes;
+  if (!Number.isSafeInteger(total))
+    throw new Error("Image upload attribution exceeds the safe byte-count limit");
+  Object.defineProperty(uploadedBytesByUser, userId, {
+    value: total, enumerable: true, configurable: true, writable: true,
+  });
+  return { ...base, uploadedBytesByUser };
 }
 
 function bufferToHex(bytes: Uint8Array): string {
@@ -94,6 +144,7 @@ export class AssetServer {
     bytes: Uint8Array, name: string, mime: string,
     visibility: NonNullable<AssetManifestEntry["visibility"]> = "referenced",
     exportRights?: AssetManifestEntry["exportRights"],
+    metadata: Pick<AssetManifestEntry, "source" | "ingest" | "logicalFiles"> = {},
   ): Promise<ImportedAsset> {
     const hash = await sha256Hex(bytes);
     const existing = await getAsset(this.db, this.worldId, hash);
@@ -103,38 +154,77 @@ export class AssetServer {
       if (exportRights !== undefined &&
           (existing.exportRights !== exportRights || existing.visibility !== visibility))
         throw new Error("Media already exists with different sharing/export permissions; existing rights were not changed");
-      return { hash, entry: manifestEntry(existing) };
+      const source = metadata.source;
+      if (!source?.importedBy || source.uploadedBytes === undefined)
+        return { hash, entry: manifestEntry(existing) };
+
+      // Update quota/accounting in one IDB write transaction: concurrent uploads of
+      // identical bytes must not overwrite each other's per-user byte totals.
+      const tx = this.db.transaction("assets", "readwrite");
+      const current = await tx.store.get([this.worldId, hash]);
+      if (!current) {
+        await tx.done;
+        throw new Error("Asset disappeared while recording upload attribution");
+      }
+      if (exportRights !== undefined &&
+          (current.exportRights !== exportRights || current.visibility !== visibility)) {
+        await tx.done;
+        throw new Error("Media already exists with different sharing/export permissions; existing rights were not changed");
+      }
+      const updated: AssetRecord = {
+        ...current,
+        source: appendUploadSource(current.source, source),
+      };
+      await tx.store.put(updated);
+      await tx.done;
+      this.onManifest?.(await this.manifest());
+      return { hash, entry: manifestEntry(updated) };
     }
+
     const size = bytes.length;
     const chunks = Math.max(1, Math.ceil(size / this.chunkSize));
-    if (this.opfs) {
-      await this.opfs.put(hash, bytes);
-      await putAsset(this.db, {
-        worldId: this.worldId,
-        hash,
-        name,
-        mime,
-        size,
-        chunks,
-        visibility,
-        ...(exportRights ? { exportRights } : {}),
-      });
+    const storedSource = initialUploadSource(metadata.source);
+    const record: AssetRecord = {
+      worldId: this.worldId,
+      hash,
+      name,
+      mime,
+      size,
+      chunks,
+      visibility,
+      ...(exportRights ? { exportRights } : {}),
+      ...(storedSource ? { source: storedSource } : {}),
+      ...(metadata.ingest ? { ingest: structuredClone(metadata.ingest) } : {}),
+      ...(metadata.logicalFiles ? { logicalFiles: structuredClone(metadata.logicalFiles) } : {}),
+    };
+    if (this.opfs) await this.opfs.put(hash, bytes);
+    else record.bytes = new Uint8Array(bytes);
+
+    // `getAsset` above is only an optimization. A concurrent import can win the
+    // hash between that read and this transaction; merge the new uploader rather
+    // than replacing the winner's visibility/provenance/accounting metadata.
+    const tx = this.db.transaction("assets", "readwrite");
+    const current = await tx.store.get([this.worldId, hash]);
+    let persisted: AssetRecord;
+    if (current) {
+      if (exportRights !== undefined &&
+          (current.exportRights !== exportRights || current.visibility !== visibility)) {
+        await tx.done;
+        throw new Error("Media already exists with different sharing/export permissions; existing rights were not changed");
+      }
+      persisted = current;
+      const source = metadata.source;
+      if (source?.importedBy && source.uploadedBytes !== undefined) {
+        persisted = { ...current, source: appendUploadSource(current.source, source) };
+        await tx.store.put(persisted);
+      }
     } else {
-      await putAsset(this.db, {
-        worldId: this.worldId,
-        hash,
-        name,
-        mime,
-        size,
-        chunks,
-        visibility,
-        ...(exportRights ? { exportRights } : {}),
-        bytes: new Uint8Array(bytes),
-      });
+      persisted = record;
+      await tx.store.put(record);
     }
+    await tx.done;
     this.onManifest?.(await this.manifest());
-    return { hash, entry: { name, mime, size, chunks, visibility,
-      ...(exportRights ? { exportRights } : {}) } };
+    return { hash, entry: manifestEntry(persisted) };
   }
 
   async get(hash: AssetId): Promise<Uint8Array | undefined> {
@@ -165,18 +255,26 @@ export class AssetServer {
    * so restarts need no re-derivation.
    */
   async describe(hash: AssetId, patch: Partial<AssetManifestEntry>): Promise<AssetManifestEntry> {
-    const record = await getAsset(this.db, this.worldId, hash);
-    if (!record) throw new Error(`describe: unknown asset ${hash}`);
+    const tx = this.db.transaction("assets", "readwrite");
+    const record = await tx.store.get([this.worldId, hash]);
+    if (!record) {
+      await tx.done;
+      throw new Error(`describe: unknown asset ${hash}`);
+    }
     const entry: AssetManifestEntry = { ...manifestEntry(record), ...patch };
     const updated: AssetRecord = { ...record, name: entry.name, mime: entry.mime };
     if (entry.visibility !== undefined) updated.visibility = entry.visibility;
     if (entry.exportRights !== undefined) updated.exportRights = entry.exportRights;
+    if (entry.source !== undefined) updated.source = structuredClone(entry.source);
+    if (entry.ingest !== undefined) updated.ingest = structuredClone(entry.ingest);
+    if (entry.logicalFiles !== undefined) updated.logicalFiles = structuredClone(entry.logicalFiles);
     if (entry.width !== undefined) updated.width = entry.width;
     if (entry.height !== undefined) updated.height = entry.height;
     if (entry.thumb !== undefined) updated.thumb = entry.thumb;
     if (entry.mid !== undefined) updated.mid = entry.mid;
     if (entry.tiles !== undefined) updated.tiles = entry.tiles;
-    await putAsset(this.db, updated);
+    await tx.store.put(updated);
+    await tx.done;
     this.onManifest?.(await this.manifest());
     return entry;
   }
@@ -227,6 +325,9 @@ function manifestEntry(record: AssetRecord): AssetManifestEntry {
   };
   if (record.visibility !== undefined) entry.visibility = record.visibility;
   if (record.exportRights !== undefined) entry.exportRights = record.exportRights;
+  if (record.source !== undefined) entry.source = structuredClone(record.source);
+  if (record.ingest !== undefined) entry.ingest = structuredClone(record.ingest);
+  if (record.logicalFiles !== undefined) entry.logicalFiles = structuredClone(record.logicalFiles);
   if (record.width !== undefined) entry.width = record.width;
   if (record.height !== undefined) entry.height = record.height;
   if (record.thumb !== undefined) entry.thumb = record.thumb;

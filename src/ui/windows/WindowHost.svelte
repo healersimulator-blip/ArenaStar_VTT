@@ -30,6 +30,7 @@
   import type { ClientSync } from "../../client/sync";
   import type { AssetManifest } from "../../core/documents";
   import type { FxImportPermissions } from "../../core/fx";
+  import { DEFAULT_SCENE_EXPRESS_DEFAULTS, type SceneExpressDefaults } from "../../core/imageHandling";
   import type { RequestSummonPick } from "../macros/summonPicker";
   import type { RequestCrosshairPick } from "../macros/crosshairPicker";
   import type { PreviewFxSequence } from "../macros/fxPreview";
@@ -53,6 +54,8 @@
     bindings = {},
     isGM = false,
     importImage = null,
+    importSceneImage = null,
+    sceneDefaults = DEFAULT_SCENE_EXPRESS_DEFAULTS,
     onFxImport = null,
     listFxAssets = null,
     setFxAssetRights = null,
@@ -89,6 +92,10 @@
     isGM?: boolean;
     /** D-270: the app's asset pipeline, for the hexcrawl wizard's map step. */
     importImage?: ((file: File) => Promise<{ hash: string; width?: number; height?: number }>) | null;
+    /** The new-scene upload (destination folder, duplicate policy, thumbnail) the wizard's map step uses. */
+    importSceneImage?: ((file: File) => Promise<{ hash: string; width?: number; height?: number; thumbnail?: string | null }>) | null;
+    /** The GM's new-scene defaults, from the world settings. */
+    sceneDefaults?: SceneExpressDefaults;
     onFxImport?: ((file: File, permissions: FxImportPermissions) => Promise<{ hash: string; mime: string; name: string }>) | null;
     listFxAssets?: (() => Promise<AssetManifest>) | null;
     setFxAssetRights?: ((hash: string, permissions: FxImportPermissions) => Promise<void>) | null;
@@ -296,6 +303,7 @@
             {client}
             journalId={win.data.journalId ?? ""}
             pageId={win.data.pageId ?? ""}
+            {resolveAsset}
           />
         {:else if win.kind === "gmextras"}
           <GmExtrasPanel {client} {bus} {sceneId} />
@@ -371,7 +379,8 @@
           <HexcrawlWizard
             {client}
             {bus}
-            {importImage}
+            importImage={importSceneImage ?? importImage}
+            {sceneDefaults}
             onCreated={() => manager.close(win.id)}
           />
         {:else if win.kind === "army" && win.data}

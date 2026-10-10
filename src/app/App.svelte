@@ -1,6 +1,21 @@
 <script lang="ts">
   import { SceneLightingPlayer } from "../client/sceneLighting";
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
+  import { detectMapGridFromBytes } from "../client/gridDetection";
+  import BackgroundPanel from "../ui/canvas/BackgroundPanel.svelte";
+  import type { BackgroundDetectionView } from "../ui/canvas/backgroundPanelTypes";
+  import {
+    backgroundTransformOf,
+    backgroundWriteFields,
+    mapSquaresAsGrid,
+    matchMapToGrid,
+    moveBackground,
+    placeBackground as placeBackgroundInScene,
+    type BackgroundSnap,
+    type BackgroundTransform,
+    type MapGridEstimate,
+    type NaturalSize,
+  } from "../core/backgroundTransform";
   import { onMount, untrack } from "svelte";
   import { detectCapabilities } from "./capabilities";
   import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
@@ -45,6 +60,12 @@
     selectedEncounter,
   } from "../ui/combat/encounters";
   import { JournalsPanel } from "../ui/journals";
+  import ImageHandlingPanel from "../ui/images/ImageHandlingPanel.svelte";
+  import ScenesImagesPanel from "../ui/images/ScenesImagesPanel.svelte";
+  import ImageImportDialog from "../ui/images/ImageImportDialog.svelte";
+  import SharedImageNotice from "../ui/images/SharedImageNotice.svelte";
+  import type { ImageSource } from "../ui/images/imageSources";
+  import { imageSourcesFromClipboard, imageSourcesFromTransfer, isVideoFile } from "../ui/images/imageSources";
   import { WindowHost } from "../ui/windows";
   import { WindowManager } from "../ui/windows";
   import { selectedMacroItem } from "../core/macroItems";
@@ -152,6 +173,9 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     type PlacementPoint,
   } from "../core/hexcrawl/placement";
   import { planDuplicateSceneOps } from "../core/sceneCopy";
+  import { DEFAULT_IMAGE_HANDLING_PREFERENCES, imageHandlingPreferencesOf, loadImageHandlingPreferences, saveImageHandlingPreferences, sceneExpressDefaultsOf, type ImageAction, type ImageHandlingPreferences, VIDEO_SOURCE_ACTIONS } from "../core/imageHandling";
+  import { sniffImage, assertImageByteLength, normalizeImageName, normalizeLogicalFolder } from "../core/imageSizing";
+  import { sha256Hex } from "../host/assets";
   import { prototypeTokenTagsOf } from "../core/tags";
   import { logEncounterOps } from "../core/hexcrawl/encounter";
   import { cellAtPoint } from "../core/hexcrawl/cells";
@@ -203,6 +227,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { DEFAULT_BINDINGS, actionForCombo, comboOf, isTypingTarget } from "../core/keys";
   import { globalHooks } from "../core/events";
   import type { GridSpec } from "../canvas/grid";
+  import type { AssetId } from "../core/ids";
   import { TablesPanel } from "../ui/tables";
   import { PlaylistsPanel } from "../ui/playlists";
   import { AudioPlayer } from "../client/audioPlayer";
@@ -216,6 +241,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     AssetManifestEntry,
     CellFeature,
     CombatDocument,
+    JournalDocument,
     LightDocument,
     NoteDocument,
     SceneDocument,
@@ -317,7 +343,9 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     queueMicrotask(() => sessionTrigger?.focus());
   }
   let player = $state<AudioPlayer | null>(null);
-  const wm = new WindowManager({ width: 900, height: 700 });
+  // 56 px: the canvas tool rail. Windows open and drag to its right, never under it (the rail's
+  // icons and a window's title would otherwise fight for the same pixels).
+  const wm = new WindowManager({ width: 900, height: 700, leftInset: 56 });
   (globalThis as unknown as { __wm?: WindowManager }).__wm = wm;
   /** Bumped on every store ops/snapshot so non-panel reads re-render. */
   let storeVersion = $state(0);
@@ -325,6 +353,8 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   const TABS: Array<{ id: string; label: string }> = [
     { id: "chat", label: "Chat" },
     { id: "combat", label: "Combat" },
+    { id: "scenes", label: "Scenes" },
+    { id: "images", label: "Images" },
     { id: "journals", label: "Journals" },
     { id: "tables", label: "Tables" },
     { id: "playlists", label: "Playlists" },
@@ -332,6 +362,113 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     { id: "compendia", label: "Compendia" },
   ];
   let canvasError = $state<string | null>(null);
+  let imagePreferences = $state<ImageHandlingPreferences>(imageHandlingPreferencesOf(DEFAULT_IMAGE_HANDLING_PREFERENCES));
+  let imageDialogSources = $state<ImageSource[]>([]);
+  let imageDialogOpen = $state(false);
+  let sharedImageAnnouncement = $state<{ assetId: string; name: string; senderName: string } | null>(null);
+  let imageDialogOrigin = $state<"file" | "paste" | "url">("file");
+  let imageDialogAction = $state<ImageAction | null>(null);
+  let imageDragActive = $state(false);
+  let imageDragDepth = 0;
+
+  const imageSceneDefaults = $derived.by(() => {
+    void storeVersion;
+    const current = app;
+    return sceneExpressDefaultsOf(current ? worldSettingsFrom(current.gm.client.store.getAll("settings")).sceneExpressDefaults : null);
+  });
+  const restrictedPlayerImageMode = $derived.by(() => {
+    void storeVersion;
+    const current = app;
+    return current ? worldSettingsFrom(current.gm.client.store.getAll("settings")).restrictedPlayerImageMode === true : false;
+  });
+  const imageCanWriteDocuments = $derived(["GM", "ASSISTANT"].includes(app?.gm.client.user?.role ?? ""));
+  const imageCanUpload = $derived(imageCanWriteDocuments || (app?.gm.client.user?.role === "TRUSTED" && !restrictedPlayerImageMode));
+  const imageCanShare = $derived(imageCanUpload);
+
+  function saveImagePreferences(next: ImageHandlingPreferences): void {
+    const current = app;
+    if (!current) return;
+    imagePreferences = saveImageHandlingPreferences(current.meta.worldId, current.gm.client.user?.id ?? GM_USER_ID, next);
+  }
+
+  function chooseImageAction(requested: ImageAction | null): ImageAction {
+    if (!imageCanWriteDocuments) return requested === "showPlayers" && imageCanShare ? "showPlayers" : "preview";
+    return requested ?? imagePreferences.lastUsedAction ?? imagePreferences.defaultAction;
+  }
+
+  function openImageImport(sources: ImageSource[], requested: ImageAction | null = null, origin: "file" | "paste" | "url" = "file"): void {
+    if (!app || imageDialogOpen || sources.length === 0) return;
+    imageDialogSources = sources;
+    imageDialogOrigin = origin;
+    // A video can only be a scene background, so the dialog opens on that action whatever was asked for.
+    const hasVideo = sources.some((item) => item.kind === "file" && isVideoFile(item.file));
+    const forced = hasVideo && (requested === null || !VIDEO_SOURCE_ACTIONS.includes(requested)) ? "replaceBackground" : requested;
+    imageDialogAction = chooseImageAction(forced);
+    imageDialogOpen = true;
+  }
+
+  function closeImageImport(): void {
+    imageDialogOpen = false;
+    imageDialogSources = [];
+    imageDialogAction = null;
+  }
+
+  function isInternalAppDrag(transfer: DataTransfer | null): boolean {
+    const types = Array.from(transfer?.types ?? []);
+    return types.includes("application/x-vtt-compendium") || types.includes("application/x-vtt-encounter");
+  }
+
+  function hasImageDragData(transfer: DataTransfer | null): boolean {
+    if (!transfer || isInternalAppDrag(transfer)) return false;
+    const types = Array.from(transfer.types ?? []);
+    return types.includes("Files") || types.includes("text/uri-list") || types.includes("text/html") || types.includes("text/plain");
+  }
+
+  function onWindowDragEnter(event: DragEvent): void {
+    if (!hasImageDragData(event.dataTransfer)) return;
+    imageDragDepth++;
+    if (imagePreferences.dropEnabled) imageDragActive = true;
+  }
+
+  function onWindowDragLeave(event: DragEvent): void {
+    if (!hasImageDragData(event.dataTransfer)) return;
+    imageDragDepth = Math.max(0, imageDragDepth - 1);
+    if (imageDragDepth === 0) imageDragActive = false;
+  }
+
+  function onWindowDragOver(event: DragEvent): void {
+    if (hasImageDragData(event.dataTransfer)) event.preventDefault();
+  }
+
+  function onWindowDrop(event: DragEvent): void {
+    if (isInternalAppDrag(event.dataTransfer)) return;
+    const sources = imageSourcesFromTransfer(event.dataTransfer);
+    if (!sources.length) return;
+    event.preventDefault();
+    imageDragActive = false;
+    imageDragDepth = 0;
+    if (!imagePreferences.dropEnabled) {
+      notifyLog = [...notifyLog.slice(-49), { message: "Image drop is disabled in your image preferences.", level: "warn" }];
+      return;
+    }
+    const droppedOnCanvas = !!canvasHost && event.target instanceof Node && canvasHost.contains(event.target);
+    const action = droppedOnCanvas ? "tileNatural" : null;
+    const origin = sources.some((source) => source.kind === "url") && !sources.some((source) => source.kind === "file") ? "url" : "file";
+    openImageImport(sources, action, origin);
+  }
+
+  function onWindowPaste(event: ClipboardEvent): void {
+    if (isTypingTarget(event.target) || imageDialogOpen) return;
+    const sources = imageSourcesFromClipboard(event.clipboardData);
+    if (!sources.length) return;
+    event.preventDefault();
+    if (!imagePreferences.pasteEnabled) {
+      notifyLog = [...notifyLog.slice(-49), { message: "Image paste is disabled in your image preferences.", level: "warn" }];
+      return;
+    }
+    const origin = sources.some((source) => source.kind === "url") && !sources.some((source) => source.kind === "file") ? "url" : "paste";
+    openImageImport(sources, null, origin);
+  }
   /**
    * §3.2 the agent desk. Null until a host app exists (and for a joined player, who has no host to
    * mint agent users on — agents are a GM surface). The Settings window shows the section only
@@ -617,12 +754,11 @@ const WALL_PICK_RADIUS = 12;
         toolController?.recall();
         break;
       case "escape":
-        // D-275: in path mode the route being drawn *is* the pending gesture (plan §5.7's
-        // "Esc clears"), so the key gives it up and leaves the tool armed for the next click
-        // — falling through to `select` here would disarm the tool *before* the canvas key
-        // layer could see `canvasTool === "path"` and clear the draft it owns.
+        // Path mode: Esc gives up the route being drawn and leaves path mode in the same press
+        // (back to Select, like every other tool). Handled here so the rail's key layer and the
+        // canvas key layer both see one consistent answer.
         if (canvasTool === "path") {
-          clearPathDraft();
+          leavePathMode();
           break;
         }
         if (!toolController || toolController.current() === null) canvasTool = "select";
@@ -1566,6 +1702,12 @@ const WALL_PICK_RADIUS = 12;
     pathDraft = { sceneId: activeScene()?._id ?? "", keys: [] };
   }
 
+  /** Esc in path mode: drop the draft and return to Select. Idempotent, so both key layers may call it. */
+  function leavePathMode(): void {
+    clearPathDraft();
+    if (canvasTool === "path") canvasTool = "select";
+  }
+
   /** Commit the drawn route: one profile write, cursor at the party's own cell. */
   function commitTravelRoute(): void {
     const current = app;
@@ -1584,7 +1726,9 @@ const WALL_PICK_RADIUS = 12;
       pace: travelPace,
     };
     current.gm.client.submit(travelProgressOps(scene, plan));
-    clearPathDraft();
+    // A committed route ends the gesture, like Esc does: back to Select, so the next Path click
+    // starts a new route instead of toggling the tool off.
+    leavePathMode();
     pushLog(
       [
         hexTravel.committed(
@@ -2520,6 +2664,145 @@ const WALL_PICK_RADIUS = 12;
   }
 
   /** §9 full grid spec for the stage + snapping (square/hex/gridless). */
+  // ── Map & background (GM, Map & background layer) ──────────────────────────
+  // The background is a separately editable object: it only answers pointers and keys while the
+  // Map & background layer is active, so tokens are never moved by accident from there.
+  let backgroundNatural = $state<NaturalSize | null>(null);
+  let backgroundSnap = $state<BackgroundSnap>("off");
+  let backgroundKeepAspect = $state(true);
+  let backgroundDetection = $state<BackgroundDetectionView>({ status: "idle" });
+  /** The transform being dragged, typed or nudged; the panel reads it until the scene echoes back. */
+  let backgroundPreview = $state<BackgroundTransform | null>(null);
+  let backgroundPanelOpen = $state(true);
+  /** Arrow-key nudges are batched: one undo step per pause, not one per key repeat. */
+  let backgroundNudge: { transform: BackgroundTransform; timer: ReturnType<typeof setTimeout> } | null = null;
+
+  /** The panel's view of the active scene. Re-derived on every store change (`storeVersion`). */
+  const backgroundPanelScene = $derived.by((): SceneDocument | null => {
+    void storeVersion;
+    return canvasLayer === "map" ? activeScene() : null;
+  });
+
+  function backgroundEditable(scene: SceneDocument | null = activeScene()): boolean {
+    return !!scene && !viewingAs && canvasLayer === "map" && scene.background?.locked !== true;
+  }
+  function backgroundGridSize(scene: SceneDocument | null): number | null {
+    return scene && scene.grid.type === "square" && scene.grid.size > 0 ? scene.grid.size : null;
+  }
+  function backgroundMapGrid(scene: SceneDocument | null): MapGridEstimate | null {
+    const measured = scene?.background?.mapGrid;
+    if (!scene || !measured || measured.image !== scene.img) return null;
+    return { sizeX: measured.sizeX, sizeY: measured.sizeY, offsetX: measured.offsetX, offsetY: measured.offsetY };
+  }
+  function backgroundCurrent(scene: SceneDocument | null): BackgroundTransform {
+    return backgroundNudge?.transform ?? backgroundTransformOf(scene?.background);
+  }
+  /** Push the editor frame (or hide it) to the stage. Called from scene refresh and mode changes. */
+  function syncBackgroundEditor(): void {
+    const scene = activeScene();
+    if (!stage || !backgroundNatural || !backgroundEditable(scene)) {
+      stage?.setBackgroundEditor(null);
+      return;
+    }
+    stage.setBackgroundEditor({ natural: backgroundNatural, transform: backgroundCurrent(scene) });
+  }
+  function flushBackgroundNudge(): void {
+    if (!backgroundNudge) return;
+    clearTimeout(backgroundNudge.timer);
+    const pending = backgroundNudge.transform;
+    backgroundNudge = null;
+    writeBackground({ ...backgroundWriteFields(pending) });
+  }
+  /** One scene update per call: the whole background object, so stored fields stay consistent. */
+  function writeBackground(patch: Record<string, unknown>, extra: Record<string, unknown> = {}): void {
+    const scene = activeScene();
+    if (!scene || !app) return;
+    app.gm.client.submit([
+      {
+        kind: "update",
+        ref: { coll: "scenes", id: scene._id },
+        diff: { background: { ...(scene.background ?? {}), ...patch }, ...extra },
+      },
+    ]);
+  }
+  function commitBackground(next: BackgroundTransform, extra: Record<string, unknown> = {}): void {
+    flushBackgroundNudge();
+    backgroundPreview = next;
+    writeBackground(backgroundWriteFields(next), extra);
+  }
+  function patchBackground(patch: Record<string, unknown>): void {
+    flushBackgroundNudge();
+    writeBackground(patch);
+  }
+  function nudgeBackground(dx: number, dy: number): void {
+    const scene = activeScene();
+    if (!backgroundEditable(scene) || !backgroundNatural) return;
+    const next = moveBackground(backgroundCurrent(scene), dx, dy);
+    if (backgroundNudge) clearTimeout(backgroundNudge.timer);
+    const timer = setTimeout(flushBackgroundNudge, 350);
+    backgroundNudge = { transform: next, timer };
+    backgroundPreview = next;
+    stage?.setBackgroundEditor({ natural: backgroundNatural, transform: next });
+  }
+  // Entering the Map & background layer shows its panel; leaving it hides the frame at once.
+  $effect(() => {
+    if (canvasLayer === "map") backgroundPanelOpen = true;
+    void backgroundNatural;
+    void canvasLayer;
+    syncBackgroundEditor();
+  });
+
+  function placeBackgroundMode(mode: "fit" | "cover" | "native" | "center"): void {
+    const scene = activeScene();
+    if (!scene || !backgroundNatural) return;
+    commitBackground(
+      placeBackgroundInScene(
+        backgroundNatural,
+        { width: scene.width, height: scene.height },
+        mode,
+        backgroundTransformOf(scene.background),
+      ),
+    );
+  }
+  async function detectBackgroundGrid(): Promise<void> {
+    const scene = activeScene();
+    if (!scene?.img || !app) return;
+    backgroundDetection = { status: "running" };
+    try {
+      const bytes = await app.gm.fetcher.request(scene.img, "scene");
+      const mime = app.gm.client.store.world.assetManifest[scene.img]?.mime ?? "image/png";
+      const result = await detectMapGridFromBytes(bytes, mime);
+      if (!result.found) {
+        backgroundDetection = {
+          status: "none",
+          message: `No square grid found (confidence ${Math.round(result.confidence * 100)}%). Align by hand with the frame or the fields.`,
+        };
+        return;
+      }
+      patchBackground({ mapGrid: { image: scene.img, ...result.grid } });
+      backgroundDetection = { status: "found", confidence: result.confidence };
+    } catch (error) {
+      backgroundDetection = {
+        status: "error",
+        message: error instanceof Error ? error.message : "Grid detection failed.",
+      };
+    }
+  }
+  function alignMapToGrid(): void {
+    const scene = activeScene();
+    const grid = backgroundGridSize(scene);
+    const measured = backgroundMapGrid(scene);
+    if (!scene || !grid || !measured) return;
+    commitBackground(matchMapToGrid(backgroundTransformOf(scene.background), measured, grid));
+  }
+  function useSquaresAsGrid(): void {
+    const scene = activeScene();
+    const measured = backgroundMapGrid(scene);
+    if (!scene || !measured || scene.grid.type !== "square") return;
+    const { gridSize, transform } = mapSquaresAsGrid(backgroundTransformOf(scene.background), measured);
+    commitBackground(transform, { grid: { ...scene.grid, size: gridSize } });
+  }
+
   function sceneGridSpec(grid: SceneGrid | undefined): GridSpec | null {
     if (!grid || grid.size <= 0) return null;
     if (grid.type === "square") return { type: "square", size: grid.size };
@@ -2718,6 +3001,7 @@ const WALL_PICK_RADIUS = 12;
 
   function refresh(): void {
     storeVersion++;
+    backgroundPreview = null;
     const current = app;
     const view = stage;
     if (!current || !view) return;
@@ -2745,6 +3029,7 @@ const WALL_PICK_RADIUS = 12;
     const tokens = scene?.tokens ?? [];
     // E06 (D-147): condition/effect chips derive on read from the client replica, so apply,
     // suppress and expiry all re-render the badges with no invalidation step.
+    view.setTokenImageLoader(tileImages.load);
     view.syncTokens(
       tokens,
       tokenBadgesMap(tokens, {
@@ -2804,10 +3089,11 @@ const WALL_PICK_RADIUS = 12;
     view
       .getTilesLayer({ loadTexture: tileImages.load })
       .sync(scene?.tiles ?? [], occupied, scene?.regions ?? []);
-    tileImages.retain((scene?.tiles ?? []).map((tile) => tile.img));
+    tileImages.retain([...(scene?.tiles ?? []).map((tile) => tile.img), ...(scene?.tokens ?? []).map((token) => token.img)]);
     sceneBackground.sync(scene?.img ?? null, current.gm.client.store.world.assetManifest,
-      (hash, priority) => current.gm.fetcher.request(hash, priority), view);
+      (hash, priority) => current.gm.fetcher.request(hash, priority), view, scene);
     view.setGrid(sceneGridSpec(scene?.grid));
+    syncBackgroundEditor();
   }
 
   async function beginShare(): Promise<void> {
@@ -2893,25 +3179,55 @@ const WALL_PICK_RADIUS = 12;
     }
   }
 
-  /**
-   * D-270: the file goes into the world's assets and comes back as a hash — one helper, because
-   * both the sidebar's **Import map** and the hexcrawl wizard's map step need exactly this.
-   */
-  async function importMapFile(
-    file: File,
-  ): Promise<{ hash: string; width?: number; height?: number }> {
+  /** Hexcrawl map pickers need an immediate asset reference; they still use the same host upload gate. */
+  async function importMapFile(file: File): Promise<{ hash: string; width?: number; height?: number }> {
     const current = app;
     if (!current) throw new Error("the world is not open");
+    assertImageByteLength(file.size);
     const bytes = new Uint8Array(await file.arrayBuffer());
-    const { hash, entry } = await current.pipeline.importImage(
-      bytes,
-      file.name,
-      file.type || "image/png",
-    );
+    sniffImage(bytes);
+    const uploaded = await current.gm.client.uploadImageAsset(bytes, {
+      name: file.name,
+      displayName: normalizeImageName(file.name),
+      folder: imagePreferences.defaultUploadFolder,
+      sourceKind: "file",
+      collisionBehavior: "stop",
+      convertToWebp: imagePreferences.webpConvert,
+      webpQuality: imagePreferences.webpQuality,
+    });
     return {
-      hash,
-      ...(entry.width !== undefined ? { width: entry.width } : {}),
-      ...(entry.height !== undefined ? { height: entry.height } : {}),
+      hash: uploaded.hash,
+      ...(uploaded.width !== undefined ? { width: uploaded.width } : {}),
+      ...(uploaded.height !== undefined ? { height: uploaded.height } : {}),
+    };
+  }
+
+  /**
+   * The hexcrawl wizard's map step: the same upload a New scene from an image makes (design §5.2) —
+   * the scenes folder, the duplicate policy and the WebP settings of the image system — and the
+   * thumbnail, so the scene's tab and rail have a picture from the first frame.
+   */
+  async function importSceneMapFile(file: File): Promise<{ hash: string; width?: number; height?: number; thumbnail?: string | null }> {
+    const current = app;
+    if (!current) throw new Error("the world is not open");
+    assertImageByteLength(file.size);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    sniffImage(bytes);
+    const defaults = imageSceneDefaults;
+    const uploaded = await current.gm.client.uploadImageAsset(bytes, {
+      name: file.name,
+      displayName: normalizeImageName(file.name),
+      folder: normalizeLogicalFolder(defaults.destinationLogicalFolder),
+      sourceKind: "file",
+      collisionBehavior: defaults.duplicateFileBehavior === "ask" ? "stop" : defaults.duplicateFileBehavior,
+      convertToWebp: imagePreferences.webpConvert,
+      webpQuality: imagePreferences.webpQuality,
+    });
+    return {
+      hash: uploaded.hash,
+      ...(uploaded.width !== undefined ? { width: uploaded.width } : {}),
+      ...(uploaded.height !== undefined ? { height: uploaded.height } : {}),
+      thumbnail: uploaded.thumbnail ?? null,
     };
   }
 
@@ -2922,6 +3238,36 @@ const WALL_PICK_RADIUS = 12;
     if (!/^(image\/(png|jpeg|webp|gif|avif)|video\/(webm|mp4)|audio\/(mpeg|mp3|wav|ogg|webm|mp4|aac))$/.test(file.type))
       throw new Error(`Unsupported FX media type: ${file.type || "unknown"}`);
     const bytes = new Uint8Array(await file.arrayBuffer());
+    if (file.type.startsWith("image/")) {
+      assertImageByteLength(bytes.byteLength);
+      const image = sniffImage(bytes);
+      const hash = await sha256Hex(bytes) as AssetId;
+      const visibility = permissions.shareWithPlayers ? "referenced" : "gm";
+      const exportRights = permissions.includeInWorldFile ? "granted" : "restricted";
+      const existing = await current.assets.meta(hash);
+      if (existing && (existing.visibility !== visibility || existing.exportRights !== exportRights))
+        throw new Error("Media already exists with different sharing/export permissions; existing rights were not changed");
+      const uploaded = await current.gm.client.uploadImageAsset(bytes, {
+        name: file.name,
+        displayName: file.name.slice(0, 160) || "Image",
+        folder: "FX",
+        sourceKind: "file",
+        collisionBehavior: "overwrite",
+        convertToWebp: false,
+        webpQuality: 0.8,
+      });
+      if (uploaded.hash !== hash) throw new Error("The FX image did not retain its content hash during upload.");
+      if (uploaded.auditWarning)
+        notifyLog = [...notifyLog.slice(-49), { message: uploaded.auditWarning, level: "warn" }];
+      const entry = await current.assets.describe(hash, { visibility, exportRights });
+      // The thumbnail, mid-res copy and tiles are separate assets. A GM-only image must not leave
+      // them player-visible, so they take the primary's audience (narrowing only; never widened).
+      if (visibility === "gm") {
+        const derived = new Set([entry.thumb?.assetId, entry.mid?.assetId, ...(entry.tiles?.ids ?? [])]);
+        for (const id of derived) if (id) await current.assets.describe(id, { visibility: "gm" });
+      }
+      return { hash, mime: image.mime, name: entry.name };
+    }
     const { hash, entry } = await current.assets.import(bytes, file.name, file.type,
       permissions.shareWithPlayers ? "referenced" : "gm",
       permissions.includeInWorldFile ? "granted" : "restricted");
@@ -2941,23 +3287,10 @@ const WALL_PICK_RADIUS = 12;
    * hardcode `DEFAULT_SCENE_ID`, which meant a hexcrawl map uploaded while standing on a new
    * scene landed on scene 1 — 1,000 px away and invisible.
    */
-  async function importMap(ev: Event): Promise<void> {
+  function importMap(ev: Event): void {
     const input = ev.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
-    if (!app || !file) return;
-    const target = activeScene()?._id ?? DEFAULT_SCENE_ID;
-    const imported = await importMapFile(file);
-    app.gm.client.submit([
-      {
-        kind: "update",
-        ref: { coll: "scenes", id: target },
-        diff: {
-          img: imported.hash,
-          ...(imported.width !== undefined ? { width: imported.width } : {}),
-          ...(imported.height !== undefined ? { height: imported.height } : {}),
-        },
-      },
-    ]);
+    if (app && file) openImageImport([{ kind: "file", file, name: file.name || "Image" }], "replaceBackground", "file");
     input.value = "";
   }
 
@@ -3076,6 +3409,7 @@ const WALL_PICK_RADIUS = 12;
   onMount(() => {
     const current = app;
     if (!current) return;
+    imagePreferences = loadImageHandlingPreferences(current.meta.worldId, current.gm.client.user?.id ?? GM_USER_ID);
     // §3.2 the agent desk, built here rather than in `$props` init: it needs the live HostSync to
     // mint agent users on, and it is torn down with the app (onDestroy above).
     agents = createAgentManager({
@@ -3135,6 +3469,22 @@ const WALL_PICK_RADIUS = 12;
       }
     };
     globalThis.addEventListener("keydown", onKey);
+    // Arrow nudges move the background only while its layer is active; Shift = 10 px, Ctrl/⌘ = one grid square.
+    const onBackgroundKey = (e: KeyboardEvent): void => {
+      if (isTypingTarget(e.target) || !backgroundEditable()) return;
+      const steps: Record<string, [number, number]> = {
+        ArrowLeft: [-1, 0],
+        ArrowRight: [1, 0],
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1],
+      };
+      const step = steps[e.key];
+      if (!step) return;
+      e.preventDefault();
+      const unit = e.ctrlKey || e.metaKey ? (backgroundGridSize(activeScene()) ?? 1) : e.shiftKey ? 10 : 1;
+      nudgeBackground(step[0] * unit, step[1] * unit);
+    };
+    globalThis.addEventListener("keydown", onBackgroundKey);
     onDestroy(() => {
       settleSummonPick(null);
       settleSpellAim({ ok: false, error: "The session closed before aiming completed; no slot was spent." });
@@ -3153,6 +3503,7 @@ const WALL_PICK_RADIUS = 12;
       offRejected();
       offWm();
       globalThis.removeEventListener("keydown", onKey);
+      globalThis.removeEventListener("keydown", onBackgroundKey);
       toolCleanup?.();
     });
     void (async () => {
@@ -3168,6 +3519,10 @@ const WALL_PICK_RADIUS = 12;
           hostElement,
         });
         stage = view;
+        view.onBackgroundNaturalSize((size) => {
+          backgroundNatural = size;
+          syncBackgroundEditor();
+        });
         fxPlayer = new FxPlayer({
           client: current.gm.client, bus: current.gm.bus, stage: view,
           // Live FX are imminent current-scene work; do not leave their lead window behind
@@ -3281,10 +3636,9 @@ const WALL_PICK_RADIUS = 12;
         };
         const onToolKey = (e: KeyboardEvent) => {
           if (e.key !== "Escape" || isTypingTarget(e.target)) return;
-          // D-275: Esc gives up the route being drawn (plan §5.7) — the same key that finishes a
-          // polygon gives up a path, and both leave the map as it was.
+          // D-275: Esc gives up the route being drawn (plan §5.7). Path mode also ends here.
           if (canvasTool === "path") {
-            clearPathDraft();
+            leavePathMode();
             return;
           }
           if (!GESTURE_TOOLS.has(canvasTool)) return;
@@ -3817,6 +4171,21 @@ const WALL_PICK_RADIUS = 12;
             canvasTool === "select" ? "select" : canvasTool === "pan" ? "pan" : "suppress",
           // D-256: only the Objects & Tokens layer answers a token pointer (Roll20's layers).
           tokenLayerActive: () => canvasLayer === "tokens",
+          backgroundEdit: {
+            active: () => backgroundEditable(),
+            state: () => {
+              const scene = activeScene();
+              return backgroundNatural && scene
+                ? { natural: backgroundNatural, transform: backgroundCurrent(scene) }
+                : null;
+            },
+            snap: () => backgroundSnap,
+            gridSize: () => backgroundGridSize(activeScene()),
+            mapGrid: () => backgroundMapGrid(activeScene()),
+            keepAspect: () => backgroundKeepAspect,
+            onCommit: (next) => commitBackground(next),
+            onPreview: (next) => (backgroundPreview = next),
+          },
           canMove: () => true, // GM (players get the ownership gate, §5/§10)
           onPing: (world) => {
             const at = { x: Math.round(world.x), y: Math.round(world.y) };
@@ -3877,6 +4246,19 @@ const WALL_PICK_RADIUS = 12;
           }
         });
         current.gm.bus.on("ephemeral", (m) => {
+          if (m.t === "image") {
+            const assetId = m.data.assetId;
+            if (typeof assetId === "string" && /^[a-f0-9]{64}$/i.test(assetId) &&
+                m.from !== current.gm.client.user?.id) {
+              const sender = current.gm.client.store.get("users", m.from);
+              sharedImageAnnouncement = {
+                assetId,
+                name: typeof m.data.name === "string" ? m.data.name.slice(0, 160) : "Shared image",
+                senderName: sender?.name ?? "A table participant",
+              };
+            }
+            return;
+          }
           if (m.t === "ping") {
             const x = Number(m.data.x);
             const y = Number(m.data.y);
@@ -4441,6 +4823,8 @@ const WALL_PICK_RADIUS = 12;
   });
 </script>
 
+<svelte:window ondragenter={onWindowDragEnter} ondragleave={onWindowDragLeave} ondragover={onWindowDragOver} ondrop={onWindowDrop} onpaste={onWindowPaste} />
+
 <main class="vtt-ui gm-app">
   <header class="app-header">
     <div class="brand-badge" aria-hidden="true">✦</div>
@@ -4456,7 +4840,7 @@ const WALL_PICK_RADIUS = 12;
     <div class="header-actions" aria-label="Game master actions">
       <label class="header-icon file-control" title="Import map" aria-label="Import map">
         <Icon name="mapImport" /><span class="sr-only">Import map</span>
-        <input id="map-input" type="file" accept="image/*" onchange={importMap} hidden />
+        <input id="map-input" type="file" accept="image/*,video/webm,video/mp4" onchange={importMap} hidden />
       </label>
       <button data-icon-button id="add-token" class="header-icon" aria-label="Add token" title="Add token" onclick={addToken}><Icon name="addToken" /></button>
       <span class="header-separator" aria-hidden="true"></span>
@@ -4818,7 +5202,62 @@ const WALL_PICK_RADIUS = 12;
               pick={(placement) => settleAnchorPick(placement)} cancel={() => settleAnchorPick(null)} />
           {/if}
         {/if}
+          {#if backgroundPanelScene && backgroundNatural && !viewingAs && backgroundPanelOpen && backgroundPanelScene.img}
+            {@const bgScene = backgroundPanelScene}
+            <BackgroundPanel
+              natural={backgroundNatural}
+              transform={backgroundPreview ?? backgroundTransformOf(bgScene.background)}
+              gridSize={backgroundGridSize(bgScene)}
+              locked={bgScene.background?.locked === true}
+              keepAspect={backgroundKeepAspect}
+              snap={backgroundSnap}
+              mapGrid={backgroundMapGrid(bgScene)}
+              detection={backgroundDetection}
+              onTransform={(next) => commitBackground(next)}
+              onPlace={placeBackgroundMode}
+              onSnap={(next) => (backgroundSnap = next)}
+              onKeepAspect={(next) => (backgroundKeepAspect = next)}
+              onLock={(next) => patchBackground({ locked: next })}
+              onDetect={() => void detectBackgroundGrid()}
+              onAlignToGrid={alignMapToGrid}
+              onUseSquaresAsGrid={useSquaresAsGrid}
+              onForgetMapGrid={() => patchBackground({ mapGrid: null })}
+              onClose={() => (backgroundPanelOpen = false)}
+            />
+          {/if}
           </div>
+        <WindowHost
+          manager={wm}
+          windows={wmWindows}
+          client={app.gm.client}
+          bus={app.gm.bus}
+          sceneId={activeScene()?._id ?? null}
+          selectedTokenId={singleSelectedTokenId()}
+          {selectedItemRef}
+          importImage={importMapFile}
+          importSceneImage={importSceneMapFile}
+          sceneDefaults={imageSceneDefaults}
+          onFxImport={importFxFile}
+          onPickSummon={requestSummonPick}
+          onPickAnchor={requestAnchorPick}
+          onPreviewFx={previewFxSequence}
+          onStopFxPreview={stopFxPreview}
+          listFxAssets={() => Promise.resolve(app?.assets.manifest() ?? {})}
+          {setFxAssetRights}
+          getFxAsset={(hash) => app?.assets.get(hash) ?? Promise.resolve(undefined)}
+          onUndo={undo}
+          onRedo={redo}
+          packages={app.packages}
+          rulesBoot={app.rulesBoot}
+          {agents}
+          bindings={DEFAULT_BINDINGS}
+          isGM={true}
+          onHexRollTable={rollHexTable}
+          onHexOpenScene={activateScene}
+          onEncounterPlaceAll={(resultId) => void placeEncounterAt({ resultId })}
+          onEncounterBattleScene={(resultId) => void createBattleScene({ resultId })}
+          {resolveAsset}
+        />
         </div>
           {#if hexMenu}
             <!--
@@ -4857,36 +5296,6 @@ const WALL_PICK_RADIUS = 12;
               {/each}
             </div>
           {/if}
-        <WindowHost
-          manager={wm}
-          windows={wmWindows}
-          client={app.gm.client}
-          bus={app.gm.bus}
-          sceneId={activeScene()?._id ?? null}
-          selectedTokenId={singleSelectedTokenId()}
-          {selectedItemRef}
-          importImage={importMapFile}
-          onFxImport={importFxFile}
-          onPickSummon={requestSummonPick}
-          onPickAnchor={requestAnchorPick}
-          onPreviewFx={previewFxSequence}
-          onStopFxPreview={stopFxPreview}
-          listFxAssets={() => Promise.resolve(app?.assets.manifest() ?? {})}
-          {setFxAssetRights}
-          getFxAsset={(hash) => app?.assets.get(hash) ?? Promise.resolve(undefined)}
-          onUndo={undo}
-          onRedo={redo}
-          packages={app.packages}
-          rulesBoot={app.rulesBoot}
-          {agents}
-          bindings={DEFAULT_BINDINGS}
-          isGM={true}
-          onHexRollTable={rollHexTable}
-          onHexOpenScene={activateScene}
-          onEncounterPlaceAll={(resultId) => void placeEncounterAt({ resultId })}
-          onEncounterBattleScene={(resultId) => void createBattleScene({ resultId })}
-          {resolveAsset}
-        />
         {#if pendingReaction}
           <!--
             D-187: the held move's queue. Nothing has moved yet — each row is the seam's
@@ -4977,6 +5386,23 @@ const WALL_PICK_RADIUS = 12;
               bus={app.gm.bus}
               selection={tokenSelection}
               onClearSelection={clearTokenSelection}
+            />
+          {:else if activeTab === "scenes"}
+            <ScenesImagesPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              {resolveAsset}
+              onActivate={activateScene}
+              onRequestImages={(sources, action) => openImageImport(sources, action, "file")}
+            />
+          {:else if activeTab === "images"}
+            <ImageHandlingPanel
+              client={app.gm.client}
+              bus={app.gm.bus}
+              preferences={imagePreferences}
+              onPreferencesChange={saveImagePreferences}
+              onRequestImages={(sources, action, origin) => openImageImport(sources, action ?? null, origin ?? "file")}
+              fetchAsset={(hash) => app.gm.fetcher.request(hash, "scene")}
             />
           {:else if activeTab === "journals"}
             <JournalsPanel
@@ -5144,7 +5570,41 @@ const WALL_PICK_RADIUS = 12;
     {/if}
   {/if}
 </main>
+{#if imageDragActive}
+  <div class="image-drop-hint" aria-live="polite">Drop image files or a browser-readable HTTPS image link to preview and import</div>
+{/if}
+{#if imageDialogOpen && app}
+  <ImageImportDialog
+    sources={imageDialogSources}
+    sourceOrigin={imageDialogOrigin}
+    initialAction={imageDialogAction}
+    client={app.gm.client}
+    scene={activeScene()}
+    {scenes}
+    journals={app.gm.client.store.getAll("journals") as readonly JournalDocument[]}
+    selectedTokenIds={tokenSelection.sceneId === activeScene()?._id ? tokenSelection.ids : []}
+    manifest={app.gm.client.store.world.assetManifest}
+    preferences={imagePreferences}
+    sceneDefaults={imageSceneDefaults}
+    restrictedPlayerMode={restrictedPlayerImageMode}
+    canUpload={imageCanUpload}
+    canWriteDocuments={imageCanWriteDocuments}
+    canShare={imageCanShare}
+    onActivateScene={activateScene}
+    onPreferencesChange={saveImagePreferences}
+    onWarning={(message) => { notifyLog = [...notifyLog.slice(-49), { message, level: "warn" }]; }}
+    onClose={closeImageImport}
+  />
+{/if}
+{#if sharedImageAnnouncement}
+  <SharedImageNotice
+    announcement={sharedImageAnnouncement}
+    resolveAsset={(assetId) => resolveAsset(assetId)}
+    onDismiss={() => (sharedImageAnnouncement = null)}
+  />
+{/if}
 <style>
+  .image-drop-hint { position:fixed; inset:18px; z-index:4999; display:grid; place-items:center; border:3px dashed #78dccc; border-radius:18px; background:#10201edb; color:#e5fff9; font-size:clamp(18px,3vw,30px); font-weight:700; text-align:center; pointer-events:none; box-shadow:inset 0 0 0 1px #ffffff22; }
   .dice3d-host {
     position: absolute;
     inset: 0;
@@ -5190,12 +5650,13 @@ const WALL_PICK_RADIUS = 12;
   }
   .notify-stack {
     position: fixed;
-    right: 16px;
+    /* Clear the chat dock: the stack sits over the table, never over the composer and Send. */
+    right: calc(var(--gm-dock-width) + 16px);
     bottom: 16px;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    width: min(420px, calc(100vw - 32px));
+    width: min(420px, calc(100vw - var(--gm-dock-width) - 48px));
     z-index: 60;
     pointer-events: none;
   }
