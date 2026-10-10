@@ -47,6 +47,8 @@ export interface StageLike {
   ): void;
   /** Background editor overlay/preview (Map & background layer); optional for simple stages. */
   setBackgroundEditor?(state: { natural: NaturalSize; transform: BackgroundTransform } | null): void;
+  /** Canvas cursor for background handles and the frame; "" restores the default. */
+  setCursor?(cursor: string): void;
 }
 
 export interface PointerEvt {
@@ -260,6 +262,8 @@ export interface BackgroundEditOptions {
   /** Aspect lock from the panel. Holding Shift inverts it for the gesture. */
   keepAspect: () => boolean;
   onCommit: (transform: BackgroundTransform) => void;
+  /** Live transform while a gesture is in progress, so readouts track the drag; null when it ends without a change. */
+  onPreview?: (transform: BackgroundTransform | null) => void;
 }
 
 type Mode = "idle" | "pan" | "marquee" | "drag" | "background";
@@ -268,6 +272,19 @@ type Mode = "idle" | "pan" | "marquee" | "drag" | "background";
 const BACKGROUND_HANDLE_PX = 9;
 
 const RULER_MAX_WAYPOINTS = 12;
+
+/** CSS cursor for each background handle; "move" is the frame body. */
+const BACKGROUND_CURSORS: Record<BackgroundHandle, string> = {
+  move: "move",
+  nw: "nwse-resize",
+  se: "nwse-resize",
+  ne: "nesw-resize",
+  sw: "nesw-resize",
+  n: "ns-resize",
+  s: "ns-resize",
+  e: "ew-resize",
+  w: "ew-resize",
+};
 
 export class CanvasController {
   private mode: Mode = "idle";
@@ -284,6 +301,7 @@ export class CanvasController {
   private bgStart: BackgroundTransform = { x: 0, y: 0, scaleX: 1, scaleY: 1 };
   private bgCurrent: BackgroundTransform = { x: 0, y: 0, scaleX: 1, scaleY: 1 };
   private bgNatural: NaturalSize = { width: 1, height: 1 };
+  private hoverCursor = "";
 
   private readonly onDown = (ev: PointerEvt): void => this.pointerDown(ev);
   private readonly onMove = (ev: PointerEvt): void => this.pointerMove(ev);
@@ -479,14 +497,38 @@ export class CanvasController {
         const world = screenToWorld(this.options.stage.camera, ev.x, ev.y);
         this.bgCurrent = this.backgroundTarget(bg, this.bgHandle, world, ev.shiftKey);
         this.options.stage.setBackgroundEditor?.({ natural: this.bgNatural, transform: this.bgCurrent });
+        bg.onPreview?.(this.bgCurrent);
         return;
       }
       case "idle":
+        this.updateBackgroundCursor(ev);
         return;
     }
   }
 
   /** Where a background gesture would leave the image now (snapped, aspect-locked as configured). */
+  /**
+   * Hover feedback over the Map & background frame: resize cursors on handles, a move cursor inside.
+   * Only changes are sent, so the cursor of other tools is left alone elsewhere.
+   */
+  private updateBackgroundCursor(ev: PointerEvt): void {
+    const bg = this.options.backgroundEdit;
+    const state = bg?.active() ? bg.state() : null;
+    const camera = this.options.stage.camera;
+    const handle = state
+      ? hitBackground(
+          state.natural,
+          state.transform,
+          screenToWorld(camera, ev.x, ev.y),
+          BACKGROUND_HANDLE_PX / (camera.scale || 1),
+        )
+      : null;
+    const cursor = handle ? BACKGROUND_CURSORS[handle] : "";
+    if (cursor === this.hoverCursor) return;
+    this.hoverCursor = cursor;
+    this.options.stage.setCursor?.(cursor);
+  }
+
   private backgroundTarget(
     bg: BackgroundEditOptions,
     handle: BackgroundHandle,
@@ -581,6 +623,7 @@ export class CanvasController {
           bg.onCommit(this.bgCurrent);
         } else {
           this.options.stage.setBackgroundEditor?.({ natural: this.bgNatural, transform: this.bgStart });
+          bg.onPreview?.(null);
         }
         return;
       }

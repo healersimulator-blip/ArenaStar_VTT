@@ -184,6 +184,8 @@ export interface Stage {
   setCamera(camera: Camera): void;
   /** Show the background editor frame/handles, or hide them (null). */
   setBackgroundEditor(state: BackgroundEditorState | null): void;
+  /** Canvas cursor for background handles; "" restores the default. */
+  setCursor(cursor: string): void;
   /** Reports the loaded background's natural pixel size (null when none is loaded). */
   onBackgroundNaturalSize(listener: ((size: NaturalSize | null) => void) | null): void;
   /**
@@ -452,13 +454,13 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     const zoom = state.camera.scale || 1;
     bgEditorGraphics
       .rect(r.left, r.top, r.width, r.height)
-      .stroke({ width: 2 / zoom, color: 0x4ea1ff, alpha: 0.95 });
+      .stroke({ width: 1.5 / zoom, color: 0x73d8c5, alpha: 0.95 });
     const handle = 10 / zoom;
     for (const p of Object.values(backgroundHandlePoints(natural, transform))) {
       bgEditorGraphics
         .rect(p.x - handle / 2, p.y - handle / 2, handle, handle)
         .fill(0xffffff)
-        .stroke({ width: 1 / zoom, color: 0x1a1d24 });
+        .stroke({ width: 1.25 / zoom, color: 0x0c141d });
     }
   };
   const placeBackground = (texture: Texture, stop: (() => void) | null): void => {
@@ -466,7 +468,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     bgVideoStop = stop;
     bgSprite = new Sprite(texture);
     applyBackgroundSprite();
-    backgroundLayer.addChildAt(bgSprite, 0);
+    // Above the colour fill, below the padding: the fill repaints on every presentation refresh and
+    // must never cover the image.
+    backgroundLayer.addChildAt(bgSprite, 1);
     bgFill.clear();
     naturalSizeListener?.({ width: texture.width, height: texture.height });
     drawBackgroundEditor();
@@ -853,6 +857,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       applyCamera();
       // Handle and line widths are in screen pixels, so the editor redraws at each zoom.
       if (bgEditor) drawBackgroundEditor();
+    },
+    setCursor(cursor: string): void {
+      app.canvas.style.cursor = cursor;
     },
     setBackgroundEditor(next: BackgroundEditorState | null): void {
       bgEditor = next ? { natural: { ...next.natural }, transform: { ...next.transform } } : null;

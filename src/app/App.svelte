@@ -2662,6 +2662,8 @@ const WALL_PICK_RADIUS = 12;
   let backgroundSnap = $state<BackgroundSnap>("off");
   let backgroundKeepAspect = $state(true);
   let backgroundDetection = $state<BackgroundDetectionView>({ status: "idle" });
+  /** The transform being dragged, typed or nudged; the panel reads it until the scene echoes back. */
+  let backgroundPreview = $state<BackgroundTransform | null>(null);
   let backgroundPanelOpen = $state(true);
   /** Arrow-key nudges are batched: one undo step per pause, not one per key repeat. */
   let backgroundNudge: { transform: BackgroundTransform; timer: ReturnType<typeof setTimeout> } | null = null;
@@ -2716,6 +2718,7 @@ const WALL_PICK_RADIUS = 12;
   }
   function commitBackground(next: BackgroundTransform, extra: Record<string, unknown> = {}): void {
     flushBackgroundNudge();
+    backgroundPreview = next;
     writeBackground(backgroundWriteFields(next), extra);
   }
   function patchBackground(patch: Record<string, unknown>): void {
@@ -2729,6 +2732,7 @@ const WALL_PICK_RADIUS = 12;
     if (backgroundNudge) clearTimeout(backgroundNudge.timer);
     const timer = setTimeout(flushBackgroundNudge, 350);
     backgroundNudge = { transform: next, timer };
+    backgroundPreview = next;
     stage?.setBackgroundEditor({ natural: backgroundNatural, transform: next });
   }
   // Entering the Map & background layer shows its panel; leaving it hides the frame at once.
@@ -2988,6 +2992,7 @@ const WALL_PICK_RADIUS = 12;
 
   function refresh(): void {
     storeVersion++;
+    backgroundPreview = null;
     const current = app;
     const view = stage;
     if (!current || !view) return;
@@ -4142,6 +4147,7 @@ const WALL_PICK_RADIUS = 12;
             mapGrid: () => backgroundMapGrid(activeScene()),
             keepAspect: () => backgroundKeepAspect,
             onCommit: (next) => commitBackground(next),
+            onPreview: (next) => (backgroundPreview = next),
           },
           canMove: () => true, // GM (players get the ownership gate, §5/§10)
           onPing: (world) => {
@@ -5163,7 +5169,7 @@ const WALL_PICK_RADIUS = 12;
             {@const bgScene = backgroundPanelScene}
             <BackgroundPanel
               natural={backgroundNatural}
-              transform={backgroundTransformOf(bgScene.background)}
+              transform={backgroundPreview ?? backgroundTransformOf(bgScene.background)}
               gridSize={backgroundGridSize(bgScene)}
               locked={bgScene.background?.locked === true}
               keepAspect={backgroundKeepAspect}

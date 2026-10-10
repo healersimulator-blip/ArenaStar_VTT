@@ -561,8 +561,13 @@ The frame and the panel appear only in that layer, and only once the image has d
   gesture is one undo step. The pointer is captured on press, so a release over the panel still ends the gesture.
 - **Keyboard:** arrow keys move 1 scene px, Shift moves 10 px, and Ctrl/⌘ moves one grid square. A burst of
   presses ends as one undo step after a short pause.
-- **Panel:** numeric X, Y, width, height and scale fields, an aspect lock, a snap mode (off, grid, or map grid),
-  and a background lock. The lock blocks handles, drags and fields until it is released.
+- **Panel:** two sections. *Placement* has X, Y, width, height and scale fields (one scale field while the
+  aspect lock is on, separate X and Y scales when it is off), the Fit / Cover / 1:1 / Centre presets, and the aspect
+  and background locks. *Grid alignment* shows one status card: find the grid, lined up, or off by how much. Its
+  actions are "Match map to grid" and "Use map squares as grid", each with a one-line explanation. A snap segmented
+  control (Off, Grid, Map lines) and a shortcut list complete the panel. The fields and status track the gesture
+  live, and the lock blocks handles, drags and fields until it is released. The frame uses the app's accent colour,
+  and hovering a handle shows its resize cursor.
 - **Stored data:** `scene.background` keeps `offset`, `scale`, and optional `scaleX`/`scaleY`, `locked`, and
   `mapGrid`. The scene width and height are not changed by alignment. Grid origin is 0,0, with lines at multiples
   of `grid.size`. Rotation is out of scope.
