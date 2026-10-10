@@ -174,7 +174,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   } from "../core/hexcrawl/placement";
   import { planDuplicateSceneOps } from "../core/sceneCopy";
   import { DEFAULT_IMAGE_HANDLING_PREFERENCES, imageHandlingPreferencesOf, loadImageHandlingPreferences, saveImageHandlingPreferences, sceneExpressDefaultsOf, type ImageAction, type ImageHandlingPreferences, VIDEO_SOURCE_ACTIONS } from "../core/imageHandling";
-  import { sniffImage, assertImageByteLength, normalizeImageName } from "../core/imageSizing";
+  import { sniffImage, assertImageByteLength, normalizeImageName, normalizeLogicalFolder } from "../core/imageSizing";
   import { sha256Hex } from "../host/assets";
   import { prototypeTokenTagsOf } from "../core/tags";
   import { logEncounterOps } from "../core/hexcrawl/encounter";
@@ -752,12 +752,11 @@ const WALL_PICK_RADIUS = 12;
         toolController?.recall();
         break;
       case "escape":
-        // D-275: in path mode the route being drawn *is* the pending gesture (plan §5.7's
-        // "Esc clears"), so the key gives it up and leaves the tool armed for the next click
-        // — falling through to `select` here would disarm the tool *before* the canvas key
-        // layer could see `canvasTool === "path"` and clear the draft it owns.
+        // Path mode: Esc gives up the route being drawn and leaves path mode in the same press
+        // (back to Select, like every other tool). Handled here so the rail's key layer and the
+        // canvas key layer both see one consistent answer.
         if (canvasTool === "path") {
-          clearPathDraft();
+          leavePathMode();
           break;
         }
         if (!toolController || toolController.current() === null) canvasTool = "select";
@@ -1701,6 +1700,12 @@ const WALL_PICK_RADIUS = 12;
     pathDraft = { sceneId: activeScene()?._id ?? "", keys: [] };
   }
 
+  /** Esc in path mode: drop the draft and return to Select. Idempotent, so both key layers may call it. */
+  function leavePathMode(): void {
+    clearPathDraft();
+    if (canvasTool === "path") canvasTool = "select";
+  }
+
   /** Commit the drawn route: one profile write, cursor at the party's own cell. */
   function commitTravelRoute(): void {
     const current = app;
@@ -1719,7 +1724,9 @@ const WALL_PICK_RADIUS = 12;
       pace: travelPace,
     };
     current.gm.client.submit(travelProgressOps(scene, plan));
-    clearPathDraft();
+    // A committed route ends the gesture, like Esc does: back to Select, so the next Path click
+    // starts a new route instead of toggling the tool off.
+    leavePathMode();
     pushLog(
       [
         hexTravel.committed(
@@ -3193,6 +3200,35 @@ const WALL_PICK_RADIUS = 12;
     };
   }
 
+  /**
+   * The hexcrawl wizard's map step: the same upload a New scene from an image makes (design §5.2) —
+   * the scenes folder, the duplicate policy and the WebP settings of the image system — and the
+   * thumbnail, so the scene's tab and rail have a picture from the first frame.
+   */
+  async function importSceneMapFile(file: File): Promise<{ hash: string; width?: number; height?: number; thumbnail?: string | null }> {
+    const current = app;
+    if (!current) throw new Error("the world is not open");
+    assertImageByteLength(file.size);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    sniffImage(bytes);
+    const defaults = imageSceneDefaults;
+    const uploaded = await current.gm.client.uploadImageAsset(bytes, {
+      name: file.name,
+      displayName: normalizeImageName(file.name),
+      folder: normalizeLogicalFolder(defaults.destinationLogicalFolder),
+      sourceKind: "file",
+      collisionBehavior: defaults.duplicateFileBehavior === "ask" ? "stop" : defaults.duplicateFileBehavior,
+      convertToWebp: imagePreferences.webpConvert,
+      webpQuality: imagePreferences.webpQuality,
+    });
+    return {
+      hash: uploaded.hash,
+      ...(uploaded.width !== undefined ? { width: uploaded.width } : {}),
+      ...(uploaded.height !== undefined ? { height: uploaded.height } : {}),
+      thumbnail: uploaded.thumbnail ?? null,
+    };
+  }
+
   /** Import an owned media file for host-authorized FX. Stored as bytes, not embedded in a macro. */
   async function importFxFile(file: File, permissions: FxImportPermissions): Promise<{ hash: string; mime: string; name: string }> {
     const current = app;
@@ -3598,10 +3634,9 @@ const WALL_PICK_RADIUS = 12;
         };
         const onToolKey = (e: KeyboardEvent) => {
           if (e.key !== "Escape" || isTypingTarget(e.target)) return;
-          // D-275: Esc gives up the route being drawn (plan §5.7) — the same key that finishes a
-          // polygon gives up a path, and both leave the map as it was.
+          // D-275: Esc gives up the route being drawn (plan §5.7). Path mode also ends here.
           if (canvasTool === "path") {
-            clearPathDraft();
+            leavePathMode();
             return;
           }
           if (!GESTURE_TOOLS.has(canvasTool)) return;
@@ -5236,6 +5271,8 @@ const WALL_PICK_RADIUS = 12;
           selectedTokenId={singleSelectedTokenId()}
           {selectedItemRef}
           importImage={importMapFile}
+          importSceneImage={importSceneMapFile}
+          sceneDefaults={imageSceneDefaults}
           onFxImport={importFxFile}
           onPickSummon={requestSummonPick}
           onPickAnchor={requestAnchorPick}

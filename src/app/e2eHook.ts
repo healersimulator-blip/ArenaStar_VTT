@@ -264,6 +264,11 @@ export interface AppSurface {
     cells: number;
     authored: number;
     img: string | null;
+    /** The image system's placement and defaults the wizard's scene was made with. */
+    background: { offset: { x: number; y: number }; scale: number; padding: number; color: string } | null;
+    ownership: number;
+    thumbnail: string | null;
+    logicalFolder: string | null;
     sight: string | null;
     radiusCells: number | null;
     encounterMode: string | null;
@@ -290,6 +295,8 @@ export interface AppSurface {
     coverHeight: number;
   } | null;
   /** D-271: the cells *this replica* holds — the projection's output, not the GM's truth. */
+  /** Create a Campaign Codex sheet for the hexcrawl codex link tests; returns its journal id. */
+  hexCodexSeed(name: string, kind: NonNullable<JournalDocument["codex"]>["kind"]): string;
   hexCells(): Array<{
     key: string;
     name: string;
@@ -1588,6 +1595,8 @@ function hexCellRows(
     img: string | null;
   }>;
   tables: number;
+  /** The Campaign Codex links a hex carries — GM-side, so a player's readback is `null`. */
+  codexEntries: string[] | null;
   open: boolean;
 }> {
   const scenes = store.getAll("scenes");
@@ -1598,6 +1607,7 @@ function hexCellRows(
     terrain: c.terrain ?? null,
     description: c.description ?? null,
     playerText: c.playerText ?? null,
+    codexEntries: c.codexEntries ?? null,
     features: (c.features ?? []).length,
     revealedFeatures: (c.features ?? []).filter((f) => f.state?.revealed === true).length,
     // D-275: the rule in the GM's own words, so a spec can assert what a feature *waits for*
@@ -2720,6 +2730,17 @@ function appSurface(app: HostApp): AppSurface {
         cells: census.total,
         authored: census.authored,
         img: s.img ?? null,
+        background: s.background
+          ? {
+              offset: { x: s.background.offset?.x ?? 0, y: s.background.offset?.y ?? 0 },
+              scale: s.background.scale ?? 1,
+              padding: s.background.padding ?? 0,
+              color: s.background.color ?? "",
+            }
+          : null,
+        ownership: s.ownership.default,
+        thumbnail: s.thumbnail ?? null,
+        logicalFolder: s.logicalFolder ?? null,
         sight: profile?.sight.mode ?? null,
         radiusCells: profile?.sight.radiusCells ?? null,
         encounterMode: profile?.encounterMode ?? null,
@@ -2766,6 +2787,22 @@ function appSurface(app: HostApp): AppSurface {
       };
     },
     hexCells: () => hexCellRows(client.store),
+    /** Create a Campaign Codex sheet for the hexcrawl codex link tests; returns its journal id. */
+    hexCodexSeed: (name: string, kind: NonNullable<JournalDocument["codex"]>["kind"]): string => {
+      const id = `codex-hex-${kind}-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+      const doc: JournalDocument = {
+        _id: id as JournalDocument["_id"],
+        type: "journal",
+        name,
+        ownership: { default: 1 },
+        flags: {},
+        system: {},
+        pages: [],
+        codex: { version: 1, kind, links: [], widgets: [] },
+      };
+      client.submit([{ kind: "create", coll: "journals", data: doc }]);
+      return id;
+    },
     hexClock: () => readWorldClock(client.store.getAll("settings")),
     hexTravel: () => hexTravelOf(client.store),
     hexEncounterLedger: () => {

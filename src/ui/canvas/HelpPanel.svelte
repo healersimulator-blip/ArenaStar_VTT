@@ -76,7 +76,7 @@
     { keys: "Right-click a hex", action: "The hex menu: description, terrain, features, tables (GM)" },
     { keys: "Shift+H", action: "Open the hex the party is standing in" },
     { keys: "Y", action: "Travel path — click hexes to draw the party's route (GM)" },
-    { keys: "Escape", action: "Give up the route being drawn (the tool stays armed)" },
+    { keys: "Escape", action: "Give up the route being drawn and leave path mode" },
   ];
 </script>
 

@@ -35,6 +35,10 @@ interface HexcrawlReadback {
   cells: number;
   authored: number;
   img: string | null;
+  background: { offset: { x: number; y: number }; scale: number; padding: number; color: string } | null;
+  ownership: number;
+  thumbnail: string | null;
+  logicalFolder: string | null;
   sight: string | null;
   radiusCells: number | null;
   encounterMode: string | null;
@@ -71,7 +75,9 @@ test.describe("hexcrawl scene (§9 Phase 1, D-270)", () => {
       mimeType: "image/png",
       buffer: solidPng(1600, 1200),
     });
-    await expect(wizard.locator("[data-hx-map]")).toContainText("1600 × 1200");
+    // The picture goes through the image system's import (thumbnail and all): give it real time
+    // on a loaded box rather than the 5 s default.
+    await expect(wizard.locator("[data-hx-map]")).toContainText("1600 × 1200", { timeout: 30_000 });
     await page.fill("[data-hx-name]", "Marsh overland");
 
     // ── step 2: the grid and the reference scale, with the cell count read before creating ──
@@ -181,5 +187,65 @@ test.describe("hexcrawl scene (§9 Phase 1, D-270)", () => {
     expect(await hostCall<string | null>(page, "activeSceneId")).toBe(
       after.sceneId,
     );
+  });
+
+  test("a map fitted into a chosen size lands centred, with the image system's defaults and a unique name", async ({
+    page,
+  }) => {
+    test.setTimeout(150_000);
+    await page.goto(entry + "?e2e=1");
+    await waitForSurface(page, "app");
+    await waitForSurface(page, "gm");
+
+    // ── the picture, then "fit" into a 2400 × 1500 scene ──
+    await page.click("#scene-add");
+    await page.click("#scene-new-hexcrawl");
+    const wizard = page.locator("[data-hexcrawl-wizard]");
+    await expect(wizard).toBeVisible();
+    await page.setInputFiles("[data-hx-map-input]", {
+      name: "fit.png",
+      mimeType: "image/png",
+      buffer: solidPng(1600, 1200),
+    });
+    await expect(wizard.locator("[data-hx-size-mode]")).toHaveAttribute(
+      "data-hx-size-mode",
+      "matchImage",
+      { timeout: 30_000 },
+    );
+    await wizard.locator('[data-hx-size-option="fitImage"]').click();
+    await page.fill("[data-hx-fit-width]", "2400");
+    await page.fill("[data-hx-fit-height]", "1500");
+    // scale = min(2400 / 1600, 1500 / 1200) = 1.25; the picture is 2000 px wide once scaled,
+    // so it sits 200 px in from each side and touches the top and bottom.
+    await expect(wizard.locator("[data-hx-fit-readout]")).toContainText("125%");
+    await expect(wizard.locator("[data-hx-map]")).toContainText("2400 × 1500");
+    await page.click("[data-hx-next]");
+    await page.click("[data-hx-next]");
+    await page.click("[data-hx-create]");
+    await expect(wizard).toBeHidden();
+
+    await expect
+      .poll(() => hostCall<HexcrawlReadback | null>(page, "hexcrawl"), { timeout: 20_000 })
+      .toMatchObject({
+        sceneName: "Overland map",
+        width: 2400,
+        height: 1500,
+        // Hexcrawl maps stay shared with the table, whatever the image default says.
+        ownership: 1,
+        logicalFolder: "Scenes",
+        background: { scale: 1.25, offset: { x: 200, y: 0 }, color: "#ffffff", padding: 0 },
+      });
+
+    // ── a second hexcrawl with no picture takes the next free name ──
+    await page.click("#scene-add");
+    await page.click("#scene-new-hexcrawl");
+    await expect(wizard).toBeVisible();
+    await page.click("[data-hx-next]");
+    await page.click("[data-hx-next]");
+    await page.click("[data-hx-create]");
+    await expect(wizard).toBeHidden();
+    await expect
+      .poll(() => hostCall<HexcrawlReadback | null>(page, "hexcrawl"), { timeout: 20_000 })
+      .toMatchObject({ sceneName: "Overland map (2)", width: 2000, height: 1500, img: null, background: null });
   });
 });

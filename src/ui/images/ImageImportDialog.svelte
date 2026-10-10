@@ -6,7 +6,7 @@
   import type { ImageAction, ImageHandlingPreferences, SceneExpressDefaults } from "../../core/imageHandling";
   import { IMAGE_ACTIONS, uniqueLogicalFileName, uniqueSceneName } from "../../core/imageHandling";
   import { imageHandlingPreferencesOf } from "../../core/imageHandling";
-  import { MAX_IMAGE_BYTES, aspectLockedSize, assertImageByteLength, gridFromImage, normalizeImageName, normalizeLogicalFolder, sniffMedia, isVideoMime, validateDecodedDimensions, validateHttpsImageUrl, isPinterestPinPage } from "../../core/imageSizing";
+  import { MAX_IMAGE_BYTES, aspectLockedSize, assertImageByteLength, fitImageToScene, gridFromImage, normalizeImageName, normalizeLogicalFolder, sniffMedia, isVideoMime, validateDecodedDimensions, validateHttpsImageUrl, isPinterestPinPage } from "../../core/imageSizing";
   import { readVideoSize } from "../../client/videoMedia";
   import { imageString } from "./strings";
   import { planImageAction } from "../../core/imageActions";
@@ -342,10 +342,10 @@
   /** Fit mode: the image is scaled to fill the chosen scene and centred, with its aspect kept. */
   function refitBackground(): void {
     if (!prepared || sceneSizeMode !== "fitImage") return;
-    const scale = Math.min(sceneWidth / prepared.width, sceneHeight / prepared.height);
-    backgroundScale = scale;
-    offsetX = Math.round((sceneWidth - prepared.width * scale) / 2);
-    offsetY = Math.round((sceneHeight - prepared.height * scale) / 2);
+    const fitted = fitImageToScene(prepared, { width: sceneWidth, height: sceneHeight });
+    backgroundScale = fitted.scale;
+    offsetX = fitted.offset.x;
+    offsetY = fitted.offset.y;
   }
 
   function changeSceneSizeMode(mode: "matchImage" | "fitImage"): void {

@@ -419,6 +419,12 @@ These are the only geometry rules. They live in `src/core/imageSizing.ts` and ar
   blindly multiply every numeric field. Preserve rotations, elevations, grid-unit values and unrelated
   stats; state how normalized shapes and circular/radial geometry behave if X/Y ratios differ. Submit the
   resulting document changes as one batch so Revert restores them together.
+- **Hexcrawl maps (D-410, 2026-10-10):** the hexcrawl wizard builds its image map with the new-scene planner
+  (`planImageAction`, `newScene`) and offers "match the scene to the image" (default) or "fit the image to a
+  chosen size" (`fitImageToScene`, centred, aspect kept). Hexcrawl keeps `ownership: "all"` (shared with the
+  table) and turns token vision and fog exploration off, because sight is hex-based. **Open for the GM:** SZ-13
+  makes GM-only the default for a new image scene, which would hide new hexcrawl maps from players until the GM
+  shares them. This is not decided; the wizard keeps the current shared behaviour until it is.
 
 ### 6.4 Naming and duplicates
 

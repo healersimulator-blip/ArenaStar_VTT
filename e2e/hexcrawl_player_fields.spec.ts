@@ -32,6 +32,7 @@ import {
   playerCall,
   solidPng,
   surfaceCallArg,
+  surfaceCallArgs,
   waitForSurface,
 } from "./lib";
 
@@ -55,6 +56,7 @@ interface CellRow {
     revealed: boolean;
     img: string | null;
   }>;
+  codexEntries: string[] | null;
   open: boolean;
 }
 
@@ -327,5 +329,113 @@ test.describe("what a player holds of a hex (§8 Phase 6 tail, D-275)", () => {
     // link, and is why this spec's propagation step used to fail in a long run and pass alone.
     await hostCtx.close();
     await playerCtx.close();
+  });
+});
+
+/** A hex one step from the party token, and its screen point — the same pick the feature test makes. */
+async function hexBesideParty(host: Page): Promise<{ key: string; at: Point }> {
+  const partyKey = await hostCall<string | null>(host, "hexPartyKey");
+  if (!partyKey) throw new Error("the party token is not on a cell");
+  const partyCentre = await surfaceCallArg<Point | null>(
+    host,
+    "app",
+    "hexCellCenter",
+    partyKey,
+  );
+  if (!partyCentre) throw new Error("no centre for the party's cell");
+  for (const dx of [150, -150, 200, 100, 75]) {
+    const candidate = await surfaceCallArg<string | null>(
+      host,
+      "app",
+      "hexCellAt",
+      {
+        x: partyCentre.x + dx,
+        y: partyCentre.y,
+      },
+    );
+    if (!candidate || candidate === partyKey) continue;
+    const centre = await surfaceCallArg<Point | null>(
+      host,
+      "app",
+      "hexCellCenter",
+      candidate,
+    );
+    const at = centre
+      ? await surfaceCallArg<Point | null>(host, "app", "screenOf", centre)
+      : null;
+    if (at) return { key: candidate, at };
+  }
+  throw new Error("no hex beside the party");
+}
+
+test.describe("a hex's Campaign Codex links (GM-side)", () => {
+  test("the GM links a codex entry to a hex and the codex sheet lists the hex; a player's copy of the hex carries no link", async ({
+    browser,
+  }: {
+    browser: Browser;
+  }) => {
+    test.setTimeout(300_000);
+    const hostCtx = await browser.newContext();
+    const playerCtx = await browser.newContext();
+    const host = await hostCtx.newPage();
+    const player = await playerCtx.newPage();
+
+    await makeHexcrawlScene(host);
+    const townId = await surfaceCallArgs<string>(host, "app", "hexCodexSeed", [
+      "Ashford",
+      "location",
+    ]);
+
+    // ── the GM links the town from the hex window ──
+    const { key: targetKey, at } = await hexBesideParty(host);
+    await host.mouse.click(at.x, at.y, { button: "right" });
+    const menu = host.locator("[data-hex-menu]");
+    await expect(menu).toBeVisible();
+    await menu.locator('[data-hex-menu-action="open"]').click();
+    const win = host.locator(`[data-hex-window="${targetKey}"]`);
+    await expect(win).toBeVisible();
+    await expect(win.locator("[data-hex-codex-empty]")).toBeVisible();
+    await win.locator("[data-hex-codex-picker]").selectOption(townId);
+    await expect(win.locator(`[data-hex-codex-row="${townId}"]`)).toBeVisible();
+    await expect(
+      win.locator(`[data-hex-codex-row="${townId}"] [data-hex-codex-kind]`),
+    ).toHaveText("location");
+    await expect
+      .poll(
+        async () =>
+          (await gmCells(host)).find((c) => c.key === targetKey)?.codexEntries,
+      )
+      .toEqual([townId]);
+
+    // ── the codex sheet lists the hex that names it ──
+    await host.locator('[data-tab="journals"]').click();
+    await host.locator("[data-open-codex]").click();
+    const codex = host.locator("[data-campaign-codex]");
+    const nav = codex.getByRole("complementary", { name: "Codex navigator" });
+    await nav.locator(`[data-codex-sheet="${townId}"]`).click();
+    await expect(codex.locator("[data-codex-hexes]")).toBeVisible();
+    const sceneId = await hostCall<string | null>(host, "activeSceneId");
+    await expect(
+      codex.locator(`[data-codex-hex="${sceneId}:${targetKey}"]`),
+    ).toBeVisible();
+
+    // ── the hex is opened and a player joins: the player's copy never names the town ──
+    await win.locator("[data-hex-reveal]").click();
+    await expect
+      .poll(
+        async () =>
+          (await gmCells(host)).find((c) => c.key === targetKey)?.open,
+      )
+      .toBe(true);
+    await joinPlayer(host, player);
+    await expect
+      .poll(
+        async () =>
+          (await playerCells(player)).find((c) => c.key === targetKey),
+        { timeout: 90_000 },
+      )
+      .toBeDefined();
+    const seen = (await playerCells(player)).find((c) => c.key === targetKey);
+    expect(seen?.codexEntries).toBeNull();
   });
 });

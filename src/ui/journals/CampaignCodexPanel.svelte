@@ -147,6 +147,8 @@ import { derivedAssetIds } from "../../core/imageHandling";
   const UID = () => globalThis.crypto.randomUUID();
 
   let journals = $state<JournalDocument[]>([]);
+  /** Hexes that name a codex entry (GM-side): the reverse of a hex's codex links, one row per link. */
+  let hexLinks = $state<Array<{ sceneId: string; sceneName: string; key: string; entryId: string }>>([]);
   let audienceUsers = $state<UserDocument[]>([]);
   let actorDocuments = $state<ActorDocument[]>([]);
   let linkChoices = $state<LinkChoice[]>([]);
@@ -534,10 +536,22 @@ import { derivedAssetIds } from "../../core/imageHandling";
     );
   }
 
+  function collectHexLinks(): Array<{ sceneId: string; sceneName: string; key: string; entryId: string }> {
+    const rows: Array<{ sceneId: string; sceneName: string; key: string; entryId: string }> = [];
+    for (const scene of client.store.getAll("scenes") as readonly SceneDocument[]) {
+      for (const cell of scene.cells ?? []) {
+        for (const entryId of cell.codexEntries ?? [])
+          rows.push({ sceneId: scene._id, sceneName: scene.name, key: cell.key, entryId });
+      }
+    }
+    return rows;
+  }
+
   function refresh(): void {
     journals = [
       ...(client.store.getAll("journals") as readonly JournalDocument[]),
     ];
+    hexLinks = collectHexLinks();
     audienceUsers = [
       ...(client.store.getAll("users") as readonly UserDocument[]),
     ];
@@ -3356,6 +3370,20 @@ import { derivedAssetIds } from "../../core/imageHandling";
             {#if !sheet.codex.links.some((link) => link.relation === "linksScene")}
               <p class="muted">No readable scenes linked.</p>
             {/if}
+          </section>
+        {/if}
+
+        {#if sheet && hexLinks.some((row) => row.entryId === sheet._id)}
+          <section class="panel-section" aria-labelledby="codex-hexes-heading" data-codex-hexes>
+            <h3 id="codex-hexes-heading">Hexes</h3>
+            <ul class="card-list">
+              {#each hexLinks.filter((row) => row.entryId === sheet._id) as row (row.sceneId + row.key)}
+                <li data-codex-hex={`${row.sceneId}:${row.key}`}>
+                  <strong>{row.sceneName}</strong>
+                  <span class="muted">hex {row.key}</span>
+                </li>
+              {/each}
+            </ul>
           </section>
         {/if}
 

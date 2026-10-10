@@ -10,7 +10,7 @@
  * What only a browser can prove is the arrangement:
  *
  * 1. **path mode** is a real tool — clicking a hex extends the route, clicking it again takes it
- *    back, `Esc` clears it, and *Commit route* is what writes the profile (plan §5.7);
+ *    back, `Esc` clears it and leaves path mode, and *Commit route* is what writes the profile (plan §5.7);
  * 2. the itinerary prices the route **before** anyone walks it, per cell, off the same
  *    `stepSecondsOf` the advance charges with — the number the GM commits to is the number the
  *    clock moves by;
@@ -196,7 +196,8 @@ test.describe("travel & features (§8 Phase 6, D-275)", () => {
 
     const panel = page.locator("[data-travel-panel]");
 
-    // ── 1. the draft: click a hex to extend, click it again to take it back, Esc to give up ──
+    // ── 1. the draft: click a hex to extend, click it again to take it back, Esc to give up and
+    //      leave path mode (so the next drawRoute arms the tool afresh) ──
     await page.click('[data-canvas-tool="path"]');
     await expect(page.locator("[data-path-hint]")).toBeVisible();
     const first = await cellAt(page, step1);

@@ -339,6 +339,11 @@ px + "1 cell = N miles" + the hex orientation preview), *origin* (which cell is 
 authored keys survive a re-import), *party* (create the party token now or pick an existing one). For
 gridless: *reference scale* (`1 inch = 6 miles`, expressed with the existing `size`/`distance`/`units`).
 
+*As landed (D-410):* a map image goes through the same new-scene import as the Scenes & Images panel, and
+the scene is planned by `planImageAction` (default name, folder, thumbnail, placement). The map step offers
+**match the scene to the image** (the default) or **fit the image to a chosen size** (centred, aspect kept).
+Without a picture the step is the same as before.
+
 ### 5.2 The canvas menu (requirement 4)
 With the hexcrawl profile active, a GM right-click on the canvas opens a small menu built like
 `ui/combat/tokenContextMenu.ts`: **Open hex / Close hex**, **Describe this hex…**, **Terrain →**
@@ -365,6 +370,11 @@ itself when the party enters, moves or fights here"), *prompt* ("asks the GM …
 now") or *manual* ("nothing rolls on its own, and these rows are the trigger") — and every roll goes through
 the same `rollTableNow` pair (one host draw, one ledger write) the `auto` path uses, so a table rolled by
 hand is a table the next footstep will not roll again.
+
+*As landed (D-409):* the window has a **Codex entries here** section. A GM links a town, NPC, region or
+location from the codex; a hex can name several entries, and the codex sheet's **Hexes** section lists every
+hex that names it. The list is GM-side (a player's replica never receives it), and unlinking never changes
+the codex entry. Opening a codex entry from the hex window is not built yet.
 
 ### 5.4 The encounter wizard (requirement 5b)
 Window kind `encounterTable`, opened from the *Tables* sidebar (**New encounter table**) or from a hex's
@@ -447,7 +457,7 @@ click.
 
 ### 5.7 Travel (requirement 7)
 Path mode on the canvas: click cells to extend the route (clicking the last cell again removes it),
-`Esc` clears, **Commit** writes `travel`. The party token then sits on the path's cursor cell, and the
+`Esc` clears the route and leaves path mode, **Commit** writes `travel` and also leaves path mode (amended D-408). The party token then sits on the path's cursor cell, and the
 hex panel shows the itinerary with per-cell cost, terrain and *encounter state*. The time controls gain a
 **Travel until…** affordance: advance to the next cell border / to dawn / to dusk / by N hours — each of
 which is just `advanceWorldClockOps` with the encounter pipeline hanging off it.

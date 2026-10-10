@@ -19,6 +19,7 @@ import {
   validateDecodedDimensions,
   validateHttpsImageUrl,
   assertImageByteLength,
+  fitImageToScene,
 } from "../../src/core/imageSizing";
 import type { SceneDocument } from "../../src/core/documents";
 import { pngHeaderForTest } from "../helpers/imageBytes";
@@ -198,5 +199,30 @@ describe("image validation, dimensions and geometry", () => {
     expect(() => validateHttpsImageUrl("not a URL")).toThrow(/complete image URL/i);
     expect(isPinterestPinPage("https://www.pinterest.com/pin/12345/" )).toBe(true);
     expect(isPinterestPinPage("https://i.pinimg.com/originals/a.png")).toBe(false);
+  });
+});
+
+describe("fitImageToScene (design §6.3: fit the picture into a chosen scene)", () => {
+  test("a wider scene keeps the height and centres the picture horizontally", () => {
+    // min(2400 / 1600, 1500 / 1200) = 1.25; 1600 × 1.25 = 2000, so 200 px of margin each side.
+    expect(fitImageToScene({ width: 1600, height: 1200 }, { width: 2400, height: 1500 })).toEqual({
+      scale: 1.25,
+      offset: { x: 200, y: 0 },
+    });
+  });
+
+  test("a taller scene keeps the width and centres the picture vertically", () => {
+    // min(1000 / 1600, 1000 / 1200) = 0.625; 1200 × 0.625 = 750, so 125 px of margin top and bottom.
+    expect(fitImageToScene({ width: 1600, height: 1200 }, { width: 1000, height: 1000 })).toEqual({
+      scale: 0.625,
+      offset: { x: 0, y: 125 },
+    });
+  });
+
+  test("the same shape at the same size is the identity placement", () => {
+    expect(fitImageToScene({ width: 800, height: 600 }, { width: 800, height: 600 })).toEqual({
+      scale: 1,
+      offset: { x: 0, y: 0 },
+    });
   });
 });

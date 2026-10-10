@@ -279,6 +279,12 @@ export interface CellDocument extends BaseDocument {
   playerText?: string;
   /** Encounter table ids attached to this cell (`encounterTables`). */
   tables?: string[];
+  /**
+   * Campaign Codex entries (journal ids with a `codex` sheet) this hex is about: a town, a lair's
+   * NPC, a region. GM-side context only: a player's replica never receives this list, in the same
+   * way it never receives `description`.
+   */
+  codexEntries?: string[];
   features?: CellFeature[];
 }
 

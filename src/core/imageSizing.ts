@@ -313,6 +313,25 @@ export function sceneSizeFromImage(image: Pick<SniffedImage, "width" | "height">
   return { width: image.width, height: image.height };
 }
 
+/**
+ * "Fit the image to the scene" (design §6.3): the image keeps its aspect, is scaled to the largest
+ * size that fits the chosen scene, and is centred. The dialog and the hexcrawl wizard both use this,
+ * so a fitted map lands the same way from either entry point.
+ */
+export function fitImageToScene(
+  image: SceneSize,
+  scene: SceneSize,
+): { scale: number; offset: { x: number; y: number } } {
+  const scale = Math.min(scene.width / image.width, scene.height / image.height);
+  return {
+    scale,
+    offset: {
+      x: Math.round((scene.width - image.width * scale) / 2),
+      y: Math.round((scene.height - image.height * scale) / 2),
+    },
+  };
+}
+
 /** Change one scene dimension and derive the other, rounded to the nearest pixel. */
 export function aspectLockedSize(
   original: SceneSize,

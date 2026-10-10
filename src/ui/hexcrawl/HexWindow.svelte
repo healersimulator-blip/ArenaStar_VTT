@@ -44,6 +44,7 @@
     CellDocument,
     CellFeature,
     EncounterTableDocument,
+    JournalDocument,
     SceneDocument,
   } from "../../core/documents";
   import {
@@ -103,6 +104,10 @@
   let closed = $state(true);
   let isGM = $state(false);
   let tables = $state<EncounterTableDocument[]>([]);
+  /** Campaign Codex entries linked to this hex, in the order the GM linked them (GM-side only). */
+  let codexLinked = $state<JournalDocument[]>([]);
+  /** Every codex entry the world has that is not linked here yet — the picker's choices. */
+  let codexAvailable = $state<JournalDocument[]>([]);
   let log = $state<EncounterLogEntry[]>([]);
   let spentSeconds = $state(0);
   /** The image import's own error line (a failed import is the one thing that must be visible). */
@@ -137,6 +142,16 @@
     tables = client.store
       .getAll("encounterTables")
       .filter((t) => ids.has(t._id)) as EncounterTableDocument[];
+    const codexIds = cell?.codexEntries ?? [];
+    const codexAll = (client.store.getAll("journals") as readonly JournalDocument[]).filter(
+      (j) => j.codex !== undefined,
+    );
+    codexLinked = codexIds
+      .map((id) => codexAll.find((j) => j._id === id))
+      .filter((j): j is JournalDocument => j !== undefined);
+    codexAvailable = codexAll
+      .filter((j) => !codexIds.includes(j._id))
+      .sort((a, b) => a.name.localeCompare(b.name));
     log = encounterLogOf(doc, cellKey);
     // D-275: the counter a `time` rule reads (a march through this hex, hours of exploring).
     spentSeconds = exploredSecondsOf(cell);
@@ -169,6 +184,23 @@
       ? updateCellOps(scene, cellKey, patch)
       : createCellOps(scene, nextId(), { key: cellKey, ...patch });
     if (ops.length) client.submit(ops);
+  }
+
+  /**
+   * Link or unlink a Campaign Codex entry. The list is GM-side: the projection never sends it to a
+   * player, so a player's replica holds no trace of which entries a hex is about.
+   */
+  function setCodexLinks(ids: string[]): void {
+    writeCell({ codexEntries: [...new Set(ids)] });
+  }
+
+  function linkCodex(id: string): void {
+    if (!id || codexLinked.some((j) => j._id === id)) return;
+    setCodexLinks([...codexLinked.map((j) => j._id), id]);
+  }
+
+  function unlinkCodex(id: string): void {
+    setCodexLinks(codexLinked.map((j) => j._id).filter((x) => x !== id));
   }
 
   function setTerrain(id: string): void {
@@ -384,6 +416,47 @@
         >
       </div>
     {/each}
+  {/if}
+
+  {#if isGM}
+    <h4>Codex entries here</h4>
+    {#if codexLinked.length === 0}
+      <p class="hint" data-hex-codex-empty>
+        Nothing from the Campaign Codex is tied to this hex yet. Link the town, NPC or region it
+        belongs to below; the codex entry itself is not changed.
+      </p>
+    {:else}
+      {#each codexLinked as entry (entry._id)}
+        <div class="table-row" data-hex-codex-row={entry._id}>
+          <span class="table-name">{entry.name}</span>
+          <span class="chip" data-hex-codex-kind>{entry.codex?.kind ?? "entry"}</span>
+          <button
+            type="button"
+            data-hex-codex-unlink={entry._id}
+            title="unlink from this hex — the codex entry itself is not changed"
+            onclick={() => unlinkCodex(entry._id)}>Unlink</button
+          >
+        </div>
+      {/each}
+    {/if}
+    {#if codexAvailable.length > 0}
+      <label class="field">
+        <span>Link a codex entry</span>
+        <select
+          data-hex-codex-picker
+          value=""
+          onchange={(event) => {
+            linkCodex(event.currentTarget.value);
+            event.currentTarget.value = "";
+          }}
+        >
+          <option value="">Choose an entry…</option>
+          {#each codexAvailable as entry (entry._id)}
+            <option value={entry._id}>{entry.name} · {entry.codex?.kind ?? "entry"}</option>
+          {/each}
+        </select>
+      </label>
+    {/if}
   {/if}
 
   {#if isGM && log.length > 0}
