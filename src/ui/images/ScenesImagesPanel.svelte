@@ -1,6 +1,7 @@
 <script lang="ts">
   import LevelDraftEditor from "./LevelDraftEditor.svelte";
   import RoofEditor from "./RoofEditor.svelte";
+  import RaisedAreasEditor from "./RaisedAreasEditor.svelte";
   import FoundrySceneImport from "./FoundrySceneImport.svelte";
   import { onMount } from "svelte";
   import type { ClientSync, ClientEvents } from "../../client/sync";
@@ -220,7 +221,7 @@
         {#if image}<img src={image} alt="" loading="lazy" />{:else}<span class="thumb-placeholder">✦</span>{/if}
         <span class="scene-title"><strong>{scene.name}</strong><small>{alignmentHint(scene)}{scene.active ? " · Active" : ""}</small></span>
       </button>
-      {#if isGm}<LevelDraftEditor {scene} {client} {bus} {loadArtMask} /><RoofEditor {scene} {client} />{/if}
+      {#if isGm}<LevelDraftEditor {scene} {client} {bus} {loadArtMask} /><RoofEditor {scene} {client} /><RaisedAreasEditor {scene} {client} />{/if}
     {/each}
   </div>
 </section>

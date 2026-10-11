@@ -1342,6 +1342,8 @@ export interface GmFogSurface {
   lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> };
   /** D-452: height labels under lower-floor tokens. */
   lowerTokenLabels(): Array<{ id: string; label: string }>;
+  /** D-453: the GM's raised-area outlines and their labels. */
+  raisedMarkerLabels(): Array<{ id: string; label: string }>;
   /** G-22 (D-446): light crossing floors: split darkness and the other floors' light groups. */
   crossFloorLighting(): CrossFloorLightingState;
   /** D-438: what each roof on the active scene draws (alpha, openings, group, fog reveal). */

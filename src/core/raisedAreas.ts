@@ -339,3 +339,70 @@ export function raisedBarriers(scene: Pick<SceneDocument, "regions" | "levels">)
   }
   return out;
 }
+
+// ─── authoring ─────────────────────────────────────────────────────────────────
+
+export interface RaisedRect { x: number; y: number; width: number; height: number }
+const UNIT_SQUARE: Array<[number, number]> = [[0, 0], [1, 0], [1, 1], [0, 1]];
+
+/** Why this height does not fit on that floor (it must stay below the next floor up), or null. */
+export function raisedFitError(scene: Pick<SceneDocument, "levels" | "grid">, levelId: string | null | undefined, height: number): string | null {
+  const level = levelId ? scene.levels?.find((l) => l._id === levelId) : undefined;
+  if (!level || level.top === null || level.floorZ + height < level.top - EPS) return null;
+  const units = scene.grid?.units ? ` ${scene.grid.units}` : "";
+  return `${level.name} is ${Math.round((level.top - level.floorZ) * 100) / 100}${units} high: a raised area on it must be lower.`;
+}
+
+/**
+ * The raised area a dragged rectangle makes (the Raised area tool, the editor's form), or why it
+ * cannot. It stands on `levelId` when given (the floor being viewed), else everywhere it is drawn.
+ */
+export function drawnRaisedArea(scene: Pick<SceneDocument, "levels" | "grid">, area: RaisedRect,
+  options: { id: string; levelId?: string | null | undefined; name?: string; height?: number; solid?: boolean }): RegionDocument | string {
+  if (![area.x, area.y, area.width, area.height].every(Number.isFinite) || area.width < 1 || area.height < 1) return "Drag a larger area for the raised area.";
+  const height = options.height ?? 5, solid = options.solid ?? true;
+  const error = raisedAreaError({ height, solid }) ?? raisedFitError(scene, options.levelId, height);
+  if (error) return error;
+  const level = options.levelId ? scene.levels?.find((l) => l._id === options.levelId) : undefined;
+  const units = scene.grid?.units ? ` ${scene.grid.units}` : "";
+  const x = Math.round(area.x), y = Math.round(area.y);
+  return {
+    _id: options.id, type: "region", name: (options.name?.trim() || `Raised area (${height}${units})`).slice(0, 128), ownership: { default: 0 }, flags: {}, system: {},
+    x, y, width: Math.max(1, Math.round(area.x + area.width) - x), height: Math.max(1, Math.round(area.y + area.height) - y), rotation: 0,
+    shape: { kind: "polygon", points: UNIT_SQUARE.map(([px, py]) => [px, py] as [number, number]) },
+    raised: { height, solid }, ...(level ? { levelScope: { mode: "levels" as const, ids: [level._id] } } : {}),
+  };
+}
+
+export interface RaisedEdit { name: string; height: number; solid: boolean; area: RaisedRect }
+/** The region update for an in-place edit, or why it is refused. */
+export function raisedEditDiff(region: RegionDocument, scene: Pick<SceneDocument, "levels" | "grid">, edit: RaisedEdit):
+  { name: string; x: number; y: number; width: number; height: number; raised: RaisedArea } | string {
+  if (!region.raised) return "This region is not a raised area.";
+  const raised = { height: edit.height, solid: edit.solid };
+  const error = raisedAreaError(raised);
+  if (error) return error;
+  const scope = region.levelScope;
+  for (const id of scope?.mode === "levels" ? scope.ids : []) {
+    const fit = raisedFitError(scene, id, edit.height);
+    if (fit) return fit;
+  }
+  const { x, y, width, height } = edit.area;
+  if (![x, y, width, height].every(Number.isFinite) || width < 1 || height < 1) return "Give the raised area a size of at least 1 × 1.";
+  return { name: edit.name.trim().slice(0, 128) || region.name, x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height), raised };
+}
+
+/** GM canvas outline of a raised area: polygon points and a label such as `15 ft · solid`. */
+export interface RaisedMarker { id: string; points: number[]; label: string; solid: boolean }
+/** The raised areas the GM sees outlined: on the viewed floor, or all of them without one. */
+export function raisedMarkers(scene: Pick<SceneDocument, "regions" | "levels" | "grid">, levelId: string | null): RaisedMarker[] {
+  const units = scene.grid?.units ? ` ${scene.grid.units}` : "";
+  return (scene.regions ?? []).flatMap((region) => {
+    if (!region.raised || region.stairs || raisedAreaError(region.raised)) return [];
+    const scope = region.levelScope;
+    if (levelId && scope?.mode === "levels" && !scope.ids.includes(levelId)) return [];
+    const polygon = raisedPolygon(region);
+    if (!polygon || polygon.length < 3) return [];
+    return [{ id: region._id, points: polygon.flatMap((p) => [p.x, p.y]), label: `${region.raised.height}${units} · ${region.raised.solid ? "solid" : "open"}`, solid: region.raised.solid }];
+  });
+}

@@ -6,6 +6,7 @@
   import StairChooser from "../ui/StairChooser.svelte";
   import { floorForElevation, floorLighting, floorMoveOps, stairMarkers, STAIRS_V2_FEATURE } from "../core/levelPlay";
   import { drawnStairwell, type StairArea } from "../core/stairAuthoring";
+  import { drawnRaisedArea, raisedMarkers } from "../core/raisedAreas";
   import { areaFloorOf, areaFloorReach, wallsOnFloor } from "../core/areaFloors";
   import { flightPassage, tokenFooting } from "../core/floorSupport";
   import { adjacentFloor, floorRoster, gmFloorRender, GM_GHOST_ALPHA, type GmFloorMode } from "../core/gmFloorView";
@@ -651,6 +652,7 @@ const WALL_PICK_RADIUS = 12;
     "light",
     "pin",
     "stairs",
+    "raised",
   ]);
   const currentGrid = () => {
     const sc = activeScene();
@@ -734,6 +736,17 @@ const WALL_PICK_RADIUS = 12;
     if (typeof region === "string") { notifyLog = [...notifyLog.slice(-49), { message: region, level: "warn" }]; return; }
     void current.gm.client.submitAndWait([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: scene._id }, data: region }])
       .then(() => { notifyLog = [...notifyLog.slice(-49), { message: `${region.name} added. Change its floors, directions or name under Scenes → Floor play & stairs.`, level: "info" }]; })
+      .catch((error: unknown) => { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; });
+  }
+  /** D-453: the Raised area tool's rectangle becomes a raised area on the viewed floor (height and solidity from the tool options). */
+  function createRaisedArea(area: StairArea): void {
+    const scene = activeScene(), current = app;
+    if (!scene || !current) return;
+    const region = drawnRaisedArea(scene, area, { id: `raised-${crypto.randomUUID()}`, levelId: previewLevel(scene) ?? null,
+      height: toolOptions.raisedHeight, solid: toolOptions.raisedSolid });
+    if (typeof region === "string") { notifyLog = [...notifyLog.slice(-49), { message: region, level: "warn" }]; return; }
+    void current.gm.client.submitAndWait([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: scene._id }, data: region }])
+      .then(() => { notifyLog = [...notifyLog.slice(-49), { message: `${region.name} added. Change its height, solidity or name under Scenes → Raised areas.`, level: "info" }]; })
       .catch((error: unknown) => { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; });
   }
   function createPin(at: { x: number; y: number }) {
@@ -1792,6 +1805,12 @@ const WALL_PICK_RADIUS = 12;
   const pathToolAvailable = $derived.by(() => {
     void storeVersion;
     return isHexcrawlScene(activeScene());
+  });
+  /** D-453: raised areas belong on tactical maps (not strategic or hexcrawl scenes). */
+  const raisedToolAvailable = $derived.by(() => {
+    void storeVersion;
+    const scene = activeScene();
+    return !!scene && scene.flags?.core?.scale !== "strategic" && !isHexcrawlScene(scene);
   });
   /** G-14 (D-450): stairwells can be drawn once the scene has two floors. */
   const stairsToolAvailable = $derived.by(() => {
@@ -3241,6 +3260,8 @@ const WALL_PICK_RADIUS = 12;
     view.setTokenImageLoader(tileImages.load);
     view.setFauxOverhead(shown?.regions ?? []);
     view.setStairMarkers(scene?.levels?.length ? stairMarkers(scene, previewLevel(scene) ?? null, true) : []);
+    // D-453: raised areas outlined with their height for the GM (a "view as" preview shows what the player sees: none).
+    view.setRaisedMarkers(scene && viewAsPlayer === null ? raisedMarkers(scene, previewLevel(scene) ?? null) : []);
     view.syncTokens(
       tokens,
       tokenBadgesMap(tokens, {
@@ -3883,6 +3904,7 @@ const WALL_PICK_RADIUS = 12;
           },
           fogPaint: ({ mode, poly }) => paintFog(mode, poly),
           createStairs: (area) => createStairs(area),
+          createRaised: (area) => createRaisedArea(area),
         });
         toolReady++;
         // D-256: every gesture tool (draw/text/measure/fog/wall/light/pin) sees the pointer
@@ -5026,6 +5048,7 @@ const WALL_PICK_RADIUS = 12;
           },
           lowerFloors: () => view.lowerFloors(),
           lowerTokenLabels: () => view.lowerTokenLabels(),
+          raisedMarkerLabels: () => view.raisedMarkerLabels(),
           crossFloorLighting: () => view.getLightingLayer().crossFloorState(),
           // §2.2/G-10a: what the GM canvas actually drew — the mode's own gate, read back.
           tokenHpBars: () => view.tokenHpBars(),
@@ -5332,6 +5355,7 @@ const WALL_PICK_RADIUS = 12;
               onChooseTool={() => { sessionOpen = false; }}
               pathTool={pathToolAvailable}
               stairsTool={stairsToolAvailable}
+              raisedTool={raisedToolAvailable}
             />
           </div>
           <div
@@ -5470,6 +5494,11 @@ const WALL_PICK_RADIUS = 12;
                 {@const b = measurePoint(preview.to)}
                 <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} fill="#8ad9ff22" stroke="#8ad9ff" stroke-width="2" stroke-dasharray="8 4" />
                 <text x={Math.min(a.x, b.x) + 6} y={Math.min(a.y, b.y) + 16} fill="#e8f7ff" stroke="#0b1520" stroke-width="3" paint-order="stroke" font-size="12">Stairs</text>
+              {:else if preview.kind === "raised"}
+                {@const a = measurePoint(preview.from)}
+                {@const b = measurePoint(preview.to)}
+                <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} fill="#ff9a5c22" stroke="#ff9a5c" stroke-width="2" stroke-dasharray="8 4" />
+                <text x={Math.min(a.x, b.x) + 6} y={Math.min(a.y, b.y) + 16} fill="#fff3e6" stroke="#1b1408" stroke-width="3" paint-order="stroke" font-size="12">Raised area · {toolOptions.raisedHeight} {activeScene()?.grid.units ?? "ft"} · {toolOptions.raisedSolid ? "solid" : "open"}</text>
               {:else if preview.kind === "wallEdit"}
                 {#each preview.walls as wall (wall._id)}
                   {@const a = measurePoint({ x: wall.c[0], y: wall.c[1] })}

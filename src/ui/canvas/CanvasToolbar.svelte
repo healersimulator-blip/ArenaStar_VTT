@@ -26,7 +26,9 @@
     /** D-275: the hexcrawl travel route — click hexes to extend it (plan §5.7). */
     | "path"
     /** G-14 (D-450): drag a stairwell out on a scene with floors. */
-    | "stairs";
+    | "stairs"
+    /** D-453: drag a raised area (crates, a dais, a scaffold) out on the viewed floor. */
+    | "raised";
   /** Roll20's four layers: Map & Background (map), Objects & Tokens (tokens), GM Info (gm), Dynamic Lighting (lighting). */
   export type CanvasLayer = "map" | "tokens" | "gm" | "lighting";
   export type CanvasAction =
@@ -60,6 +62,7 @@
     onEraseAll = () => {},
     pathTool = false,
     stairsTool = false,
+    raisedTool = false,
   }: {
     active?: CanvasTool;
     collapsed?: boolean;
@@ -83,6 +86,7 @@
     pathTool?: boolean;
     /** G-14 (D-450): the scene has floors, so stairwells can be drawn. */
     stairsTool?: boolean;
+    raisedTool?: boolean;
   } = $props();
 
   let formula = $state("1d20");
@@ -90,7 +94,7 @@
   let rollMode = $state<RollMode>("roll");
   let history = $state<Array<{ formula: string; mode: RollMode }>>([]);
   let optionsOpen = $state(false);
-  const HAS_OPTIONS = new Set<CanvasTool>(["draw", "text", "measure", "dice", "fog", "wall", "light", "pin", "path", "stairs"]);
+  const HAS_OPTIONS = new Set<CanvasTool>(["draw", "text", "measure", "dice", "fog", "wall", "light", "pin", "path", "stairs", "raised"]);
   let toolDice = [4, 6, 8, 10, 12, 20] as const;
   let drawShapes = [
     { id: "freehand", label: "Freehand", icon: "✎", key: "F" },
@@ -144,11 +148,12 @@
     // authored for the party, not by it.
     { id: "path", label: "Travel path", icon: "⇢", shortcut: "Y", gmOnly: true },
     { id: "stairs", label: "Stairs", icon: "⇅", shortcut: "", gmOnly: true },
+    { id: "raised", label: "Raised area", icon: "⛰", shortcut: "", gmOnly: true },
   ];
 
   const visibleTools = $derived(
     tools.filter(
-      (tool) => (isGM || !tool.gmOnly) && (tool.id !== "path" || pathTool) && (tool.id !== "stairs" || stairsTool),
+      (tool) => (isGM || !tool.gmOnly) && (tool.id !== "path" || pathTool) && (tool.id !== "stairs" || stairsTool) && (tool.id !== "raised" || raisedTool),
     ),
   );
 
@@ -652,6 +657,19 @@
       {:else if active === "stairs"}
         <p class="hint" data-stairs-hint>
           Drag over the stairs on the map. They join the floor you are viewing and the next one up; change the floors, directions or name under Scenes → Floor play &amp; stairs.
+        </p>
+      {:else if active === "raised"}
+        <div class="style-row" data-raised-options>
+          <label class="hint">Height
+            <input type="number" min="1" max="1000" step="1" aria-label="Raised area height" data-raised-height bind:value={settings.raisedHeight} />
+          </label>
+          <label class="hint">
+            <input type="checkbox" aria-label="Raised area solid" data-raised-solid bind:checked={settings.raisedSolid} />
+            Solid (blocks sight)
+          </label>
+        </div>
+        <p class="hint" data-raised-hint>
+          Drag over crates, a dais or a scaffold. Walking tokens climb onto it; a solid one hides what is behind it from eyes below its top. Edit it under Scenes → Raised areas.
         </p>
       {:else if active === "pin"}
         <p class="hint">

@@ -40,3 +40,23 @@ test("a click (or a drag inside one grid corner) makes nothing; Escape drops a d
   free.tool.pointerUp({ world: { x: 75, y: 95 }, button: 0 });
   expect(free.areas).toEqual([{ x: 10, y: 20, width: 65, height: 75 }]);
 });
+
+test("D-453: the Raised area tool drags the same snapped rectangle and hands it to its own callback", () => {
+  const raised: Array<{ x: number; y: number; width: number; height: number }> = [];
+  const stairs: typeof raised = [];
+  const previews: Array<ShapePreview | null> = [];
+  const tool = new ToolInteractionController({
+    nextId: () => "id", userId: "gm", grid: () => ({ type: "square", size: 100, diagonals: "555" }), options: () => DEFAULT_TOOL_OPTIONS,
+    createDrawing: () => {}, createWall: () => {}, createLight: () => {}, createNote: () => {}, promptText: () => {},
+    measurePreview: () => {}, shapePreview: (p) => previews.push(p), broadcastMeasure: () => {}, fogPaint: () => {},
+    createStairs: (area) => stairs.push(area), createRaised: (area) => raised.push(area),
+  });
+  tool.activate("raised");
+  tool.pointerDown({ world: { x: 610, y: 1390 }, button: 0 });
+  tool.pointerMove({ world: { x: 790, y: 1610 }, button: 0 });
+  expect(previews.at(-1)).toEqual({ kind: "raised", from: { x: 600, y: 1400 }, to: { x: 800, y: 1600 } });
+  tool.pointerUp({ world: { x: 790, y: 1610 }, button: 0 });
+  expect(raised).toEqual([{ x: 600, y: 1400, width: 200, height: 200 }]);
+  expect(stairs).toEqual([]);
+  expect(DEFAULT_TOOL_OPTIONS).toMatchObject({ raisedHeight: 5, raisedSolid: true });
+});

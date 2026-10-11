@@ -219,3 +219,45 @@ describe("D-453 raised areas: sight", () => {
     expect(tokensSeenBelow(tower([lookout, ...goblins], []), [], player, "gallery").map((x) => x.id)).toEqual(["open", "tucked"]);
   });
 });
+
+describe("D-453 raised areas: authoring", () => {
+  test("a dragged rectangle becomes a raised area on the viewed floor, if it fits under the next floor", async () => {
+    const { drawnRaisedArea, raisedEditDiff, raisedFitError, raisedMarkers } = await import("../../src/core/raisedAreas");
+    const t = tower([], []);
+    const area = drawnRaisedArea(t, { x: 600.4, y: 1400, width: 199.8, height: 200 }, { id: "r1", levelId: "hall", height: 10, solid: false });
+    expect(area).toMatchObject({ _id: "r1", type: "region", name: "Raised area (10 ft)", x: 600, y: 1400, width: 200, height: 200, rotation: 0,
+      raised: { height: 10, solid: false }, levelScope: { mode: "levels", ids: ["hall"] } });
+    expect((area as RegionDocument).hidden).toBeUndefined(); // players need it for sight
+    expect(regionGeometryError(area)).toBeNull();
+    expect(drawnRaisedArea(t, { x: 0, y: 0, width: 100, height: 100 }, { id: "r2", levelId: "hall", height: 20 })).toBe("Hall is 20 ft high: a raised area on it must be lower.");
+    expect(drawnRaisedArea(t, { x: 0, y: 0, width: 0.5, height: 100 }, { id: "r3" })).toBe("Drag a larger area for the raised area.");
+    expect(drawnRaisedArea(flat([]), { x: 0, y: 0, width: 100, height: 100 }, { id: "r4", name: " Dais ", height: 2.5 })).toMatchObject({ name: "Dais", raised: { height: 2.5, solid: true } });
+    expect((drawnRaisedArea(flat([]), { x: 0, y: 0, width: 100, height: 100 }, { id: "r5" }) as RegionDocument).levelScope).toBeUndefined();
+    expect(raisedFitError(t, "gallery", 14.5)).toBeNull();
+    expect(raisedFitError(t, "gallery", 15)).toMatch(/Gallery is 15 ft high/);
+    // Editing: height, solidity, name and bounds in one update, checked against the floor.
+    const crates = { ...raised("c", 600, 1400, 200, 200, 5, true), levelScope: { mode: "levels" as const, ids: ["hall"] } };
+    expect(raisedEditDiff(crates, t, { name: "Tall crates", height: 15, solid: true, area: { x: 600, y: 1200, width: 200, height: 400 } }))
+      .toEqual({ name: "Tall crates", x: 600, y: 1200, width: 200, height: 400, raised: { height: 15, solid: true } });
+    expect(raisedEditDiff(crates, t, { name: "", height: 25, solid: true, area: { x: 0, y: 0, width: 1, height: 1 } })).toMatch(/Hall is 20 ft high/);
+    expect(raisedEditDiff(crates, t, { name: "", height: 5, solid: true, area: { x: 0, y: 0, width: 0, height: 1 } })).toMatch(/size/);
+    expect(raisedEditDiff({ ...crates, raised: undefined } as unknown as RegionDocument, t, { name: "", height: 5, solid: true, area: { x: 0, y: 0, width: 1, height: 1 } })).toMatch(/not a raised area/);
+    // The GM's outlines: the viewed floor's areas, labelled.
+    const scoped = tower([]);
+    expect(raisedMarkers(scoped, "hall").map((m) => [m.id, m.label])).toEqual([
+      ["crates5", "5 ft · solid"], ["crates10", "10 ft · solid"], ["crates15", "15 ft · solid"], ["scaffold", "10 ft · open"]]);
+    expect(raisedMarkers(scoped, "gallery")).toEqual([]);
+    expect(raisedMarkers(scoped, null)).toHaveLength(4);
+    expect(raisedMarkers(scoped, "hall")[0]?.points).toEqual([600, 1400, 800, 1400, 800, 1600, 600, 1600]);
+  });
+});
+
+describe("D-453 raised areas: floor play check", () => {
+  test("an area reaching the floor above is flagged", async () => {
+    const { levelPlayAudit } = await import("../../src/core/levelAudit");
+    const scoped = (r: RegionDocument) => ({ ...r, levelScope: { mode: "levels" as const, ids: ["hall"] } });
+    expect(levelPlayAudit(tower([], [scoped(raised("pillar", 0, 0, 100, 100, 20, true))])).find((f) => f.code === "raised-too-tall"))
+      .toMatchObject({ severity: "warning", ids: ["pillar"], message: expect.stringContaining("reaches the floor above Hall") });
+    expect(levelPlayAudit(tower([])).some((f) => f.code === "raised-too-tall")).toBe(false);
+  });
+});

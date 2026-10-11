@@ -11,6 +11,7 @@ import { wallEditLocked } from "./wallEditing";
 import { floorSolidAt, surfaceOpenings } from "./floorSurface";
 import { floorFooting } from "./floorSupport";
 import { floorMoveOps } from "./levelPlay";
+import { raisedVolumes } from "./raisedAreas";
 
 export type LevelAuditFix = "walls-all" | "lights-all" | "tokens-by-band" | "merge-stairs" | "drop-tokens";
 export interface LevelAuditFinding {
@@ -59,6 +60,9 @@ export function levelPlayAudit(scene: SceneDocument): LevelAuditFinding[] {
     message: `${plural(floorless.length, "token")} ${floorless.length === 1 ? "has" : "have"} no floor. Players cannot see ${floorless.length === 1 ? "it" : "them"} in floor play.` });
   for (const level of levels) if (!(level.tileIds?.length) && level.useSceneBackground !== true)
     findings.push({ code: "floor-without-art", severity: "warning", ids: [level._id], message: `${level.name} has no map art: assign tiles or the scene background.` });
+  // D-453: a raised area as tall as its floor reaches the next floor up: nobody can stand on it.
+  for (const v of raisedVolumes(scene)) if (!v.standable)
+    findings.push({ code: "raised-too-tall", severity: "warning", ids: [v.regionId], message: `Raised area ${v.name} reaches the floor above ${levels.find((l) => l._id === v.levelId)?.name ?? "its floor"}: tokens cannot stand on it. Lower it below the floor's height.` });
   // G-21 (D-444): an opening in a traced floor with no floor anywhere beneath it.
   for (const level of levels) {
     if (!level.surface) continue;

@@ -32,6 +32,8 @@ import {
 } from "../core/backgroundTransform";
 import { FauxOverheadLayer } from "./layers/FauxOverheadLayer";
 import { StairMarkersLayer } from "./layers/StairMarkersLayer";
+import { RaisedAreasLayer } from "./layers/RaisedAreasLayer";
+import type { RaisedMarker } from "../core/raisedAreas";
 import { lowerFloorTint, type StairMarker } from "../core/levelPlay";
 import type { ElevationCue } from "../core/elevationCues";
 import type { RegionDocument, TokenDocument } from "../core/documents";
@@ -236,6 +238,10 @@ export interface Stage {
   lowerTokenLabels(): Array<{ id: string; label: string }>;
   /** G-10/G-14: draw these stair markers (players: host-filtered; GM: every stairwell). */
   setStairMarkers(markers: readonly StairMarker[]): void;
+  /** D-453: the GM's raised-area outlines (players never get any). */
+  setRaisedMarkers(markers: readonly RaisedMarker[]): void;
+  /** D-453 readback: the raised-area outlines drawn, with their labels. */
+  raisedMarkerLabels(): Array<{ id: string; label: string }>;
   stairMarkerIds(): string[];
   tokenPointVisible(id: string, point: { x: number; y: number }): boolean;
   tokenMarqueeSelectable(id: string): boolean;
@@ -548,6 +554,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const stairsHolder = new Container();
   stairsHolder.label = "stairs";
   root.addChild(stairsHolder);
+  const raisedAreas = new RaisedAreasLayer(stairsHolder);
   const stairMarkers = new StairMarkersLayer(stairsHolder);
   let ghostTokens: ReadonlySet<string> = new Set();
   let ghostAlpha = 0.25;
@@ -1131,6 +1138,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }).sort((a, b) => a.id.localeCompare(b.id));
     },
     setStairMarkers(markers): void { stairMarkers.sync(markers); },
+    setRaisedMarkers(markers): void { raisedAreas.sync(markers); },
+    raisedMarkerLabels() { return raisedAreas.labels(); },
     setFloorGhosts(ghost, alpha = 0.25): void {
       ghostTokens = ghost?.tokens ?? new Set();
       ghostAlpha = alpha;
@@ -1297,6 +1306,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       tokenArtwork.clear();
       overhead.destroy();
       stairMarkers.destroy();
+      raisedAreas.destroy();
       tokenViews.clear();
       tokenMovement.clear();
       tokenRotation.clear();

@@ -36,7 +36,7 @@ import type { DrawingDocument, WallDocument } from "../../core/documents";
 import type { WallKind } from "../vision/wallKinds";
 import type { DocId, UserId } from "../../core/ids";
 
-export type ToolGesture = "draw" | "text" | "measure" | "fog" | "wall" | "light" | "pin" | "stairs";
+export type ToolGesture = "draw" | "text" | "measure" | "fog" | "wall" | "light" | "pin" | "stairs" | "raised";
 
 /** Roll20's advanced hotkeys draw the wall/light layer with snapping on by default. */
 export type FogBrush = "reveal" | "hide";
@@ -63,6 +63,9 @@ export interface ToolOptions {
   lightColor: string;
   /** Snap wall/light placement to the grid (Roll20: on). */
   placementSnap: SnapMode;
+  /** D-453: height (scene units) and solidity of the next raised area the Raised area tool makes. */
+  raisedHeight: number;
+  raisedSolid: boolean;
 }
 
 export const DEFAULT_TOOL_OPTIONS: ToolOptions = {
@@ -82,6 +85,8 @@ export const DEFAULT_TOOL_OPTIONS: ToolOptions = {
   lightRadius: 40,
   lightColor: "#ffcc66",
   placementSnap: "corner",
+  raisedHeight: 5,
+  raisedSolid: true,
 };
 
 export interface ToolPointer {
@@ -117,7 +122,9 @@ export type ShapePreview =
   | { kind: "wall"; from: Point; to: Point; wallKind: WallKind }
   | { kind: "wallEdit"; walls: WallDocument[] }
   /** G-14 (D-450): the stairwell being dragged out, snapped to grid corners. */
-  | { kind: "stairs"; from: Point; to: Point };
+  | { kind: "stairs"; from: Point; to: Point }
+  /** D-453: the raised area being dragged out, snapped to grid corners. */
+  | { kind: "raised"; from: Point; to: Point };
 
 export interface ToolCallbacks {
   wallEditing?: WallEditorPort;
@@ -142,6 +149,8 @@ export interface ToolCallbacks {
   fogPaint: (value: { mode: FogBrush; poly: number[] }) => void;
   /** G-14 (D-450): the GM dragged out a stairwell (scene pixels, grid-corner snapped). */
   createStairs?: (area: { x: number; y: number; width: number; height: number }) => void;
+  /** D-453: the GM dragged out a raised area (scene pixels, grid-corner snapped). */
+  createRaised?: (area: { x: number; y: number; width: number; height: number }) => void;
 }
 
 /** Click-within-this-many-world-units of the first vertex closes a polygon. */
@@ -237,9 +246,9 @@ export class ToolInteractionController {
       }
       return;
     }
-    if (this.mode === "stairs") {
+    if (this.mode === "stairs" || this.mode === "raised") {
       this.start = this.snap(event.world, event, "corner");
-      this.callbacks.shapePreview({ kind: "stairs", from: this.start, to: this.start });
+      this.callbacks.shapePreview({ kind: this.mode, from: this.start, to: this.start });
       return;
     }
     if (this.mode === "wall") {
@@ -296,8 +305,8 @@ export class ToolInteractionController {
       this.emitMeasure([...this.points, at], false);
     } else if (this.mode === "fog" && options.fogShape === "rect" && this.start) {
       this.emitFogRectPreview({ ...event.world });
-    } else if (this.mode === "stairs" && this.start) {
-      this.callbacks.shapePreview({ kind: "stairs", from: this.start, to: this.snap(event.world, event, "corner") });
+    } else if ((this.mode === "stairs" || this.mode === "raised") && this.start) {
+      this.callbacks.shapePreview({ kind: this.mode, from: this.start, to: this.snap(event.world, event, "corner") });
     } else if (this.mode === "fog" && options.fogShape === "poly" && this.points.length > 0) {
       this.emitFogPolyPreview({ ...event.world });
     } else if (this.mode === "wall") {
@@ -358,13 +367,16 @@ export class ToolInteractionController {
       if (poly) this.callbacks.fogPaint({ mode: options.fogBrush, poly });
       return;
     }
-    if (this.mode === "stairs" && this.start) {
+    if ((this.mode === "stairs" || this.mode === "raised") && this.start) {
       const from = this.start, to = this.snap(event.world, event, "corner");
       this.start = null;
       this.callbacks.shapePreview(null);
       const width = Math.abs(to.x - from.x), height = Math.abs(to.y - from.y);
-      if (width >= MIN_SHAPE_SIZE && height >= MIN_SHAPE_SIZE)
-        this.callbacks.createStairs?.({ x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width, height });
+      const area = { x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width, height };
+      if (width >= MIN_SHAPE_SIZE && height >= MIN_SHAPE_SIZE) {
+        if (this.mode === "stairs") this.callbacks.createStairs?.(area);
+        else this.callbacks.createRaised?.(area);
+      }
       return;
     }
     if (this.mode === "wall" && this.start) {
