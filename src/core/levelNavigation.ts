@@ -30,12 +30,18 @@ export function levelFocusView(scene: SceneDocument | undefined, actors: readonl
   const level = scene.levels?.find((l) => l._id === levelId);
   const presentation = level ? floorPresentation(scene, level) : undefined;
   if (presentation) presentation.tileIds = presentation.tileIds.filter((id) => scene.tiles.some((t) => t._id === id && !t.hidden && can(user, "read", t, "tiles", { parent: scene })));
+  // Only IDs this viewer already receives (projection rules: hidden regions, pin visibility, ownership).
+  const readable = (rows: readonly BaseDocument[] | undefined) => new Set((rows ?? []).filter((d) => docVisibleTo(user, d, scene)).map((d) => d._id));
   if (presentation?.offFloor) {
-    // Only IDs this viewer already receives (projection rules: hidden regions, pin visibility, ownership).
-    const readable = (rows: readonly BaseDocument[] | undefined) => new Set((rows ?? []).filter((d) => docVisibleTo(user, d, scene)).map((d) => d._id));
     const { regions, drawings, templates, notes } = presentation.offFloor;
     const r = readable(scene.regions), d = readable(scene.drawings), t = readable(scene.templates), n = readable(scene.notes);
     presentation.offFloor = { regions: regions.filter((id) => r.has(id)), drawings: drawings.filter((id) => d.has(id)), templates: templates.filter((id) => t.has(id)), notes: notes.filter((id) => n.has(id)) };
+  }
+  // G-22 (D-446): the same for the other floors' lights and walls that light this one.
+  if (presentation?.lighting) {
+    const l = readable(scene.lights), w = readable(scene.walls);
+    presentation.lighting = { ...presentation.lighting, links: presentation.lighting.links.map((link) => ({ ...link,
+      lightIds: link.lightIds.filter((id) => l.has(id)), wallIds: link.wallIds.filter((id) => w.has(id)) })) };
   }
   // G-20 (D-445): tokens below that this viewer's own vision tokens see through the openings.
   if (presentation && level && isolated && presentation.below?.length) {

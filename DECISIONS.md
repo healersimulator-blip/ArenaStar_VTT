@@ -13034,3 +13034,30 @@ With lower floors' art showing through openings (D-443) and floors that know whe
 **GM.** The isolated ("only") floor view draws every token on the floors it sees below, beneath the art. The art decides what shows. The ghost and all modes are unchanged.
 
 **Limits.** The replica still holds every non-hidden token, so this is fair presentation, not secrecy; the read boundary is G-33 (D-442). Only floors *below* are drawn, as a top-down view implies. The kernel is rebuilt per focus update, which is cheap for ordinary scenes; cache it if large scenes need it.
+
+## D-446 — Light between floors through openings (G-22) (2026-10-11)
+
+Floors now know where they are open (D-444), and players see lower floors and their tokens (D-443, D-445). Light still stopped at hard per-floor scopes. A pitch-dark upper floor showed the lit hall below it as dark, and a lamp downstairs never glowed in the stairwell. V14 lets floors restrict light, so light spills through openings (T7).
+
+**What crosses.** Light crosses only through openings in traced floors. An untraced floor is solid, so existing scenes do not change.
+- **Below.** Through a floor's openings, the floors it sees (D-443) show under *their own* ambient darkness and lights. A deeper floor's light shows only where every nearer seen floor is also open. An untraced floor in between ends the chain.
+- **Above.** The floor directly above sends its own lights down through its openings, when it sees this floor and has openings. A lamp hanging over the stairwell lights the landing at its foot.
+- Lights that are also on this floor (scoped to it, or to every floor) already light it, so they are not repeated.
+
+**Data.** Players hold no levels or surfaces, so `FloorPresentation.lighting` carries what they need: this floor's surface, plus links `{levelId, side, depth, lightIds, wallIds, darkness, surface?}`. The focus view keeps only the light and wall IDs this viewer receives. The GM's isolated ("only") view computes the same from the scene (`floorLighting`). The client drops malformed surfaces before drawing.
+
+**Drawing.**
+- The ambient darkness splits at the floor's solid area. Solid parts take this floor's darkness, which still animates. Openings take the darkness of the nearest floor seen below.
+- Other floors' lights are drawn additively inside nested containers, each masked to one floor's openings. Their polygons come from the vision worker, using that floor's own light-blocking walls.
+- There are no CPU polygon booleans: the masks do the clipping.
+- Light from below is drawn as seen from above, with no extra falloff for the drop.
+
+**Canvas2D.** Pixi attaches a fill's cut-out holes only when it draws that fill. Masks are never drawn, so on Canvas2D a mask with openings clipped as if it had no holes, and inverted: the light below glowed on the solid floor instead of in the well. The layer now attaches the holes up front, and both renderers clip the same way. A real-pixel e2e covers each renderer; without the fix, the Canvas2D run fails.
+
+**Perception.** Seeing tokens below (D-445) now counts light from the viewer's floor and from the floor above, not just from the targets' floors. The kernel's floor planes let that light through openings only. Above the perception budget of 256 lights, only the targets' own floors light them, as before.
+
+**Limits.**
+- Ambient light inside openings uses only the nearest seen floor's darkness, so a second stairwell under the first shows that floor's ambient.
+- Token-carried lights stay on their own floor.
+- Light from above reaches only the floor directly beneath.
+- The GM's ghost and all views are unchanged.

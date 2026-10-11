@@ -113,6 +113,12 @@ export function surfaceOpenings(surface: LevelSurface): SpatialPoint[] {
   });
 }
 
+/** G-22 (D-446): a surface's solid areas in scene pixels, as flat [x, y, …] rings for drawing and masks. */
+export function surfaceRings(surface: LevelSurface): Array<{ outer: number[]; holes: number[][] }> {
+  const flat = (ring: readonly SpatialPoint[]) => ring.flatMap((p) => [surface.x + p.x * surface.width, surface.y + p.y * surface.height]);
+  return surface.footprint.components.map((c) => ({ outer: flat(c.outer), holes: c.holes.map(flat) }));
+}
+
 /** SVG path data (scene pixels, even-odd) for a surface preview. */
 export function surfaceSvgPath(surface: LevelSurface): string {
   const ring = (points: readonly SpatialPoint[]) => points.map((p, i) => `${i ? "L" : "M"}${round(surface.x + p.x * surface.width)} ${round(surface.y + p.y * surface.height)}`).join("") + "Z";

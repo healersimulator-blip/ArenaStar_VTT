@@ -1,5 +1,5 @@
 /** Discrete floor play. No vertical LOS, teleport permissions or secret-data guarantee is implied. */
-import { isDoorWall, type SceneDocument, type RegionDocument, type TokenDocument, type LevelDocument, type LevelScope } from "./documents";
+import { isDoorWall, type SceneDocument, type RegionDocument, type TokenDocument, type LevelDocument, type LevelScope, type LevelSurface } from "./documents";
 import type { Op } from "./ops";
 import { snapTokenCenter, type GridSpec } from "../canvas/grid";
 import { SpatialKernel, legacySpatialBarrier } from "./spatial/kernel";
@@ -46,6 +46,32 @@ export interface FloorPresentation {
    * per viewer (added by the focus view, never by `floorPresentation`). Drawn beneath this floor's art.
    */
   belowTokens?: Array<{ id: string; depth: number }>;
+  /** G-22 (D-446): light between floors through openings. Absent when no light crosses into this floor. */
+  lighting?: FloorLighting;
+}
+/**
+ * G-22 (D-446): one floor whose light reaches this floor's view through openings. A `below` floor
+ * is seen through this floor's openings (and every nearer seen floor's), lit by its own lights and
+ * ambient. The `above` floor is the one directly over this floor, when it sees this floor: its
+ * lights fall through its own openings onto this floor.
+ */
+export interface FloorLightLink {
+  levelId: string;
+  side: "below" | "above";
+  depth: number;
+  /** That floor's own lights; lights that are also on this floor already light it and are left out. */
+  lightIds: string[];
+  /** Walls on that floor (its own and every-floor walls); they shape its lights. */
+  wallIds: string[];
+  /** That floor's ambient darkness, 0–1. */
+  darkness: number;
+  /** That floor's solid area; absent = solid everywhere. */
+  surface?: LevelSurface;
+}
+export interface FloorLighting {
+  /** This floor's solid area; its openings are everywhere else. Absent = solid everywhere. */
+  surface?: LevelSurface;
+  links: FloorLightLink[];
 }
 export interface FloorBelow {
   levelId: string;
@@ -63,6 +89,12 @@ export function lowerFloorTint(depth: number): number {
 function stackOf(levels: readonly LevelDocument[]): LevelDocument[] {
   return [...levels].sort((a, b) => a.floorZ - b.floorZ || a.sort - b.sort || (a._id < b._id ? -1 : a._id > b._id ? 1 : 0));
 }
+/** The next floor up the stack from `levelId`, if any. */
+export function floorAbove(scene: Pick<SceneDocument, "levels">, levelId: string): LevelDocument | undefined {
+  const stack = stackOf(scene.levels ?? []);
+  const index = stack.findIndex((l) => l._id === levelId);
+  return index < 0 ? undefined : stack[index + 1];
+}
 /** G-19 (D-443): the floors `level` sees beneath it, nearest first, with their depth in the stack. */
 export function visibleFloorsBelow(scene: Pick<SceneDocument, "levels">, level: LevelDocument): Array<{ level: LevelDocument; depth: number }> {
   const stack = stackOf(scene.levels ?? []);
@@ -74,6 +106,28 @@ export function visibleFloorsBelow(scene: Pick<SceneDocument, "levels">, level: 
     if (below.floorZ < level.floorZ && seen.has(below._id)) out.push({ level: below, depth: index - i });
   }
   return out;
+}
+/**
+ * G-22 (D-446): the floors whose light crosses into this floor's view. Below: the floors it sees
+ * (D-443), but only when it has openings (a D-444 surface); without one it is solid and nothing
+ * shows through. Above: the next floor up, when that floor sees this one and has openings, and
+ * only if it has lights of its own.
+ */
+export function floorLighting(scene: Pick<SceneDocument, "levels" | "lights" | "walls" | "darkness">, level: LevelDocument): FloorLighting | null {
+  const own = (l: LevelDocument): Omit<FloorLightLink, "levelId" | "side" | "depth"> => ({
+    lightIds: scene.lights.filter((x) => x.levelScope?.mode === "levels" && x.levelScope.ids.includes(l._id) && !x.levelScope.ids.includes(level._id)).map((x) => x._id),
+    wallIds: scene.walls.filter((w) => w.levelScope !== undefined && scopeIncludes(w.levelScope, l._id)).map((w) => w._id),
+    darkness: Math.max(0, Math.min(1, l.darkness ?? scene.darkness ?? 0)),
+    ...(l.surface ? { surface: l.surface } : {}),
+  });
+  const links: FloorLightLink[] = [];
+  if (level.surface) for (const { level: below, depth } of visibleFloorsBelow(scene, level)) links.push({ levelId: below._id, side: "below", depth, ...own(below) });
+  const up = floorAbove(scene, level._id);
+  if (up && up.surface && up.floorZ > level.floorZ && up.visibleLevelIds.includes(level._id)) {
+    const link: FloorLightLink = { levelId: up._id, side: "above", depth: 1, ...own(up) };
+    if (link.lightIds.length) links.push(link);
+  }
+  return links.length ? { ...(level.surface ? { surface: level.surface } : {}), links } : null;
 }
 /** Tile id → depth for the lower floors' art (the nearest floor wins a shared tile; this floor's own tiles are excluded). */
 export function lowerFloorDepths(presentation: Pick<FloorPresentation, "tileIds" | "below"> | undefined | null): Map<string, number> {
@@ -251,11 +305,12 @@ export function floorPresentation(scene: SceneDocument, level: LevelDocument): F
   const off = (rows: ReadonlyArray<{ _id: string; levelScope?: LevelScope }> | undefined) =>
     (rows ?? []).filter((r) => !scopeIncludes(r.levelScope, level._id)).map((r) => r._id);
   const below: FloorBelow[] = visibleFloorsBelow(scene, level).map(({ level: l, depth }) => ({ levelId: l._id, depth, tileIds: l.tileIds ?? [], useSceneBackground: l.useSceneBackground === true }));
+  const lighting = floorLighting(scene, level);
   return { tileIds: level.tileIds ?? [], wallIds: scene.walls.filter((w) => belongs(w.levelScope)).map((w) => w._id),
     lightIds: scene.lights.filter((l) => belongs(l.levelScope)).map((l) => l._id), useSceneBackground: level.useSceneBackground === true,
     darkness: level.darkness ?? scene.darkness, epoch: level.fogEpoch ?? "", floorZ: level.floorZ,
     offFloor: { regions: off((scene.regions ?? []).filter((r) => r.stairs === undefined)), drawings: off(scene.drawings), templates: off(scene.templates), notes: off(scene.notes) },
-    stairs: stairMarkers(scene, level._id), ...(below.length ? { below } : {}) };
+    stairs: stairMarkers(scene, level._id), ...(below.length ? { below } : {}), ...(lighting ? { lighting } : {}) };
 }
 /** Clear every unspecified layer, including legacy foreground and manual exploration mask. */
 export function floorScene(scene: SceneDocument, view: { isolated?: boolean; levelId: string | null; tokenIds: string[] | null; presentation?: FloorPresentation } | null): SceneDocument {

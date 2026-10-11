@@ -4,11 +4,11 @@
   import SavesPanel from "../ui/settings/SavesPanel.svelte";
   import ZoomControl from "../ui/canvas/ZoomControl.svelte";
   import StairChooser from "../ui/StairChooser.svelte";
-  import { floorForElevation, floorMoveOps, stairMarkers } from "../core/levelPlay";
+  import { floorForElevation, floorLighting, floorMoveOps, stairMarkers } from "../core/levelPlay";
   import { adjacentFloor, floorRoster, gmFloorRender, GM_GHOST_ALPHA, type GmFloorMode } from "../core/gmFloorView";
   import { unscopedToFloorOps } from "../core/levelAudit";
   import type { StairOfferMsg } from "../core/messages";
-  import { SceneLightingPlayer } from "../client/sceneLighting";
+  import { SceneLightingPlayer, crossFloorLightingInput } from "../client/sceneLighting";
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
   import { detectMapGridFromBytes } from "../client/gridDetection";
   import BackgroundPanel from "../ui/canvas/BackgroundPanel.svelte";
@@ -3184,7 +3184,10 @@ const WALL_PICK_RADIUS = 12;
         !scene?.tokens.some((token) => token._id === pendingSpellAim?.casterTokenId)))
       settleSpellAim({ ok: false, error: "The caster or aiming scene changed; no slot was spent." });
     fxPlayer?.syncScene();
-    sceneLighting.sync(scene, view, previewLevel(scene));
+    // G-22 (D-446): the isolated floor view lights what players on that floor see through its openings.
+    const lightingLevel = previewLevel(scene);
+    const lightingFloor = lightingLevel && floorMode === "only" ? scene?.levels?.find((l) => l._id === lightingLevel) : undefined;
+    sceneLighting.sync(scene, view, lightingLevel, undefined, scene && lightingFloor ? crossFloorLightingInput(floorLighting(scene, lightingFloor), scene) : null);
     if (tokenSelection.sceneId !== (scene?._id ?? null)) clearTokenSelection();
     // A preview belongs to the scene it was resolved against; switching scenes
     // clears it rather than repainting stale cells.
@@ -4970,6 +4973,7 @@ const WALL_PICK_RADIUS = 12;
             return Object.fromEntries((activeScene()?.tiles ?? []).map((t) => [t._id, layer.roofStateOf(t._id)]));
           },
           lowerFloors: () => view.lowerFloors(),
+          crossFloorLighting: () => view.getLightingLayer().crossFloorState(),
           // §2.2/G-10a: what the GM canvas actually drew — the mode's own gate, read back.
           tokenHpBars: () => view.tokenHpBars(),
           // G-32 (D-440): the height badge and size cue each drawn token shows.
@@ -5013,6 +5017,15 @@ const WALL_PICK_RADIUS = 12;
             current.gm.client.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: scene._id },
               data: { _id: id, type: "wall" as const, name: spec.door === undefined ? "Wall" : "Door", ownership: { default: 0 }, flags: {}, system: {}, c: spec.c,
                 door: spec.door ?? 0, oneWay: false, move: axis, sight: axis, sound: axis, light: axis, ...(spec.everyFloor ? { levelScope: { mode: "all" as const } } : {}) } }]);
+            return id;
+          },
+          seedLight: (spec) => {
+            const scene = activeScene();
+            if (!scene) return "";
+            const id = `light-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+            current.gm.client.submit([{ kind: "create", coll: "lights", parent: { coll: "scenes", id: scene._id },
+              data: { _id: id, type: "light" as const, name: "Lamp", ownership: { default: 0 }, flags: {}, system: {}, x: spec.x, y: spec.y,
+                dim: spec.dim, bright: spec.bright ?? spec.dim, color: "#ffffff", alpha: 1, ...(spec.levelId ? { levelScope: { mode: "levels" as const, ids: [spec.levelId] } } : {}) } }]);
             return id;
           },
           setDoorState: ({ id, door }) => {

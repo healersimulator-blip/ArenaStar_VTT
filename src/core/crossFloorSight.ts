@@ -9,13 +9,14 @@
  * are solid everywhere, so nothing is seen through them.
  *
  * Bodies are a token's footprint. A creature is as tall as its size in cells times the grid
- * distance (one cell for a medium creature), with eyes at 90 %. Lights are the target floor's own
- * lights, at one grid distance above its floor. Light across floors is G-22.
+ * distance (one cell for a medium creature), with eyes at 90 %. Lights stand one grid distance
+ * above their floor. The targets' floors, this floor and the floor above all light targets; the
+ * floor planes pass light through openings only (G-22, D-446).
  */
 import type { ActorDocument, LevelDocument, SceneDocument, TokenDocument } from "./documents";
 import { maskHiddenTokenIds } from "./fogExploration";
 import { floorSurfaces } from "./floorSurface";
-import { visibleFloorsBelow } from "./levelPlay";
+import { floorAbove, visibleFloorsBelow } from "./levelPlay";
 import type { PermissionUser } from "./ownership";
 import { can } from "./permissions";
 import { SpatialKernel, legacySpatialBarrier, type SpatialBarrier } from "./spatial/kernel";
@@ -90,7 +91,12 @@ export function tokensSeenBelow(scene: SceneDocument, actors: readonly ActorDocu
   try {
     const kernel = new SpatialKernel(floorBarriers(scene), floorSurfaces(scene));
     const perUnit = scene.grid.size / (scene.grid.distance > 0 ? scene.grid.distance : 5);
-    const perception = new SpatialPerception(kernel, floorLights(scene, new Set(below.keys())), perUnit, options.rayBudget ?? 20_000);
+    // G-22 (D-446): light from this floor and the floor above counts too; the floor planes let it
+    // through openings only. Past the perception light budget, only the targets' floors light them.
+    const up = floorAbove(scene, levelId);
+    let lights = floorLights(scene, new Set([...below.keys(), levelId, ...(up ? [up._id] : [])]));
+    if (lights.length > 256) lights = floorLights(scene, new Set(below.keys())).slice(0, 256);
+    const perception = new SpatialPerception(kernel, lights, perUnit, options.rayBudget ?? 20_000);
     const levelOf = (t: TokenDocument) => scene.levels?.find((l) => l._id === t.levelId);
     const eyes = observers.map((t) => capToBand(perceptionBody(t, scene.grid), levelOf(t)));
     const darkness = new Map((scene.levels ?? []).map((l) => [l._id, l.darkness ?? scene.darkness ?? 0] as const));

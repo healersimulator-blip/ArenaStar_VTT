@@ -202,7 +202,7 @@ Legend: ✅ have · ◐ partial · ❌ missing · — not applicable. Gap IDs re
 | Solid floors and ceilings with holes | tile planes; holes from alpha | Define Surface regions with hole tool | ✅ a solid shape per floor, traced from its art, previewed and checked (D-444); play consumers in G-20/G-22/G-23 | G-21 |
 | See tokens on other floors through openings | 3D line-of-sight sampling | visibility lists plus surfaces | ✅ host 3D sight through traced openings, drawn dimmed beneath the floor art (D-445) | G-20 |
 | See lower-floor art from above | show-if-above, basement rules | visibility lists | ✅ through the floor art's transparent parts, dimmed by depth (D-443) | G-19 |
-| Light passing between floors | light masking by viewer height | unassigned lights; floors restrict light | ❌ hard per-floor scope | G-22 |
+| Light passing between floors | light masking by viewer height | unassigned lights; floors restrict light | ✅ through traced openings: a floor's openings show the lower floors' darkness and lights, and the floor above's lights fall through its own openings (D-446) | G-22 |
 | Notes, templates, drawings per floor | elevation-gated; template elevation tool | tagged to levels | ❌ removed in isolated mode (S3) | **G-06**, G-27 |
 | Flying and falling between floors | warning when crossing a floor | surfaces plus elevation | ❌ | G-23 |
 | Faux Overhead token clipping | (Better Levels) | — | ✅ vector; ❌ on Canvas2D (S4); ❌ in isolated mode (S3) | G-05, G-06 |
@@ -292,6 +292,7 @@ Code references point to the pinned commits. Behavior is described in my own wor
 - V13 (`handlers/lightHandler.js` L2-56) hides lights outside the viewer's band, or in "light masking" mode keeps lights at or below the viewer's height.
 - V14 advice: leave lights unassigned at their floor's elevation and let floors restrict light. Light then spills naturally down stairwells and through openings.
 - ArenaStar only has hard per-floor light scopes. Address this after surfaces exist (G-22).
+- **Done (D-446):** light now crosses traced openings in both directions, clipped to the openings, and it counts for seeing tokens below. Light scopes stay explicit: there is no "unassigned light at an elevation".
 
 ### T8. Better Roofs: roof visible through fog, and linked roofs
 
@@ -575,6 +576,7 @@ P2 · L · Design §4.3
 P2 · M–L · Design §5.3
 
 - **Bridge:** once G-21 exists, let unassigned lights at a floor's elevation light other visible floors through surface holes (clipped to the holes), instead of stopping at a hard per-floor boundary.
+- **Status: Done (D-446).** Each floor's own lights reach other floors through traced openings: lower floors seen through a floor's openings keep their ambient darkness and lights, and the floor above's lights fall through its own openings. Masks clip on WebGL and Canvas2D alike, and host sight (G-20) counts this light.
 
 #### G-23: Flying and falling
 P2 · L · Design §5.1 "Flying/falling"
@@ -668,7 +670,7 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-10 Stairs visible to players | **Done** — markers per floor, `secret` hides them | D-430 |
 | G-11 Lock stairs | **Done** — toggle, plus stairs linked to a door work only while it is open (dangling links audited) | D-430, D-437 |
 | G-14 Stairs on the canvas | **Partial** — GM labels/arrows, create from any Active Zones region; dedicated draw tool open | D-430 |
-| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 20 Chromium tests, roofs included) | D-429 |
+| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 28 Chromium tests in 21 specs, roofs and floor perception included) | D-429 |
 | S6 / G-15 Pre-check and live audit | **Done** — blocking errors, acknowledged warnings, quick fixes, live list | D-433 |
 | G-18 Transition presentation | **Done** — arrival notice and cross-fade | D-430 |
 | S7 / G-12 GM floor view & build mode | **Done** — floor switch with ghost/only/all, build mode, PageUp/PageDown | D-434 · `src/core/gmFloorView.ts` |
@@ -687,7 +689,8 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-19 See lower floors | **Done (art)** — per-floor "Sees floors below" with Sealed / Down to ground / All below presets; isolated player floors and the GM's isolated view draw the visible lower floors' art beneath, dimmed by depth, through the floor art's transparent parts. Tokens on other floors wait for G-20. Also fixed: GM-only changes no longer blank players' floors, and players' height badges measure from their floor | D-443 · `visibleFloorsBelow` |
 | G-21 Solid floors with openings | **Done (model + authoring)** — `LevelDocument.surface` (solid area, holes = openings; absent = solid everywhere); "Trace from floor art" with preview; kernel planes via `floorSurfaces`; `opening-over-void` check. Surfaces inside a band (bridges) deferred | D-444 · `traceSurface` |
 | G-20 See tokens on other floors | **Done** — per viewer, the host's 3D sight (kernel rays through D-444 openings, floor-scoped walls, ranges, light/darkvision) lists the lower-floor tokens the viewer's own vision tokens see; they are drawn dimmed beneath the floor's art, not pickable. The GM's isolated view shows all of them | D-445 · `tokensSeenBelow` |
-| G-22, G-23, G-27, G-30 | Open (slices D and F) | — |
+| G-22 Light through openings | **Done** — split ambient darkness at the floor's solid area; lower floors' lights in nested masks of the openings, shaped by their own walls; the floor above's lights through its openings; sent as `presentation.lighting` (players hold no surfaces); host sight counts it; WebGL and Canvas2D clip alike | D-446 · `floorLighting` |
+| G-23, G-27, G-30 | Open (slices D and F) | — |
 
 ---
 

@@ -2,6 +2,7 @@
  * Test-only hook (D-045): `?e2e` gates a window surface for Playwright to
  * drive the real bundled modules (WebRTC loopback, §14). Inert otherwise.
  */
+import type { CrossFloorLightingState } from "../canvas/layers/LightingLayer";
 import type { LoopbackResult } from "../net/webrtc";
 import { RendererType } from "pixi.js";
 import { makeToken, type HostApp } from "./hostBoot";
@@ -1333,6 +1334,8 @@ export interface GmFogSurface {
   tokenElevationCues(): Array<{ id: string; label: string | null; scale: number }>;
   /** G-19 (D-443): lower-floor tiles drawn beneath the floor view, and the background's depth. */
   lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> };
+  /** G-22 (D-446): light crossing floors: split darkness and the other floors' light groups. */
+  crossFloorLighting(): CrossFloorLightingState;
   /** D-438: what each roof on the active scene draws (alpha, openings, group, fog reveal). */
   roofStates(): Record<string, {
     alpha: number; holes: "none" | "circles" | "vision"; openings: number; holeAlpha: number;
@@ -1343,6 +1346,8 @@ export interface GmFogSurface {
    * every axis conditional); returns its id. `everyFloor` scopes it to all floors.
    */
   seedWall(spec: { c: [number, number, number, number]; door?: 0 | 1 | 2; everyFloor?: boolean }): string;
+  /** G-22 (D-446): a placed light, optionally on one floor. */
+  seedLight(spec: { x: number; y: number; dim: number; bright?: number; levelId?: string }): string;
   /** G-11 e2e: set a door wall's state (0 closed, 1 open, 2 locked) through the client op path. */
   setDoorState(spec: { id: string; door: 0 | 1 | 2 }): void;
   /** §12: rulesVersion of the last resolved turn's report. */
@@ -1562,6 +1567,8 @@ export interface PlayerCanvasSurface {
   stairMarkers(): string[];
   /** G-19 (D-443): lower-floor tiles drawn beneath this player's floor, and the background's depth. */
   lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> };
+  /** G-22 (D-446): light crossing floors on this player's canvas (the same shape as the GM readback). */
+  crossFloorLighting(): CrossFloorLightingState;
   /** G-32 (D-440): the height badge text and artwork scale of each token this player sees. */
   tokenElevationCues(): Array<{ id: string; label: string | null; scale: number }>;
   /** D-438: what each roof on this player's canvas draws (the same shape as the GM readback). */

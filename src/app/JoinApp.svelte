@@ -8,7 +8,7 @@
   import type { LevelFocusStateMsg } from "../core/messages";
   import ZoomControl from "../ui/canvas/ZoomControl.svelte";
   /* eslint-disable @typescript-eslint/no-non-null-assertion */
-  import { SceneLightingPlayer } from "../client/sceneLighting";
+  import { SceneLightingPlayer, crossFloorLightingInput } from "../client/sceneLighting";
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
   import { TileImageCache } from "../canvas/imageTexture";
   import { tokenRect } from "../canvas/tokens";
@@ -1128,7 +1128,14 @@
     }
     syncPF1eAreaPreview();
     fxPlayer?.syncScene();
-    sceneLighting.sync(scene, view, undefined, client.levelFocus?.isolated ? client.levelFocus.levelId ?? "pending" : undefined);
+    // G-22 (D-446): light from the floors seen through this floor's openings, and from the floor
+    // above through its own. Their lights and walls are in the replica, not in the floor's scene.
+    const lightFocus = client.levelFocus;
+    const lighting = scene?.levelMode === "isolated" && lightFocus?.isolated && lightFocus.sceneId === scene._id &&
+      (lightFocus.worldSeq === undefined || lightFocus.worldSeq === client.store.seq) ? lightFocus.presentation?.lighting : undefined;
+    const lightingReplica = scene && lighting ? client.store.get("scenes", scene._id) as SceneDocument | undefined : undefined;
+    sceneLighting.sync(scene, view, undefined, client.levelFocus?.isolated ? client.levelFocus.levelId ?? "pending" : undefined,
+      lightingReplica ? crossFloorLightingInput(lighting, lightingReplica) : null);
     worldName = client.world?.name ?? "—";
     seq = client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
@@ -1343,6 +1350,7 @@
               },
               stairMarkers: () => view.stairMarkerIds(),
               lowerFloors: () => view.lowerFloors(),
+              crossFloorLighting: () => view.getLightingLayer().crossFloorState(),
               tokenElevationCues: () => view.tokenElevationCues(),
               roofStates: () => {
                 const layer = view.getTilesLayer({ loadTexture: tileImages.load });
