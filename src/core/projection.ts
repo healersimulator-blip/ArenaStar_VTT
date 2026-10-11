@@ -22,6 +22,7 @@
 import {
   OWNERSHIP_LEVELS,
   TOP_LEVEL_COLLECTIONS,
+  type ActorDocument,
   type BaseDocument,
   type CellDocument,
   type CellFeature,
@@ -38,6 +39,7 @@ import {
   type WorldCollections,
 } from "./documents";
 import type { Op, OpEnvelope } from "./ops";
+import { FLOOR_DISCLOSED_PARTS, floorDisclosure, floorReadable, isFloorDisclosedPart } from "./floorDisclosure";
 import { getEffectiveOwnership } from "./permissions";
 import type { PermissionUser } from "./ownership";
 import type { Json } from "./documents";
@@ -81,6 +83,29 @@ export interface ProjectionFns {
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+type ActorLookup = (id: string) => ActorDocument | undefined;
+const resolverActors = (resolver: ProjectionResolver | undefined): ActorLookup => (id) => {
+  const actor = resolver?.resolve({ coll: "actors", id });
+  return actor?.type === "actor" ? (actor as ActorDocument) : undefined;
+};
+
+/**
+ * G-33 (D-451): a scene document outside the player's floors (isolated floor play) is withheld,
+ * as a create or an update. Deletes are left to the host, which knows what each session holds.
+ */
+function floorWithheld(
+  user: PermissionUser,
+  coll: string,
+  doc: BaseDocument,
+  parentRef: DocRef | undefined,
+  resolver: ProjectionResolver | undefined,
+): boolean {
+  if (isGm(user) || !resolver || !parentRef || !isFloorDisclosedPart(coll)) return false;
+  const scene = resolver.resolve(parentRef);
+  if (scene?.type !== "scene") return false;
+  return !floorReadable(floorDisclosure(scene as SceneDocument, user, resolverActors(resolver)), coll, doc);
+}
 
 const SECRET_BLOCK = /<secret>[\s\S]*?<\/secret>/gi;
 
@@ -377,6 +402,7 @@ function projectSceneEmbedUpdate(
   user: PermissionUser,
   op: Extract<Op, { kind: "update" }>,
   scene: SceneDocument,
+  actorOf: ActorLookup,
 ): Op {
   const touched = SCENE_PROJECTED_PARTS.filter((part) =>
     Object.keys(op.diff).some((key) => {
@@ -385,7 +411,7 @@ function projectSceneEmbedUpdate(
     }),
   );
   if (touched.length === 0) return op;
-  const projected = projectScene(user, scene);
+  const projected = projectScene(user, scene, actorOf);
   const diff: Record<string, Json | null> = {};
   for (const [key, value] of Object.entries(op.diff)) {
     const path = key.startsWith("-=") ? key.slice(2) : key;
@@ -399,19 +425,28 @@ function projectSceneEmbedUpdate(
 function projectScene(
   user: PermissionUser,
   scene: SceneDocument,
+  actorOf: ActorLookup,
 ): SceneDocument {
+  // G-33 (D-451): in isolated floor play, other floors' documents stay on the host.
+  const floors = isGm(user) ? null : floorDisclosure(scene, user, actorOf);
   const tokens = scene.tokens
-    .filter((t) => tokenVisible(user, t, scene))
+    .filter((t) => tokenVisible(user, t, scene) && floorReadable(floors, "tokens", t))
     .map(stripPrefabMarker);
   const tiles = scene.tiles
-    .filter((t) => docVisibleTo(user, t, scene))
+    .filter((t) => docVisibleTo(user, t, scene) && floorReadable(floors, "tiles", t))
     .map(stripPrefabMarker);
   const regions = scene.regions
-    ?.filter((region) => docVisibleTo(user, region, scene))
+    ?.filter((region) => docVisibleTo(user, region, scene) && floorReadable(floors, "regions", region))
     .map(stripPrefabMarker);
   const notes = scene.notes
-    .filter((n) => docVisibleTo(user, n, scene))
+    .filter((n) => docVisibleTo(user, n, scene) && floorReadable(floors, "notes", n))
     .map(stripPrefabMarker);
+  const walls = floors ? scene.walls.filter((w) => floorReadable(floors, "walls", w)) : scene.walls;
+  const lights = floors ? scene.lights.filter((l) => floorReadable(floors, "lights", l)) : scene.lights;
+  const drawings = floors ? scene.drawings.filter((d) => floorReadable(floors, "drawings", d)) : scene.drawings;
+  const templates = floors ? scene.templates.filter((t) => floorReadable(floors, "templates", t)) : scene.templates;
+  const withheld = walls.length !== scene.walls.length || lights.length !== scene.lights.length ||
+    drawings.length !== scene.drawings.length || templates.length !== scene.templates.length;
   const cells = projectSceneCells(scene);
   const markers = PREFAB_PARTS.some((coll) =>
     (scene[coll] ?? []).some(
@@ -428,6 +463,7 @@ function projectScene(
     notes.length === scene.notes.length &&
     !cells &&
     !markers &&
+    !withheld &&
     scene.levels === undefined
   )
     return scene;
@@ -439,17 +475,31 @@ function projectScene(
     tiles,
     ...(regions ? { regions } : {}),
     notes,
-    ...(markers
+    ...(markers || withheld
       ? {
-          walls: scene.walls.map(stripPrefabMarker),
-          lights: scene.lights.map(stripPrefabMarker),
+          walls: walls.map(stripPrefabMarker),
+          lights: lights.map(stripPrefabMarker),
           sounds: scene.sounds.map(stripPrefabMarker),
-          drawings: scene.drawings.map(stripPrefabMarker),
-          templates: scene.templates.map(stripPrefabMarker),
+          drawings: drawings.map(stripPrefabMarker),
+          templates: templates.map(stripPrefabMarker),
         }
       : {}),
     ...(cells ? { cells } : {}),
   };
+}
+
+/**
+ * G-33 (D-451): one scene as this user's replica holds it, and the floor-bound documents in it.
+ * The host keeps the keys per session so floor boundary crossings can never send a replica an
+ * update or delete for a document it lacks, or a create for one it has.
+ */
+export function projectSceneFor(user: PermissionUser, scene: SceneDocument, actorOf: (id: string) => ActorDocument | undefined): SceneDocument {
+  return projectScene(user, scene, actorOf);
+}
+export function floorPartKeys(scene: SceneDocument): Set<string> {
+  const keys = new Set<string>();
+  for (const part of FLOOR_DISCLOSED_PARTS) for (const doc of (scene[part] ?? []) as readonly BaseDocument[]) keys.add(`${part}:${doc._id}`);
+  return keys;
 }
 
 function projectMacro(
@@ -611,6 +661,8 @@ export function projectWorld(
   const out: Partial<WorldCollections> = {
     users: world.users, // D-021: player list / whisper targets for everyone
   };
+  const actorsById = new Map((world.actors ?? []).map((actor) => [actor._id, actor]));
+  const actorOf: ActorLookup = (id) => actorsById.get(id);
   for (const coll of TOP_LEVEL_COLLECTIONS) {
     if (coll === "users") continue;
     if (coll === "automations") {
@@ -639,7 +691,7 @@ export function projectWorld(
         continue;
       switch (coll) {
         case "scenes":
-          kept.push(projectScene(user, doc as SceneDocument));
+          kept.push(projectScene(user, doc as SceneDocument, actorOf));
           break;
         case "journals":
           kept.push(
@@ -795,6 +847,7 @@ function createVisible(
     return null;
   if (op.coll === "users") return op; // keep live membership/capabilities consistent with snapshot users
   if (op.coll === "macros" && !docVisibleTo(user, op.data)) return null;
+  if (floorWithheld(user, op.coll, op.data, op.parent, resolver)) return null;
   if (op.coll === "walls" || op.coll === "lights")
     return projectPrefabCreate(op); // §5/D-022
   // D-019 accepts creates without common fields; DocumentStore adds private ownership
@@ -859,7 +912,7 @@ function createVisible(
     if (op.coll === "macros")
       return { ...op, data: projectMacro(data as MacroDocument, user) };
     if (op.coll === "scenes")
-      return { ...op, data: projectScene(user, data as SceneDocument) };
+      return { ...op, data: projectScene(user, data as SceneDocument, resolverActors(resolver)) };
     if (op.coll === "journals")
       return {
         ...op,
@@ -908,6 +961,10 @@ function updateVisible(
   )
     return null;
   if (op.ref.coll === "users") return op; // D-394: opt-in/revocation must reach the actual player's UI live
+  if (op.ref.parent && isFloorDisclosedPart(op.ref.coll)) {
+    const current = resolver?.resolve(op.ref);
+    if (current && floorWithheld(user, op.ref.coll, current, op.ref.parent, resolver)) return null;
+  }
   if (op.ref.coll === "walls" || op.ref.coll === "lights")
     return projectPrefabDiff(op);
   if (op.ref.coll === "macros") {
@@ -1011,7 +1068,7 @@ function updateVisible(
   if (getEffectiveOwnership(user, doc, parent) < OWNERSHIP_LEVELS.LIMITED)
     return null;
   if (op.ref.coll === "scenes")
-    return projectSceneEmbedUpdate(user, op, doc as SceneDocument);
+    return projectSceneEmbedUpdate(user, op, doc as SceneDocument, resolverActors(resolver));
   if (
     op.ref.coll === "macros" &&
     ((doc as MacroDocument).playerAuthoring !== undefined ||

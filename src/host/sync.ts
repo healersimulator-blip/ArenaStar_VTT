@@ -241,10 +241,13 @@ import { boundedJson, scriptApprovalHash, scriptApprovalHashSync, validateScript
 import { runScriptWorker, type ScriptRunner } from "./scriptWorker";
 import {
   docVisibleTo,
+  floorPartKeys,
   projectEnvelope,
+  projectSceneFor,
   projectWorld,
   visibilityFields,
 } from "../core/projection";
+import { FLOOR_DISCLOSED_PARTS, floorDisclosure, isFloorDisclosedPart } from "../core/floorDisclosure";
 import {
   cellVisibilityChanges,
   openCellKeys,
@@ -455,6 +458,11 @@ interface Session {
   /** Last projected metadata sent to this peer (not asset bytes). */
   manifestFingerprint: string | null;
   imageUpload: ImageUploadState | null;
+  /**
+   * G-33 (D-451): per scene in isolated floor play, the floor-bound documents (`part:id`) this
+   * replica holds. Kept exact so a floor crossing never sends an op the replica cannot apply.
+   */
+  floorKeys?: Map<string, Set<string>>;
 }
 
 /**
@@ -1675,6 +1683,7 @@ export class HostSync {
       manifest,
     });
     session.manifestFingerprint = JSON.stringify(manifest);
+    session.floorKeys = new Map([...this.floorViews(session.user as SessionUser)].map(([id, view]) => [id, view.keys]));
     return this.store.seq;
   }
 
@@ -4171,11 +4180,12 @@ export class HostSync {
         crossings.length > 0
           ? projectWithCrossings(envelope, session.user, crossings, resolver)
           : projectEnvelope(envelope, session.user, resolver);
-      if (projected) {
+      const floored = this.withFloorDisclosure(session, envelope, projected);
+      if (floored) {
         const withCells =
           cellCrossings.length > 0
-            ? withCellReveals(projected, session.user, cellCrossings)
-            : projected;
+            ? withCellReveals(floored, session.user, cellCrossings)
+            : floored;
         this.send(session, { kind: "ops", envelope: withCells });
       }
       // A visible document may add/remove an asset reference; even a projected-away op can
@@ -4184,6 +4194,87 @@ export class HostSync {
       this.sendLevelFocus(session);
     }
     this.reconcileFxInstances();
+  }
+
+  /** G-33 (D-451): the readable scenes in isolated floor play, as this player's replica should hold them. */
+  private floorViews(user: SessionUser): Map<string, { view: SceneDocument; keys: Set<string> }> {
+    const views = new Map<string, { view: SceneDocument; keys: Set<string> }>();
+    if (user.role === "GM" || user.role === "ASSISTANT") return views;
+    const actorOf = (id: string) => this.store.get("actors", id) as ActorDocument | undefined;
+    for (const scene of this.store.getAll("scenes") as SceneDocument[]) {
+      if (getEffectiveOwnership(user, scene) < OWNERSHIP_LEVELS.LIMITED || !floorDisclosure(scene, user, actorOf)) continue;
+      const view = projectSceneFor(user, scene, actorOf);
+      views.set(scene._id, { view, keys: floorPartKeys(view) });
+    }
+    return views;
+  }
+
+  /**
+   * G-33 (D-451): floor boundary crossings for one session. Walk its projected ops against what
+   * its replica holds (dropping any create it already has, and any update or delete for something
+   * it lacks); then, where the result is not the scene as it should now see it (a token took the
+   * stairs, the player's own token changed floors, floor play started or ended), replace the
+   * scene's floor-bound parts with its projection. A whole-array replace cannot fail on a replica.
+   */
+  private withFloorDisclosure(session: Session, envelope: OpEnvelope, projected: OpEnvelope | null): OpEnvelope | null {
+    const user = session.user;
+    if (!user || user.role === "GM" || user.role === "ASSISTANT") return projected;
+    const previous = session.floorKeys ?? new Map<string, Set<string>>();
+    const now = this.floorViews(user);
+    if (!previous.size && !now.size) return projected;
+    const crossing = new Set([...previous.keys(), ...now.keys()].filter((id) => previous.has(id) !== now.has(id)));
+    const held = new Map([...previous].map(([id, keys]) => [id, new Set(keys)]));
+    const fresh = new Set<string>(); // scenes this envelope delivers whole (created, or newly readable)
+    const ops: Op[] = [];
+    let modified = false;
+    for (const op of projected?.ops ?? []) {
+      const coll = op.kind === "create" ? op.coll : op.ref.coll;
+      const parent = op.kind === "create" ? op.parent : op.ref.parent;
+      if (coll === "scenes" && !parent) {
+        const sceneId = op.kind === "create" ? op.data._id : op.ref.id;
+        const target = now.get(sceneId);
+        if (op.kind === "delete") held.delete(sceneId);
+        else if (op.kind === "create") { fresh.add(sceneId); held.set(sceneId, floorPartKeys(op.data as SceneDocument)); }
+        else {
+          // A scene update carrying floor-bound parts carries their current projection.
+          const keys = held.get(sceneId);
+          for (const key of Object.keys(op.diff)) {
+            const part = key.replace(/^-=/, "").split(".")[0] ?? "";
+            if (!keys || !target || !isFloorDisclosedPart(part)) continue;
+            for (const k of [...keys]) if (k.startsWith(`${part}:`)) keys.delete(k);
+            for (const k of target.keys) if (k.startsWith(`${part}:`)) keys.add(k);
+          }
+        }
+        ops.push(op);
+        continue;
+      }
+      if (parent?.coll !== "scenes" || !isFloorDisclosedPart(coll)) { ops.push(op); continue; }
+      if (crossing.has(parent.id) && !fresh.has(parent.id)) { modified = true; continue; } // the replace below carries it
+      const keys = held.get(parent.id);
+      if (!keys) { ops.push(op); continue; }
+      const key = `${coll}:${op.kind === "create" ? op.data._id : op.ref.id}`;
+      if (op.kind === "create" ? keys.has(key) : !keys.has(key)) { modified = true; continue; }
+      if (op.kind === "create") keys.add(key);
+      if (op.kind === "delete") keys.delete(key);
+      ops.push(op);
+    }
+    const actorOf = (id: string) => this.store.get("actors", id) as ActorDocument | undefined;
+    for (const sceneId of new Set([...crossing, ...now.keys()])) {
+      const scene = this.store.get("scenes", sceneId) as SceneDocument | undefined;
+      if (!scene || getEffectiveOwnership(user, scene) < OWNERSHIP_LEVELS.LIMITED) continue;
+      const target = now.get(sceneId);
+      const keys = held.get(sceneId);
+      if (target && keys && keys.size === target.keys.size && [...keys].every((k) => target.keys.has(k))) continue; // already exact
+      if (!target && (!previous.has(sceneId) || fresh.has(sceneId))) continue; // not floor-bounded, and delivered whole
+      const view = target?.view ?? projectSceneFor(user, scene, actorOf);
+      const diff: Record<string, Json> = {};
+      for (const part of FLOOR_DISCLOSED_PARTS) if (view[part] !== undefined) diff[part] = view[part] as unknown as Json;
+      ops.push({ kind: "update", ref: { coll: "scenes", id: sceneId }, diff });
+      modified = true;
+    }
+    session.floorKeys = new Map([...now].map(([id, value]) => [id, value.keys]));
+    if (!ops.length) return null;
+    return modified || !projected || ops.length !== projected.ops.length ? { ...envelope, ops } : projected;
   }
 
   // ─── GM Tagger rules: live scene-wide allocation, not client-computed ops ───

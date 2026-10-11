@@ -13172,3 +13172,32 @@ Lock, mode, door link, secrecy and pass-through are kept, as are arrival points 
 **Limits.**
 - The canvas tool draws rectangles. Other shapes still come from an Active Zones region converted in the editor.
 - Resizing is typed in the editor; there are no drag handles on the map.
+
+## D-451 — Other floors' data stays on the host (G-33) (2026-10-11)
+
+D-442 left every floor's tokens, walls, lights and tiles on each player's replica, hidden only by the renderer, until G-20 settled what a player may see on other floors. G-20 (D-445) and G-22 (D-446) are done, so the projection now withholds the rest. Supersedes D-442's interim state.
+
+**What a player's replica holds** of a scene in isolated floor play (`src/core/floorDisclosure.ts`). The player's floors are the floors their own tokens stand on, counting tokens owned directly or through their actor. Each of those floors reaches:
+- **its own documents**, all kinds;
+- **the floors it sees below** (`visibleLevelIds`): their tokens and floor art. G-19 draws the art; G-20 picks which of those tokens the player's tokens actually see;
+- **the floor directly above, when that floor sees down onto it**: its walls and lights only, whose light falls through its openings (G-22).
+
+Regions, drawings, templates and notes go only to the player's own floors. The player's own tokens always arrive. Unassigned and every-floor documents arrive as before, and hidden/ownership rules still apply on top. GM and assistant sessions, scenes outside isolated floor play, and scenes without floors are unaffected.
+
+**Where it applies.**
+- **Snapshots** (`projectWorld`, through `projectScene`) leave the rest out.
+- **Live creates and updates** of withheld documents are dropped (`projectEnvelope`).
+- **Scene-level diffs** that carry whole arrays carry the filtered arrays.
+- **Assets** referenced only by withheld tiles or tokens stop being fetchable, because asset access is computed from the projected world.
+
+**Crossings.** Withholding changes when a token takes the stairs, the player's own token changes floors, a floor's visibility is edited, or floor play starts or ends.
+- A replica refuses a create for a document it holds and an update or delete for one it lacks, and one refused op drops the whole envelope. So the host keeps an exact per-session ledger of the floor-bound documents each replica holds, seeded from its snapshot.
+- Each broadcast walks that session's projected ops against the ledger and drops any op the replica could not apply.
+- Where the result differs from the scene as the player should now see it, the host appends one scene update that replaces the floor-bound parts with their projection. Whole-array replacement cannot fail on a replica. This is the scene-level resend D-442 planned, and floor changes are rare enough that its size does not matter.
+
+**Effects elsewhere.** Host checks that use the caller's projected scene, such as movement refusals and macro targets, now see only the caller's floors, which is the intended strictness.
+
+**Limits.**
+- A combatant whose token is withheld shows in the tracker without its token, as hidden tokens do.
+- Chat cards that name withheld tokens are text and stay.
+- Pings, rulers and FX cues are ephemeral and not filtered by floor.
