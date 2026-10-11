@@ -1329,6 +1329,8 @@ export interface GmFogSurface {
   }): string;
   /** G-32 (D-440): the height badge text and artwork scale of each drawn token. */
   tokenElevationCues(): Array<{ id: string; label: string | null; scale: number }>;
+  /** G-19 (D-443): lower-floor tiles drawn beneath the floor view, and the background's depth. */
+  lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null };
   /** D-438: what each roof on the active scene draws (alpha, openings, group, fog reveal). */
   roofStates(): Record<string, {
     alpha: number; holes: "none" | "circles" | "vision"; openings: number; holeAlpha: number;
@@ -1556,6 +1558,8 @@ export interface PlayerCanvasSurface {
   floorPresentation(): { levelId: string | null; mode: string | null; tileIds: string[]; lightIds: string[]; img: string | null; darkness: number | null };
   /** G-10 (D-430): IDs of the stair markers drawn on this player's floor. */
   stairMarkers(): string[];
+  /** G-19 (D-443): lower-floor tiles drawn beneath this player's floor, and the background's depth. */
+  lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null };
   /** G-32 (D-440): the height badge text and artwork scale of each token this player sees. */
   tokenElevationCues(): Array<{ id: string; label: string | null; scale: number }>;
   /** D-438: what each roof on this player's canvas draws (the same shape as the GM readback). */

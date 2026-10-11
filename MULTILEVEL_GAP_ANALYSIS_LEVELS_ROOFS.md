@@ -173,7 +173,7 @@ Legend: ✅ have · ◐ partial · ❌ missing · — not applicable. Gap IDs re
 | New objects stamped with the active floor | `preCreate*` hooks for tiles, walls, lights, sounds, notes, regions, drawings, tokens | auto-tag to the viewed level | ❌ one dropdown per object | G-13 |
 | Bulk assignment | via the active level | multi-select | ❌ | G-13 |
 | Build mode (hide other floors while editing) | range filter for the GM | (Better Levels) | ❌ | G-12 |
-| Per-level visibility list | implicit (show-if-above, basement) | `visibility.levels` | ◐ field `visibleLevelIds` exists, but no UI and nothing uses it | G-19 |
+| Per-level visibility list | implicit (show-if-above, basement) | `visibility.levels` | ✅ "Sees floors below" per floor, with presets (D-443) | G-19 |
 | Generate or auto-detect levels | "Get levels from scene" | (Better Levels Generate Levels) | ❌ manual add (default 10-unit bands) | G-28 |
 | Drop another scene in as a floor | yes | — | ✅ map, tiles, walls and lights, scaled to the grid (D-441) | G-29 |
 | Who is on which floor | player portraits per level | Placeables tab | ❌ audit lists IDs only | G-17 |
@@ -201,7 +201,7 @@ Legend: ✅ have · ◐ partial · ❌ missing · — not applicable. Gap IDs re
 | Wall heights | wall-height bottom/top | walls tagged to levels | ✅ floor scopes; finite heights exist only in the unconnected kernel | G-21 |
 | Solid floors and ceilings with holes | tile planes; holes from alpha | Define Surface regions with hole tool | ◐ kernel surfaces with holes, not connected and no authoring | G-21 |
 | See tokens on other floors through openings | 3D line-of-sight sampling | visibility lists plus surfaces | ◐ planner exists, nothing uses it | G-20 |
-| See lower-floor art from above | show-if-above, basement rules | visibility lists | ❌ one floor at a time | G-19 |
+| See lower-floor art from above | show-if-above, basement rules | visibility lists | ✅ through the floor art's transparent parts, dimmed by depth (D-443) | G-19 |
 | Light passing between floors | light masking by viewer height | unassigned lights; floors restrict light | ❌ hard per-floor scope | G-22 |
 | Notes, templates, drawings per floor | elevation-gated; template elevation tool | tagged to levels | ❌ removed in isolated mode (S3) | **G-06**, G-27 |
 | Flying and falling between floors | warning when crossing a floor | surfaces plus elevation | ❌ | G-23 |
@@ -684,7 +684,8 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-32 Elevation cues | **Done** — a badge with the height above the token's floor (+15 ft), an optional smaller-at-other-heights cue measured from the selected token (×0.83 at two cells, half size from ten), a world setting for everyone / GM only / off (GM only hides the size cue too), and the token menu's Feet Z on every scene | D-440 · `src/core/elevationCues.ts` |
 | G-29 Scene as a floor | **Done** — import another scene (or one floor of a multilevel scene) into an existing floor or a new floor on top: its map becomes a floor map tile, its tiles, walls and lights are copied and stamped, scaled so grid cells match, one undo step; tokens and regions stay behind. No per-level `background` field: a floor map tile already is one | D-441 · `src/core/levelImport.ts` |
 | G-33 Withhold other floors | **Deferred, design recorded** — do after G-20, which decides what other floors a player legitimately sees; the plan is a per-session floor set as a projection read boundary with a scene resend on floor change | D-442 |
-| G-19 to G-23, G-27, G-30 | Open (slices D and F) | — |
+| G-19 See lower floors | **Done (art)** — per-floor "Sees floors below" with Sealed / Down to ground / All below presets; isolated player floors and the GM's isolated view draw the visible lower floors' art beneath, dimmed by depth, through the floor art's transparent parts. Tokens on other floors wait for G-20. Also fixed: GM-only changes no longer blank players' floors, and players' height badges measure from their floor | D-443 · `visibleFloorsBelow` |
+| G-20 to G-23, G-27, G-30 | Open (slices D and F) | — |
 
 ---
 

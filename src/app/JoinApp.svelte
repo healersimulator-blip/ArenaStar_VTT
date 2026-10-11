@@ -1,6 +1,6 @@
 <!-- eslint-disable @typescript-eslint/no-non-null-assertion -->
 <script lang="ts">
-  import { floorScene, type StairMarker } from "../core/levelPlay";
+  import { backgroundDepth, floorScene, lowerFloorDepths, type StairMarker } from "../core/levelPlay";
   import type { StairOfferMsg } from "../core/messages";
   import StairChooser from "../ui/StairChooser.svelte";
   import { tileTriggerPolygonContains } from "../core/tileTriggerZone";
@@ -1156,9 +1156,13 @@
     // G-32 (D-440): height badges unless the GM hid them; the optional size cue measures from the
     // selected token, else the token this player's floor follows.
     const cueSettings = worldSettingsFrom(client.store.getAll("settings"));
+    const focusState = client.levelFocus;
+    const presentation = scene?.levelMode === "isolated" && focusState?.isolated && focusState.sceneId === scene._id ? focusState.presentation : undefined;
     view.setTokenElevationCues(scene ? elevationCues(scene, tokens, {
       mode: tokenElevationModeOf(cueSettings), scaleByHeight: tokenElevationScaleOf(cueSettings), isGm: false,
       viewer: elevationViewer(scene, client.user, client.store.getAll("actors") as readonly ActorDocument[], selection, client.levelFocus?.followTokenId),
+      // D-443: players hold no `levels`; on an isolated floor every drawn token stands on the focused floor.
+      floorZ: presentation?.floorZ ?? null,
     }) : new Map());
     const focus = client.levelFocus;
     const levelId = scene?.levelMode === "isolated" && focus?.sceneId === scene._id && focus.worldSeq === client.store.seq ? focus.levelId : null;
@@ -1176,6 +1180,8 @@
     syncHexOverlay(view, hexOverlay, scene, "player", client.store.getAll("settings"));
     // Only projected tiles are present; hidden GM tiles and their images never arrive.
     // D-438: roofs open for this player's own vision tokens (the selection narrows them).
+    // G-19 (D-443): floors seen beneath this one show through its art, dimmed by depth (art only).
+    view.setLowerFloors(lowerFloorDepths(presentation), backgroundDepth(presentation) || null);
     view.getTilesLayer({ loadTexture: tileImages.load }).sync(scene?.tiles ?? [],
       scene ? roofViewerTokens(scene, client.user, client.store.getAll("actors") as readonly ActorDocument[], selection).map(tokenRect) : [],
       scene?.regions ?? [], scene ? { gridSize: scene.grid.size } : {});
@@ -1330,6 +1336,7 @@
                 return Array.from(view.app.renderer.extract.pixels({ target: layer, frame, resolution: 1 }).pixels).slice(0, 4);
               },
               stairMarkers: () => view.stairMarkerIds(),
+              lowerFloors: () => view.lowerFloors(),
               tokenElevationCues: () => view.tokenElevationCues(),
               roofStates: () => {
                 const layer = view.getTilesLayer({ loadTexture: tileImages.load });

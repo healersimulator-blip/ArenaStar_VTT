@@ -144,3 +144,37 @@ describe("roof drawing", () => {
     f.layer.destroy();
   });
 });
+
+describe("G-19 (D-443): art seen on lower floors", () => {
+  test("lower-floor tiles go into the dimmed container beneath this floor's art, deepest first, as plain art", () => {
+    const f = fixture();
+    const lowerRoof = tile("porchRoof", { occlusion: { mode: "roof", alpha: 0.25 } });
+    const ground = tile("ground", { above: false, occlusion: { mode: "fade", alpha: 0 } });
+    const own = tile("own", { above: false, occlusion: { mode: "fade", alpha: 0 } });
+    f.layer.setLowerFloors(new Map([["ground", 2], ["porchRoof", 1]]));
+    f.layer.sync([ground, lowerRoof, own], [at(200, 200)]);
+    const lower = f.below.children[0] as Container;
+    expect(lower.label).toBe("lowerFloors");
+    expect(lower.sortableChildren).toBe(true);
+    // Imageless tiles draw a placeholder Graphics: one node per tile, keyed here by depth.
+    const atDepth = (depth: number) => lower.children.find((child) => child.zIndex === -depth);
+    expect(lower.children).toHaveLength(2);
+    expect(atDepth(2)?.tint).toBe(0x808080);
+    expect(atDepth(1)?.tint).toBe(0xa6a6a6);
+    // A lower floor's roof is art seen from above: never faded or opened, never drawn in the roof layer.
+    expect(f.layer.alphaOf("porchRoof")).toBe(1);
+    expect(f.layer.roofStateOf("porchRoof")).toMatchObject({ alpha: 1, under: false, holes: "none" });
+    expect(labels(f.above)).toEqual([]);
+    // This floor's own tile stays in the normal layer, untinted.
+    const ownNode = f.below.children.find((child, index) => index > 0 && child !== lower);
+    expect(ownNode?.tint).toBe(0xffffff);
+    expect(f.layer.lowerFloorTiles()).toEqual([{ id: "ground", depth: 2 }, { id: "porchRoof", depth: 1 }]);
+    // Climbing down: the same tiles become this floor's own art again.
+    f.layer.setLowerFloors(new Map());
+    f.layer.sync([ground, lowerRoof], [at(200, 200)]);
+    expect(lower.children).toHaveLength(0);
+    expect(f.layer.roofStateOf("porchRoof")).toMatchObject({ under: true });
+    expect(f.layer.lowerFloorTiles()).toEqual([]);
+    f.layer.destroy();
+  });
+});

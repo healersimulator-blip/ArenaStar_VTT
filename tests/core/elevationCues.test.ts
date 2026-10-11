@@ -83,4 +83,14 @@ describe("G-32 elevation cues", () => {
     expect(validateWorldSettingsPatch({ tokenElevation: "players" }).error).toBe("tokenElevation must be all, gm, or off");
     expect(validateWorldSettingsPatch({ tokenElevationScale: "yes" }).error).toBe("tokenElevationScale must be a boolean");
   });
+
+  test("D-443: on an isolated player floor (no levels in the replica) the badge measures from the focused floor's Z", () => {
+    // What a player's replica holds: no `levels`, no `levelId`.
+    const tokens = [token("me", 10), token("flyer", 25)];
+    const s = scene(tokens, false);
+    expect(Object.fromEntries(elevationCues(s, tokens, { mode: "all", scaleByHeight: false, isGm: false, viewer: null }))).toEqual({
+      me: { label: "+10 ft", scale: 1 }, flyer: { label: "+25 ft", scale: 1 } }); // the old, wrong reading
+    expect(Object.fromEntries(elevationCues(s, tokens, { mode: "all", scaleByHeight: false, isGm: false, viewer: null, floorZ: 10 }))).toEqual({
+      flyer: { label: "+15 ft", scale: 1 } });
+  });
 });

@@ -9,7 +9,7 @@
   import type { ClientEvents } from "../../client/sync";
   import type { ClientSync } from "../../client/sync";
   import type { LevelDocument, SceneDocument } from "../../core/documents";
-  import { draftLevel, generateLevels, levelDraftAudit, levelDraftOps, MAX_LEVELS, sceneLevelsError } from "../../core/levels";
+  import { draftLevel, generateLevels, levelDraftAudit, levelDraftOps, levelVisibilityPreset, MAX_LEVELS, sceneLevelsError, type LevelVisibilityPreset } from "../../core/levels";
   let { scene, client, bus }: { scene: SceneDocument; client: ClientSync; bus: EventBus<ClientEvents> } = $props();
   let compatible = $state(false), ambientCompatible = $state(false);
   onMount(() => {
@@ -51,6 +51,17 @@
     rows.push(draftLevel(`level-${crypto.randomUUID()}`, rows.length ? `Level ${rows.length + 1}` : "Base", highest, highest + 10, rows.length));
     dirty = true;
   }
+  // G-19 (D-443): which floors each floor sees beneath it (their art shows through its openings).
+  function preset(kind: LevelVisibilityPreset) {
+    rows = ordered(levelVisibilityPreset($state.snapshot(rows) as LevelDocument[], kind));
+    dirty = true;
+  }
+  function sees(level: LevelDocument, other: string, on: boolean) {
+    level.visibleLevelIds = on ? [...level.visibleLevelIds.filter((id) => id !== other), other] : level.visibleLevelIds.filter((id) => id !== other);
+    dirty = true;
+  }
+  const lowerRows = (level: LevelDocument) => rows.filter((r) => r._id !== level._id && Number.isFinite(r.floorZ) && r.floorZ < level.floorZ)
+    .sort((a, b) => b.floorZ - a.floorZ);
   function remove(id: string) {
     rows = rows.filter((l) => l._id !== id).map((l) => ({ ...l, visibleLevelIds: l.visibleLevelIds.filter((target) => target !== id) }));
     dirty = true;
@@ -114,10 +125,28 @@
           {/each}
           <small>Place each floor map as a tile, then assign it here. No unassigned tile or global foreground appears in isolated floor play.</small>
         </fieldset>
+        {#if lowerRows(level).length}
+          <fieldset class="sees" data-level-sees={level._id}>
+            <strong>Sees floors below</strong>
+            {#each lowerRows(level) as other (other._id)}
+              <label><input type="checkbox" aria-label={`${level.name || level._id} sees ${other.name || other._id}`} data-sees={other._id} checked={level.visibleLevelIds.includes(other._id)}
+                onchange={(e) => sees(level, other._id, e.currentTarget.checked)} />{other.name || other._id}</label>
+            {/each}
+            <small>Their map art shows, dimmed, through transparent parts of this floor's art. Their tokens, walls and lights stay hidden.</small>
+          </fieldset>
+        {/if}
         <small>Blank bottom/top = unbounded. ID: {level._id}</small>
         <button type="button" onclick={() => remove(level._id)}>Remove draft level</button>
       </section>
     {/each}
+    {#if rows.length >= 2}
+      <div class="presets" data-level-visibility-presets>
+        <span>Floors see below:</span>
+        <button type="button" onclick={() => preset("sealed")} title="No floor sees another">Sealed</button>
+        <button type="button" onclick={() => preset("aboveGround")} title="Floors at or above the ground see the floors below them down to the ground; basements stay sealed">Down to ground</button>
+        <button type="button" onclick={() => preset("open")} title="Every floor sees every floor below it">All below</button>
+      </div>
+    {/if}
     {#if !rows.length}
       <details class="generator" data-level-generator open>
         <summary>Generate a stack of floors</summary>
@@ -151,6 +180,10 @@
   .numbers { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
   input { box-sizing:border-box; width:100%; min-width:0; color:#edf3fb; background:#131b25; border:1px solid #435067; border-radius:4px; padding:5px; }
   .ambient-settings { border-left:2px solid #435067; padding-left:8px; }
+  .sees { border-left:2px solid #435067; padding-left:8px; display:flex; flex-direction:column; gap:3px; }
+  .sees label { flex-direction:row; align-items:center; gap:6px; }
+  .presets { display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding:6px 0; }
+  .presets button { margin:0; }
   input[type="checkbox"] { width:auto; align-self:flex-start; }
   small { overflow-wrap:anywhere; color:#9dabbc; }
   button { padding:5px 7px; margin:4px 4px 0 0; border:1px solid #52657a; border-radius:4px; background:#253549; color:#e6eef9; cursor:pointer; }

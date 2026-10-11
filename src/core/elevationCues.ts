@@ -69,13 +69,21 @@ export function elevationViewer(scene: SceneDocument, user: PermissionUser | nul
  */
 export function elevationCues(scene: SceneDocument, tokens: readonly TokenDocument[], options: {
   mode: TokenElevationMode; scaleByHeight: boolean; isGm: boolean; viewer: TokenDocument | null;
+  /** D-443: an isolated player floor's Z. Every token drawn there stands on it, and players have no `levels` to look it up. */
+  floorZ?: number | null;
 }): Map<string, ElevationCue> {
   const cues = new Map<string, ElevationCue>();
   if (options.mode === "off" || (options.mode === "gm" && !options.isGm)) return cues;
   const units = scene.grid?.units ?? "";
   const viewer = options.scaleByHeight ? options.viewer : null;
+  const floorZ = typeof options.floorZ === "number" && Number.isFinite(options.floorZ) ? options.floorZ : null;
+  const height = (token: TokenDocument) => {
+    if (floorZ === null) return heightAboveFloor(scene, token);
+    const h = Math.round(((token.elevation ?? 0) - floorZ) * 100) / 100;
+    return h === 0 ? 0 : h;
+  };
   for (const token of tokens) {
-    const label = elevationLabel(heightAboveFloor(scene, token), units);
+    const label = elevationLabel(height(token), units);
     const scale = viewer && token._id !== viewer._id ? elevationScale((token.elevation ?? 0) - (viewer.elevation ?? 0), scene.grid?.distance ?? 5) : 1;
     if (label !== null || scale !== 1) cues.set(token._id, { label, scale });
   }

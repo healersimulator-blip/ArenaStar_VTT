@@ -3271,6 +3271,8 @@ const WALL_PICK_RADIUS = 12;
           current.gm.client.store.getAll("actors") as readonly ActorDocument[],
           tokenSelection.sceneId === shown._id ? tokenSelection.ids : []).map((t) => tokenRect(t))
       : [];
+    // G-19 (D-443): in the isolated floor view, the floors it sees below show through, as players see them.
+    view.setLowerFloors(floor?.lower ?? new Map(), floor?.backgroundDepth || null);
     view
       .getTilesLayer({ loadTexture: tileImages.load })
       .sync(shown?.tiles ?? [], occupied, shown?.regions ?? [], shown ? { gridSize: shown.grid.size } : {});
@@ -4955,6 +4957,7 @@ const WALL_PICK_RADIUS = 12;
             const layer = view.getTilesLayer({ loadTexture: tileImages.load });
             return Object.fromEntries((activeScene()?.tiles ?? []).map((t) => [t._id, layer.roofStateOf(t._id)]));
           },
+          lowerFloors: () => view.lowerFloors(),
           // §2.2/G-10a: what the GM canvas actually drew — the mode's own gate, read back.
           tokenHpBars: () => view.tokenHpBars(),
           // G-32 (D-440): the height badge and size cue each drawn token shows.

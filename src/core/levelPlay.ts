@@ -29,6 +29,65 @@ export interface FloorPresentation {
   offFloor?: { regions: string[]; drawings: string[]; templates: string[]; notes: string[] };
   /** G-10 (D-430): non-secret stairs usable from this floor; geometry and direction only. */
   stairs?: StairMarker[];
+  /**
+   * G-19 (D-443): floors this floor sees beneath it (its `visibleLevelIds`), nearest first. Their
+   * map art is drawn under this floor's, dimmed by depth, and shows through transparent parts of
+   * this floor's art. Art only: their tokens, walls and lights stay on their own floor. Absent when
+   * the floor sees nothing below (and from hosts before D-443).
+   */
+  below?: FloorBelow[];
+  /**
+   * D-443: this floor's own Z. Players never receive `levels` or `levelId`, so without it their
+   * elevation badges (D-440) measured from 0 instead of from the floor they stand on.
+   */
+  floorZ?: number;
+}
+export interface FloorBelow {
+  levelId: string;
+  /** 1 = the floor directly beneath in the stack, 2 = the one under that, … */
+  depth: number;
+  tileIds: string[];
+  useSceneBackground: boolean;
+}
+/** Dimming for art seen on lower floors, by depth (1, 2, 3+). */
+export const LOWER_FLOOR_TINTS = [0xa6a6a6, 0x808080, 0x606060] as const;
+export function lowerFloorTint(depth: number): number {
+  return LOWER_FLOOR_TINTS[Math.min(LOWER_FLOOR_TINTS.length, Math.max(1, Math.floor(depth))) - 1] ?? 0x606060;
+}
+/** Bottom-up stack order: floor elevation, then display order, then id. */
+function stackOf(levels: readonly LevelDocument[]): LevelDocument[] {
+  return [...levels].sort((a, b) => a.floorZ - b.floorZ || a.sort - b.sort || (a._id < b._id ? -1 : a._id > b._id ? 1 : 0));
+}
+/** G-19 (D-443): the floors `level` sees beneath it, nearest first, with their depth in the stack. */
+export function visibleFloorsBelow(scene: Pick<SceneDocument, "levels">, level: LevelDocument): Array<{ level: LevelDocument; depth: number }> {
+  const stack = stackOf(scene.levels ?? []);
+  const index = stack.findIndex((l) => l._id === level._id);
+  const seen = new Set(level.visibleLevelIds);
+  const out: Array<{ level: LevelDocument; depth: number }> = [];
+  for (let i = index - 1; i >= 0; i--) {
+    const below = stack[i] as LevelDocument;
+    if (below.floorZ < level.floorZ && seen.has(below._id)) out.push({ level: below, depth: index - i });
+  }
+  return out;
+}
+/** Tile id → depth for the lower floors' art (the nearest floor wins a shared tile; this floor's own tiles are excluded). */
+export function lowerFloorDepths(presentation: Pick<FloorPresentation, "tileIds" | "below"> | undefined | null): Map<string, number> {
+  const depths = new Map<string, number>();
+  if (!presentation?.below) return depths;
+  const own = new Set(presentation.tileIds);
+  for (const floor of presentation.below) for (const id of floor.tileIds) {
+    if (own.has(id)) continue;
+    const known = depths.get(id);
+    if (known === undefined || floor.depth < known) depths.set(id, floor.depth);
+  }
+  return depths;
+}
+/** The depth at which the scene background is seen: 0 = on this floor, a number = a lower floor's, null = not drawn. */
+export function backgroundDepth(presentation: Pick<FloorPresentation, "useSceneBackground" | "below"> | undefined | null): number | null {
+  if (!presentation) return null;
+  if (presentation.useSceneBackground) return 0;
+  const floors = (presentation.below ?? []).filter((f) => f.useSceneBackground).map((f) => f.depth);
+  return floors.length ? Math.min(...floors) : null;
 }
 /** Legacy one-way stair (D-428): entering on `from` moves the token to `to`. Still accepted. */
 export interface StairBehaviorV1 { from: string; to: string }
@@ -186,11 +245,12 @@ export function floorPresentation(scene: SceneDocument, level: LevelDocument): F
   const belongs = (scope: LevelScope | undefined) => scope?.mode === "all" || (scope?.mode === "levels" && scope.ids.includes(level._id));
   const off = (rows: ReadonlyArray<{ _id: string; levelScope?: LevelScope }> | undefined) =>
     (rows ?? []).filter((r) => !scopeIncludes(r.levelScope, level._id)).map((r) => r._id);
+  const below: FloorBelow[] = visibleFloorsBelow(scene, level).map(({ level: l, depth }) => ({ levelId: l._id, depth, tileIds: l.tileIds ?? [], useSceneBackground: l.useSceneBackground === true }));
   return { tileIds: level.tileIds ?? [], wallIds: scene.walls.filter((w) => belongs(w.levelScope)).map((w) => w._id),
     lightIds: scene.lights.filter((l) => belongs(l.levelScope)).map((l) => l._id), useSceneBackground: level.useSceneBackground === true,
-    darkness: level.darkness ?? scene.darkness, epoch: level.fogEpoch ?? "",
+    darkness: level.darkness ?? scene.darkness, epoch: level.fogEpoch ?? "", floorZ: level.floorZ,
     offFloor: { regions: off((scene.regions ?? []).filter((r) => r.stairs === undefined)), drawings: off(scene.drawings), templates: off(scene.templates), notes: off(scene.notes) },
-    stairs: stairMarkers(scene, level._id) };
+    stairs: stairMarkers(scene, level._id), ...(below.length ? { below } : {}) };
 }
 /** Clear every unspecified layer, including legacy foreground and manual exploration mask. */
 export function floorScene(scene: SceneDocument, view: { isolated?: boolean; levelId: string | null; tokenIds: string[] | null; presentation?: FloorPresentation } | null): SceneDocument {
@@ -205,9 +265,11 @@ export function floorScene(scene: SceneDocument, view: { isolated?: boolean; lev
     const skip = new Set(hidden ?? []);
     return (rows ?? []).filter((r) => !skip.has(r._id));
   };
-  return { ...base, flags, img: p?.useSceneBackground ? scene.img : null,
+  // G-19: lower floors' art comes along (the renderer dims it and draws it beneath this floor's).
+  const lower = lowerFloorDepths(p);
+  return { ...base, flags, img: backgroundDepth(p) !== null ? scene.img : null,
     darkness: p?.darkness ?? 1, tokens: p ? scene.tokens.filter((t) => view?.tokenIds?.includes(t._id)) : [],
-    tiles: p ? scene.tiles.filter((t) => p.tileIds.includes(t._id)) : [], walls: p ? scene.walls.filter((w) => p.wallIds.includes(w._id)) : [],
+    tiles: p ? scene.tiles.filter((t) => p.tileIds.includes(t._id) || lower.has(t._id)) : [], walls: p ? scene.walls.filter((w) => p.wallIds.includes(w._id)) : [],
     lights: p ? scene.lights.filter((l) => p.lightIds.includes(l._id)) : [], sounds: [],
     regions: keep((scene.regions ?? []).filter((r) => r.stairs === undefined), off?.regions), drawings: keep(scene.drawings, off?.drawings),
     templates: keep(scene.templates, off?.templates), notes: keep(scene.notes, off?.notes), cells: [] };

@@ -433,6 +433,12 @@ interface ImageUploadState {
 }
 
 interface Session {
+  /**
+   * The world seq of the last snapshot/envelope this session received. Floor focus states carry
+   * it: an envelope projected away entirely never reaches the client, whose replica then stays at
+   * the older seq while being exactly as current for everything it may see.
+   */
+  sentSeq?: number;
   /** Previously authorized reads may flush their last own PNG after leaving a floor. */
   fogWriteGrants?: Set<string>;
   levelFocus?: { followTokenId?: string; sceneId: string; levelId: string | null; requestId: string; revision: number };
@@ -1049,6 +1055,8 @@ export class HostSync {
   // ─── Frames ─────────────────────────────────────────────────────────────────
 
   private send(session: Session, msg: WireMessage): void {
+    if (msg.kind === "ops") session.sentSeq = msg.envelope.seq;
+    else if (msg.kind === "snapshot") session.sentSeq = msg.seq;
     try {
       session.transport.send(channelFor(msg.kind), frameMessage(msg));
     } catch {
@@ -1291,7 +1299,7 @@ export class HostSync {
     const denied = focus.levelId !== null && !view.levels.some((l) => l.id === focus.levelId);
     if (denied) focus.levelId = null;
     if (view.followTokenId) focus.followTokenId = view.followTokenId;
-    this.send(session, { kind: "level.focus.state", sceneId: focus.sceneId, requestId: focus.requestId, revision: ++focus.revision, worldSeq: this.store.seq, mode: focus.levelId === null ? "follow" : "manual", ...view, ...(denied ? { error: "unavailable" as const } : {}) });
+    this.send(session, { kind: "level.focus.state", sceneId: focus.sceneId, requestId: focus.requestId, revision: ++focus.revision, worldSeq: session.sentSeq ?? this.store.seq, mode: focus.levelId === null ? "follow" : "manual", ...view, ...(denied ? { error: "unavailable" as const } : {}) });
   }
   // ─── G-01/G-08 stairwell choices (D-430) ────────────────────────────────────
   private stairSessions(userId: UserId, only?: Session): Session[] {

@@ -20,6 +20,7 @@ import { tileTriggerLocalPolygon, tileTriggerZoneError } from "../../core/tileTr
 import { ROOF_IDLE, resolveRoofs, roofStateKey, type RoofArtMask, type RoofHoles, type RoofPoint, type RoofState } from "../../core/roofs";
 import { tileTint, type TileRect } from "../ephemera";
 import { roofArtMaskFromTexture } from "../roofArt";
+import { lowerFloorTint } from "../../core/levelPlay";
 
 export interface TilesLayerOptions {
   /** Asset hash/URL → texture; null/undefined keeps the tinted placeholder. */
@@ -95,6 +96,33 @@ export class TilesLayer {
     this.opts = options;
     this.overFog = roof.overFog ?? null;
     this.masks = roof.inverseMasks ?? false;
+    this.lower = new Container();
+    this.lower.label = "lowerFloors";
+    this.lower.sortableChildren = true;
+    below.addChildAt(this.lower, 0);
+  }
+
+  /**
+   * G-19 (D-443): art of the floors seen beneath the current one (tile id → depth). These tiles
+   * are drawn first, deepest at the bottom, dimmed by depth, as plain art: never roofs, triggers
+   * or outlines. Call before `sync`.
+   */
+  private readonly lower: Container;
+  private lowerDepth: ReadonlyMap<string, number> = new Map();
+  setLowerFloors(depths: ReadonlyMap<string, number>): void { this.lowerDepth = depths; }
+  /** Readback: the lower-floor tiles currently drawn, with their depth. */
+  lowerFloorTiles(): Array<{ id: string; depth: number }> {
+    return [...this.views.keys()].filter((id) => this.lowerDepth.has(id)).sort().map((id) => ({ id, depth: this.lowerDepth.get(id) as number }));
+  }
+  /** A lower floor's roof is just art seen from above. */
+  private effective(tile: TileDocument): TileDocument {
+    return tile.above && this.lowerDepth.has(tile._id) ? { ...tile, above: false } : tile;
+  }
+  private styleLower(view: TileView): void {
+    const depth = this.lowerDepth.get(view.tile._id);
+    const tint = depth === undefined ? 0xffffff : lowerFloorTint(depth);
+    const z = depth === undefined ? 0 : -depth;
+    for (const node of [view.sprite, view.g]) if (node) { node.tint = tint; node.zIndex = z; }
   }
 
   /** G-12 (D-434): tiles of other floors drawn faintly in the GM's "ghost" floor view. */
@@ -116,11 +144,12 @@ export class TilesLayer {
    * Reconcile tile views. `occupied` are the rects of the viewer's own vision tokens: a roof opens
    * for a token whose centre is under it (D-438).
    */
-  sync(tiles: readonly TileDocument[], occupied: readonly TileRect[], regions: readonly RegionDocument[] = [],
+  sync(input: readonly TileDocument[], occupied: readonly TileRect[], regions: readonly RegionDocument[] = [],
     roof: RoofSyncOptions = {}): void {
     this.occupied = occupied;
     if (roof.gridSize !== undefined && Number.isFinite(roof.gridSize) && roof.gridSize > 0) this.gridSize = roof.gridSize;
     const seen = new Set<string>();
+    const tiles = input.map((tile) => this.effective(tile));
     for (const tile of tiles) {
       seen.add(tile._id);
       let view = this.views.get(tile._id);
@@ -279,7 +308,7 @@ export class TilesLayer {
   }
 
   private containerFor(tile: TileDocument): Container {
-    return tile.above ? this.above : this.below;
+    return this.lowerDepth.has(tile._id) ? this.lower : tile.above ? this.above : this.below;
   }
 
   private detach(view: TileView): void {
@@ -317,8 +346,9 @@ export class TilesLayer {
         sprite.rotation = view.rotation.sample(performance.now()) * Math.PI / 180;
         sprite.alpha = view.alpha;
         view.g.clear();
-        this.drawAdornment(view);
+        if (!this.lowerDepth.has(view.tile._id)) this.drawAdornment(view);
         this.containerFor(view.tile).addChild(view.g); // trigger outline above the loaded image
+        this.styleLower(view);
         // D-438: the art now decides "under", and openings/copies move onto the sprite.
         this.clearRoofExtras(view);
         if (view.tile.above) this.refreshRoofs();
@@ -355,13 +385,14 @@ export class TilesLayer {
       view.sprite.rotation = angle;
       view.sprite.alpha = alpha;
       view.g.clear();
-      // Roof and trigger outlines stay visible even with a texture.
-      this.drawAdornment(view);
+      // Roof and trigger outlines stay visible even with a texture (not on art seen below).
+      if (!this.lowerDepth.has(tile._id)) this.drawAdornment(view);
     } else {
       view.g.clear();
       this.drawPlaceholder(view.g, tile);
-      this.drawAdornment(view);
+      if (!this.lowerDepth.has(tile._id)) this.drawAdornment(view);
     }
+    this.styleLower(view);
     this.applyRoof(view, state);
   }
 

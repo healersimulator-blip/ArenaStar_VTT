@@ -12965,3 +12965,27 @@ Levels users build towers from one scene per floor, and Foundry V14 gives each l
    - Templates that cross floors.
    - A token mid-animation between floors.
    - Chat cards naming withheld tokens: they are text, so acceptable.
+
+## D-443 — Seeing lower floors from upper floors (G-19), and two floor-play fixes (2026-10-11)
+
+V14 lets a level list the levels it can see, and Levels shows lower floors from above. ArenaStar stored `visibleLevelIds` from the start (D-427), but had no UI for it and nothing drew from it: an isolated floor showed one floor at a time.
+
+**Authoring.** Draft levels → each floor gets **Sees floors below**, with a checkbox per lower floor. Three presets cover the usual towers:
+- *Sealed* clears every floor's list.
+- *Down to ground* lets floors at or above the ground see down to it, while basements stay sealed and unseen. The ground floor is the one whose band holds elevation 0.
+- *All below* lets every floor see every floor below it.
+
+Presets only rewrite entries for floors *below*. Entries for floors above are kept for G-20.
+
+**What is drawn.** On an isolated player floor, and in the GM's isolated floor view ("only"), the art of the floors this floor sees is drawn *beneath* its own art. It shows through the transparent parts of that art: openings, stairwells, a courtyard, the open air beside a tower top.
+- **Order and dimming.** The nearest floor is drawn above deeper ones, dimmed by depth: tints `#a6a6a6`, `#808080`, `#606060` for one, two, and three or more floors down.
+- **Plain art only.** A lower floor's roof tile is just art seen from above. It is never faded or opened, and lower tiles draw no trigger or roof outlines.
+- **Background.** The scene background is drawn when this floor or a visible lower floor uses it, dimmed at that floor's depth.
+- **Not shown.** Tokens on other floors (G-20 decides which), their walls and vision, and their lights (G-22).
+- The GM's ghost and all modes are unchanged.
+
+**Protocol.** `FloorPresentation.below` (`{levelId, depth, tileIds, useSceneBackground}[]`, nearest first) is optional and additive. Older clients ignore it; a newer client with an older host simply draws nothing below. The renderer keeps lower-floor art in a sorted `lowerFloors` container at the bottom of the tiles-below layer, so the §9 layer order is untouched.
+
+**Fix: a GM-only change blanked players' floors.** The host stamped every floor focus state with its own `seq`. An envelope projected away entirely never reaches the player (draft-level edits, for example), so the player's replica stayed at the older `seq` and treated the focus as stale. Its floor went blank until some unrelated visible change arrived. The host now records the `seq` of the last snapshot or envelope each session received (`Session.sentSeq`) and stamps focus states with that. Applying draft levels during isolated play triggered it, and a host test now covers it.
+
+**Fix: players' height badges measured from 0.** Players never receive `levels` or `levelId`, so on an isolated floor the D-440 badge showed absolute elevation ("+10 ft" for a token standing on a floor at Z 10). The presentation now carries the floor's own `floorZ`. On an isolated floor, every token a player sees stands on that floor, so badges measure from it.

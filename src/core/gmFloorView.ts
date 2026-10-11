@@ -5,6 +5,7 @@
  */
 import type { LevelDocument, LevelScope, SceneDocument, TokenDocument } from "./documents";
 import { scopeIncludes } from "./levelMembership";
+import { visibleFloorsBelow } from "./levelPlay";
 
 export type GmFloorMode = "only" | "ghost" | "all";
 export interface GmFloorView { levelId: string; mode: GmFloorMode }
@@ -14,6 +15,10 @@ export interface GmFloorRender {
   ghost: { tokens: Set<string>; tiles: Set<string> };
   /** Tokens the GM may pick and drag in build mode (active floor plus floorless). */
   pickable: (token: TokenDocument) => boolean;
+  /** G-19 (D-443): in "only" mode, art of the floors this floor sees below (tile id → depth), as players see it. */
+  lower: Map<string, number>;
+  /** The depth the scene background is seen at: 0 = this floor's own, null = not drawn or not a floor view. */
+  backgroundDepth: number | null;
 }
 export const GM_GHOST_ALPHA = 0.25;
 
@@ -21,7 +26,7 @@ function onFloor(scope: LevelScope | undefined, levelId: string, unscoped: boole
   return scope === undefined ? unscoped : scopeIncludes(scope, levelId);
 }
 export function gmFloorRender(scene: SceneDocument, view: GmFloorView | null): GmFloorRender {
-  const all: GmFloorRender = { scene, ghost: { tokens: new Set(), tiles: new Set() }, pickable: () => true };
+  const all: GmFloorRender = { scene, ghost: { tokens: new Set(), tiles: new Set() }, pickable: () => true, lower: new Map(), backgroundDepth: null };
   const level = view ? scene.levels?.find((l) => l._id === view.levelId) : undefined;
   if (!view || !level || view.mode === "all") return all;
   const levels = scene.levels ?? [];
@@ -43,12 +48,20 @@ export function gmFloorRender(scene: SceneDocument, view: GmFloorView | null): G
     regions: (scene.regions ?? []).filter((r) => r.stairs !== undefined || onFloor(r.levelScope, level._id, true)),
   };
   if (view.mode === "only") {
-    return { scene: { ...filtered, img: background, tokens: scene.tokens.filter(tokenHere), tiles: scene.tiles.filter((t) => tileHere(t._id)) },
-      ghost: { tokens: new Set(), tiles: new Set() }, pickable: tokenHere };
+    // G-19: the floors this one sees below show through its art, dimmed, exactly as players see them.
+    const lower = new Map<string, number>();
+    let backgroundDepth: number | null = background ? 0 : null;
+    for (const { level: below, depth } of visibleFloorsBelow(scene, level)) {
+      for (const id of below.tileIds ?? []) if (!ownTile.has(id) && !lower.has(id)) lower.set(id, depth);
+      if (backgroundDepth === null && below.useSceneBackground === true) backgroundDepth = depth;
+    }
+    return { scene: { ...filtered, img: backgroundDepth !== null ? scene.img : null, tokens: scene.tokens.filter(tokenHere),
+      tiles: scene.tiles.filter((t) => tileHere(t._id) || lower.has(t._id)) },
+    ghost: { tokens: new Set(), tiles: new Set() }, pickable: tokenHere, lower, backgroundDepth };
   }
   return { scene: { ...filtered, img: background ?? scene.img },
     ghost: { tokens: new Set(scene.tokens.filter((t) => !tokenHere(t)).map((t) => t._id)), tiles: new Set(scene.tiles.filter((t) => !tileHere(t._id)).map((t) => t._id)) },
-    pickable: tokenHere };
+    pickable: tokenHere, lower: new Map(), backgroundDepth: null };
 }
 /** PageUp/PageDown order: by floor elevation, then display order. */
 export function adjacentFloor(levels: readonly LevelDocument[], current: string | null, direction: 1 | -1): string | null {

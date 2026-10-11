@@ -132,6 +132,25 @@ export function levelDraftOps(sceneId: string, before: readonly LevelDocument[],
  * G-28 (D-436): a ready stack of floors. Ground starts at 0; floors above it, basements below, each
  * `height` tall, plus an optional unbounded roof band. IDs come from the caller; nothing is saved.
  */
+/**
+ * G-19 (D-443): visibility presets for floors seen beneath each floor. `sealed` clears them;
+ * `aboveGround` lets every floor at or above the ground floor see the floors below it down to the
+ * ground (basements stay sealed, and are not seen from above); `open` lets every floor see every
+ * floor below it. Entries for floors *above* a floor are kept as they are. The ground floor is the
+ * one whose band holds elevation 0, else the lowest floor at or above 0, else the highest floor.
+ */
+export type LevelVisibilityPreset = "sealed" | "aboveGround" | "open";
+export function levelVisibilityPreset(levels: readonly LevelDocument[], preset: LevelVisibilityPreset): LevelDocument[] {
+  const stack = [...levels].sort((a, b) => a.floorZ - b.floorZ || a.sort - b.sort || (a._id < b._id ? -1 : a._id > b._id ? 1 : 0));
+  const ground = stack.find((l) => (l.bottom ?? -Infinity) <= 0 && 0 < (l.top ?? Infinity)) ?? stack.find((l) => l.floorZ >= 0) ?? stack[stack.length - 1];
+  const groundZ = ground?.floorZ ?? 0;
+  return levels.map((level) => {
+    const above = level.visibleLevelIds.filter((id) => { const other = levels.find((l) => l._id === id); return !!other && other.floorZ >= level.floorZ && other._id !== level._id; });
+    const below = preset === "sealed" || (preset === "aboveGround" && level.floorZ < groundZ) ? [] :
+      stack.filter((l) => l.floorZ < level.floorZ && (preset === "open" || l.floorZ >= groundZ)).map((l) => l._id);
+    return { ...level, visibleLevelIds: [...below, ...above] };
+  });
+}
 export function generateLevels(spec: { floors: number; basements: number; height: number; roof?: boolean; id: () => string }): LevelDocument[] {
   const { floors, basements, height } = spec;
   if (!Number.isInteger(floors) || floors < 1 || floors > 16 || !Number.isInteger(basements) || basements < 0 || basements > 8 ||
