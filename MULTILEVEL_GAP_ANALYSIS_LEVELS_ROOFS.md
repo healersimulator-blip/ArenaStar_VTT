@@ -671,8 +671,8 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-09 Path entry / route continuation | **Done** — opt-in `trigger:"cross"`: first stairwell along the centre path; stop-and-ask, or auto floor change with the drag continuing on the new floor when its walls allow | D-437 |
 | G-10 Stairs visible to players | **Done** — markers per floor, `secret` hides them | D-430 |
 | G-11 Lock stairs | **Done** — toggle, plus stairs linked to a door work only while it is open (dangling links audited) | D-430, D-437 |
-| G-14 Stairs on the canvas | **Partial** — GM labels/arrows, create from any Active Zones region; dedicated draw tool open | D-430 |
-| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 31 Chromium tests in 24 specs, roofs, floor perception and the Foundry import included) | D-429 |
+| G-14 Stairs on the canvas | **Done** — GM labels/arrows (D-430); a Stairs tool on the map rail drags out a grid-snapped stairwell joining the floor in view and the next one; each stairwell edits in place (name, player label, floors, directions, position and size) in one undoable update. Rectangles on the canvas; other shapes from Active Zones regions | D-430, D-450 · `src/core/stairAuthoring.ts` |
+| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 32 Chromium tests in 25 specs, roofs, floor perception, the Foundry import and the stairs tool included) | D-429 |
 | S6 / G-15 Pre-check and live audit | **Done** — blocking errors, acknowledged warnings, quick fixes, live list | D-433 |
 | G-18 Transition presentation | **Done** — arrival notice and cross-fade | D-430 |
 | S7 / G-12 GM floor view & build mode | **Done** — floor switch with ghost/only/all, build mode, PageUp/PageDown | D-434 · `src/core/gmFloorView.ts` |

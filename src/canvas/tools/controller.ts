@@ -36,7 +36,7 @@ import type { DrawingDocument, WallDocument } from "../../core/documents";
 import type { WallKind } from "../vision/wallKinds";
 import type { DocId, UserId } from "../../core/ids";
 
-export type ToolGesture = "draw" | "text" | "measure" | "fog" | "wall" | "light" | "pin";
+export type ToolGesture = "draw" | "text" | "measure" | "fog" | "wall" | "light" | "pin" | "stairs";
 
 /** Roll20's advanced hotkeys draw the wall/light layer with snapping on by default. */
 export type FogBrush = "reveal" | "hide";
@@ -115,7 +115,9 @@ export type ShapePreview =
     }
   | { kind: "fog"; brush: FogBrush; shape: FogShape; from: Point; to: Point; points: Point[] }
   | { kind: "wall"; from: Point; to: Point; wallKind: WallKind }
-  | { kind: "wallEdit"; walls: WallDocument[] };
+  | { kind: "wallEdit"; walls: WallDocument[] }
+  /** G-14 (D-450): the stairwell being dragged out, snapped to grid corners. */
+  | { kind: "stairs"; from: Point; to: Point };
 
 export interface ToolCallbacks {
   wallEditing?: WallEditorPort;
@@ -138,6 +140,8 @@ export interface ToolCallbacks {
   broadcastMeasure: (points: Point[]) => void;
   /** GM fog brush: world-space polygon + which way it paints. */
   fogPaint: (value: { mode: FogBrush; poly: number[] }) => void;
+  /** G-14 (D-450): the GM dragged out a stairwell (scene pixels, grid-corner snapped). */
+  createStairs?: (area: { x: number; y: number; width: number; height: number }) => void;
 }
 
 /** Click-within-this-many-world-units of the first vertex closes a polygon. */
@@ -233,6 +237,11 @@ export class ToolInteractionController {
       }
       return;
     }
+    if (this.mode === "stairs") {
+      this.start = this.snap(event.world, event, "corner");
+      this.callbacks.shapePreview({ kind: "stairs", from: this.start, to: this.start });
+      return;
+    }
     if (this.mode === "wall") {
       if (options.wallEditMode !== "draw") {
         this.wallEditor?.down(event.world, options.wallEditMode, options.wallMoveJoined); return;
@@ -287,6 +296,8 @@ export class ToolInteractionController {
       this.emitMeasure([...this.points, at], false);
     } else if (this.mode === "fog" && options.fogShape === "rect" && this.start) {
       this.emitFogRectPreview({ ...event.world });
+    } else if (this.mode === "stairs" && this.start) {
+      this.callbacks.shapePreview({ kind: "stairs", from: this.start, to: this.snap(event.world, event, "corner") });
     } else if (this.mode === "fog" && options.fogShape === "poly" && this.points.length > 0) {
       this.emitFogPolyPreview({ ...event.world });
     } else if (this.mode === "wall") {
@@ -345,6 +356,15 @@ export class ToolInteractionController {
       this.callbacks.shapePreview(null);
       const poly = rectPolygon(from, { ...event.world });
       if (poly) this.callbacks.fogPaint({ mode: options.fogBrush, poly });
+      return;
+    }
+    if (this.mode === "stairs" && this.start) {
+      const from = this.start, to = this.snap(event.world, event, "corner");
+      this.start = null;
+      this.callbacks.shapePreview(null);
+      const width = Math.abs(to.x - from.x), height = Math.abs(to.y - from.y);
+      if (width >= MIN_SHAPE_SIZE && height >= MIN_SHAPE_SIZE)
+        this.callbacks.createStairs?.({ x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), width, height });
       return;
     }
     if (this.mode === "wall" && this.start) {

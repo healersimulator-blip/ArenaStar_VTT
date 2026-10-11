@@ -4,6 +4,7 @@
   import type { Op } from "../../core/ops";
   import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE, stairDoor, stairSpec, type StairBehaviorV2, type StairEdge } from "../../core/levelPlay";
   import { levelAuditFixOps, levelPlayAudit, type LevelAuditFinding, type LevelAuditFix } from "../../core/levelAudit";
+  import { stairDirectionsOf, stairEdgesFor, stairEditDiff, type StairEdit } from "../../core/stairAuthoring";
   let { scene, client, draftDirty }: { scene: SceneDocument; client: ClientSync; draftDirty: boolean } = $props();
   let busy = $state(false), message = $state("");
   let floors = $state<string[]>([]), directions = $state<"both" | "up" | "down">("both"), mode = $state<"auto" | "prompt">("auto");
@@ -12,6 +13,8 @@
   let cross = $state(false), door = $state("");
   /** G-15 (D-433): pending activation, shown until the GM fixes, acknowledges or cancels. */
   let preflight = $state<LevelAuditFinding[] | null>(null);
+  /** G-14 (D-450): the stairwell being edited in place. */
+  let editing = $state<string | null>(null), edit = $state<StairEdit | null>(null);
   const parent = $derived({ coll: "scenes" as const, id: scene._id });
   const levels = $derived([...(scene.levels ?? [])].sort((a, b) => a.floorZ - b.floorZ || a.sort - b.sort || a._id.localeCompare(b._id)));
   const findings = $derived(levelPlayAudit(scene));
@@ -60,10 +63,21 @@
       if (preflight && !preflight.length) await setEnabled(true);
     }
   }
+  const floorZ = (id: string) => scene.levels?.find((l) => l._id === id)?.floorZ ?? 0;
   function edgesFor(ids: readonly string[]): StairEdge[] | undefined {
-    if (directions === "both") return undefined;
-    const z = (id: string) => scene.levels?.find((l) => l._id === id)?.floorZ ?? 0;
-    return ids.flatMap((from) => ids.filter((to) => to !== from && (directions === "up" ? z(to) > z(from) : z(to) < z(from))).map((to) => ({ from, to })));
+    return stairEdgesFor(ids, directions, floorZ);
+  }
+  function startEdit(region: RegionDocument) {
+    if (!region.stairs || !("version" in region.stairs)) return;
+    editing = region._id; message = "";
+    edit = { name: region.name, label: region.stairs.label ?? "", levels: [...region.stairs.levels], directions: stairDirectionsOf(region.stairs, floorZ),
+      area: { x: region.x, y: region.y, width: region.width, height: region.height } };
+  }
+  async function saveEdit(region: RegionDocument) {
+    if (!edit) return;
+    const diff = stairEditDiff(region, scene, edit);
+    if (typeof diff === "string") { message = diff; return; }
+    if (await submit([{ kind: "update", ref: { coll: "regions", id: region._id, parent }, diff: { ...diff, stairs: diff.stairs as unknown as Json } }], "Stairs updated.")) { editing = null; edit = null; }
   }
   async function createStairwell() {
     const ids = levels.map((l) => l._id).filter((id) => floors.includes(id));
@@ -141,7 +155,7 @@
         <label>X<input aria-label="Stairs X" type="number" bind:value={x} /></label><label>Y<input aria-label="Stairs Y" type="number" bind:value={y} /></label>
         <label>Width<input aria-label="Stairs width" type="number" min="1" bind:value={width} /></label><label>Height<input aria-label="Stairs height" type="number" min="1" bind:value={height} /></label>
       </div>
-      <p>Bounds use scene pixels; draw a polygon in Active Zones and pick it above for other shapes. Entry uses the token center. With several destinations, the mover chooses; "Take stairs" on the floor chip asks again while standing on them.</p>
+      <p>Or pick the Stairs tool on the map's tool rail and drag over the stairs: they join the floor you are viewing and the next one up. Bounds use scene pixels; draw a polygon in Active Zones and pick it above for other shapes. Entry uses the token center. With several destinations, the mover chooses; "Take stairs" on the floor chip asks again while standing on them.</p>
     {/if}
     <button type="button" disabled={!v2 || floors.length < 2 || (!source && (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0))} onclick={createStairwell}>Create stairwell</button>
     {#each stairs as r (r._id)}
@@ -160,7 +174,31 @@
         {:else if spec}
           <button type="button" disabled={!v2} onclick={() => upgrade(r)}>Convert to stairwell</button>
         {/if}
+        {#if spec && !spec.legacy}
+          <button type="button" aria-label={`Edit stairs ${spec.label ?? r.name}`} aria-expanded={editing === r._id} disabled={!v2}
+            onclick={() => { if (editing === r._id) { editing = null; edit = null; } else startEdit(r); }}>{editing === r._id ? "Close editor" : "Edit"}</button>
+        {/if}
         <button type="button" onclick={() => submit([{ kind: "delete", ref: { coll: "regions", id: r._id, parent } }], "Stairs removed.")}>Remove stairs</button>
+        {#if editing === r._id && edit}
+          <div class="stair-edit" role="group" aria-label={`Edit stairs ${spec?.label ?? r.name}`} data-stair-edit>
+            <label>Name<input aria-label="Stairs name" maxlength="128" bind:value={edit.name} /></label>
+            <label>Label for players (optional)<input aria-label="Stairs player label" maxlength="64" bind:value={edit.label} placeholder="Spiral stair" /></label>
+            <div class="floors" role="group" aria-label="Floors these stairs connect">
+              {#each levels as l (l._id)}<label class="check"><input type="checkbox" aria-label={`Stairs floor ${l.name}`} checked={edit.levels.includes(l._id)}
+                onchange={(e) => { if (edit) edit.levels = e.currentTarget.checked ? [...edit.levels, l._id] : edit.levels.filter((id) => id !== l._id); }} />{l.name}</label>{/each}
+            </div>
+            <label>Directions<select aria-label="Stairs directions" bind:value={edit.directions}>
+              <option value="both">Both ways</option><option value="up">Up only</option><option value="down">Down only</option>
+              {#if edit.directions === "custom"}<option value="custom">Keep the current one-way moves</option>{/if}
+            </select></label>
+            <div class="bounds">
+              <label>X<input aria-label="Edit stairs X" type="number" bind:value={edit.area.x} /></label><label>Y<input aria-label="Edit stairs Y" type="number" bind:value={edit.area.y} /></label>
+              <label>Width<input aria-label="Edit stairs width" type="number" min="1" bind:value={edit.area.width} /></label><label>Height<input aria-label="Edit stairs height" type="number" min="1" bind:value={edit.area.height} /></label>
+            </div>
+            <button type="button" onclick={() => saveEdit(r)}>Save stairs</button>
+            <button type="button" onclick={() => { editing = null; edit = null; }}>Cancel</button>
+          </div>
+        {/if}
       </div>
     {/each}
   </fieldset>
@@ -170,6 +208,7 @@
   details { margin-top:12px; border-top:1px solid #435067; padding-top:8px; }
   summary { cursor:pointer; font-weight:600; } label { display:block; margin:8px 0; }
   .bounds { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .stair-edit { margin:6px 0 4px; padding:6px 8px; border-left:2px solid #52657a; }
   .floors { display:flex; flex-wrap:wrap; gap:4px 12px; } .check { display:flex; align-items:center; gap:6px; margin:4px 0; }
   fieldset { border:0; padding:0; min-width:0; } input:not([type=checkbox]),select { width:100%; box-sizing:border-box; background:#131b25; color:#edf3fb; border:1px solid #435067; padding:5px; }
   button { padding:5px; background:#253549; color:#edf3fb; border:1px solid #52657a; cursor:pointer; margin:2px 4px 2px 0; } button:disabled { opacity:.5; }

@@ -62,6 +62,7 @@
   {:else if name === "pin"}<path
       d="M18 10c0 4-6 11-6 11S6 14 6 10a6 6 0 1 1 12 0Z"
     /><circle cx="12" cy="10" r="2" />
+  {:else if name === "stairs"}<path d="M3 20h5v-5h5v-5h5V5h3" /><path d="M6 12V4M3 7l3-3 3 3" />
   {:else if name === "path"}<circle cx="5" cy="18" r="2" /><circle
       cx="19"
       cy="6"

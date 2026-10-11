@@ -24,7 +24,9 @@
     | "light"
     | "pin"
     /** D-275: the hexcrawl travel route — click hexes to extend it (plan §5.7). */
-    | "path";
+    | "path"
+    /** G-14 (D-450): drag a stairwell out on a scene with floors. */
+    | "stairs";
   /** Roll20's four layers: Map & Background (map), Objects & Tokens (tokens), GM Info (gm), Dynamic Lighting (lighting). */
   export type CanvasLayer = "map" | "tokens" | "gm" | "lighting";
   export type CanvasAction =
@@ -57,6 +59,7 @@
     onRoll = () => {},
     onEraseAll = () => {},
     pathTool = false,
+    stairsTool = false,
   }: {
     active?: CanvasTool;
     collapsed?: boolean;
@@ -78,6 +81,8 @@
      * than the rail guessing from the scene it cannot see.
      */
     pathTool?: boolean;
+    /** G-14 (D-450): the scene has floors, so stairwells can be drawn. */
+    stairsTool?: boolean;
   } = $props();
 
   let formula = $state("1d20");
@@ -85,7 +90,7 @@
   let rollMode = $state<RollMode>("roll");
   let history = $state<Array<{ formula: string; mode: RollMode }>>([]);
   let optionsOpen = $state(false);
-  const HAS_OPTIONS = new Set<CanvasTool>(["draw", "text", "measure", "dice", "fog", "wall", "light", "pin", "path"]);
+  const HAS_OPTIONS = new Set<CanvasTool>(["draw", "text", "measure", "dice", "fog", "wall", "light", "pin", "path", "stairs"]);
   let toolDice = [4, 6, 8, 10, 12, 20] as const;
   let drawShapes = [
     { id: "freehand", label: "Freehand", icon: "✎", key: "F" },
@@ -138,11 +143,12 @@
     // D-275 (plan §5.7): path mode. Hexcrawl maps only, and the GM's alone — the route is
     // authored for the party, not by it.
     { id: "path", label: "Travel path", icon: "⇢", shortcut: "Y", gmOnly: true },
+    { id: "stairs", label: "Stairs", icon: "⇅", shortcut: "", gmOnly: true },
   ];
 
   const visibleTools = $derived(
     tools.filter(
-      (tool) => (isGM || !tool.gmOnly) && (tool.id !== "path" || pathTool),
+      (tool) => (isGM || !tool.gmOnly) && (tool.id !== "path" || pathTool) && (tool.id !== "stairs" || stairsTool),
     ),
   );
 
@@ -274,7 +280,7 @@
           type="button"
           class:active={active === tool.id}
           aria-pressed={active === tool.id}
-          title={`${tool.label} (${tool.shortcut})`}
+          title={tool.shortcut ? `${tool.label} (${tool.shortcut})` : tool.label}
           aria-label={tool.label}
           data-canvas-tool={tool.id}
           onclick={() => choose(tool.id)}
@@ -643,6 +649,10 @@
           </button>
         </div>
         <p class="hint">Click the map to place a light</p>
+      {:else if active === "stairs"}
+        <p class="hint" data-stairs-hint>
+          Drag over the stairs on the map. They join the floor you are viewing and the next one up; change the floors, directions or name under Scenes → Floor play &amp; stairs.
+        </p>
       {:else if active === "pin"}
         <p class="hint">
           Click the map to drop a pin. Pins are GM-only until you make them visible.

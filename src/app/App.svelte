@@ -4,7 +4,8 @@
   import SavesPanel from "../ui/settings/SavesPanel.svelte";
   import ZoomControl from "../ui/canvas/ZoomControl.svelte";
   import StairChooser from "../ui/StairChooser.svelte";
-  import { floorForElevation, floorLighting, floorMoveOps, stairMarkers } from "../core/levelPlay";
+  import { floorForElevation, floorLighting, floorMoveOps, stairMarkers, STAIRS_V2_FEATURE } from "../core/levelPlay";
+  import { drawnStairwell, type StairArea } from "../core/stairAuthoring";
   import { areaFloorOf, areaFloorReach, wallsOnFloor } from "../core/areaFloors";
   import { flightPassage, tokenFooting } from "../core/floorSupport";
   import { adjacentFloor, floorRoster, gmFloorRender, GM_GHOST_ALPHA, type GmFloorMode } from "../core/gmFloorView";
@@ -649,6 +650,7 @@ const WALL_PICK_RADIUS = 12;
     "wall",
     "light",
     "pin",
+    "stairs",
   ]);
   const currentGrid = () => {
     const sc = activeScene();
@@ -724,6 +726,16 @@ const WALL_PICK_RADIUS = 12;
     lastPlacement = { kind: "light", id };
   }
   /** D-256 map pin: hidden by default (Roll20), visible = `ownership.default = LIMITED`. */
+  /** G-14 (D-450): the Stairs tool's rectangle becomes a stairwell joining the viewed floor and the next one. */
+  function createStairs(area: StairArea): void {
+    const scene = activeScene(), current = app;
+    if (!scene || !current) return;
+    const region = drawnStairwell(scene, area, { id: `stairs-${crypto.randomUUID()}`, levelId: previewLevel(scene) ?? null });
+    if (typeof region === "string") { notifyLog = [...notifyLog.slice(-49), { message: region, level: "warn" }]; return; }
+    void current.gm.client.submitAndWait([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: scene._id }, data: region }])
+      .then(() => { notifyLog = [...notifyLog.slice(-49), { message: `${region.name} added. Change its floors, directions or name under Scenes → Floor play & stairs.`, level: "info" }]; })
+      .catch((error: unknown) => { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; });
+  }
   function createPin(at: { x: number; y: number }) {
     const scene = activeScene();
     if (!scene) return;
@@ -1780,6 +1792,11 @@ const WALL_PICK_RADIUS = 12;
   const pathToolAvailable = $derived.by(() => {
     void storeVersion;
     return isHexcrawlScene(activeScene());
+  });
+  /** G-14 (D-450): stairwells can be drawn once the scene has two floors. */
+  const stairsToolAvailable = $derived.by(() => {
+    void storeVersion;
+    return (activeScene()?.levels?.length ?? 0) >= 2 && app?.gm.client.supportsFeature(STAIRS_V2_FEATURE) === true;
   });
 
   /** The travel panel's own model: one row per step, priced by terrain, plus the total. */
@@ -3862,6 +3879,7 @@ const WALL_PICK_RADIUS = 12;
             current.gm.client.sendEphemeral("ruler", { points: points.map((p) => ({ x: p.x, y: p.y })) });
           },
           fogPaint: ({ mode, poly }) => paintFog(mode, poly),
+          createStairs: (area) => createStairs(area),
         });
         toolReady++;
         // D-256: every gesture tool (draw/text/measure/fog/wall/light/pin) sees the pointer
@@ -5309,6 +5327,7 @@ const WALL_PICK_RADIUS = 12;
               onAction={runCanvasAction}
               onChooseTool={() => { sessionOpen = false; }}
               pathTool={pathToolAvailable}
+              stairsTool={stairsToolAvailable}
             />
           </div>
           <div
@@ -5442,6 +5461,11 @@ const WALL_PICK_RADIUS = 12;
                 {:else}
                   <polyline points={preview.points.map((p) => { const q = measurePoint(p); return `${q.x},${q.y}`; }).join(" ")} fill={preview.brush === "hide" ? "#0a0f1599" : "#ffd47933"} stroke={preview.brush === "hide" ? "#8892a6" : "#ffd479"} stroke-width="2" stroke-dasharray="6 4" />
                 {/if}
+              {:else if preview.kind === "stairs"}
+                {@const a = measurePoint(preview.from)}
+                {@const b = measurePoint(preview.to)}
+                <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} fill="#8ad9ff22" stroke="#8ad9ff" stroke-width="2" stroke-dasharray="8 4" />
+                <text x={Math.min(a.x, b.x) + 6} y={Math.min(a.y, b.y) + 16} fill="#e8f7ff" stroke="#0b1520" stroke-width="3" paint-order="stroke" font-size="12">Stairs</text>
               {:else if preview.kind === "wallEdit"}
                 {#each preview.walls as wall (wall._id)}
                   {@const a = measurePoint({ x: wall.c[0], y: wall.c[1] })}

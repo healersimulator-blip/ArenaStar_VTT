@@ -13152,3 +13152,23 @@ It is a clean-room reading of Foundry's public data model and of the behaviour r
 - Hex scenes use the square-grid padding rule; the report asks the GM to check alignment.
 - Images do not relink after import; re-import with the files.
 - Region behaviours other than level changes (teleports, damage, scripts) are skipped.
+
+## D-450 — Drawing stairs on the map, and editing them in place (G-14) (2026-10-11)
+
+Stairwells were made from typed X, Y, width and height, or by converting a region typed into Active Zones. Once made, they could be locked, hidden, linked to a door or removed, but not renamed, retargeted, re-directed or resized; any mistake meant removing them and starting again.
+
+**Drawing.** A GM-only **Stairs** tool joins the map's tool rail when the scene has at least two floors.
+- Drag over the stairs on the map. The area snaps to grid corners (gridless maps follow the pointer) and previews as a labelled dashed box. A click makes nothing, and Escape drops the drag.
+- The new stairwell joins the floor the GM is viewing (D-434) and the next floor up, or the next floor down from the top floor. With no floor in view, it starts at the lowest floor. It travels at once both ways, is named after its floors ("Stairs Ground ↔ Floor 2"), and starts hidden like any stair region. A notice says where to change it.
+- `src/core/stairAuthoring.ts` (`drawnStairwell`) builds it; the tool controller's new `stairs` gesture delivers the area.
+
+**Editing in place.** Each stairwell under Scenes → Floor play & stairs has an **Edit** form. One save (`stairEditDiff`) is one undoable update covering:
+- the name, and the label players see in the stair chooser;
+- the floors it connects;
+- its directions: both ways, up only or down only. One-way moves that no single direction describes can be kept for the floors that remain;
+- its position and size.
+Lock, mode, door link, secrecy and pass-through are kept, as are arrival points on floors that stay.
+
+**Limits.**
+- The canvas tool draws rectangles. Other shapes still come from an Active Zones region converted in the editor.
+- Resizing is typed in the editor; there are no drag handles on the map.
