@@ -1455,6 +1455,8 @@ export interface GmFogSurface {
     originCol: number;
     originRow: number;
     radiusFt: number;
+    /** G-27 (D-447): the caster, whose floor the area happens on. */
+    casterTokenId?: string;
   }): {
     ok: boolean;
     issues: Array<{ field: string; message: string }>;

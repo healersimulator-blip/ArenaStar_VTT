@@ -203,7 +203,7 @@ Legend: ✅ have · ◐ partial · ❌ missing · — not applicable. Gap IDs re
 | See tokens on other floors through openings | 3D line-of-sight sampling | visibility lists plus surfaces | ✅ host 3D sight through traced openings, drawn dimmed beneath the floor art (D-445) | G-20 |
 | See lower-floor art from above | show-if-above, basement rules | visibility lists | ✅ through the floor art's transparent parts, dimmed by depth (D-443) | G-19 |
 | Light passing between floors | light masking by viewer height | unassigned lights; floors restrict light | ✅ through traced openings: a floor's openings show the lower floors' darkness and lights, and the floor above's lights fall through its own openings (D-446) | G-22 |
-| Notes, templates, drawings per floor | elevation-gated; template elevation tool | tagged to levels | ❌ removed in isolated mode (S3) | **G-06**, G-27 |
+| Notes, templates, drawings per floor | elevation-gated; template elevation tool | tagged to levels | ✅ scoped to floors and shown there (D-432); areas resolve on the caster's floor, and on other floors only through openings (D-447) | **G-06**, G-27 |
 | Flying and falling between floors | warning when crossing a floor | surfaces plus elevation | ❌ | G-23 |
 | Faux Overhead token clipping | (Better Levels) | — | ✅ vector; ❌ on Canvas2D (S4); ❌ in isolated mode (S3) | G-05, G-06 |
 | Roof fades when a token is under it | core modes: fade / radial / vision | core | ◐ `roof` fades the whole tile using its bounding box | G-26 |
@@ -618,6 +618,7 @@ P2 · M
 
 - **Reference:** the V13 template elevation tool and caster hand height.
 - **Bridge:** templates carry a floor (G-06) and an elevation. Area effects resolve against tokens on the template's floor, plus visible floors once G-20 exists.
+- **Status: Done (D-447).** Areas happen on the caster's floor, with that floor's walls. Radius areas also reach tokens on other floors through openings, as spheres with a clear 3D line of effect. Lines and cones stay on their floor. The host verifies this; the GM's preview and targeting use it. Templates keep their floor scope; an elevation field waits until templates drive areas.
 
 ### P3: productivity, portability, beyond parity
 
@@ -670,7 +671,7 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-10 Stairs visible to players | **Done** — markers per floor, `secret` hides them | D-430 |
 | G-11 Lock stairs | **Done** — toggle, plus stairs linked to a door work only while it is open (dangling links audited) | D-430, D-437 |
 | G-14 Stairs on the canvas | **Partial** — GM labels/arrows, create from any Active Zones region; dedicated draw tool open | D-430 |
-| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 28 Chromium tests in 21 specs, roofs and floor perception included) | D-429 |
+| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 29 Chromium tests in 22 specs, roofs and floor perception included) | D-429 |
 | S6 / G-15 Pre-check and live audit | **Done** — blocking errors, acknowledged warnings, quick fixes, live list | D-433 |
 | G-18 Transition presentation | **Done** — arrival notice and cross-fade | D-430 |
 | S7 / G-12 GM floor view & build mode | **Done** — floor switch with ghost/only/all, build mode, PageUp/PageDown | D-434 · `src/core/gmFloorView.ts` |
@@ -690,7 +691,8 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-21 Solid floors with openings | **Done (model + authoring)** — `LevelDocument.surface` (solid area, holes = openings; absent = solid everywhere); "Trace from floor art" with preview; kernel planes via `floorSurfaces`; `opening-over-void` check. Surfaces inside a band (bridges) deferred | D-444 · `traceSurface` |
 | G-20 See tokens on other floors | **Done** — per viewer, the host's 3D sight (kernel rays through D-444 openings, floor-scoped walls, ranges, light/darkvision) lists the lower-floor tokens the viewer's own vision tokens see; they are drawn dimmed beneath the floor's art, not pickable. The GM's isolated view shows all of them | D-445 · `tokensSeenBelow` |
 | G-22 Light through openings | **Done** — split ambient darkness at the floor's solid area; lower floors' lights in nested masks of the openings, shaped by their own walls; the floor above's lights through its openings; sent as `presentation.lighting` (players hold no surfaces); host sight counts it; WebGL and Canvas2D clip alike | D-446 · `floorLighting` |
-| G-23, G-27, G-30 | Open (slices D and F) | — |
+| G-27 Areas and floors | **Done** — areas resolve on the caster's floor (that floor's walls); radius areas reach other floors only through openings (sphere, kernel line of effect); lines/cones stay; host verification, GM preview and Lightning Bolt targeting share `areaFloorReach`; players' previews are floor-only already | D-447 · `src/core/areaFloors.ts` |
+| G-23, G-30 | Open (slices D and F) | — |
 
 ---
 

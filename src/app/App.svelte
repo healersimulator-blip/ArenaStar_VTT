@@ -5,6 +5,7 @@
   import ZoomControl from "../ui/canvas/ZoomControl.svelte";
   import StairChooser from "../ui/StairChooser.svelte";
   import { floorForElevation, floorLighting, floorMoveOps, stairMarkers } from "../core/levelPlay";
+  import { areaFloorOf, areaFloorReach, wallsOnFloor } from "../core/areaFloors";
   import { adjacentFloor, floorRoster, gmFloorRender, GM_GHOST_ALPHA, type GmFloorMode } from "../core/gmFloorView";
   import { unscopedToFloorOps } from "../core/levelAudit";
   import type { StairOfferMsg } from "../core/messages";
@@ -2469,9 +2470,12 @@ const WALL_PICK_RADIUS = 12;
       const radians = placement.angleDeg * Math.PI / 180;
       const direction = { x: Math.cos(radians), y: Math.sin(radians) };
       const line = { origin: { x: caster.x, y: caster.y }, direction, lengthFt: 90, widthFt: 5 };
+      // G-27 (D-447): the bolt stays on the caster's floor, blocked only by that floor's walls.
+      const floor = areaFloorOf(scene, caster), onFloor = areaFloorReach(scene, caster, { origin: line.origin });
+      const walls = floor ? wallsOnFloor(scene.walls, floor) : scene.walls;
       const targets = scene.tokens.flatMap((token) => {
-        if (token._id === caster._id || !lineIntersectsTokenFootprint(line, token, built.grid) ||
-            sightBlockedBetween(scene.walls, line.origin, { x: token.x, y: token.y })) return [];
+        if (token._id === caster._id || !onFloor(token) || !lineIntersectsTokenFootprint(line, token, built.grid) ||
+            sightBlockedBetween(walls, line.origin, { x: token.x, y: token.y })) return [];
         const targetActor = token.actorId
           ? current.gm.client.store.get("actors", token.actorId) as ActorDocument | undefined : undefined;
         return targetActor ? [{ tokenId: token._id, actor: targetActor }] : [];
@@ -2502,7 +2506,7 @@ const WALL_PICK_RADIUS = 12;
     }
     const preview = showPF1eAreaPreview({ kind: "spread",
       origin: { col: placement.point.x / scene.grid.size, row: placement.point.y / scene.grid.size },
-      radiusFt: 40 });
+      radiusFt: 40 }, caster);
     if (!preview.ok) {
       settleSpellAim({ ok: false, error: `Entangle area could not be resolved: ${preview.issues.map((issue) => issue.message).join("; ")}. No slot was spent.` });
       return;
@@ -3117,7 +3121,7 @@ const WALL_PICK_RADIUS = 12;
    * callers can surface the named issues. The casting flow (C02 UI) is the
    * in-product consumer; every refusal is an issue, never a guess.
    */
-  function showPF1eAreaPreview(spec: PF1eAreaSpec): PF1eAreaPreviewModel {
+  function showPF1eAreaPreview(spec: PF1eAreaSpec, caster?: TokenDocument): PF1eAreaPreviewModel {
     const scene = activeScene();
     if (!scene) {
       pf1ePreview = null;
@@ -3133,11 +3137,15 @@ const WALL_PICK_RADIUS = 12;
         label: "",
       };
     }
+    // G-27 (D-447): an area happens on its caster's floor (with that floor's walls); tokens on
+    // other floors only where it reaches them through openings.
+    const floor = areaFloorOf(scene, caster);
+    const reach = areaFloorReach(scene, caster, { origin: { x: spec.origin.col * scene.grid.size, y: spec.origin.row * scene.grid.size }, radius: spec.radiusFt });
     pf1ePreview = pf1eAreaPreviewModel(
       {
         grid: scene.grid,
-        tokens: scene.tokens,
-        segments: sightSegments(scene.walls),
+        tokens: scene.tokens.filter(reach),
+        segments: sightSegments(floor ? wallsOnFloor(scene.walls, floor) : scene.walls),
       },
       spec,
     );
@@ -4741,11 +4749,12 @@ const WALL_PICK_RADIUS = 12;
             }
           },
           pf1eAreaPreviewShow: (spec) => {
+            const caster = spec.casterTokenId ? activeScene()?.tokens.find((t) => t._id === spec.casterTokenId) : undefined;
             const model = showPF1eAreaPreview({
               kind: spec.kind as PF1eAreaKind,
               origin: { col: spec.originCol, row: spec.originRow },
               radiusFt: spec.radiusFt,
-            });
+            }, caster);
             return {
               ok: model.ok,
               issues: model.issues.map((i) => ({ ...i })),

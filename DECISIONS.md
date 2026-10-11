@@ -13061,3 +13061,26 @@ Floors now know where they are open (D-444), and players see lower floors and th
 - Token-carried lights stay on their own floor.
 - Light from above reaches only the floor directly beneath.
 - The GM's ghost and all views are unchanged.
+
+## D-447 — Area effects that know about floors (G-27) (2026-10-11)
+
+Templates already carry a floor (D-432 scopes, stamped from the floor their creator views), but nothing that resolves an area looked at floors. With isolated floor play:
+- The GM's Entangle on Floor 2 caught goblins standing at the same spot on the ground floor, and the host's area verification (D-407) accepted them.
+- A Lightning Bolt hit through the floor the same way.
+- Walls on other floors blocked lines and refused spreads.
+
+**Rule.** An area happens on its caster's floor. This applies in floor play only; draft levels change nothing.
+- **Same floor.** Tokens on the caster's floor count as before: the area's cells decide, and only that floor's walls block line of effect.
+- **Other floors.** A token on another floor counts only when a radius area (burst, spread, emanation, cylinder) reaches it through openings. The area is a sphere around its origin, set one grid distance above the caster's floor (where lights hang). Part of the token's body must be within the radius, with a clear line of effect through the kernel: floor planes from D-444 surfaces and floor-band walls, on the sight axis, the same axis line of effect uses elsewhere.
+- **Lines and cones** stay on the caster's floor. Floorless tokens never count on a floor.
+
+**Where it applies.** `areaFloorReach` (core) is used by:
+- the host's verification of Entangle and Lightning Bolt targets, which now also checks only the caster's floor's walls;
+- the GM's area preview, which proposes the targets;
+- the GM's Lightning Bolt targeting.
+
+Players' previews already hold only their own floor's tokens and walls, so they never propose other floors. The host refuses a forged claim; a host test shows the bolt hitting through the floor without the rule.
+
+**Templates.** The template document gets no elevation field yet. Nothing in the product creates or resolves template documents: they come from imports and automation, and they are presentation only. Spell areas carry their own origin. When templates drive areas, they should use the origin height above.
+
+**Limits.** Players cannot aim areas at tokens on lower floors, because their clients hold no other floor's geometry; the GM can. The origin height is fixed, so there is no template elevation tool.

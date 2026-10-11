@@ -506,3 +506,71 @@ describe("D-407 spell effectiveness metadata", () => {
     expect((JSON.parse(JSON.stringify(receipt?.system)) as Json)).toBeTruthy();
   });
 });
+
+describe("G-27 (D-447) area effects know about floors", () => {
+  test("a Lightning Bolt stays on its caster's floor: the host refuses a target directly under the line on the floor below", async () => {
+    const { store, gm, player, rejected } = await setup();
+    const { draftLevel } = await import("../../src/core/levels");
+    const hosilla = actorDoc("hosilla", {
+      name: "Hosilla", ownership: { default: 0, [PLAYER_ID]: 3, [GM_ID]: 3 },
+      system: { pf1e: {
+        size: "Medium", hp: 24, hpMax: 24, saves: { fort: 3, ref: 2, will: 5 }, savesAsTotal: true,
+        abilities: { str: 10, dex: 14, con: 12, int: 12, wis: 10, cha: 18 },
+        spells: { keyAbility: "cha", casterLevel: 6, mode: "spontaneous",
+          slotsPerDay: { 0: 6, 1: 8, 2: 6, 3: 4 }, slotsUsed: { 3: 0 }, known: [{ name: "Lightning Bolt", level: 3 }] },
+      } },
+    });
+    const hobgoblin = actorDoc("hobgoblin-fighter-1", {
+      name: "Hobgoblin Fighter 1", ownership: { default: 2, [GM_ID]: 3 },
+      system: { pf1e: {
+        size: "Medium", hp: 20, hpMax: 20, saves: { fort: 3, ref: 1, will: 0 }, savesAsTotal: true,
+        abilities: { str: 13, dex: 12, con: 12, int: 10, wis: 10, cha: 9 },
+      } },
+    });
+    // Hosilla on Floor 2; the hobgoblin on the ground floor, right under the bolt's path.
+    const scene: SceneDocument = { ...lightningDemoScene(), levelMode: "isolated",
+      levels: [draftLevel("ground", "Ground", 0, 10, 0), draftLevel("upper", "Upper", 10, 20, 1)] };
+    scene.tokens = scene.tokens.map((t) => t._id === "tok-hosilla" ? { ...t, levelId: "upper", elevation: 10 } : { ...t, levelId: "ground", elevation: 0 });
+    gm.submit([
+      { kind: "create", coll: "actors", data: hosilla },
+      { kind: "create", coll: "actors", data: hobgoblin },
+      { kind: "create", coll: "scenes", data: scene },
+    ]);
+    await flushMicrotasks();
+    expect(rejected, JSON.stringify(rejected)).toEqual([]);
+    const cast = async () => {
+      const caster = player.store.get("actors", "hosilla") as ActorDocument | undefined;
+      const target = player.store.get("actors", "hobgoblin-fighter-1") as ActorDocument | undefined;
+      if (!caster || !target || !player.user) throw new Error("player replica did not receive spell demo actors");
+      const area = { sceneId: "scene-jungle", shape: "line" as const, origin: { x: 300, y: 500 },
+        length: 90, width: 5, direction: { x: 1, y: 0 }, units: "ft" as const };
+      const resolved = await resolveCastFlow(player, player.user, {
+        context: { sceneId: "scene-jungle", casterTokenId: "tok-hosilla", targetTokenId: "tok-hobgoblin-1", area },
+        casterActor: caster, casterDerived: deriveFromActorDocument(caster),
+        spell: { name: "Lightning Bolt", level: 3 },
+        authored: { saveType: "ref", severity: "half", damageFormula: "6d6", energyType: "electricity" },
+        targetName: target.name, targetActor: target, targetDerived: deriveFromActorDocument(target),
+      });
+      await flushMicrotasks();
+      return resolved;
+    };
+    const hp = () => Number(pf1eOf(actorOf(store, "hobgoblin-fighter-1")).hp);
+    const slots = () => ((pf1eOf(actorOf(store, "hosilla")).spells as Record<string, unknown>).slotsUsed as Record<string, number>)["3"];
+
+    const below = await cast();
+    expect(below.ok && !rejected.length).toBe(false); // refused somewhere: never a hit through the floor
+    expect(hp()).toBe(20);
+    expect(slots()).toBe(0);
+    expect(messagesOf(store).some((m) => (m.system.action as Record<string, unknown> | undefined)?.label === "Lightning Bolt")).toBe(false);
+
+    // On the caster's floor the same bolt lands.
+    rejected.length = 0;
+    gm.submit([{ kind: "update", ref: { coll: "tokens", id: "tok-hobgoblin-1", parent: { coll: "scenes", id: "scene-jungle" } }, diff: { levelId: "upper", elevation: 10 } }]);
+    await flushMicrotasks();
+    const level = await cast();
+    expect(level.ok).toBe(true);
+    expect(rejected, JSON.stringify(rejected)).toEqual([]);
+    expect(hp()).toBeLessThan(20);
+    expect(slots()).toBe(1);
+  });
+});

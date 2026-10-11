@@ -145,6 +145,7 @@ import { pf1eConditionDef, conditionRefusalFor } from "../packages/pf1e/conditio
 import { pf1eSpellEffectById, pf1eSpellEffectLanded, type PF1eSpellEffect }
   from "../packages/pf1e/spellEffects";
 import { sightBlockedBetween } from "../core/crosshair";
+import { areaFloorOf, areaFloorReach, wallsOnFloor } from "../core/areaFloors";
 import { affectedTokens, lineIntersectsTokenFootprint, pf1eAreaGridFromScene, resolveAreaCells } from "../packages/pf1e/targeting";
 import { combinedTacticalEffects, resolveTacticalEffects } from "../packages/pf1e/effectOps";
 import {
@@ -2382,7 +2383,9 @@ export class HostSync {
         area.units === "ft" && area.width === undefined && area.direction === undefined) {
       // The spread resolver has no cell-blocker geometry. Refuse to claim a host-verified area
       // across authored blocking walls rather than treating those walls as transparent.
-      if (scene.walls.some((wall) => wall.move === 0 || wall.sight === 0)) return false;
+      // G-27 (D-447): in floor play, only the caster's floor's walls stand in the spread's way.
+      const floor = areaFloorOf(scene, casterToken);
+      if ((floor ? wallsOnFloor(scene.walls, floor) : scene.walls).some((wall) => wall.move === 0 || wall.sight === 0)) return false;
       const col = area.origin.x / built.grid.cellSize;
       const row = area.origin.y / built.grid.cellSize;
       const unitsPerFoot = scene.grid.size / scene.grid.distance;
@@ -2392,7 +2395,8 @@ export class HostSync {
           area.origin.x > scene.width || area.origin.y > scene.height) return false;
       const resolved = resolveAreaCells({ kind: "spread", origin: { col, row }, radiusFt: 40 }, built.grid);
       if (resolved.issues.length > 0) return false;
-      return affectedTokens(resolved.cells, [token], built.grid).length === 1;
+      return affectedTokens(resolved.cells, [token], built.grid).length === 1 &&
+        areaFloorReach(scene, casterToken, { origin: area.origin, radius: 40 })(token);
     }
 
     const sourceActor = action.source.actorId
@@ -2408,8 +2412,11 @@ export class HostSync {
         area.origin.x < 0 || area.origin.y < 0 || area.origin.x > scene.width || area.origin.y > scene.height)
       return false;
     const line = { origin: area.origin, direction: area.direction, lengthFt: 90, widthFt: 5 };
+    // G-27 (D-447): a line stays on its caster's floor, and only that floor's walls block it.
+    const floor = areaFloorOf(scene, casterToken);
     return lineIntersectsTokenFootprint(line, token, built.grid) &&
-      !sightBlockedBetween(scene.walls, area.origin, { x: token.x, y: token.y });
+      !sightBlockedBetween(floor ? wallsOnFloor(scene.walls, floor) : scene.walls, area.origin, { x: token.x, y: token.y }) &&
+      areaFloorReach(scene, casterToken, { origin: area.origin })(token);
   }
 
   /** Versioned PF1e adapter: rederive a normal spell target from immutable host roll facts/state. */
