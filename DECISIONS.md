@@ -12889,3 +12889,22 @@ Roofs were barely usable: no UI could make a tile overhead, `roof` mode opened w
 **Validation and authoring.** The host checks the roof fields on tile create and on any update touching `occlusion`, `roofGroup` or `revealInFog`, including dotted paths. It checks them on the resulting tile, so removing `occlusion` is refused. Absent fields are never checked, so old documents keep loading. Older peers draw `radial`/`vision` as `roof` and ignore the other fields, so no capability gate is needed. Scenes → each scene → **Tiles & roofs** lists the scene's tiles with *Overhead (roof)*, fade mode, open opacity, radius, group (with suggestions) and role, and *Show through fog*. Each change is one undoable update.
 
 Verified: **5,469 Vitest passed / 12 skipped** (393 files, 2 skipped), including 17 roof-rule and 9 roof-layer tests and the host roof-field validation. **`test:multilevel` 20/20 Chromium tests passed on WebGL** (real-pixel radial and vision openings, group fade, reveal through opaque fog, editor setup, Peek, art-shaped "under", player-only openings, legacy roof fade). The roof specs also pass with the Canvas2D fallback (whole-roof fade). Typecheck, full lint and single-file build passed; Svelte 89 components / zero blockers / one existing advisory.
+
+## D-439 — Merge, reorder and rescale floors (G-31) (2026-10-11)
+
+A GM who generated the wrong stack had no way out except deleting floors, which the host refuses while anything still points at them, and re-assigning every token, wall and stair by hand. `src/core/levelRestack.ts` builds three plans. Each is one envelope (one undo step), recomputed from the live scene when submitted and checked by the same staged validation the host runs (`levelTransactionError`, then `regionTransactionError`). A plan made before somebody else's change is refused as a whole, never applied in part.
+
+**Elevations move with their floor.** A plan is a piecewise map: each old band moves by its own offset, and values outside every band stay put. Token feet follow their `levelId` (floorless tokens follow the band their feet are in). Region and tile `triggerElevation`, Faux Overhead covers (`affectedElevation` and `coverZ` together, by the cover band's offset) and the scene foreground move with the band that contains them. A range that straddles bands is left alone and listed in the plan's notes. Unbounded covers belong to no floor.
+
+**Merge into level** (Levels 7). Everything on floor A moves to floor B, and A is deleted:
+- Token feet keep their height above the floor (`e − A.floorZ + B.floorZ`), clamped into B's band; a token that would not fit stands on B's floor.
+- Floor scopes, other floors' visibility lists and stairwells are remapped and deduplicated. A stairwell left with one floor (or with only self-moves) loses its `stairs`, but the region stays. B's own arrival point wins over A's.
+- B gains A's map tiles and, if A used it, the scene background.
+- When the bands touch, B grows over A's band so the stack stays contiguous. Otherwise the empty band is reported.
+- A's ambient override is dropped (noted). Explored fog stays in storage, so undo brings the floor back with its fog.
+
+**Reorder.** Move a floor up or down by swapping it with its neighbour in the stack. Each floor keeps its height, any gap between the two stays between them, everything on either floor moves with it, and the display orders swap. Stair directions are computed from floor heights, so the chooser follows the new order. Floors with an open band stay at the ends of the stack (refused with that reason).
+
+**Rescale** (Levels API `rescaleGridDistance`). Multiply every elevation in the scene by a factor up to 1000, rounded to 10⁻⁶ so 0.3 × 12 is 3.6. Optionally set the grid distance to match. Token sight and darkvision are authored in feet and are not touched. Results beyond ±1,000,000 are refused.
+
+**UI.** Draft levels → **Merge, reorder or rescale floors** (shown once levels are saved). Merge shows a live preview of what will happen; Move up/down explain in their tooltip, or why they are disabled. The tools are disabled while the draft has unapplied edits. Previews run only while the panel is open, from a plain snapshot and without the staged check (Svelte state proxies cannot be structured-cloned); the click recomputes and validates. No protocol or capability change: the plans are ordinary GM ops on existing fields.

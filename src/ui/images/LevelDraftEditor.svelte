@@ -2,6 +2,7 @@
   import LevelPlayEditor from "./LevelPlayEditor.svelte";
   import { LEVEL_PLAY_FEATURE } from "../../core/levelPlay";
   import LevelBindingEditor from "./LevelBindingEditor.svelte";
+  import LevelToolsEditor from "./LevelToolsEditor.svelte";
   import { DRAFT_LEVELS_FEATURE, LEVEL_AMBIENT_FEATURE } from "../../core/capabilities";
   import { onMount, untrack } from "svelte";
   import type { EventBus } from "../../core/events";
@@ -136,6 +137,7 @@
   {#if stale && dirty}<p role="alert">Draft levels changed elsewhere. Reload before applying.</p>{/if}
   {#if validation}<p role="alert">{validation}</p>{:else}{#each warnings as warning, index (index)}<p class="warning">{warning}</p>{/each}{/if}
   {#if message}<p role="status">{message}</p>{/if}
+  {#if compatible && (scene.levels?.length ?? 0) > 0}<LevelToolsEditor {scene} {client} draftDirty={dirty || busy} />{/if}
   <LevelPlayEditor {scene} {client} draftDirty={dirty || busy} />
   <LevelBindingEditor {scene} {client} {bus} draftDirty={dirty || busy} />
 </details>

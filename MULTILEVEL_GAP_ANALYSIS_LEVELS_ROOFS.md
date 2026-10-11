@@ -680,7 +680,8 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-25 Roof groups | **Done** — `roofGroup {id, role}`: an occupied source fades the whole group, followers never trigger; order-independent | D-438 |
 | G-24 Roofs through fog | **Done** — `revealInFog`: a copy above the fog while live sight touches the outline (exact test); never explored | D-438 |
 | Roof authoring (found while doing E) | **Done** — no UI could make a tile overhead; Scenes → Tiles & roofs edits overhead, mode, opacity, radius, group, role, reveal | D-438 · `src/ui/images/RoofEditor.svelte` |
-| G-19 to G-23, G-27, G-29 to G-33 | Open (slices D and F) | — |
+| G-31 Merge, reorder, rescale | **Done** — merge into level (tokens keep height above the floor; scopes, stairs, visibility, art remapped; touching bands absorbed), move up/down (bands swap, contents follow), rescale (×factor, optional grid distance); each one undo with a preview | D-439 · `src/core/levelRestack.ts` |
+| G-19 to G-23, G-27, G-29, G-30, G-32, G-33 | Open (slices D and F) | — |
 
 ---
 
