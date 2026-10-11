@@ -1,13 +1,15 @@
 <script lang="ts">
-  import type { SceneDocument, RegionDocument, Json } from "../../core/documents";
+  import { isDoorWall, type SceneDocument, type RegionDocument, type Json, type WallDocument } from "../../core/documents";
   import type { ClientSync } from "../../client/sync";
   import type { Op } from "../../core/ops";
-  import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE, stairSpec, type StairBehaviorV2, type StairEdge } from "../../core/levelPlay";
+  import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE, stairDoor, stairSpec, type StairBehaviorV2, type StairEdge } from "../../core/levelPlay";
   import { levelAuditFixOps, levelPlayAudit, type LevelAuditFinding, type LevelAuditFix } from "../../core/levelAudit";
   let { scene, client, draftDirty }: { scene: SceneDocument; client: ClientSync; draftDirty: boolean } = $props();
   let busy = $state(false), message = $state("");
   let floors = $state<string[]>([]), directions = $state<"both" | "up" | "down">("both"), mode = $state<"auto" | "prompt">("auto");
   let label = $state(""), secret = $state(false), source = $state(""), x = $state(0), y = $state(0), width = $state(100), height = $state(100);
+  /** G-09/G-11 (D-437): pass-through trigger and an optional linked door. */
+  let cross = $state(false), door = $state("");
   /** G-15 (D-433): pending activation, shown until the GM fixes, acknowledges or cancels. */
   let preflight = $state<LevelAuditFinding[] | null>(null);
   const parent = $derived({ coll: "scenes" as const, id: scene._id });
@@ -16,6 +18,9 @@
   const warnings = $derived(findings.filter((f) => f.severity !== "info"));
   const stairs = $derived((scene.regions ?? []).filter((r) => r.stairs));
   const plainRegions = $derived((scene.regions ?? []).filter((r) => !r.stairs && !r.fauxOverhead));
+  const doors = $derived(scene.walls.filter((w) => isDoorWall(w)));
+  const doorState = (w: WallDocument) => w.door === 1 ? "open" : w.door === 2 ? "locked" : "closed";
+  const doorName = (w: WallDocument) => `${w.name && w.name !== "wall" && w.name !== w._id ? w.name : "Door"} at (${Math.round((w.c[0] + w.c[2]) / 2)}, ${Math.round((w.c[1] + w.c[3]) / 2)})`;
   const v2 = $derived(client.supportsFeature(STAIRS_V2_FEATURE));
   const levelName = (id: string) => scene.levels?.find((l) => l._id === id)?.name ?? id;
   const fixLabel: Record<LevelAuditFix, string> = {
@@ -65,20 +70,25 @@
     const edges = edgesFor(ids);
     if (ids.length < 2) { message = "Choose at least two floors."; return; }
     if (edges && !edges.length) { message = "Those floors have no up/down direction between them."; return; }
-    const behavior: StairBehaviorV2 = { version: 2, levels: ids, mode, ...(edges ? { edges } : {}), ...(label.trim() ? { label: label.trim() } : {}), ...(secret ? { secret: true } : {}) };
+    const behavior: StairBehaviorV2 = { version: 2, levels: ids, mode, ...(edges ? { edges } : {}), ...(label.trim() ? { label: label.trim() } : {}), ...(secret ? { secret: true } : {}),
+      ...(cross ? { trigger: "cross" as const } : {}), ...(door && doors.some((w) => w._id === door) ? { door } : {}) };
     const from = plainRegions.find((r) => r._id === source);
     const name = label.trim() || `Stairs ${ids.map(levelName).join(" ↔ ")}`;
     const ops: Op[] = from
       ? [{ kind: "update", ref: { coll: "regions", id: from._id, parent }, diff: { stairs: behavior as unknown as Json, hidden: true } }]
       : [{ kind: "create", coll: "regions", parent, data: { _id: `stairs-${crypto.randomUUID()}`, type: "region", name, ownership: { default: 0 }, flags: {}, system: {}, hidden: true,
           x, y, width, height, rotation: 0, shape: { kind: "polygon", points: [[0, 0], [1, 0], [1, 1], [0, 1]] }, stairs: behavior } satisfies RegionDocument }];
-    if (await submit(ops, "Stairwell saved. A token that ends its move inside it travels, or its player is asked which floor.")) { floors = []; label = ""; secret = false; source = ""; }
+    if (await submit(ops, cross ? "Stairwell saved. A token that passes through it or ends its move inside it travels, or its player is asked which floor."
+      : "Stairwell saved. A token that ends its move inside it travels, or its player is asked which floor.")) { floors = []; label = ""; secret = false; source = ""; cross = false; door = ""; }
   }
-  function update(region: RegionDocument, patch: Partial<StairBehaviorV2>, done: string) {
+  type StairPatch = { [K in keyof StairBehaviorV2]?: StairBehaviorV2[K] | undefined };
+  function update(region: RegionDocument, patch: StairPatch, done: string) {
     if (!region.stairs || !("version" in region.stairs)) return;
-    const next: StairBehaviorV2 = { ...region.stairs, ...patch };
+    const next = { ...region.stairs, ...patch } as StairBehaviorV2;
     if (next.locked === false) delete next.locked;
     if (next.secret === false) delete next.secret;
+    if (next.trigger !== "cross") delete next.trigger;
+    if (!next.door) delete next.door;
     void submit([{ kind: "update", ref: { coll: "regions", id: region._id, parent }, diff: { stairs: next as unknown as Json } }], done);
   }
   function upgrade(region: RegionDocument) {
@@ -91,7 +101,9 @@
     const spec = stairSpec(region.stairs);
     const all = spec.edges.length === spec.levels.length * (spec.levels.length - 1);
     const route = spec.legacy || !all ? spec.edges.map((e) => `${levelName(e.from)} → ${levelName(e.to)}`).join(", ") : spec.levels.map(levelName).join(" ↔ ");
-    return `${route}${spec.mode === "prompt" ? " · always asks" : ""}${spec.locked ? " · locked" : ""}${spec.secret ? " · hidden" : ""}`;
+    const linked = stairDoor(scene, spec);
+    const doorNote = spec.door ? linked ? ` · door ${doorState(linked)}` : " · linked door missing" : "";
+    return `${route}${spec.mode === "prompt" ? " · always asks" : ""}${spec.trigger === "cross" ? " · pass-through" : ""}${spec.locked ? " · locked" : ""}${doorNote}${spec.secret ? " · hidden" : ""}`;
   }
 </script>
 <details data-level-play>
@@ -121,6 +133,8 @@
     <label>On arrival<select aria-label="Stair mode" bind:value={mode}><option value="auto">Travel at once when only one floor is possible</option><option value="prompt">Always ask the player</option></select></label>
     <label>Label for players (optional)<input aria-label="Stair label" maxlength="64" bind:value={label} placeholder="Spiral stair" /></label>
     <label class="check"><input type="checkbox" aria-label="Hidden passage" bind:checked={secret} />Hidden passage: no stair marker for players</label>
+    <label class="check"><input type="checkbox" aria-label="Stair trigger on pass-through" bind:checked={cross} />Also when a move passes through (stops there, or continues on the new floor)</label>
+    <label>Works only while this door is open (optional)<select aria-label="Stair door" bind:value={door}><option value="">No door</option>{#each doors as w (w._id)}<option value={w._id}>{doorName(w)} · {doorState(w)}</option>{/each}</select></label>
     <label>Area<select aria-label="Stair area" bind:value={source}><option value="">Rectangle below</option>{#each plainRegions as r (r._id)}<option value={r._id}>Region: {r.name}</option>{/each}</select></label>
     {#if !source}
       <div class="bounds">
@@ -138,6 +152,11 @@
           <button type="button" aria-label={`${spec.locked ? "Unlock" : "Lock"} stairs ${spec.label ?? r.name}`} disabled={!v2} onclick={() => update(r, { locked: !spec.locked }, spec.locked ? "Stairs unlocked." : "Stairs locked: tokens can stand on them but not travel.")}>{spec.locked ? "Unlock" : "Lock"}</button>
           <button type="button" disabled={!v2} onclick={() => update(r, { mode: spec.mode === "auto" ? "prompt" : "auto" }, "Stair choice updated.")}>{spec.mode === "auto" ? "Always ask" : "Travel at once"}</button>
           <button type="button" disabled={!v2} onclick={() => update(r, { secret: !spec.secret }, spec.secret ? "Stairs are marked for players." : "Stairs hidden from players' markers.")}>{spec.secret ? "Show marker" : "Hide marker"}</button>
+          <button type="button" aria-label={`${spec.trigger === "cross" ? "Only on ending inside" : "Pass-through"} stairs ${spec.label ?? r.name}`} disabled={!v2}
+            onclick={() => update(r, { trigger: spec.trigger === "cross" ? undefined : "cross" }, spec.trigger === "cross" ? "Stairs now work only when a move ends inside." : "Stairs now also work when a move passes through.")}>{spec.trigger === "cross" ? "Only on ending inside" : "Also on pass-through"}</button>
+          <label class="inline">Door<select aria-label={`Door for stairs ${spec.label ?? r.name}`} disabled={!v2} value={spec.door ?? ""}
+            onchange={(e) => update(r, { door: e.currentTarget.value || undefined }, e.currentTarget.value ? "Stairs now work only while that door is open." : "Door link removed.")}>
+            <option value="">No door</option>{#if spec.door && !stairDoor(scene, spec)}<option value={spec.door}>Missing door</option>{/if}{#each doors as w (w._id)}<option value={w._id}>{doorName(w)} · {doorState(w)}</option>{/each}</select></label>
         {:else if spec}
           <button type="button" disabled={!v2} onclick={() => upgrade(r)}>Convert to stairwell</button>
         {/if}
@@ -158,4 +177,5 @@
   .audit { border-top:0; margin-top:4px; } li.warning, li.error { color:#f0c789; }
   .preflight { border:1px solid #8c7542; border-radius:4px; padding:6px 8px; background:#221d12; margin:6px 0; }
   .stair { font-size:11px; color:#b2bdca; border-top:1px dashed #33405a; padding:4px 0; overflow-wrap:anywhere; }
+  .inline { display:inline-flex; align-items:center; gap:4px; margin:2px 4px 2px 0; } .inline select { width:auto; max-width:180px; }
 </style>

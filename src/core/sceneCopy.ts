@@ -570,7 +570,7 @@ export function planDuplicateSceneOps(input: DuplicateSceneInput): DuplicateScen
     if (level.tileIds) level.tileIds = level.tileIds.map((id) => ids.get(refKey("tiles", id)) ?? id);
   }
   for (const region of copy.regions ?? []) if (region.stairs)
-    region.stairs = remapStairLevels(region.stairs, (id) => ids.get(refKey("levels", id)) ?? id);
+    region.stairs = remapStairLevels(region.stairs, (id) => ids.get(refKey("levels", id)) ?? id, (id) => ids.get(refKey("walls", id)) ?? id);
   for (const scoped of [...copy.walls, ...copy.lights, ...(copy.regions ?? []), ...copy.drawings, ...copy.templates, ...copy.notes])
     if (scoped.levelScope?.mode === "levels") scoped.levelScope.ids = scoped.levelScope.ids.map((id) => ids.get(refKey("levels", id)) ?? id);
   for (const token of copy.tokens) if (token.levelId !== undefined) {

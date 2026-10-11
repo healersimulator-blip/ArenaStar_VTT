@@ -1322,6 +1322,13 @@ export interface GmFogSurface {
     mode: "roof" | "fade";
     alpha: number;
   }): string;
+  /**
+   * G-11 e2e (D-437): create a wall through the client op path (a door when `door` is given:
+   * every axis conditional); returns its id. `everyFloor` scopes it to all floors.
+   */
+  seedWall(spec: { c: [number, number, number, number]; door?: 0 | 1 | 2; everyFloor?: boolean }): string;
+  /** G-11 e2e: set a door wall's state (0 closed, 1 open, 2 locked) through the client op path. */
+  setDoorState(spec: { id: string; door: 0 | 1 | 2 }): void;
   /** §12: rulesVersion of the last resolved turn's report. */
   reportRulesVersion(): string;
   /** §11 distributions byType of the last report the GM received. */

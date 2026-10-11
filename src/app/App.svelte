@@ -4948,6 +4948,20 @@ const WALL_PICK_RADIUS = 12;
             ]);
             return id;
           },
+          seedWall: (spec) => {
+            const scene = activeScene();
+            if (!scene) return "";
+            const id = `wall-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+            const axis = spec.door === undefined ? 0 : 1;
+            current.gm.client.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: scene._id },
+              data: { _id: id, type: "wall" as const, name: spec.door === undefined ? "Wall" : "Door", ownership: { default: 0 }, flags: {}, system: {}, c: spec.c,
+                door: spec.door ?? 0, oneWay: false, move: axis, sight: axis, sound: axis, light: axis, ...(spec.everyFloor ? { levelScope: { mode: "all" as const } } : {}) } }]);
+            return id;
+          },
+          setDoorState: ({ id, door }) => {
+            const scene = activeScene();
+            if (scene) current.gm.client.submit([{ kind: "update", ref: { coll: "walls", id, parent: { coll: "scenes", id: scene._id } }, diff: { door } }]);
+          },
           factionOwnership: () => {
             const factions = current.gm.client.store.getAll(
               "factions",

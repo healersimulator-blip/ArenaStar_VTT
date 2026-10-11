@@ -1,6 +1,7 @@
 /** Discrete floor play. No vertical LOS, teleport permissions or secret-data guarantee is implied. */
-import type { SceneDocument, RegionDocument, TokenDocument, LevelDocument, LevelScope } from "./documents";
+import { isDoorWall, type SceneDocument, type RegionDocument, type TokenDocument, type LevelDocument, type LevelScope } from "./documents";
 import type { Op } from "./ops";
+import { snapTokenCenter, type GridSpec } from "../canvas/grid";
 import { SpatialKernel, legacySpatialBarrier } from "./spatial/kernel";
 import { applyDiff } from "./diff";
 import { regionTriggerTile } from "./regionGeometry";
@@ -49,22 +50,46 @@ export interface StairBehaviorV2 {
   label?: string;
   /** G-10: hidden passages are not marked for players. */
   secret?: boolean;
+  /**
+   * G-09 (D-437): `cross` also fires when a move passes through the stairwell, stopping (or, in
+   * `auto` mode, continuing on the new floor) at the entry point. Absent/`end` = the move must end
+   * inside, as before.
+   */
+  trigger?: "end" | "cross";
+  /** G-11 (D-437): wall ID of a door; the stairwell works only while that door is open. */
+  door?: string;
 }
 export type StairBehavior = StairBehaviorV1 | StairBehaviorV2;
-/** Normalized view of either version. */
-export interface StairSpec { levels: string[]; mode: "auto" | "prompt"; edges: StairEdge[]; arrivals: StairArrival[]; locked: boolean; label?: string; secret: boolean; legacy: boolean }
+/** Normalized view of either version. `locked` is the stored flag; see `stairLocked` for doors. */
+export interface StairSpec { levels: string[]; mode: "auto" | "prompt"; edges: StairEdge[]; arrivals: StairArrival[]; locked: boolean; label?: string; secret: boolean; legacy: boolean;
+  trigger: "end" | "cross"; door?: string }
 export interface StairMarker { id: string; points: number[]; label?: string; up: boolean; down: boolean; locked: boolean }
 export interface StairChoice { levelId: string; name: string; direction: "up" | "down" | "level" }
 /** A move stopped inside a stairwell with a choice to make (or a locked one to explain). */
 export interface StairPrompt { sceneId: string; tokenId: string; fromLevelId: string; regionIds: string[]; label?: string; choices: StairChoice[]; reason?: "locked" }
 
-const STAIR_V2_KEYS = new Set(["version", "levels", "mode", "edges", "arrivals", "locked", "label", "secret"]);
+const STAIR_V2_KEYS = new Set(["version", "levels", "mode", "edges", "arrivals", "locked", "label", "secret", "trigger", "door"]);
 const LEGACY_STAIR_ERROR = "Stairs require distinct existing source and destination levels";
+const STAIR_REF = /^[A-Za-z0-9_-]{1,128}$/;
 export function stairSpec(s: StairBehavior): StairSpec {
-  if (!("version" in s)) return { levels: [s.from, s.to], mode: "auto", edges: [{ from: s.from, to: s.to }], arrivals: [], locked: false, secret: false, legacy: true };
+  if (!("version" in s)) return { levels: [s.from, s.to], mode: "auto", edges: [{ from: s.from, to: s.to }], arrivals: [], locked: false, secret: false, legacy: true, trigger: "end" };
   const edges = s.edges ?? s.levels.flatMap((from) => s.levels.filter((to) => to !== from).map((to) => ({ from, to })));
   return { levels: [...s.levels], mode: s.mode, edges: edges.map((e) => ({ ...e })), arrivals: (s.arrivals ?? []).map((a) => ({ ...a })), locked: s.locked === true,
-    ...(s.label ? { label: s.label } : {}), secret: s.secret === true, legacy: false };
+    ...(s.label ? { label: s.label } : {}), secret: s.secret === true, legacy: false, trigger: s.trigger === "cross" ? "cross" : "end", ...(s.door ? { door: s.door } : {}) };
+}
+/**
+ * G-11 (D-437): the door a stairwell is linked to, when that wall still exists and is a door.
+ * A dangling link (wall deleted, or no longer a door) is ignored here and reported by the audit.
+ */
+export function stairDoor(scene: Pick<SceneDocument, "walls">, spec: Pick<StairSpec, "door">) {
+  const wall = spec.door ? scene.walls.find((w) => w._id === spec.door) : undefined;
+  return wall && isDoorWall(wall) ? wall : undefined;
+}
+/** Effective lock: the stored flag, or a linked door that is closed or locked (door state ≠ open). */
+export function stairLocked(scene: Pick<SceneDocument, "walls">, spec: Pick<StairSpec, "locked" | "door">): boolean {
+  if (spec.locked) return true;
+  const door = stairDoor(scene, spec);
+  return !!door && door.door !== 1;
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -103,6 +128,9 @@ export function stairBehaviorError(raw: unknown, levels: readonly LevelDocument[
     }
   }
   if (raw.locked !== undefined && typeof raw.locked !== "boolean") return "Stair lock must be true or false";
+  if (raw.trigger !== undefined && raw.trigger !== "end" && raw.trigger !== "cross") return "Stair trigger must be end or cross";
+  // Shape only: the wall may be deleted later, and a level transaction must never fail on that (D-437).
+  if (raw.door !== undefined && (typeof raw.door !== "string" || !STAIR_REF.test(raw.door))) return "Stair door must be a wall ID";
   if (raw.secret !== undefined && typeof raw.secret !== "boolean") return "Stair secrecy must be true or false";
   if (raw.label !== undefined && (typeof raw.label !== "string" || !raw.label.trim() || raw.label.length > 64 || [...raw.label].some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127)))
     return "Stair label needs 1–64 printable characters";
@@ -150,7 +178,7 @@ export function stairMarkers(scene: SceneDocument, levelId: string | null, inclu
     const up = !!origin && targets.some((l) => l.floorZ > origin.floorZ) || (levelId === null && spec.levels.length > 1);
     const down = !!origin && targets.some((l) => l.floorZ < origin.floorZ) || (levelId === null && spec.levels.length > 1);
     markers.push({ id: region._id, points: polygon.flatMap((p) => [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10]),
-      ...(spec.label ? { label: spec.label } : levelId === null ? { label: region.name } : {}), up, down, locked: spec.locked });
+      ...(spec.label ? { label: spec.label } : levelId === null ? { label: region.name } : {}), up, down, locked: stairLocked(scene, spec) });
   }
   return markers;
 }
@@ -273,7 +301,7 @@ function choicesFrom(scene: SceneDocument, source: LevelDocument, regions: reado
     const spec = stairSpec(region.stairs);
     const outgoing = spec.edges.filter((e) => e.from === source._id);
     if (!outgoing.length) continue;
-    if (spec.locked) { locked = true; continue; }
+    if (stairLocked(scene, spec)) { locked = true; continue; }
     regionIds.push(region._id);
     label ??= spec.label;
     for (const edge of outgoing) {
@@ -301,25 +329,121 @@ function attachedFollowers(scene: SceneDocument, tokenId: string, levelId: strin
     return false;
   });
 }
-function transitionOps(scene: SceneDocument, token: TokenDocument, choice: ResolvedChoice, followers: ReadonlyArray<{ token: TokenDocument; at: { x: number; y: number } }>, at: { x: number; y: number }): Op[] {
+type Point = { x: number; y: number };
+type Follower = { token: TokenDocument; at: Point };
+/**
+ * Floor change for the mover and its attached followers. `at` is where the commit leaves the mover;
+ * `land` is where it ends up (an arrival point, a pass-through stop, or `at` itself). Followers keep
+ * their offset from the mover.
+ */
+function transitionOps(scene: SceneDocument, token: TokenDocument, level: LevelDocument, followers: readonly Follower[], at: Point, land: Point): Op[] {
   const parent = { coll: "scenes" as const, id: scene._id };
-  const dx = choice.arrival ? choice.arrival.x - at.x : 0, dy = choice.arrival ? choice.arrival.y - at.y : 0;
-  const move = (dx || dy) ? { x: at.x + dx, y: at.y + dy } : {};
+  const dx = land.x - at.x, dy = land.y - at.y;
+  const move = (dx || dy) ? { x: land.x, y: land.y } : {};
   return [
-    { kind: "update", ref: { coll: "tokens", id: token._id, parent }, diff: { levelId: choice.level._id, elevation: choice.level.floorZ, ...move } },
+    { kind: "update", ref: { coll: "tokens", id: token._id, parent }, diff: { levelId: level._id, elevation: level.floorZ, ...move } },
     ...followers.map(({ token: f, at: fAt }): Op => ({ kind: "update", ref: { coll: "tokens", id: f._id, parent },
-      diff: { levelId: choice.level._id, elevation: choice.level.floorZ, ...((dx || dy) ? { x: fAt.x + dx, y: fAt.y + dy } : {}) } })),
+      diff: { levelId: level._id, elevation: level.floorZ, ...((dx || dy) ? { x: fAt.x + dx, y: fAt.y + dy } : {}) } })),
   ];
 }
+/** G-09: stop the mover (and its followers, by the same offset) short of its submitted endpoint. */
+function shiftOps(scene: SceneDocument, token: TokenDocument, followers: readonly Follower[], at: Point, stop: Point): Op[] {
+  const parent = { coll: "scenes" as const, id: scene._id };
+  const dx = stop.x - at.x, dy = stop.y - at.y;
+  if (!dx && !dy) return [];
+  return [{ kind: "update", ref: { coll: "tokens", id: token._id, parent }, diff: { x: stop.x, y: stop.y } },
+    ...followers.map(({ token: f, at: fAt }): Op => ({ kind: "update", ref: { coll: "tokens", id: f._id, parent }, diff: { x: fAt.x + dx, y: fAt.y + dy } }))];
+}
 /** Filter out destinations whose landing would put the body inside a wall. */
-function clearChoices(scene: SceneDocument, token: TokenDocument, at: { x: number; y: number }, choices: readonly ResolvedChoice[]): ResolvedChoice[] {
+function clearChoices(scene: SceneDocument, token: TokenDocument, at: Point, choices: readonly ResolvedChoice[]): ResolvedChoice[] {
   return choices.filter((c) => !landingBlocked(scene, token, c.level, c.arrival ?? at));
+}
+function sweepBlocked(scene: SceneDocument, levelId: string, token: TokenDocument, from: Point, to: Point, z: number): boolean {
+  return new SpatialKernel(wallsOn(scene, levelId).map(legacySpatialBarrier), []).sweep({ ...bodyOf(token), from: { ...from, z }, to: { ...to, z } }).length > 0;
+}
+/**
+ * G-09: where the segment `a → b` runs inside a convex polygon, as parameters `enter ≤ exit` in
+ * [0, 1] (Cyrus–Beck). Null when it misses. Orientation-independent.
+ */
+export function segmentPolygonSpan(polygon: readonly Point[], a: Point, b: Point): { enter: number; exit: number } | null {
+  const n = polygon.length;
+  if (n < 3) return null;
+  let area = 0;
+  for (let i = 0; i < n; i++) { const p = polygon[i] as Point, q = polygon[(i + 1) % n] as Point; area += p.x * q.y - q.x * p.y; }
+  if (!Number.isFinite(area) || Math.abs(area) < 1e-9) return null;
+  const orient = Math.sign(area), dx = b.x - a.x, dy = b.y - a.y;
+  let enter = 0, exit = 1;
+  for (let i = 0; i < n; i++) {
+    const p = polygon[i] as Point, q = polygon[(i + 1) % n] as Point;
+    const ex = q.x - p.x, ey = q.y - p.y;
+    const inside0 = (ex * (a.y - p.y) - ey * (a.x - p.x)) * orient; // ≥ 0 on the inner side
+    const rate = (ex * dy - ey * dx) * orient;
+    if (Math.abs(rate) < 1e-12) { if (inside0 < 0) return null; continue; }
+    const t = -inside0 / rate;
+    if (rate > 0) enter = Math.max(enter, t); else exit = Math.min(exit, t);
+    if (enter > exit) return null;
+  }
+  return { enter, exit };
+}
+/** A centre path running less than this far inside a pass-through stairwell only grazed it. */
+const MIN_CROSSING_PX = 1;
+interface StairEntry { region: RegionDocument; polygon: TileTriggerPoint[]; t: number; exit: number; ends: boolean }
+/**
+ * Stairwells on `source` the centre path enters, outside → inside, in path order. Every stairwell
+ * counts when the move ends inside it (`ends`); a `cross` stairwell also counts when the path only
+ * passes through it (G-09).
+ */
+function stairEntries(scene: SceneDocument, source: LevelDocument, before: Point, after: Point): StairEntry[] {
+  const out: StairEntry[] = [];
+  const length = Math.hypot(after.x - before.x, after.y - before.y);
+  for (const region of [...(scene.regions ?? [])].sort(byRegionOrder)) {
+    if (!region.stairs) continue;
+    const spec = stairSpec(region.stairs);
+    if (!spec.levels.includes(source._id)) continue;
+    const polygon = regionPolygon(region);
+    if (!polygon || tileTriggerPolygonContains(polygon, before)) continue;
+    const ends = tileTriggerPolygonContains(polygon, after);
+    if (!ends && spec.trigger !== "cross") continue;
+    const span = segmentPolygonSpan(polygon, before, after);
+    if (ends) { out.push({ region, polygon, t: span?.enter ?? 1, exit: 1, ends }); continue; }
+    if (!span || (span.exit - span.enter) * length < MIN_CROSSING_PX) continue;
+    out.push({ region, polygon, t: span.enter, exit: span.exit, ends });
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+function gridSpec(scene: SceneDocument): GridSpec | null {
+  const g = scene.grid;
+  if (!g || !Number.isFinite(g.size) || g.size <= 0) return null;
+  if (g.type === "square") return { type: "square", size: g.size };
+  if (g.type === "hex" && (["oddQ", "evenQ", "oddR", "evenR"] as string[]).includes(g.hexLayout)) return { type: "hex", size: g.size, layout: g.hexLayout };
+  return null;
+}
+/**
+ * Where a pass-through stops: just inside the entry edge of every stairwell entered there, on the
+ * nearest grid cell centre when that centre is inside too.
+ */
+function passStop(scene: SceneDocument, group: readonly StairEntry[], before: Point, after: Point): Point {
+  const t0 = group[0]?.t ?? 1, exit = Math.min(...group.map((e) => e.exit));
+  const length = Math.hypot(after.x - before.x, after.y - before.y) || 1;
+  const t = t0 + Math.min(1 / length, (exit - t0) / 2);
+  const raw = { x: before.x + (after.x - before.x) * t, y: before.y + (after.y - before.y) * t };
+  const inside = (p: Point) => group.every((e) => tileTriggerPolygonContains(e.polygon, p));
+  const grid = gridSpec(scene);
+  const snapped = grid ? snapTokenCenter(grid, raw.x, raw.y) : null;
+  const rounded = { x: Math.round(raw.x * 100) / 100, y: Math.round(raw.y * 100) / 100 };
+  return [snapped, rounded].find((p): p is Point => !!p && inside(p)) ?? raw;
 }
 /**
  * One edge-triggered transition per committed drag (outside→inside, token center). XY remains the
  * accepted endpoint unless the stairwell defines an arrival point. A single destination in `auto`
  * mode is appended atomically; several destinations, or `prompt` mode, stop the token in the
  * stairwell and return a prompt for the mover (G-01). Undo/redo never re-enter this function.
+ *
+ * G-09 (D-437): a `cross` stairwell also fires when the path passes through it. The first stairwell
+ * along the path wins. Passing through stops the token just inside it and asks, or — in `auto` mode
+ * with one destination — changes floor there and continues to the endpoint when the new floor's
+ * walls allow (else it stays at the stop). A pass-through that cannot be used now (locked, landing
+ * blocked, a wall before it) is walked over like ordinary floor, silently.
  */
 export function stairMovementPlan(ops: readonly Op[], sceneById: (id: string) => SceneDocument | undefined): { ops: Op[]; prompts: StairPrompt[] } {
   const movers = new Map<string, { scene: SceneDocument; before: TokenDocument; after: TokenDocument; explicit: boolean }>();
@@ -346,41 +470,65 @@ export function stairMovementPlan(ops: readonly Op[], sceneById: (id: string) =>
     const parentId = (token.flags?.prefab as { parentId?: unknown } | undefined)?.parentId;
     return typeof parentId === "string" && [...moved].some((key) => key.endsWith(`:${parentId}`));
   };
+  const isAuto = (regions: readonly RegionDocument[], ids: readonly string[]) => ids.every((id) => {
+    const region = regions.find((r) => r._id === id);
+    return !region?.stairs || stairSpec(region.stairs).mode === "auto";
+  });
   for (const { scene, before, after, explicit } of movers.values()) {
     if (explicit || !before.levelId || (before.x === after.x && before.y === after.y)) continue;
     // An attached prefab part travels with its parent (below); it never takes stairs on its own.
     if (parentMoving(before)) continue;
     const source = scene.levels?.find((l) => l._id === before.levelId);
     if (!source) continue;
-    const entered = (scene.regions ?? []).filter((r) => {
-      if (!r.stairs || !stairSpec(r.stairs).levels.includes(source._id)) return false;
-      const polygon = regionPolygon(r);
-      return !!polygon && !tileTriggerPolygonContains(polygon, before) && tileTriggerPolygonContains(polygon, after);
+    const entries = stairEntries(scene, source, before, after);
+    if (!entries.length) continue;
+    const followers = (): Follower[] => attachedFollowers(scene, before._id, source._id).map((token) => {
+      const row = movers.get(JSON.stringify([scene._id, token._id]));
+      return { token, at: row ? { x: row.after.x, y: row.after.y } : { x: token.x, y: token.y } };
     });
-    if (!entered.length) continue;
-    const offered = choicesFrom(scene, source, entered);
-    if (offered.locked) { prompts.push({ sceneId: scene._id, tokenId: before._id, fromLevelId: source._id, regionIds: entered.map((r) => r._id), choices: [], reason: "locked" }); continue; }
-    if (!offered.choices.length) continue;
-    const start = { x: before.x, y: before.y, z: before.elevation ?? 0 }, end = { x: after.x, y: after.y, z: before.elevation ?? 0 };
-    if (new SpatialKernel(wallsOn(scene, source._id).map(legacySpatialBarrier), []).sweep({ ...bodyOf(after), from: start, to: end }).length) throw new Error("A wall blocks entry to the stairs");
-    const clear = clearChoices(scene, after, after, offered.choices);
-    if (!clear.length) throw new Error("Stair landing overlaps a wall");
-    const auto = clear.length === 1 && offered.choices.length === 1 && offered.regionIds.every((id) => {
-      const region = entered.find((r) => r._id === id);
-      return !region?.stairs || stairSpec(region.stairs).mode === "auto";
-    });
-    const only = clear[0];
-    if (auto && only) {
-      const followers = attachedFollowers(scene, before._id, source._id).map((token) => {
-        const key = JSON.stringify([scene._id, token._id]);
-        const row = movers.get(key);
-        return { token, at: row ? { x: row.after.x, y: row.after.y } : { x: token.x, y: token.y } };
-      });
-      result.push(...transitionOps(scene, after, only, followers, after));
-      continue;
+    const z = before.elevation ?? 0;
+    for (let i = 0; i < entries.length;) {
+      const first = entries[i] as StairEntry;
+      const group = entries.filter((e) => e.t <= first.t + 1e-6 && e.t >= first.t - 1e-6);
+      i += group.length;
+      if (group.some((e) => e.ends)) {
+        // The move ends in a stairwell entered first: today's endpoint rule, over every stairwell
+        // that holds the endpoint (overlaps combine).
+        const entered = entries.filter((e) => e.ends).map((e) => e.region);
+        const offered = choicesFrom(scene, source, entered);
+        if (offered.locked) { prompts.push({ sceneId: scene._id, tokenId: before._id, fromLevelId: source._id, regionIds: entered.map((r) => r._id), choices: [], reason: "locked" }); break; }
+        if (!offered.choices.length) break;
+        if (sweepBlocked(scene, source._id, after, before, after, z)) throw new Error("A wall blocks entry to the stairs");
+        const clear = clearChoices(scene, after, after, offered.choices);
+        if (!clear.length) throw new Error("Stair landing overlaps a wall");
+        const only = clear[0];
+        if (only && clear.length === 1 && offered.choices.length === 1 && isAuto(entered, offered.regionIds)) {
+          result.push(...transitionOps(scene, after, only.level, followers(), after, only.arrival ?? after));
+          break;
+        }
+        prompts.push({ sceneId: scene._id, tokenId: before._id, fromLevelId: source._id, regionIds: offered.regionIds, ...(offered.label ? { label: offered.label } : {}),
+          choices: promptChoices(source, clear) });
+        break;
+      }
+      // G-09: passing through. Unusable right now → walk on as over ordinary floor.
+      const regions = group.map((e) => e.region);
+      const offered = choicesFrom(scene, source, regions);
+      if (offered.locked || !offered.choices.length) continue;
+      const stop = passStop(scene, group, before, after);
+      if (sweepBlocked(scene, source._id, after, before, stop, z)) continue;
+      const clear = clearChoices(scene, after, stop, offered.choices);
+      if (!clear.length) continue;
+      const only = clear[0];
+      if (only && clear.length === 1 && offered.choices.length === 1 && isAuto(regions, offered.regionIds)) {
+        const land = only.arrival ?? (sweepBlocked(scene, only.level._id, after, stop, after, only.level.floorZ) ? stop : after);
+        result.push(...transitionOps(scene, after, only.level, followers(), after, land));
+        break;
+      }
+      result.push(...shiftOps(scene, after, followers(), after, stop));
+      prompts.push({ sceneId: scene._id, tokenId: before._id, fromLevelId: source._id, regionIds: offered.regionIds, ...(offered.label ? { label: offered.label } : {}),
+        choices: promptChoices(source, clear) });
+      break;
     }
-    prompts.push({ sceneId: scene._id, tokenId: before._id, fromLevelId: source._id, regionIds: offered.regionIds, ...(offered.label ? { label: offered.label } : {}),
-      choices: promptChoices(source, clear) });
   }
   return { ops: result, prompts };
 }
@@ -419,13 +567,13 @@ export function stairChoiceOps(scene: SceneDocument, prompt: Pick<StairPrompt, "
   if (!choice) throw new Error("That stair choice is no longer available");
   if (landingBlocked(scene, token, choice.level, choice.arrival ?? token)) throw new Error("Stair landing overlaps a wall");
   const followers = attachedFollowers(scene, token._id, source._id).map((f) => ({ token: f, at: { x: f.x, y: f.y } }));
-  return transitionOps(scene, token, choice, followers, token);
+  return transitionOps(scene, token, choice.level, followers, token, choice.arrival ?? token);
 }
 /** Scene copy/import re-keying for either stair version. */
-export function remapStairLevels(s: StairBehavior, map: (id: string) => string): StairBehavior {
+export function remapStairLevels(s: StairBehavior, map: (id: string) => string, mapWall: (id: string) => string = (id) => id): StairBehavior {
   if (!("version" in s)) return { from: map(s.from), to: map(s.to) };
   return { ...s, levels: s.levels.map(map), ...(s.edges ? { edges: s.edges.map((e) => ({ from: map(e.from), to: map(e.to) })) } : {}),
-    ...(s.arrivals ? { arrivals: s.arrivals.map((a) => ({ ...a, levelId: map(a.levelId) })) } : {}) };
+    ...(s.arrivals ? { arrivals: s.arrivals.map((a) => ({ ...a, levelId: map(a.levelId) })) } : {}), ...(s.door ? { door: mapWall(s.door) } : {}) };
 }
 /** True when any value carries a version-2 stair behavior (capability detection). */
 export function containsStairsV2(value: unknown, depth = 0): boolean {

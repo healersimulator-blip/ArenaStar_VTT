@@ -1314,10 +1314,14 @@ export class HostSync {
       choices: prompt.choices.map((c) => c.levelId), expiresAt: this.now() + STAIR_OFFER_TTL_MS });
     for (const target of targets) this.send(target, { kind: "stair.offer", ...base, ...(prompt.label ? { label: prompt.label } : {}), choices: prompt.choices, ttlMs: STAIR_OFFER_TTL_MS, status: "open" });
   }
-  /** After any commit (undo included): withdraw offers whose token left, changed floor or lost its stairs. */
+  /**
+   * After any commit (undo included): withdraw offers whose token left, changed floor or lost its
+   * stairs. Wall edits count too: closing a linked door locks its stairwell (G-11, D-437).
+   */
   private refreshStairOffers(ops: readonly Op[]): void {
     if (!this.stairOffers.size) return;
-    const touched = new Set(ops.flatMap((op) => op.kind === "create" ? [] : op.ref.coll === "tokens" ? [op.ref.id] : op.ref.coll === "regions" || op.ref.coll === "levels" || op.ref.coll === "scenes" ? ["*"] : []));
+    const touched = new Set(ops.flatMap((op) => op.kind === "create" ? [] : op.ref.coll === "tokens" ? [op.ref.id]
+      : op.ref.coll === "regions" || op.ref.coll === "levels" || op.ref.coll === "scenes" || op.ref.coll === "walls" ? ["*"] : []));
     if (!touched.size) return;
     const now = this.now();
     for (const [id, offer] of this.stairOffers) {

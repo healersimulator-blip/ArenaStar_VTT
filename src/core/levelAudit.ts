@@ -6,7 +6,7 @@
 import type { LevelDocument, RegionDocument, SceneDocument, TokenDocument } from "./documents";
 import type { Op } from "./ops";
 import { inElevationBand } from "./multilevelGeometry";
-import { stairLandingBlocked, stairRegionPolygon, stairSpec, type StairBehaviorV2, type StairEdge } from "./levelPlay";
+import { stairDoor, stairLandingBlocked, stairLocked, stairRegionPolygon, stairSpec, type StairBehaviorV2, type StairEdge } from "./levelPlay";
 import { wallEditLocked } from "./wallEditing";
 
 export type LevelAuditFix = "walls-all" | "lights-all" | "tokens-by-band" | "merge-stairs";
@@ -83,7 +83,11 @@ export function levelPlayAudit(scene: SceneDocument): LevelAuditFinding[] {
     });
     if (blocked.length) findings.push({ code: "landing-blocked", severity: "warning", ids: [region._id],
       message: `Stairs ${label}: the landing on ${names(levels, blocked)} is inside a wall; arrivals there will be refused.` });
-    if (spec.locked) findings.push({ code: "stairs-locked", severity: "info", ids: [region._id], message: `Stairs ${label} are locked.` });
+    const door = stairDoor(scene, spec);
+    if (spec.door && !door) findings.push({ code: "stairs-door-missing", severity: "warning", ids: [region._id],
+      message: `Stairs ${label} are linked to a door that no longer exists or is no longer a door; they ignore it until you link another.` });
+    if (stairLocked(scene, spec)) findings.push({ code: "stairs-locked", severity: "info", ids: [region._id],
+      message: spec.locked ? `Stairs ${label} are locked.` : `Stairs ${label} are locked until their door opens.` });
   }
   const seen = new Set<string>();
   for (const a of stairs) for (const b of stairs) {

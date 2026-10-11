@@ -664,9 +664,9 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | S3 / G-06 Auxiliary layers | **Done** — scopes on drawings/templates/notes/regions, unscoped on every floor, covers reach players | D-432 |
 | S2 / G-07 Floorless tokens | **Done** — creation stamping; attached tokens follow; summons use stairs | D-430, D-431 |
 | G-08 Take stairs while standing | **Done** — `stair.request`, floor-chip button | D-430 |
-| G-09 Path entry / route continuation | Open (endpoint entry only) | — |
+| G-09 Path entry / route continuation | **Done** — opt-in `trigger:"cross"`: first stairwell along the centre path; stop-and-ask, or auto floor change with the drag continuing on the new floor when its walls allow | D-437 |
 | G-10 Stairs visible to players | **Done** — markers per floor, `secret` hides them | D-430 |
-| G-11 Lock stairs | **Done** (toggle); door-linked locks open | D-430 |
+| G-11 Lock stairs | **Done** — toggle, plus stairs linked to a door work only while it is open (dangling links audited) | D-430, D-437 |
 | G-14 Stairs on the canvas | **Partial** — GM labels/arrows, create from any Active Zones region; dedicated draw tool open | D-430 |
 | S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (12 journeys) | D-429 |
 | S6 / G-15 Pre-check and live audit | **Done** — blocking errors, acknowledged warnings, quick fixes, live list | D-433 |
