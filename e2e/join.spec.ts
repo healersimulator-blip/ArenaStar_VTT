@@ -34,6 +34,7 @@ test.describe("join scenario (§2/§6/§14)", () => {
   }: {
     browser: Browser;
   }) => {
+    test.setTimeout(90_000); // Two live canvases plus manual ICE and zoom interactions.
     const hostCtx = await browser.newContext();
     const playerCtx = await browser.newContext();
     const host = await hostCtx.newPage();
@@ -114,6 +115,23 @@ test.describe("join scenario (§2/§6/§14)", () => {
         { timeout: 20_000 },
       )
       .toBe(true);
+
+    // Shared zoom is local to the player; no ownership or GM permission is needed.
+    const gmCamera = await hostCall<{ scale: number }>(host, "camera");
+    const zoom = player.getByLabel("Scene zoom", { exact: true });
+    await zoom.click();
+    const slider = player.getByRole("slider", { name: "Scene zoom level" });
+    await slider.fill("0");
+    await expect(zoom).toContainText("100%");
+    await player.mouse.move(cx, cy);
+    await player.mouse.wheel(0, -200);
+    await expect(zoom).not.toContainText("100%");
+    await slider.focus();
+    await player.keyboard.press("Home");
+    await expect(zoom).toContainText("10%");
+    await player.keyboard.press("End");
+    await expect(zoom).toContainText("1000%");
+    expect((await hostCall<{ scale: number }>(host, "camera")).scale).toBe(gmCamera.scale);
 
     await hostCtx.close();
     await playerCtx.close();

@@ -273,3 +273,26 @@ export function withinDarkvision(
   if (viewer.darkvisionPx <= 0) return false;
   return Math.hypot(point.x - viewer.x, point.y - viewer.y) <= viewer.darkvisionPx;
 }
+
+
+/** Conservative same-level lighting input. This is not cross-level aperture tracing or authorization.
+ * Legacy lights do not automatically illuminate authored floors; explicitly all-level lights do.
+ * Ambient darkness inherits the scene unless the level has an explicit override.
+ */
+export function sceneLightingForLevel(scene: SceneDocument, levelId: string): PF1eLighting {
+  return sceneLighting(sceneForLevelPerception(scene, levelId));
+}
+/** Do not feed a floor display preference to this function as player authorization. */
+export function sceneForLevelPerception(scene: SceneDocument, levelId: string): SceneDocument {
+  const level = scene.levels?.find((l) => l._id === levelId);
+  if (!level) throw new Error("Unknown lighting/fog level");
+  if (level.darkness !== undefined && (!Number.isFinite(level.darkness) || level.darkness < 0 || level.darkness > 1)) throw new Error("Invalid level ambient darkness");
+  const flags = { ...scene.flags };
+  // A scene-wide animation hint must never fade an explicit floor override through another floor's ambient value.
+  if (level.darkness !== undefined) delete flags.arenaDarkness;
+  return { ...scene, flags, darkness: level.darkness ?? scene.darkness,
+    tokens: scene.tokens.filter((t) => t.levelId === levelId),
+    lights: scene.lights.filter((l) => l.levelScope?.mode === "all" || (l.levelScope?.mode === "levels" && l.levelScope.ids.includes(levelId))),
+    // Physical walls are intentionally NOT filtered by authoring scope.
+  };
+}

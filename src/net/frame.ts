@@ -87,6 +87,8 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "asset.cleanup":
     case "asset.cleanup.result":
     case "fog.put":
+    case "level.focus":
+    case "level.focus.state":
     case "fog.get":
     case "fog.state":
     case "relay.offer":
@@ -176,6 +178,8 @@ export function channelFor(kind: MsgName): ChannelName {
     case "codex.claim":
     case "roll.delegate":
     case "fog.put":
+    case "level.focus":
+    case "level.focus.state":
     case "fog.get":
     case "fog.state":
     case "relay.offer":

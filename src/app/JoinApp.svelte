@@ -1,5 +1,9 @@
 <!-- eslint-disable @typescript-eslint/no-non-null-assertion -->
 <script lang="ts">
+  import { floorScene } from "../core/levelPlay";
+  import { focusedTokenIds, LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
+  import type { LevelFocusStateMsg } from "../core/messages";
+  import ZoomControl from "../ui/canvas/ZoomControl.svelte";
   /* eslint-disable @typescript-eslint/no-non-null-assertion */
   import { SceneLightingPlayer } from "../client/sceneLighting";
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
@@ -897,16 +901,38 @@
     }
   }
 
+  let floorFocus = $state<LevelFocusStateMsg | null>(null);
+  let floorFocusScene: string | null = null;
+  let floorFocusPending = $state(false);
+  let floorFocusError = $state("");
+  let floorFocusTimer: ReturnType<typeof setTimeout> | undefined;
+  function chooseFloorFocus(levelId: string | null, followTokenId?: string) {
+    const scene = activeScene(), client = app?.client;
+    if (!scene || !client) return;
+    floorFocusPending = true; floorFocusError = "";
+    clearTimeout(floorFocusTimer);
+    floorFocusTimer = setTimeout(() => { floorFocusPending = false; floorFocusError = "Floor request timed out. Try again or reconnect."; }, 10000);
+    try { client.requestLevelFocus(scene._id, levelId, followTokenId ?? (selection.length === 1 ? selection[0] : undefined)); }
+    catch (error) { clearTimeout(floorFocusTimer); floorFocusPending = false; floorFocusError = String(error); }
+  }
+  function focusedVisibility(): ReadonlySet<string> | null {
+    const focus = app?.client?.levelFocus;
+    return focusedTokenIds(focus?.sceneId === activeScene()?._id ? focus : null, fogVisible);
+  }
+
   function activeScene(): SceneDocument | null {
     const client = app?.client;
     if (!client) return null;
     const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
-    return (
+    const scene = (
       scenes.find((sc) => sc.active) ??
       client.store.get("scenes", "scene-1") ??
       scenes[0] ??
       null
     );
+    if (!scene) return null;
+    const focus = client.levelFocus;
+    return floorScene(scene, focus?.sceneId === scene._id && (focus.worldSeq === undefined || focus.worldSeq === client.store.seq) ? focus : null);
   }
 
   /**
@@ -978,7 +1004,7 @@
   function tokenViews(): TokenView[] {
     const scene = activeScene();
     if (!scene) return [];
-    const visible = fogVisible;
+    const visible = focusedVisibility();
     return scene.tokens
       .filter((token) => visible === null || visible.has(token._id))
       .map((token) => ({ token, sceneId: scene._id }));
@@ -1031,6 +1057,10 @@
     // them whenever a snapshot or an op lands (the GM shell tracks its store the same way).
     storeVersion++;
     const scene = activeScene();
+    if (scene && floorFocusScene !== scene._id && client.supportsFeature(LEVEL_NAVIGATION_FEATURE)) {
+      floorFocusScene = scene._id; floorFocus = null; chooseFloorFocus(null);
+    }
+    view.setTokenVisibility(focusedVisibility());
     if (pendingSpellAim && (scene?._id !== pendingSpellAim.sceneId ||
         !scene?.tokens.some((token) => token._id === pendingSpellAim?.casterTokenId)))
       settleSpellAim({ ok: false, error: "The caster or aiming scene changed; no slot was spent." });
@@ -1040,7 +1070,7 @@
     }
     syncPF1eAreaPreview();
     fxPlayer?.syncScene();
-    sceneLighting.sync(scene, view);
+    sceneLighting.sync(scene, view, undefined, client.levelFocus?.isolated ? client.levelFocus.levelId ?? "pending" : undefined);
     worldName = client.world?.name ?? "—";
     seq = client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
@@ -1051,6 +1081,7 @@
     const hpBarMode = tokenHpBarsOf(worldSettingsFrom(client.store.getAll("settings")));
     view.setTokenHpBarMode(hpBarMode === "hover" ? "hover" : "all");
     view.setTokenImageLoader(tileImages.load);
+    view.setFauxOverhead(scene?.regions ?? []);
     view.syncTokens(
       tokens,
       undefined,
@@ -1060,7 +1091,9 @@
         isGM: false,
       }),
     );
-    void fog?.sync(scene, { style: "opaque" });
+    const focus = client.levelFocus;
+    const levelId = scene?.levelMode === "isolated" && focus?.sceneId === scene._id && focus.worldSeq === client.store.seq ? focus.levelId : null;
+    void fog?.sync(scene?.levelMode === "isolated" && !levelId ? null : scene, { style: "opaque", ...(levelId ? { levelId } : {}) });
     // D-256: the GM's manual mask + visible map pins (the projection already withheld every
     // pin the GM has not made visible, so this layer only ever draws player-visible pins).
     view.peekFogLayer()?.applyManualMask(fogMaskLog(scene));
@@ -1141,11 +1174,15 @@
           hideSurface: () => view.hideFogLayer(),
           computer: createVisionComputer(),
           transport: client,
+          authorizedLevel: (sceneId, levelId) => {
+            const focus = client.levelFocus;
+            return focus?.isolated && focus.sceneId === sceneId && focus.levelId === levelId && focus.presentation ? { epoch: focus.presentation.epoch } : null;
+          },
           user: () => client.user,
           actors: () => client.store.getAll("actors") as readonly ActorDocument[],
           onVisibility: (ids) => {
             fogVisible = ids;
-            view.setTokenVisibility(ids);
+            view.setTokenVisibility(focusedVisibility());
           },
           onError: (where, error) => console.warn(`fog ${where} failed`, error),
         });
@@ -1215,6 +1252,13 @@
                 return view.peekFogLayer()?.exploredAt(x, y) ?? null;
               },
               drawnTokens: () => view.drawnTokenIds(),
+              floorMapPixel: ({ x, y }) => {
+                const layer = view.root.getChildByLabel("tilesBelow"); if (!layer) return [];
+                view.render(); const frame = layer.getLocalBounds().rectangle.clone();
+                frame.x = x; frame.y = y; frame.width = 1; frame.height = 1;
+                return Array.from(view.app.renderer.extract.pixels({ target: layer, frame, resolution: 1 }).pixels).slice(0, 4);
+              },
+              floorPresentation: () => ({ levelId: client.levelFocus?.levelId ?? null, mode: client.levelFocus?.mode ?? null, tileIds: activeScene()?.tiles.map((t) => t._id) ?? [], lightIds: activeScene()?.lights.map((l) => l._id) ?? [], img: activeScene()?.img ?? null, darkness: activeScene()?.darkness ?? null }),
               // D-271: what this player's hexcrawl overlay painted (its own cover included).
               hexOverlay: () => {
                 const layer = view.peekHexOverlayLayer();
@@ -1301,7 +1345,7 @@
           const scene = activeScene();
           if (!scene) return null;
           const point = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
-          if (pickToken(tokenViews(), point)) return null; // a token click is not also a tile click
+          if (pickToken(tokenViews(), point, undefined, (id, p) => view.tokenPointVisible(id, p))) return null; // a token click is not also a tile click
           const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, point));
           return tile ? { scene, tile, point } : null;
         };
@@ -1342,7 +1386,7 @@
           const scene = activeScene();
           if (!scene || scene._id !== candidate.sceneId) return;
           const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
-          if (pickToken(tokenViews(), world)) return;
+          if (pickToken(tokenViews(), world, undefined, (id, p) => view.tokenPointVisible(id, p))) return;
           const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, world));
           if (!tile || tile._id !== candidate.tileId ||
               Math.hypot(world.x - candidate.point.x, world.y - candidate.point.y) > 4 / (view.camera.scale || 1)) return;
@@ -1362,7 +1406,7 @@
             if (scene) {
               const point = toWorld(e);
               const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, point));
-              if (tile && !pickToken(tokenViews(), point)) target = { scene, tile, point };
+              if (tile && !pickToken(tokenViews(), point, undefined, (id, p) => view.tokenPointVisible(id, p))) target = { scene, tile, point };
             }
           }
           const previous = tileHoverForAutomation;
@@ -1384,7 +1428,7 @@
           const scene = activeScene();
           if (!scene) return;
           const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
-          if (pickToken(tokenViews(), world)) return;
+          if (pickToken(tokenViews(), world, undefined, (id, p) => view.tokenPointVisible(id, p))) return;
           const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, world));
           if (tile) client.requestAutomationTileTrigger(scene._id, tile._id, world, tileDown.tokenId, "rightClick");
         };
@@ -1415,6 +1459,7 @@
         controller = new CanvasController({
           onSelectionChange: (ids) => {
             selection = [...ids];
+            if (ids.length === 1 && client.levelFocus?.isolated && client.levelFocus.mode !== "manual" && ids[0] !== client.levelFocus.followTokenId) chooseFloorFocus(null, ids[0]);
             closeHexMenu(); // any new gesture supersedes the menu
           },
           onTokenActivate: ({ token }) => {
@@ -1450,6 +1495,17 @@
             );
           },
         });
+        client.bus.on("levelFocus", (state) => {
+          clearTimeout(floorFocusTimer); floorFocusPending = false;
+          const changedFloor = floorFocus?.sceneId !== state?.sceneId || floorFocus?.levelId !== state?.levelId;
+          floorFocus = state;
+          if (!state) floorFocusScene = null;
+          floorFocusError = state?.error === "unavailable" ? "That floor is no longer available. View updated by the host." : state?.error === "rate_limited" ? "Too many floor requests. Try again shortly." : "";
+          const visible = focusedVisibility();
+          if (changedFloor || (visible && selection.some((id) => !visible.has(id)))) { controller?.clearSelection(); selection = []; }
+          refresh();
+        });
+        client.bus.on("welcome", refresh);
         client.bus.on("snapshot", refresh);
         client.bus.on("ops", refresh);
         client.bus.on("ephemeral", (message) => {
@@ -1529,6 +1585,7 @@
     };
   });
   onDestroy(() => {
+    clearTimeout(floorFocusTimer);
     if (imageNoticeTimer !== null) clearTimeout(imageNoticeTimer);
   });
 </script>
@@ -1662,7 +1719,27 @@
     {#if canvasError}<p class="error" role="alert">canvas: {canvasError}</p>{/if}
     <section class="shell" aria-label="Player shell">
       <div class="canvas-area">
-        <div class="board">
+        <div class="board" style="position: relative;">
+          {#if floorFocus?.sceneId === activeScene()?._id && (floorFocus?.levels.length ?? 0) > 0}
+            <div class="floor-focus" data-player-floor-focus>
+              {#if floorFocus?.isolated}
+                <strong>{floorFocus.levels.find((l) => l.id === floorFocus?.levelId)?.name ?? "No floor"}</strong>
+                <small>{floorFocus.mode === "manual" ? "Manual fallback" : "Following token · walk into stairs to change floors"}</small>
+              {/if}
+              <details open={!floorFocus?.isolated}>
+              <summary>{floorFocus?.isolated ? "Manual floor fallback" : "Token floor focus"}</summary>
+              <label>{floorFocus?.isolated ? "View mode" : "Token floor focus"}
+                <select aria-label="Player floor focus" value={floorFocus?.isolated && floorFocus.mode !== "manual" ? "" : floorFocus?.levelId ?? ""} disabled={floorFocusPending || phase !== "live"} onchange={(event) => chooseFloorFocus(event.currentTarget.value || null)}>
+                  <option value="">{floorFocus?.isolated ? "Follow token · stairs (default)" : "Shared scene · all floors"}</option>
+                  {#each floorFocus?.levels ?? [] as level (level.id)}<option value={level.id}>{level.name}</option>{/each}
+                </select>
+              </label>
+              </details>
+              {#if !floorFocus?.isolated}<small>GM has not enabled isolated floor play. Artwork and fog remain shared.</small>{/if}
+            </div>
+          {/if}
+          {#if floorFocusError}<p class="floor-focus-error" role="status">{floorFocusError} <button type="button" disabled={floorFocusPending || phase !== "live"} onclick={() => chooseFloorFocus(null)}>Retry floor list</button></p>{/if}
+          <ZoomControl {stage} onInput={() => fxPlayer?.cancelCamera()} />
           <div class="toolrail">
             <CanvasToolbar
               bind:active={canvasTool}
@@ -1915,6 +1992,11 @@
   />
 {/if}
 <style>
+  .floor-focus { position: absolute; z-index: 25; top: 12px; left: 74px; padding: 8px 12px; background: #172432ee; color: #eef3fa; border: 1px solid #53687d; border-radius: 6px; max-width: 300px; }
+  .floor-focus label, .floor-focus small { display: block; }
+  .floor-focus select { display: block; width: 100%; margin: 4px 0; }
+  .floor-focus small { font-size: 11px; opacity: .8; }
+  .floor-focus-error { position: absolute; z-index: 26; left: 74px; top: 110px; background: #172432; padding: 8px; }
   .image-drop-hint { position:fixed; inset:18px; z-index:4999; display:grid; place-items:center; border:3px dashed #78dccc; border-radius:18px; background:#10201edb; color:#e5fff9; font-size:clamp(18px,3vw,30px); font-weight:700; text-align:center; pointer-events:none; }
   .image-notice { position:fixed; z-index:4500; top:16px; left:50%; transform:translateX(-50%); padding:9px 14px; border:1px solid #8c7542; border-radius:6px; background:#2b261a; color:#f0dfad; box-shadow:0 4px 18px #0007; }
   main { 

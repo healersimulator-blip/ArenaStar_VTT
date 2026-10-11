@@ -1,4 +1,7 @@
 <script lang="ts">
+  import type { CloudBackupController } from "../../storage/cloud/cloudBackup";
+  import SavesPanel from "./SavesPanel.svelte";
+  import type { SaveCoordinator } from "../../storage/saveCoordinator";
   import FxViewPrefsPanel from "../macros/FxViewPrefsPanel.svelte";
   /**
    * §10 settings window (GM) — active-scene grid editor (drives the canvas +
@@ -78,7 +81,15 @@
     packages = null,
     rulesBoot = null,
     agents = null,
+    saves = null,
+    cloud = null,
+    onBackup = null,
+    onBackupFolder = null,
   }: {
+    saves?: SaveCoordinator | null;
+    cloud?: CloudBackupController | null;
+    onBackup?: (() => Promise<void>) | null;
+    onBackupFolder?: (() => Promise<void>) | null;
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     onUndo: () => void;
@@ -383,6 +394,9 @@
 </script>
 
 <div class="settings">
+  {#if saves && onBackup}
+    <SavesPanel {saves} {cloud} {onBackup} onFolder={onBackupFolder} />
+  {/if}
   {#if packages}
     <RulesetSection {packages} {rulesBoot} />
   {/if}

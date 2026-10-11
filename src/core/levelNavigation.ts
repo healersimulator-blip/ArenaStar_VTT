@@ -1,0 +1,35 @@
+import { floorPresentation, type FloorPresentation } from "./levelPlay";
+/** Floor focus is presentation, not secret-floor disclosure or movement authority. */
+import type { ActorDocument, SceneDocument } from "./documents";
+import type { PermissionUser } from "./ownership";
+import { can } from "./permissions";
+export const LEVEL_NAVIGATION_FEATURE = "scene-level-navigation-v1";
+export interface LevelFocusView {
+  isolated?: boolean;
+  followTokenId?: string;
+  presentation?: FloorPresentation;
+  levels: Array<{ id: string; name: string }>;
+  levelId: string | null;
+  tokenIds: string[] | null;
+}
+/** Only token owners (including actor ownership) learn their assigned floor names. */
+export function levelFocusView(scene: SceneDocument | undefined, actors: readonly ActorDocument[], user: PermissionUser, requested: string | null, followTokenId?: string): LevelFocusView {
+  const empty: LevelFocusView = { levels: [], levelId: null, tokenIds: null };
+  if (!scene || !can(user, "read", scene, "scenes")) return empty;
+  const owned = scene.tokens.filter((t) => !t.hidden && (can(user, "update", t, "tokens", { parent: scene }) ||
+    actors.some((a) => a._id === t.actorId && can(user, "update", a, "actors"))));
+  const levels = (scene.levels ?? []).filter((l) => owned.some((t) => t.levelId === l._id))
+    .sort((a, b) => a.sort - b.sort || a._id.localeCompare(b._id)).map((l) => ({ id: l._id, name: l.name }));
+  const isolated = scene.levelMode === "isolated";
+  const follow = owned.find((t) => t._id === followTokenId && levels.some((l) => l.id === t.levelId)) ?? [...owned].sort((a, b) => a._id.localeCompare(b._id)).find((t) => levels.some((l) => l.id === t.levelId));
+  const levelId = levels.some((l) => l.id === requested) ? requested : isolated ? follow?.levelId ?? null : null;
+  const level = scene.levels?.find((l) => l._id === levelId);
+  const presentation = level ? floorPresentation(scene, level) : undefined;
+  if (presentation) presentation.tileIds = presentation.tileIds.filter((id) => scene.tiles.some((t) => t._id === id && !t.hidden && can(user, "read", t, "tiles", { parent: scene })));
+  const extra = isolated ? { isolated: true, ...(follow ? { followTokenId: follow._id } : {}), ...(presentation ? { presentation } : {}) } : {};
+  return { ...extra, levels, levelId, tokenIds: levelId === null ? (isolated ? [] : null) : scene.tokens.filter((t) => t.levelId === levelId && !t.hidden && can(user, "read", t, "tokens", { parent: scene })).map((t) => t._id).sort() };
+}
+/** Intersect with ordinary fog; focus can only hide, never reveal a token. */
+export function focusedTokenIds(view: LevelFocusView | null, fog: ReadonlySet<string> | null): ReadonlySet<string> | null {
+  return view?.tokenIds ? new Set(view.tokenIds.filter((id) => fog === null || fog.has(id))) : fog;
+}

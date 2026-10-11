@@ -1,7 +1,10 @@
+import { LEVEL_PLAY_FEATURE } from "../core/levelPlay";
+import { listFogEpochs, type FogEpochRecord } from "../storage/idb";
+import { LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE, fogLevelIdError, fogEpochError, fogNamespace } from "../core/levelFog";
 /**
  * §8 — Export/Import world.zip via streaming fflate.
  *
- * Layout (format 2):
+ * Layout (formats 2/3; format 3 adds required draft-level features):
  *   world.json       { format, worldId, name, system, version, seq, exportedAt,
  *                      rules: { active } }
  *   documents.json   { seq, docs: [{ coll, id, doc }] }   — every documents-store
@@ -45,6 +48,9 @@
  * Reviewed-script approvals are also local consent: copies AND restores of world
  * archives keep source/policy for inspection but must be re-approved on this host.
  */
+import { DRAFT_LEVELS_FEATURE, LEVEL_SCOPES_FEATURE, LEVEL_LIGHTING_FEATURE, LEVEL_AMBIENT_FEATURE, requiredWorldFeatures } from "../core/capabilities";
+import { sceneLevelsError } from "../core/levels";
+import { sceneRegionsError } from "../core/regionValidation";
 import { strFromU8, strToU8, Zip, ZipDeflate } from "fflate";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -91,9 +97,11 @@ import type { AssetId, DocId, WorldId } from "../core/ids";
 import type { HostPersister } from "../storage/persistence";
 import { buildPackageFromFiles } from "../packages/packageLoader";
 
+/** Base export format. Private level drafts require format 3 and an explicit feature marker. */
 export const WORLD_FILE_FORMAT = 2;
 /** Formats `importWorldZip` accepts (older exports keep importing). */
-export const WORLD_FILE_FORMATS_READ: readonly number[] = [1, 2];
+export const WORLD_FILE_FORMATS_READ: readonly number[] = [1, 2, 3];
+export { DRAFT_LEVELS_FEATURE } from "../core/capabilities";
 
 /** Id of the built-in strategic ruleset — mirrors `BUILTIN_SYSTEM_ID` in hostBoot. */
 const BUILTIN_SYSTEM = "mass-battle-basic";
@@ -108,6 +116,7 @@ export interface WorldFileRules {
 
 export interface WorldFileMeta {
   format: number;
+  requiredFeatures?: string[];
   worldId: WorldId;
   name: string;
   system: string;
@@ -135,6 +144,8 @@ export type WorldFileAsset = Omit<AssetRecord, "worldId" | "bytes">;
 
 /** fog.json entry (D-250): one user's explored map of one scene, stored at `file`. */
 export interface WorldFileFog {
+  epoch?: string;
+  levelId?: string;
   sceneId: DocId;
   userId: string;
   /** Archive path of the PNG, e.g. `fog/3.png` (ids are not filesystem-safe). */
@@ -252,6 +263,10 @@ function validateWorldMeta(value: unknown): WorldFileMeta {
     throw new Error("world file: world.json must be an object");
   if (!Number.isSafeInteger(value.format) || typeof value.format !== "number")
     throw new Error("world file: world.json has an invalid format");
+  if (value.format === 3) {
+    if (!Array.isArray(value.requiredFeatures) || !value.requiredFeatures.includes(DRAFT_LEVELS_FEATURE) || new Set(value.requiredFeatures).size !== value.requiredFeatures.length || value.requiredFeatures.some((f) => f !== DRAFT_LEVELS_FEATURE && f !== LEVEL_SCOPES_FEATURE && f !== LEVEL_FOG_FEATURE && f !== LEVEL_LIGHTING_FEATURE && f !== LEVEL_AMBIENT_FEATURE && f !== LEVEL_FOG_RESET_FEATURE && f !== LEVEL_PLAY_FEATURE))
+      throw new Error("world file: unsupported format 3 required features");
+  } else if (value.requiredFeatures !== undefined) throw new Error("world file: required features need format 3");
   if (typeof value.worldId !== "string" || !WORLD_ID_RE.test(value.worldId))
     throw new Error("world file: world.json has an invalid worldId");
   if (typeof value.name !== "string" || value.name.length > 256)
@@ -348,6 +363,12 @@ function validateWorldDocuments(
       throw new Error(
         `world file: document ${raw.id} has type ${doc.type} in collection ${raw.coll}; expected ${expectedType}`,
       );
+    if (raw.coll === "scenes") {
+      const levelsError = sceneLevelsError(doc);
+      if (levelsError) throw new Error(`world file: scene ${raw.id}: ${levelsError}`);
+      const regionError = sceneRegionsError(doc);
+      if (regionError) throw new Error(`world file: scene ${raw.id}: ${regionError}`);
+    }
     const ownership = doc.ownership;
     for (const [userId, level] of Object.entries(ownership)) {
       if (
@@ -595,8 +616,24 @@ export async function collectWorldArchive(
       ? world.activeRulesPackage
       : null;
 
+  const fogEpochs = (await listFogEpochs(options.db, options.worldId)).filter((row) => docs.some((d) => d.coll === "scenes" && d.id === row.sceneId && (d.doc as import("../core/documents").SceneDocument).levels?.some((l) => l._id === row.levelId)));
+  // The non-undoable ledger wins over an older scene restored by structural undo.
+  for (const row of fogEpochs) {
+    const scene = docs.find((d) => d.coll === "scenes" && d.id === row.sceneId)?.doc as import("../core/documents").SceneDocument | undefined;
+    const level = scene?.levels?.find((l) => l._id === row.levelId);
+    if (level) level.fogEpoch = row.epoch;
+  }
+  const fogRows = (await listFogForWorld(options.db, options.worldId)).filter((row) => row.levelId === undefined ||
+    docs.some((d) => d.coll === "scenes" && d.id === row.sceneId && (d.doc as import("../core/documents").SceneDocument).levels?.some((l) => l._id === row.levelId && (l.fogEpoch ?? "") === (row.epoch ?? ""))));
+  const requiredFeatures = requiredWorldFeatures(docs.filter((row) => row.coll === "scenes").map((row) => row.doc as import("../core/documents").SceneDocument), "GM");
+  if (fogRows.some((r) => r.levelId !== undefined)) {
+    if (!requiredFeatures.includes(DRAFT_LEVELS_FEATURE)) requiredFeatures.push(DRAFT_LEVELS_FEATURE);
+    requiredFeatures.push(LEVEL_FOG_FEATURE);
+  }
+  const hasLevelDrafts = requiredFeatures.length > 0;
   const meta: WorldFileMeta = {
-    format: WORLD_FILE_FORMAT,
+    format: hasLevelDrafts ? 3 : WORLD_FILE_FORMAT,
+    ...(hasLevelDrafts ? { requiredFeatures } : {}),
     worldId: world.worldId,
     name: world.name,
     system: active ?? BUILTIN_SYSTEM,
@@ -675,7 +712,7 @@ export async function collectWorldArchive(
   );
   const reportRecords = await listReportsForWorld(options.db, options.worldId);
   // §9 explored fog per user + scene (D-250)
-  const fogRows = await listFogForWorld(options.db, options.worldId);
+
 
   const entries: WorldArchiveEntry[] = [];
   const add = (path: string, bytes: Uint8Array): void => {
@@ -716,9 +753,12 @@ export async function collectWorldArchive(
   const fogIndex: WorldFileFog[] = fogRows.map((row, i) => ({
     sceneId: row.sceneId,
     userId: row.userId,
+    ...(row.levelId === undefined ? {} : { levelId: row.levelId }),
+    ...(row.epoch ? { epoch: row.epoch } : {}),
     file: `fog/${i}.png`,
   }));
   add("fog.json", jsonBytes(fogIndex));
+  if (fogEpochs.length) add("fog-epochs.json", jsonBytes(fogEpochs.map(({ sceneId, levelId, epoch }) => ({ sceneId, levelId, epoch }))));
   fogRows.forEach((row, i) => add(`fog/${i}.png`, row.png));
   assertWorldZipEntriesWithinLimits(entries);
   return { meta, entries };
@@ -908,13 +948,14 @@ function readArchiveFog(
       typeof raw.userId !== "string" ||
       raw.userId.length === 0 ||
       raw.userId.length > 128 ||
+      fogLevelIdError(raw.levelId) !== null || fogEpochError(raw.epoch) !== null || (raw.epoch !== undefined && raw.levelId === undefined) ||
       typeof raw.file !== "string" ||
       !/^fog\/[A-Za-z0-9_-]{1,128}\.png$/.test(raw.file)
     )
       throw new Error(
         "world file: fog.json entry needs valid sceneId, userId, and fog/<id>.png",
       );
-    const key = `${raw.sceneId}/${raw.userId}`;
+    const key = fogNamespace(raw.sceneId, raw.levelId as string | undefined, raw.userId);
     if (seen.has(key))
       throw new Error(
         `world file: fog.json lists ${raw.sceneId}/${raw.userId} twice`,
@@ -926,7 +967,7 @@ function readArchiveFog(
     const png = files.get(raw.file);
     if (!png) throw new Error(`world file: fog.json names missing ${raw.file}`);
     if (png.length === 0) continue; // an empty map is no map
-    records.push({ worldId, sceneId: raw.sceneId, userId: raw.userId, png });
+    records.push({ worldId, sceneId: raw.sceneId, userId: raw.userId, png, ...(raw.levelId === undefined ? {} : { levelId: raw.levelId as string }), ...(raw.epoch ? { epoch: raw.epoch as string } : {}) });
   }
   return records;
 }
@@ -1098,6 +1139,10 @@ export async function importWorldZip(
     parseJson<unknown>(requireFile(files, "documents.json"), "documents.json"),
     meta.seq,
   );
+  if (meta.format < 3 && documents.docs.some((row) => row.coll === "scenes" && (row.doc as import("../core/documents").SceneDocument).levels !== undefined))
+    throw new Error("world file: draft levels require format 3");
+  const needed = requiredWorldFeatures(documents.docs.filter((row) => row.coll === "scenes").map((row) => row.doc as import("../core/documents").SceneDocument), "GM");
+  if (needed.some((feature) => !meta.requiredFeatures?.includes(feature))) throw new Error("world file: missing required scene feature");
   const assetEntries = readArchiveAssets(
     files,
     parseJson<unknown>(requireFile(files, "assets.json"), "assets.json"),
@@ -1165,7 +1210,27 @@ export async function importWorldZip(
     worldId,
   );
   const reportRecords = readArchiveReports(files, worldId);
+  const epochIndex = files.get("fog-epochs.json");
+  const rawEpochs = epochIndex ? parseJson<unknown>(epochIndex, "fog-epochs.json") : [];
+  if (!Array.isArray(rawEpochs) || rawEpochs.length > MAX_ARCHIVE_DOCUMENTS) throw new Error("world file: invalid fog epoch index");
+  const epochKeys = new Set<string>(), epochRecords: FogEpochRecord[] = [];
+  for (const row of rawEpochs) {
+    if (!isRecord(row) || typeof row.sceneId !== "string" || !row.sceneId || row.sceneId.length > 128 || typeof row.levelId !== "string" || fogLevelIdError(row.levelId) || typeof row.epoch !== "string" || !row.epoch || fogEpochError(row.epoch) || !meta.requiredFeatures?.includes(LEVEL_FOG_RESET_FEATURE)) throw new Error("world file: invalid or undeclared fog epoch");
+    const key = JSON.stringify([row.sceneId, row.levelId]);
+    const scene = documents.docs.find((r) => r.coll === "scenes" && r.id === row.sceneId)?.doc as import("../core/documents").SceneDocument | undefined;
+    if (epochKeys.has(key) || scene?.levels?.find((l) => l._id === row.levelId)?.fogEpoch !== row.epoch) throw new Error("world file: duplicate or orphan fog epoch");
+    epochKeys.add(key); epochRecords.push({ worldId, sceneId: row.sceneId, levelId: row.levelId, epoch: row.epoch });
+  }
+  // A declared epoch in scene data also seeds the ledger (archives without a historical ledger).
+  for (const row of documents.docs) if (row.coll === "scenes") for (const level of (row.doc as import("../core/documents").SceneDocument).levels ?? []) {
+    if (level.fogEpoch && !epochKeys.has(JSON.stringify([row.id, level._id]))) epochRecords.push({ worldId, sceneId: row.id, levelId: level._id, epoch: level.fogEpoch });
+  }
   const fogRecords = readArchiveFog(files, worldId);
+  for (const row of fogRecords) if (row.levelId !== undefined) {
+    if (!meta.requiredFeatures?.includes(LEVEL_FOG_FEATURE)) throw new Error("world file: per-level fog requires its capability declaration");
+    const scene = documents.docs.find((r) => r.coll === "scenes" && r.id === row.sceneId)?.doc as import("../core/documents").SceneDocument | undefined;
+    if (!scene?.levels?.some((l) => l._id === row.levelId && (l.fogEpoch ?? "") === (row.epoch ?? ""))) throw new Error("world file: orphan or stale level fog");
+  }
 
   // Blob writes first (content-addressed → idempotent): an OPFS failure leaves
   // orphan files but never a half-imported database.
@@ -1182,6 +1247,8 @@ export async function importWorldZip(
     STORES.documents,
     STORES.oplog,
     STORES.fog,
+    STORES.levelFog,
+    STORES.fogEpochs,
     STORES.assets,
     STORES.checkpoints,
     STORES.turnReports,
@@ -1259,8 +1326,8 @@ export async function importWorldZip(
     const pkgStore = tx.objectStore(STORES.packages);
     for (const rec of packageRecords) void pkgStore.put(rec);
   }
-  const fogStore = tx.objectStore(STORES.fog);
-  for (const rec of fogRecords) void fogStore.put(rec);
+  for (const rec of epochRecords) void tx.objectStore(STORES.fogEpochs).put(rec);
+  for (const rec of fogRecords) void tx.objectStore(rec.levelId === undefined ? STORES.fog : STORES.levelFog).put(rec);
   const checkpointStore = tx.objectStore(STORES.checkpoints);
   for (const rec of checkpointRecords) void checkpointStore.put(rec);
   const reportStore = tx.objectStore(STORES.turnReports);

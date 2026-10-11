@@ -267,6 +267,12 @@ const PREFAB_PARTS = [
 ] as const;
 const SCENE_PROJECTED_PARTS = [...PREFAB_PARTS] as const;
 function stripPrefabMarker<T extends BaseDocument>(doc: T): T {
+  if (Object.hasOwn(doc, "levelId") || Object.hasOwn(doc, "levelScope") || Object.hasOwn(doc, "stairs")) {
+    doc = { ...doc };
+    delete (doc as T & { stairs?: unknown }).stairs;
+    delete (doc as T & { levelId?: unknown }).levelId;
+    delete (doc as T & { levelScope?: unknown }).levelScope;
+  }
   if (
     doc.flags?.prefab === undefined &&
     doc.flags?.summon === undefined &&
@@ -308,7 +314,8 @@ function projectPrefabCreate(op: Extract<Op, { kind: "create" }>): Op {
   if (
     op.data.flags?.prefab === undefined &&
     op.data.flags?.summon === undefined &&
-    op.data.flags?.summonStatus === undefined
+    op.data.flags?.summonStatus === undefined &&
+    !Object.hasOwn(op.data, "levelId") && !Object.hasOwn(op.data, "levelScope") && !Object.hasOwn(op.data, "stairs")
   )
     return op;
   return { ...op, data: stripPrefabMarker(op.data) };
@@ -324,6 +331,8 @@ function projectPrefabDiff(op: Extract<Op, { kind: "update" }>): Op | null {
   let changed = false;
   for (const [key, value] of Object.entries(op.diff)) {
     const path = key.startsWith("-=") ? key.slice(2) : key;
+    if (/^(?:levelId|levelScope|stairs)(?:\.|$)/.test(path)) { changed = true; continue; }
+
     if (
       ["prefab", "summon", "summonStatus"].some(
         (marker) =>
@@ -409,7 +418,7 @@ function projectScene(
       (doc) =>
         doc.flags?.prefab !== undefined ||
         doc.flags?.summon !== undefined ||
-        doc.flags?.summonStatus !== undefined,
+        doc.flags?.summonStatus !== undefined || Object.hasOwn(doc, "levelId") || Object.hasOwn(doc, "levelScope") || Object.hasOwn(doc, "stairs"),
     ),
   );
   if (
@@ -418,11 +427,14 @@ function projectScene(
     regions?.length === scene.regions?.length &&
     notes.length === scene.notes.length &&
     !cells &&
-    !markers
+    !markers &&
+    scene.levels === undefined
   )
     return scene;
+  const { levels: _privateDrafts, ...publicScene } = scene;
+  void _privateDrafts;
   return {
-    ...scene,
+    ...publicScene,
     tokens,
     tiles,
     ...(regions ? { regions } : {}),
@@ -1169,7 +1181,27 @@ export function projectEnvelope(
   if (isGm(user)) return envelope;
   const ops: Op[] = [];
   let modified = false;
-  for (const op of envelope.ops) {
+  for (const original of envelope.ops) {
+    let op = original;
+    const coll = op.kind === "create" ? op.coll : op.ref.coll;
+    if (coll === "levels") continue; // Draft plans never reach players, regardless of ownership.
+    if (op.kind === "update" && coll === "scenes") {
+      const originalDiff = op.diff;
+      const diff = Object.fromEntries(Object.entries(op.diff).filter(([key]) =>
+        !/^(?:-=)?levels(?:\.|$)/.test(key) && !/^(?:-=)?(?:walls|lights|tokens|regions)\.\d+\.(?:levelId|levelScope|stairs)(?:\.|$)/.test(key)
+      ).map(([key, value]) => {
+        if (/^(?:walls|lights|tokens)$/.test(key) && Array.isArray(value))
+          return [key, value.map((doc) => doc && typeof doc === "object" && !Array.isArray(doc) ? stripPrefabMarker(doc as unknown as BaseDocument) as unknown as Json : doc)];
+        if (/^(?:walls|lights|tokens|regions)\.\d+$/.test(key) && value && typeof value === "object" && !Array.isArray(value))
+          return [key, stripPrefabMarker(value as unknown as BaseDocument) as unknown as Json];
+        return [key, value];
+      }));
+      if (Object.keys(diff).length !== Object.keys(op.diff).length || Object.keys(diff).some((key) => diff[key] !== originalDiff[key])) {
+        modified = true;
+        if (!Object.keys(diff).length) continue;
+        op = { ...op, diff };
+      }
+    }
     let projected: Op | null = null;
     switch (op.kind) {
       case "create":

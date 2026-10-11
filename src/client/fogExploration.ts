@@ -34,7 +34,7 @@
  * scene is entered only the user's own tokens are listed, before any polygon exists. The
  * GM shell does not wire it (the GM sees everything under a translucent cover).
  */
-import { sceneLighting } from "../canvas/vision/darkness";
+import { sceneLighting, sceneForLevelPerception } from "../canvas/vision/darkness";
 import { sightSegments } from "../canvas/vision/wallSight";
 import type { ActorDocument, SceneDocument } from "../core/documents";
 import {
@@ -69,11 +69,13 @@ export interface FogSurface {
 
 /** What the loop needs from ClientSync. */
 export interface FogTransport {
-  requestFog(sceneId: string): Promise<Uint8Array | null>;
-  sendFogPng(sceneId: string, png: Uint8Array): void;
+  requestFog(sceneId: string, levelId?: string, epoch?: string): Promise<Uint8Array | null>;
+  sendFogPng(sceneId: string, png: Uint8Array, levelId?: string, epoch?: string): void;
 }
 
 export interface FogExplorationOptions {
+  /** Host-approved, already filtered player scene. Does not bypass host fog authorization. */
+  authorizedLevel?: (sceneId: string, levelId: string) => { epoch: string } | null;
   /** The surface for a scene (the stage recreates its layer when the scene size changes). */
   surfaceFor: (scene: SceneDocument) => FogSurface;
   /** Fog is off for the current scene: hide whatever layer is mounted. */
@@ -111,6 +113,7 @@ export interface FogExplorationOptions {
 }
 
 export interface FogExplorationStats {
+  levelId: string | null;
   sceneId: string | null;
   enabled: boolean;
   /** Restore finished for the current scene (stored map merged, or none stored). */
@@ -130,6 +133,10 @@ export class FogExploration {
   private requestedRevision = 0;
   private surface: FogSurface | null = null;
   private sceneId: string | null = null;
+  private levelId: string | undefined;
+  private epoch = "";
+  private requestedEpoch = "";
+  private readonly knownEpochs = new Map<string, string>();
   private key: string | null = null;
   private dirty = false;
   private saveTimer: unknown = null;
@@ -163,7 +170,21 @@ export class FogExploration {
   }
 
   /** Feed the current scene (null = none) and how this shell draws the cover. */
-  sync(scene: SceneDocument | null, view: { style: FogStyle }): Promise<void> {
+  sync(scene: SceneDocument | null, view: { style: FogStyle; levelId?: string }): Promise<void> {
+    if (view.levelId !== undefined) {
+      const user = this.options.user();
+      if (!scene) throw new Error("Level fog requires a scene");
+      const authorized = this.options.authorizedLevel?.(scene._id, view.levelId);
+      if (!authorized) {
+        if (user?.role !== "GM" && user?.role !== "ASSISTANT") throw new Error("Level fog preview requires a GM and saved scene level");
+        scene = sceneForLevelPerception(scene, view.levelId);
+      }
+    }
+    if (scene) for (const level of scene.levels ?? []) this.knownEpochs.set(JSON.stringify([scene._id, level._id]), level.fogEpoch ?? "");
+    const epoch = (scene && view.levelId ? this.options.authorizedLevel?.(scene._id, view.levelId)?.epoch : undefined) ?? scene?.levels?.find((l) => l._id === view.levelId)?.fogEpoch ?? "";
+    if (scene && view.levelId) this.knownEpochs.set(JSON.stringify([scene._id, view.levelId]), epoch);
+    this.requestedEpoch = epoch;
+    if (view.levelId !== this.levelId || epoch !== this.epoch) this.surface?.setShown(false);
     if (this.destroyed) return Promise.resolve();
     const revision = ++this.requestedRevision;
     // PNG readback, restore and workers can be slow. Never leave yesterday's visible
@@ -173,17 +194,24 @@ export class FogExploration {
       const actors = this.options.actors();
       const viewers = fogViewers(scene, user, { actors });
       const key = fogRevealKey(scene, viewers, fogSightRadius(scene, sceneFogSettings(scene)));
-      const sameView = this.viewerKey === `${user?.id ?? "-"}:${user?.role ?? "-"}`;
+      const sameView = epoch === this.epoch && view.levelId === this.levelId && this.viewerKey === `${user?.id ?? "-"}:${user?.role ?? "-"}`;
       const polys = this.sceneId === scene._id && sameView && key === this.key ? this.polys : [];
       this.publishVisibility(fogVisibleTokenIds(scene, user, polys,
         { actors, lighting: sceneLighting(scene), viewers }), scene);
     } else this.publishVisibility(this.maskOnlyVisibility(scene), scene);
-    return this.enqueue("sync", () => this.syncInner(scene, view.style, revision));
+    return this.enqueue("sync", () => this.syncInner(scene, view.style, revision, view.levelId, epoch));
   }
 
   /** Upload now if anything changed since the last save (scene switch, close, pagehide). */
   flush(): Promise<void> {
     return this.enqueue("flush", () => this.save());
+  }
+
+  /** Explicit saves must not turn a readback failure into a successful receipt. */
+  flushStrict(): Promise<void> {
+    const result = this.chain.then(() => this.save());
+    this.chain = result.catch(error => { this.options.onError?.("flush", error); });
+    return result;
   }
 
   /** Wait for everything queued so far (tests / e2e readbacks). */
@@ -201,7 +229,7 @@ export class FogExploration {
       const sceneId = this.sceneId;
       if (!surface || sceneId === null || this.destroyed) return;
       const stored = await this.fetchStored(sceneId);
-      if (this.surface !== surface || this.sceneId !== sceneId || this.destroyed) return;
+      if (this.surface !== surface || this.sceneId !== sceneId || this.destroyed || this.epoch !== this.requestedEpoch) return;
       if (stored && stored.length > 0) {
         await surface.mergePng(stored);
         this.restoredBytes = stored.length;
@@ -213,6 +241,7 @@ export class FogExploration {
   stats(): FogExplorationStats {
     return {
       sceneId: this.sceneId,
+      levelId: this.levelId ?? null,
       enabled: this.enabled,
       restored: this.restored,
       restoredBytes: this.restoredBytes,
@@ -245,7 +274,7 @@ export class FogExploration {
     return this.chain;
   }
 
-  private async syncInner(scene: SceneDocument | null, style: FogStyle, revision: number): Promise<void> {
+  private async syncInner(scene: SceneDocument | null, style: FogStyle, revision: number, levelId?: string, epoch = ""): Promise<void> {
     if (this.destroyed) return;
     const publish = (ids: Set<string> | null): void => {
       if (revision === this.requestedRevision && !this.destroyed) this.publishVisibility(ids, scene);
@@ -271,7 +300,8 @@ export class FogExploration {
     this.enabled = true;
     const actors = this.options.actors();
     this.scene = scene;
-    if (scene._id !== this.sceneId || viewerKey !== this.viewerKey) {
+    if (scene._id !== this.sceneId || viewerKey !== this.viewerKey || levelId !== this.levelId || epoch !== this.epoch) {
+      if (scene._id === this.sceneId && levelId === this.levelId && epoch !== this.epoch) this.dirty = false;
       await this.leaveScene();
       this.scene = scene;
       this.viewerKey = viewerKey;
@@ -281,6 +311,8 @@ export class FogExploration {
       surface.setShown(true);
       this.surface = surface;
       this.sceneId = scene._id;
+      this.levelId = levelId;
+      this.epoch = epoch;
       this.key = null;
       this.polys = [];
       this.restored = false;
@@ -290,7 +322,7 @@ export class FogExploration {
         fogVisibleTokenIds(scene, user, [], { actors, lighting: sceneLighting(scene) }),
       );
       const stored = await this.fetchStored(scene._id);
-      if (this.destroyed || this.sceneId !== scene._id) return;
+      if (this.destroyed || this.sceneId !== scene._id || (levelId !== undefined && revision !== this.requestedRevision)) return;
       if (stored && stored.length > 0) {
         await surface.mergePng(stored);
         this.restoredBytes = stored.length;
@@ -313,7 +345,7 @@ export class FogExploration {
       const polys = await Promise.all(
         viewers.map((v) => this.options.computer.compute(v.x, v.y, segments, v.radiusPx)),
       );
-      if (this.destroyed || this.sceneId !== scene._id || this.surface !== surface) return;
+      if (this.destroyed || this.sceneId !== scene._id || this.surface !== surface || (levelId !== undefined && revision !== this.requestedRevision)) return;
       for (const poly of polys) surface.reveal(poly);
       surface.setVisible(polys);
       this.polys = polys;
@@ -368,7 +400,7 @@ export class FogExploration {
       handle = this.setTimer(() => resolve(null), this.restoreTimeoutMs);
     });
     try {
-      return await Promise.race([this.options.transport.requestFog(sceneId), timeout]);
+      return await Promise.race([this.options.transport.requestFog(sceneId, this.levelId, this.epoch), timeout]);
     } catch (error) {
       this.options.onError?.("restore", error);
       return null;
@@ -382,6 +414,7 @@ export class FogExploration {
     if (this.sceneId === null) return;
     await this.save();
     this.sceneId = null;
+    this.levelId = undefined;
     this.scene = null;
     this.surface = null;
     this.key = null;
@@ -410,10 +443,12 @@ export class FogExploration {
     const sceneId = this.sceneId;
     if (!this.dirty || !surface || sceneId === null) return;
     this.dirty = false;
+    const levelId = this.levelId, epoch = this.epoch;
     let png: Uint8Array;
     try {
       png = await surface.readbackPng();
-      this.options.transport.sendFogPng(sceneId, png);
+      if (epoch !== (this.knownEpochs.get(JSON.stringify([sceneId, levelId])) ?? "")) return;
+      this.options.transport.sendFogPng(sceneId, png, levelId, epoch);
     } catch (error) {
       this.dirty = true;
       throw error;

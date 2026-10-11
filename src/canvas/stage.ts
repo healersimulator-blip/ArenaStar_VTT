@@ -30,7 +30,8 @@ import {
   type BackgroundTransform,
   type NaturalSize,
 } from "../core/backgroundTransform";
-import type { TokenDocument } from "../core/documents";
+import { FauxOverheadLayer } from "./layers/FauxOverheadLayer";
+import type { RegionDocument, TokenDocument } from "../core/documents";
 import type { Camera, Viewport } from "./camera";
 import { fitRect, screenToWorld } from "./camera";
 import type { GridSpec, SquareGrid } from "./grid";
@@ -205,6 +206,10 @@ export interface Stage {
     badges?: ReadonlyMap<string, readonly { code: string; tint: number }[]>,
     hpBars?: ReadonlyMap<string, TokenHpBarNumbers>,
   ): void;
+  /** Cosmetic region masks only: never touches fog history or LOS. */
+  setFauxOverhead(regions: readonly RegionDocument[]): void;
+  tokenPointVisible(id: string, point: { x: number; y: number }): boolean;
+  tokenMarqueeSelectable(id: string): boolean;
   /** Current locally rendered top-left; differs from document position during an animation. */
   tokenVisualPosition(id: string): { x: number; y: number } | undefined;
   /**
@@ -533,6 +538,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   tokenLayer.label = "tokens";
   root.addChild(tokenLayer);
   const tokenViews = new Map<string, Container>();
+  const overhead = new FauxOverheadLayer(tokenLayer);
   const tokenArtwork = new Map<string, { image: string | null; revision: number; sprite: Sprite | null }>();
   let tokenImageLoader: ((image: string) => Promise<Texture | null>) | null = null;
   /** D-251: fog's token gate (null = draw every token). */
@@ -613,7 +619,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     let hit: string | null = null;
     for (const [id, rect] of tokenRects) {
       if (
-        world.x >= rect.x &&
+        overhead.pointVisible(id, world) && world.x >= rect.x &&
         world.x <= rect.x + rect.width &&
         world.y >= rect.y &&
         world.y <= rect.y + rect.height
@@ -626,8 +632,18 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const applyHpBarVisibility = (): void => {
     for (const [id, view] of tokenViews) {
       const bar = view.getChildByLabel(HP_BAR_LABEL) as Container | null;
-      if (bar) bar.visible = hpBarMode === "all" || hoveredTokenId === id;
+      if (bar) bar.visible = !overhead.obscured(id) && (hpBarMode === "all" || hoveredTokenId === id);
     }
+  };
+
+  const applyOverheadDecorations = (): void => {
+    for (const [id, view] of tokenViews) {
+      const show = !overhead.obscured(id);
+      for (const child of view.children) {
+        if (child instanceof Text || child.label === "badges") child.visible = show;
+      }
+    }
+    applyHpBarVisibility();
   };
 
   const onStagePointerMove = (event: PointerEvent): void => {
@@ -971,6 +987,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         const hpBar = hpBars?.get(token._id);
         if (hpBar) tokenHpBarNumbers.set(token._id, hpBar);
         else tokenHpBarNumbers.delete(token._id);
+        overhead.syncToken(token, view);
         syncTokenHpBar(
           token._id,
           view,
@@ -982,6 +999,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
       for (const [id, view] of tokenViews) {
         if (!seen.has(id)) {
+          overhead.remove(id);
           tokenLayer.removeChild(view);
           view.destroy({ children: true });
           tokenViews.delete(id);
@@ -997,8 +1015,14 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           tokenHpBarNumbers.delete(id);
         }
       }
-      applyHpBarVisibility();
+      applyOverheadDecorations();
     },
+    setFauxOverhead(regions): void {
+      overhead.setRegions(regions);
+      applyOverheadDecorations();
+    },
+    tokenPointVisible(id, point): boolean { return overhead.pointVisible(id, point); },
+    tokenMarqueeSelectable(id): boolean { return !!tokenViews.get(id)?.visible && !overhead.obscured(id); },
     tokenVisualPosition(id: string): { x: number; y: number } | undefined {
       const view = tokenViews.get(id);
       return view && tokenMovement.get(id)?.isRunning(performance.now())
@@ -1133,6 +1157,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         artwork.sprite?.destroy({ texture: false, textureSource: false });
       }
       tokenArtwork.clear();
+      overhead.destroy();
       tokenViews.clear();
       tokenMovement.clear();
       tokenRotation.clear();
@@ -1181,6 +1206,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         );
       }
     }
+    if (overhead.active) applyOverheadDecorations();
     const cam = state.camera;
     if (!grid) {
       gridGraphics.clear();

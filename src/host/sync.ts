@@ -1,3 +1,8 @@
+import { LEVEL_PLAY_FEATURE, stairMovementOps } from "../core/levelPlay";
+import { levelFocusView, LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
+import type { LevelFocusMsg } from "../core/messages";
+import { fogVersionKey, fogLevelIdError, fogEpochError, LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "../core/levelFog";
+import { SaveWork } from "../storage/saveCoordinator";
 import { snapshotMoveEntry } from "../core/moveDestination";
 import { snapTokenCenter } from "../canvas/grid";
 /**
@@ -96,6 +101,10 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { encumbranceOptionsOf, worldSettingsFrom } from "../core/worldSettings";
 import { sceneDifficultCells } from "../core/rules";
 import { tileTriggerElevationError, tileTriggerZoneError } from "../core/tileTriggerZone";
+import { guardedWallEditError, type WallEditGuard } from "../core/wallEditing";
+import { SUPPORTED_WIRE_FEATURES, featureListError, requiredOpFeatures, requiredWorldFeatures } from "../core/capabilities";
+import { levelTransactionError } from "../core/levels";
+import { regionTransactionError, sceneRegionsError } from "../core/regionValidation";
 import { automationSourceTile, regionGeometryError } from "../core/regionGeometry";
 import { pf1eMovePlan } from "../packages/pf1e/movement";
 import {
@@ -336,8 +345,11 @@ export interface HostSyncOptions {
 
 /** Persistence for §9 explored fog, keyed per user + scene (the world is implied). */
 export interface FogStore {
-  put(userId: UserId, sceneId: DocId, png: Uint8Array): Promise<void>;
-  get(userId: UserId, sceneId: DocId): Promise<Uint8Array | null>;
+  getEpoch?(sceneId: string, levelId: string): Promise<string | undefined>;
+  setEpoch?(sceneId: string, levelId: string, epoch: string): Promise<void>;
+  getState?(userId: UserId, sceneId: DocId, levelId?: string): Promise<{ png: Uint8Array; epoch?: string } | null>;
+  put(userId: UserId, sceneId: DocId, png: Uint8Array, levelId?: string, epoch?: string): Promise<void>;
+  get(userId: UserId, sceneId: DocId, levelId?: string): Promise<Uint8Array | null>;
 }
 
 interface ActiveTransientFx {
@@ -419,6 +431,10 @@ interface ImageUploadState {
 }
 
 interface Session {
+  /** Previously authorized reads may flush their last own PNG after leaving a floor. */
+  fogWriteGrants?: Set<string>;
+  levelFocus?: { followTokenId?: string; sceneId: string; levelId: string | null; requestId: string; revision: number };
+  features: ReadonlySet<string>;
   peerId: PeerId;
   transport: Transport;
   user: SessionUser | null;
@@ -793,6 +809,7 @@ const movementAutomationKey = (sceneId: string, tokenId: string, docId: string, 
   `${sceneId}\u0000${tokenId}\u0000${docId}\u0000${tileId}\u0000${method}`;
 
 export class HostSync {
+  readonly saveWork = new SaveWork();
   private readonly store: DocumentStore;
   private readonly log: OpLog;
   private readonly undoStack: UndoStack;
@@ -823,6 +840,8 @@ export class HostSync {
   private readonly fxTransientRuns = new Map<string, ActiveTransientFx>();
   private disposed = false;
   /** §8/§9 fog readbacks: `${sceneId}:${userId}` → latest PNG bytes (write-through cache). */
+  private readonly fogEpochs = new Map<string, string>();
+  private readonly fogTasks = new Map<string, Promise<void>>();
   readonly fogPngs = new Map<string, Uint8Array>();
   private readonly fogStore: FogStore | null;
 
@@ -862,6 +881,8 @@ export class HostSync {
       if (!session.user) continue;
       this.send(session, {
         kind: "welcome",
+        features: [...SUPPORTED_WIRE_FEATURES],
+        requiredFeatures: requiredWorldFeatures(this.store.getAll("scenes"), session.user.role),
         user: {
           id: session.user.id,
           role: session.user.role,
@@ -955,9 +976,10 @@ export class HostSync {
   // ─── Sessions ───────────────────────────────────────────────────────────────
 
   /** Attach a peer transport.GM loopback sessions may pass their user directly. */
-  addSession(peerId: PeerId, transport: Transport, user?: SessionUser): void {
+  addSession(peerId: PeerId, transport: Transport, user?: SessionUser, features: readonly string[] = SUPPORTED_WIRE_FEATURES): void {
     this.sweepExpiredSummons(); // expiry also runs on reconnect after a sleeping tab resumes
     const session: Session = {
+      features: new Set(user ? features : []), // direct users are same-build trusted loopback, not remote hello
       peerId,
       transport,
       user: user ?? null,
@@ -1039,10 +1061,10 @@ export class HostSync {
   private dispatch(session: Session, msg: WireMessage): void {
     switch (msg.kind) {
       case "hello":
-        void this.handleHello(session, msg);
+        void this.saveWork.run(() => this.handleHello(session, msg));
         return;
       case "intent":
-        this.handleIntent(session, msg.txId, msg.ops);
+        this.handleIntent(session, msg.txId, msg.ops, msg.wallEdit);
         return;
       case "roll":
         this.handleRoll(session, msg);
@@ -1051,16 +1073,16 @@ export class HostSync {
         this.handleRollReveal(session, msg as RollRevealMsg);
         return;
       case "roll.pending":
-        void this.handleRollPending(
+        void this.saveWork.run(() => this.handleRollPending(
           session,
           msg as unknown as import("../core/messages").RollPendingMsg,
-        );
+        ));
         return;
       case "roll.reroll":
-        void this.handleRollReroll(
+        void this.saveWork.run(() => this.handleRollReroll(
           session,
           msg as unknown as import("../core/messages").RollRerollMsg,
-        );
+        ));
         return;
       case "roll.apply":
         this.handleRollApply(
@@ -1069,10 +1091,10 @@ export class HostSync {
         );
         return;
       case "roll.revert":
-        void this.handleRollRevert(
+        void this.saveWork.run(() => this.handleRollRevert(
           session,
           msg as unknown as import("../core/messages").RollRevertMsg,
-        );
+        ));
         return;
       case "action.revert":
         this.handleActionRevert(session, msg);
@@ -1090,10 +1112,10 @@ export class HostSync {
         this.handleCodexClaim(session, msg);
         return;
       case "roll.delegate":
-        void this.handleRollDelegate(
+        void this.saveWork.run(() => this.handleRollDelegate(
           session,
           msg as unknown as import("../core/messages").RollDelegateMsg,
-        );
+        ));
         return;
       case "ephemeral":
         this.handleEphemeral(session, msg);
@@ -1126,13 +1148,13 @@ export class HostSync {
         this.handlePrefabPlace(session, msg);
         return;
       case "summon.place":
-        void this.handleSummonPlace(session, msg);
+        void this.saveWork.run(() => this.handleSummonPlace(session, msg));
         return;
       case "summon.dismiss":
         this.handleSummonDismiss(session, msg);
         return;
       case "macro.request":
-        void this.handleMacroRequest(session, msg);
+        void this.saveWork.run(() => this.handleMacroRequest(session, msg));
         return;
       case "macros.invoke":
         this.handleMacroInvoke(session, msg);
@@ -1190,25 +1212,28 @@ export class HostSync {
         this.handleAssetUploadChunk(session, msg);
         return;
       case "asset.upload.finish":
-        void this.handleAssetUploadFinish(session, msg);
+        void this.saveWork.run(() => this.handleAssetUploadFinish(session, msg));
         return;
       case "asset.upload.cancel":
         if (session.imageUpload?.uploadId === msg.uploadId) this.cancelImageUpload(session);
         return;
       case "asset.share":
-        void this.handleAssetShare(session, msg);
+        void this.saveWork.run(() => this.handleAssetShare(session, msg));
         return;
       case "asset.library":
         void this.handleAssetLibrary(session, msg);
         return;
       case "asset.cleanup":
-        void this.handleAssetCleanup(session, msg);
+        void this.saveWork.run(() => this.handleAssetCleanup(session, msg));
         return;
       case "fog.put":
-        this.handleFogPut(session, msg);
+        this.queueFog(session, msg);
         return;
+      case "level.focus":
+        this.handleLevelFocus(session, msg); return;
+      case "level.focus.state": return; // host-only
       case "fog.get":
-        void this.handleFogGet(session, msg);
+        this.queueFog(session, msg);
         return;
       case "fog.state":
         return; // host → client only
@@ -1239,42 +1264,133 @@ export class HostSync {
    * and answers the user's next `fog.get`. A user can only ever write their own map, and an
    * oversized or empty payload is dropped (§16).
    */
-  private handleFogPut(session: Session, msg: FogPutMsg): void {
-    const user = session.user;
-    if (!user) return;
-    if (!(msg.png instanceof Uint8Array) || msg.png.length === 0) return;
-    if (msg.png.length > MAX_FOG_PNG_BYTES) return;
-    if (typeof msg.sceneId !== "string" || msg.sceneId.length === 0) return;
-    this.fogPngs.set(`${msg.sceneId}:${user.id}`, msg.png);
-    if (this.fogStore) {
-      this.fogStore.put(user.id, msg.sceneId, msg.png).catch(() => undefined);
+  /** Scoped player fog requires isolated play and an owned-token floor. A selector alone grants nothing. */
+  private handleLevelFocus(session: Session, msg: LevelFocusMsg): void {
+    if (!session.user || !session.features.has(LEVEL_NAVIGATION_FEATURE) || typeof msg.requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.requestId) ||
+        (msg.followTokenId !== undefined && (typeof msg.followTokenId !== "string" || !!fogLevelIdError(msg.followTokenId))) || typeof msg.sceneId !== "string" || !msg.sceneId || msg.sceneId.length > 128 || (msg.levelId !== null && (typeof msg.levelId !== "string" || !!fogLevelIdError(msg.levelId)))) return;
+    if (!session.intentBucket.tryRemove()) {
+      this.send(session, { kind: "level.focus.state", sceneId: msg.sceneId, requestId: msg.requestId, revision: (session.levelFocus?.revision ?? 0) + 1, levels: [], levelId: null, tokenIds: null, error: "rate_limited" });
+      return;
     }
+    session.levelFocus = { ...(msg.followTokenId ? { followTokenId: msg.followTokenId } : {}), sceneId: msg.sceneId, levelId: msg.levelId, requestId: msg.requestId, revision: session.levelFocus?.revision ?? 0 };
+    this.sendLevelFocus(session);
   }
-
-  /** Answer with the asker's own stored map for the scene (null when nothing is stored). */
+  private sendLevelFocus(session: Session): void {
+    const focus = session.levelFocus, user = session.user;
+    if (!focus || !user || !session.features.has(LEVEL_NAVIGATION_FEATURE)) return;
+    const view = levelFocusView(this.store.get("scenes", focus.sceneId), this.store.getAll("actors"), user, focus.levelId, focus.followTokenId);
+    const denied = focus.levelId !== null && !view.levels.some((l) => l.id === focus.levelId);
+    if (denied) focus.levelId = null;
+    if (view.followTokenId) focus.followTokenId = view.followTokenId;
+    this.send(session, { kind: "level.focus.state", sceneId: focus.sceneId, requestId: focus.requestId, revision: ++focus.revision, worldSeq: this.store.seq, mode: focus.levelId === null ? "follow" : "manual", ...view, ...(denied ? { error: "unavailable" as const } : {}) });
+  }
+  private allowsFogLevel(session: Session, sceneId: string, levelId?: string): boolean {
+    if (this.sessions.get(session.peerId) !== session || !session.user || fogLevelIdError(levelId)) return false;
+    if (levelId === undefined) return true;
+    const scene = this.store.get("scenes", sceneId);
+    if (!session.features.has(LEVEL_FOG_FEATURE) || !scene?.levels?.some((l) => l._id === levelId)) return false;
+    if (session.user.role === "GM" || session.user.role === "ASSISTANT") return true;
+    return scene.levelMode === "isolated" && session.features.has(LEVEL_PLAY_FEATURE) &&
+      levelFocusView(scene, this.store.getAll("actors"), session.user, levelId).levels.some((l) => l.id === levelId);
+  }
+  private queueFog(session: Session, msg: FogGetMsg | FogPutMsg): void {
+    if (typeof msg.sceneId !== "string" || !msg.sceneId || fogLevelIdError(msg.levelId) || fogEpochError(msg.epoch)) return;
+    const key = JSON.stringify([msg.sceneId, msg.levelId ?? null]);
+    const task = (this.fogTasks.get(key) ?? Promise.resolve()).then(async () => {
+      if (this.sessions.get(session.peerId) !== session) return;
+      if (msg.levelId !== undefined && this.allowsFogLevel(session, msg.sceneId, msg.levelId) && !this.fogEpochs.has(key)) {
+        const epoch = await this.fogStore?.getEpoch?.(msg.sceneId, msg.levelId);
+        this.fogEpochs.set(key, epoch ?? this.store.get("scenes", msg.sceneId)?.levels?.find((l) => l._id === msg.levelId)?.fogEpoch ?? "");
+      }
+      if (this.sessions.get(session.peerId) !== session) return;
+      if (msg.kind === "fog.put") await this.handleFogPut(session, msg); else await this.handleFogGet(session, msg);
+    }).catch(() => { /* A failed epoch load/write is not permission to use stale fog. */ });
+    this.fogTasks.set(key, task);
+    void task.then(() => { if (this.fogTasks.get(key) === task) this.fogTasks.delete(key); });
+  }
+  private fogEpoch(sceneId: string, levelId?: string): string {
+    return levelId === undefined ? "" : this.fogEpochs.get(JSON.stringify([sceneId, levelId])) ?? this.store.get("scenes", sceneId)?.levels?.find((l) => l._id === levelId)?.fogEpoch ?? "";
+  }
+  private async handleFogPut(session: Session, msg: FogPutMsg): Promise<void> {
+    const user = session.user;
+    if (!user || typeof msg.sceneId !== "string" || !msg.sceneId || fogEpochError(msg.epoch)) return;
+    if (msg.resetRequestId !== undefined) {
+      if (typeof msg.resetRequestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.resetRequestId)) return;
+      let error: string | undefined;
+      if ((user.role !== "GM" && user.role !== "ASSISTANT") || !session.features.has(LEVEL_FOG_RESET_FEATURE) || !msg.levelId || !this.allowsFogLevel(session, msg.sceneId, msg.levelId)) error = "Fog reset is GM-only and requires a compatible saved level";
+      else if ((msg.epoch ?? "") !== this.fogEpoch(msg.sceneId, msg.levelId)) error = "Fog changed elsewhere. Reload before resetting";
+      else {
+        const epoch = globalThis.crypto.randomUUID();
+        const ops: Op[] = [{ kind: "update", ref: { coll: "levels", id: msg.levelId, parent: { coll: "scenes", id: msg.sceneId } }, diff: { fogEpoch: epoch } }];
+        error = this.draftCompatibilityError(ops) ?? undefined;
+        if (!error) {
+          try {
+            await this.fogStore?.setEpoch?.(msg.sceneId, msg.levelId, epoch);
+            this.fogEpochs.set(JSON.stringify([msg.sceneId, msg.levelId]), epoch);
+            // The durable generation is already advanced: never roll it back, even if
+            // authorization or compatibility changed while storage was awaited.
+            if (!this.allowsFogLevel(session, msg.sceneId, msg.levelId) || session.user?.id !== user.id) error = "Fog reset authorization changed";
+            else {
+              error = this.draftCompatibilityError(ops) ?? undefined;
+              if (!error) {
+                const result = this.commitOps(ops, user.id, `fog-reset-${msg.resetRequestId}`, false);
+                if (!result.ok) error = result.error;
+              }
+            }
+          } catch { error = "Fog reset could not be saved; retry after storage recovers"; }
+        }
+      }
+      if (this.sessions.get(session.peerId) !== session) return;
+      this.send(session, { kind: "fog.state", sceneId: msg.sceneId, ...(msg.levelId === undefined ? {} : { levelId: msg.levelId }), epoch: this.allowsFogLevel(session, msg.sceneId, msg.levelId) ? this.fogEpoch(msg.sceneId, msg.levelId) : (msg.epoch ?? ""), png: null, resetRequestId: msg.resetRequestId, ...(error ? { resetError: error } : {}) });
+      return;
+    }
+    if (!(msg.png instanceof Uint8Array) || !msg.png.length || msg.png.length > MAX_FOG_PNG_BYTES) return;
+    const priorRead = msg.levelId !== undefined && session.fogWriteGrants?.has(JSON.stringify([msg.sceneId, msg.levelId])) && this.store.get("scenes", msg.sceneId)?.levels?.some((l) => l._id === msg.levelId);
+    if ((!this.allowsFogLevel(session, msg.sceneId, msg.levelId) && !priorRead) || (msg.epoch ?? "") !== this.fogEpoch(msg.sceneId, msg.levelId)) return;
+    this.fogPngs.set(fogVersionKey(msg.sceneId, msg.levelId, user.id, msg.epoch), new Uint8Array(msg.png));
+    if (this.fogStore) await this.fogStore.put(user.id, msg.sceneId, new Uint8Array(msg.png), msg.levelId, msg.epoch).catch(() => undefined);
+  }
   private async handleFogGet(session: Session, msg: FogGetMsg): Promise<void> {
     const user = session.user;
-    if (!user) return;
-    if (typeof msg.sceneId !== "string" || msg.sceneId.length === 0) return;
-    let png: Uint8Array | null =
-      this.fogPngs.get(`${msg.sceneId}:${user.id}`) ?? null;
-    if (png === null && this.fogStore) {
-      try {
-        png = await this.fogStore.get(user.id, msg.sceneId);
-      } catch {
-        png = null;
-      }
-      if (png) this.fogPngs.set(`${msg.sceneId}:${user.id}`, png);
+    if (!user || typeof msg.sceneId !== "string" || !msg.sceneId || fogEpochError(msg.epoch)) return;
+    if (msg.levelId && this.allowsFogLevel(session, msg.sceneId, msg.levelId) && session.features.has(LEVEL_FOG_RESET_FEATURE)) {
+      const epoch = this.fogEpoch(msg.sceneId, msg.levelId);
+      const level = this.store.get("scenes", msg.sceneId)?.levels?.find((l) => l._id === msg.levelId);
+      if (epoch && level && level.fogEpoch !== epoch) this.commitOps([{ kind: "update", ref: { coll: "levels", id: level._id, parent: { coll: "scenes", id: msg.sceneId } }, diff: { fogEpoch: epoch } }], user.id, `fog-epoch-repair-${globalThis.crypto.randomUUID()}`, false);
     }
-    // the session may have gone while the store answered
-    if (this.sessions.get(session.peerId) !== session) return;
-    this.send(session, { kind: "fog.state", sceneId: msg.sceneId, png });
+    const allowed = () => this.allowsFogLevel(session, msg.sceneId, msg.levelId) && (msg.epoch ?? "") === this.fogEpoch(msg.sceneId, msg.levelId);
+    let png: Uint8Array | null = null;
+    const key = fogVersionKey(msg.sceneId, msg.levelId, user.id, msg.epoch);
+    if (allowed()) {
+      if (msg.levelId) {
+        const grants = session.fogWriteGrants ??= new Set<string>();
+        if (grants.size >= 128) { const oldest = grants.values().next().value; if (oldest) grants.delete(oldest); }
+        grants.add(JSON.stringify([msg.sceneId, msg.levelId]));
+      }
+      png = this.fogPngs.get(key) ?? null;
+      if (png === null && this.fogStore) {
+        try {
+          const row = this.fogStore.getState ? await this.fogStore.getState(user.id, msg.sceneId, msg.levelId) : { png: await this.fogStore.get(user.id, msg.sceneId, msg.levelId), epoch: undefined };
+          if (row && (row.epoch ?? "") === (msg.epoch ?? "")) png = row.png;
+        } catch { png = null; }
+        png = this.fogPngs.get(key) ?? png;
+        if (png && allowed()) this.fogPngs.set(key, png);
+      }
+    }
+    if (this.sessions.get(session.peerId) !== session || fogLevelIdError(msg.levelId)) return;
+    if (!allowed()) png = null;
+    this.send(session, { kind: "fog.state", sceneId: msg.sceneId, ...(msg.levelId === undefined ? {} : { levelId: msg.levelId }), ...(msg.epoch === undefined ? {} : { epoch: msg.epoch }), png });
   }
 
   // ─── Join flow (§6.4) ───────────────────────────────────────────────────────
 
   private async handleHello(session: Session, hello: HelloMsg): Promise<void> {
     if (session.user) return; // already authed
+    const featureError = featureListError(hello.features);
+    if (featureError) {
+      this.send(session, { kind: "kick", reason: featureError });
+      this.removeSession(session.peerId, featureError); return;
+    }
     if (this.banned.has(hello.pubkey)) {
       this.send(session, { kind: "kick", reason: "banned" });
       this.removeSession(session.peerId, "banned pubkey");
@@ -1286,6 +1402,8 @@ export class HostSync {
       this.removeSession(session.peerId, "invalid signature");
       return;
     }
+    if (this.sessions.get(session.peerId) !== session) return;
+    session.features = new Set(hello.features ?? []);
     session.pendingHello = hello;
     const known = this.store.get("users", hello.pubkey) !== undefined;
     // §6.4: auto-approve known pubkeys; unknown pubkeys raise a join:request.
@@ -1319,8 +1437,14 @@ export class HostSync {
     known: boolean,
     role: Role = "PLAYER",
   ): void {
+    if (this.sessions.get(session.peerId) !== session || session.pendingHello !== hello || session.user) return;
     let user = this.store.get("users", hello.pubkey) as
       UserDocument | undefined;
+    const missing = requiredWorldFeatures(this.store.getAll("scenes"), user?.role ?? role).filter((f) => !session.features.has(f));
+    if (missing.length) {
+      const reason = `Upgrade required: GM client lacks ${missing.join(", ")}`;
+      this.send(session, { kind: "kick", reason }); this.removeSession(session.peerId, reason); return;
+    }
     if (!user) {
       user = {
         _id: hello.pubkey,
@@ -1361,13 +1485,22 @@ export class HostSync {
     user: SessionUser,
     hello: HelloMsg | undefined,
   ): void {
+    const requiredFeatures = requiredWorldFeatures(this.store.getAll("scenes"), user.role);
+    if (requiredFeatures.some((f) => !session.features.has(f))) {
+      const reason = "Upgrade required: client does not support this world's level features";
+      this.send(session, { kind: "kick", reason }); this.removeSession(session.peerId, reason); return;
+    }
+    // Welcome must precede snapshot/replay so the client can validate required capabilities.
     this.send(session, {
       kind: "welcome",
+      features: [...SUPPORTED_WIRE_FEATURES],
+      requiredFeatures,
       user: { id: user.id, role: user.role, name: user.name },
       world: this.welcomeWorld(),
-      snapshotSeq: this.catchUpSeq(session, hello),
+      snapshotSeq: this.canReplay(session, hello) ? hello?.lastSeq as number : this.store.seq,
       ...(this.simInfo !== null ? { sim: this.simInfo } : {}),
     });
+    this.catchUpSeq(session, hello);
     // A viewer loading the active scene it does not already hold hears `sceneLoad` — the
     // per-player half of MATT's scene trigger (its wiki: "triggers for each player loading
     // in"). Fired after the snapshot so the graph's own commits arrive as later ops; a scene
@@ -1390,22 +1523,25 @@ export class HostSync {
    * an unprojected envelope was sent here before the FX privacy work).
    * History-aware delta projection can restore the optimization later.
    */
-  private catchUpSeq(session: Session, hello: HelloMsg | undefined): number {
+  private canReplay(session: Session, hello: HelloMsg | undefined): boolean {
     const lastSeq = hello?.lastSeq;
-    if (
-      (session.user?.role === "GM" || session.user?.role === "ASSISTANT") &&
+    return ((session.user?.role === "GM" || session.user?.role === "ASSISTANT") &&
       typeof lastSeq === "number" &&
       Number.isInteger(lastSeq) &&
       lastSeq >= 0 &&
       lastSeq <= this.store.seq &&
-      lastSeq >= this.log.baseSeq
-    ) {
-      for (const env of this.log.since(lastSeq)) {
+      lastSeq >= this.log.baseSeq) && !this.log.since(lastSeq).some((env) => requiredOpFeatures(env.ops).some((feature) => !session.features.has(feature)));
+  }
+
+  private catchUpSeq(session: Session, hello: HelloMsg | undefined): number {
+    const lastSeq = hello?.lastSeq;
+    if (this.canReplay(session, hello)) {
+      for (const env of this.log.since(lastSeq as number)) {
         this.send(session, { kind: "ops", envelope: env });
       }
       // Metadata is not an Op. Even a GM receiving delta catch-up needs today's manifest.
       this.sendProjectedManifest(session);
-      return lastSeq;
+      return lastSeq as number;
     }
     // Full projected snapshot (§5: manifest only — assets stream lazily, §7).
     const manifest = projectAssetManifest(this.store.world, this.manifestSource(), session.user as SessionUser);
@@ -1435,7 +1571,7 @@ export class HostSync {
     });
   }
 
-  private handleIntent(session: Session, txId: TxId, ops: Op[]): void {
+  private handleIntent(session: Session, txId: TxId, ops: Op[], wallEdit?: WallEditGuard): void {
     if (!session.user) {
       this.reject(session, txId, "forbidden", "not authenticated");
       return;
@@ -1443,6 +1579,16 @@ export class HostSync {
     if (!session.intentBucket.tryRemove()) {
       this.reject(session, txId, "rate_limited", "intent rate exceeded");
       return;
+    }
+    if (wallEdit !== undefined) {
+      if (session.user.role !== "GM" && session.user.role !== "ASSISTANT") {
+        this.reject(session, txId, "forbidden", "Only GMs edit wall geometry."); return;
+      }
+      if (!Array.isArray(ops) || !wallEdit || typeof wallEdit.sceneId !== "string") {
+        this.reject(session, txId, "invalid_schema", "Invalid wall edit."); return;
+      }
+      const error = guardedWallEditError(wallEdit, this.store.get("scenes", wallEdit.sceneId), ops);
+      if (error) { this.reject(session, txId, "invariant", error); return; }
     }
     // FX instances are host-owned runtime state, not GM-authored document ops.
     if (Array.isArray(ops) && ops.some((op) => op && typeof op === "object" &&
@@ -1461,6 +1607,8 @@ export class HostSync {
       this.reject(session, txId, validation.reason, validation.error);
       return;
     }
+    const compatibilityError = this.draftCompatibilityError(normalized.ops);
+    if (compatibilityError) { this.reject(session, txId, "invariant", compatibilityError); return; }
     const movementError = this.playerMovementError(session.user, normalized.ops, txId);
     if (movementError) {
       this.reject(session, txId, "invariant", movementError);
@@ -1547,7 +1695,8 @@ export class HostSync {
         ? (a: string, b: string) => visibleTokens.find((token) => token._id === a)?.disposition ===
           visibleTokens.find((token) => token._id === b)?.disposition
         : undefined;
-      const walls = (visibleScene?.walls ?? []).filter((wall) => axisBlocks(wall.move, wall.door)).map((wall) => ({
+      const projectedWalls = visibleScene?.walls ?? [];
+      const walls = projectedWalls.filter((wall) => axisBlocks(wall.move, wall.door)).map((wall) => ({
         x1: wall.c[0] ?? 0, y1: wall.c[1] ?? 0, x2: wall.c[2] ?? 0, y2: wall.c[3] ?? 0,
       }));
       const terrain = sceneDifficultCells(visibleScene);
@@ -1555,11 +1704,16 @@ export class HostSync {
         const endpoint = afterById.get(row.tokenId);
         const actorStats = moverFacts.get(row.tokenId);
         if (!endpoint || !actorStats || (row.before.x === endpoint.x && row.before.y === endpoint.y)) continue;
-        const tokenList = tokens.map((token) => token._id === row.tokenId
+        const floorIds = beforeScene.levelMode === "isolated" ? new Set(beforeScene.tokens.filter((t) => t.levelId === row.before.levelId).map((t) => t._id)) : null;
+        const levelWalls = beforeScene.levelMode === "isolated" ? projectedWalls.filter((w) => {
+          const scope = beforeScene.walls.find((raw) => raw._id === w._id)?.levelScope;
+          return scope?.mode === "all" || (scope?.mode === "levels" && scope.ids.includes(row.before.levelId ?? ""));
+        }).filter((w) => axisBlocks(w.move, w.door)).map((w) => ({ x1: w.c[0], y1: w.c[1], x2: w.c[2], y2: w.c[3] })) : walls;
+        const tokenList = tokens.filter((t) => !floorIds || floorIds.has(t._id)).map((token) => token._id === row.tokenId
           ? { ...token, x: row.before.x, y: row.before.y } : token);
         const plan = pf1eMovePlan({ grid: beforeScene.grid, tokens: tokenList,
           mover: { tokenId: row.tokenId, to: { x: endpoint.x, y: endpoint.y }, speedFt: actorStats.speedFt,
-            size: actorStats.size }, walls, ...(terrain ? { difficultCells: terrain.difficultCells } : {}),
+            size: actorStats.size }, walls: levelWalls, ...(terrain ? { difficultCells: terrain.difficultCells } : {}),
           ...(isAlly ? { isAlly } : {}) });
         if (plan.refusal !== null)
           return `${row.before.name} can't move there — ${plan.refusal}`;
@@ -2856,6 +3010,30 @@ export class HostSync {
     | { ok: true; hostOps: Op[] }
     | { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
     const hostOps: Op[] = [];
+    if (user.role !== "GM" && user.role !== "ASSISTANT") {
+      for (const op of ops) {
+        const coll = op.kind === "create" ? op.coll : op.ref.coll;
+        if (coll === "scenes" && op.kind === "delete" && (this.store.get("scenes", op.ref.id)?.levels?.length ?? 0) > 0)
+          return { ok: false, reason: "forbidden", error: "only GMs remove scenes containing draft levels" };
+        if ((coll === "tokens" || coll === "walls" || coll === "lights") && (op.kind === "create"
+          ? Object.hasOwn(op.data, coll === "tokens" ? "levelId" : "levelScope")
+          : op.kind === "update" && Object.keys(op.diff).some((key) => /^(?:-=)?(?:levelId|levelScope)(?:\.|$)/.test(key))))
+          return { ok: false, reason: "forbidden", error: "Only GMs assign level membership and scopes" };
+        if (coll === "scenes" && op.kind === "update" && Object.keys(op.diff).some((key) => /^(?:-=)?(?:tokens|walls|lights)(?:\.|$)/.test(key)) &&
+            (this.store.get("scenes", op.ref.id)?.levels !== undefined || JSON.stringify(op.diff).includes('"levelScope"') || JSON.stringify(op.diff).includes('"levelId"')))
+          return { ok: false, reason: "forbidden", error: "Only GMs replace level-bound scene arrays" };
+        if (coll === "levels" || (coll === "scenes" && op.kind === "update" &&
+            Object.keys(op.diff).some((key) => /^(?:-=)?(?:levels|levelMode)(?:\.|$)/.test(key))))
+          return { ok: false, reason: "forbidden", error: "only GMs author draft levels" };
+        if (coll === "regions" || (coll === "scenes" && op.kind === "update" &&
+            Object.keys(op.diff).some((key) => /^(?:-=)?regions(?:\.|$)/.test(key))))
+          return { ok: false, reason: "forbidden", error: "only GMs author or remove scene regions" };
+      }
+    }
+    const levelsError = levelTransactionError(ops, (ref) => this.store.resolve(ref));
+    if (levelsError) return { ok: false, reason: "invalid_schema", error: levelsError };
+    const regionError = regionTransactionError(ops, (ref) => this.store.resolve(ref));
+    if (regionError) return { ok: false, reason: "invalid_schema", error: regionError };
     // Scene-copy envelopes create the scene and its independently stored automation graphs
     // together. Preflight all automation refs against those staged scenes so neither the copy nor
     // its graphs can partially publish when their mutually bound documents are new to the store.
@@ -2958,6 +3136,10 @@ export class HostSync {
               (assetId) => this.store.world.assetManifest[assetId] !== undefined);
               if (error) return { ok: false, reason: "invalid_schema", error };
             }
+          }
+          if (op.coll === "scenes" && op.data.type === "scene") {
+            const regionError = sceneRegionsError(op.data as SceneDocument);
+            if (regionError) return { ok: false, reason: "invalid_schema", error: regionError };
           }
           const tagError = tagDataError(op.data);
           if (tagError) return { ok: false, reason: "invalid_schema", error: tagError };
@@ -3105,8 +3287,7 @@ export class HostSync {
           if (op.ref.coll === "regions") {
             if (user.role !== "GM" && user.role !== "ASSISTANT")
               return { ok: false, reason: "forbidden", error: "only GMs edit scene regions" };
-            const regionError = regionGeometryError({ ...doc, ...op.diff });
-            if (regionError) return { ok: false, reason: "invalid_schema", error: regionError };
+
           }
           if (op.ref.coll === "tokens" && Object.hasOwn(op.diff, "elevation") &&
               (typeof op.diff.elevation !== "number" || !Number.isFinite(op.diff.elevation) || Math.abs(op.diff.elevation) > 1_000_000))
@@ -3149,6 +3330,14 @@ export class HostSync {
           const dry = applyDiff(doc, op.diff);
           if (!dry.ok)
             return { ok: false, reason: "invalid_schema", error: dry.error };
+          if (op.ref.coll === "regions") {
+            const regionError = regionGeometryError(dry.value);
+            if (regionError) return { ok: false, reason: "invalid_schema", error: regionError };
+          }
+          if (op.ref.coll === "scenes" && dry.value.type === "scene") {
+            const regionError = sceneRegionsError(dry.value as SceneDocument);
+            if (regionError) return { ok: false, reason: "invalid_schema", error: regionError };
+          }
           if (op.ref.coll === "journals" && doc.type === "journal" && dry.value.type === "journal") {
             const previous = doc as JournalDocument;
             const candidate = dry.value as JournalDocument;
@@ -3441,6 +3630,16 @@ export class HostSync {
    * state, always as an OpEnvelope with monotonic seq). Broadcasts the
    * projected envelope to every authenticated session.
    */
+  private draftCompatibilityError(ops: readonly Op[]): string | null {
+    const required = requiredOpFeatures(ops);
+    if (!required.length) return null;
+    for (const peer of this.sessions.values()) {
+      if (peer.user && required.some((feature) => (feature === LEVEL_PLAY_FEATURE || peer.user?.role === "GM" || peer.user?.role === "ASSISTANT") && !peer.features.has(feature)))
+        return `Upgrade or disconnect GM client ${peer.user.name} before changing draft levels`;
+    }
+    return null;
+  }
+
   private commitOps(
     ops: Op[],
     by: UserId,
@@ -3467,6 +3666,10 @@ export class HostSync {
       ops = fxBindingDeletionOps(this.store.world,
         boundFxDeletionOps(this.store.world, summonDeletionOps(this.store.world, deleting.ops)));
     }
+    if (!restoring) {
+      try { ops = stairMovementOps(ops, (id) => this.store.get("scenes", id)); }
+      catch (error) { return { ok: false, error: String(error) }; }
+    }
     if (audit) {
       if (!ops.length) return { ok: false, error: "Cannot audit an empty world action" };
       const previous = this.store.get("actionReceipts", audit.id) as ActionReceiptDocument | undefined;
@@ -3485,6 +3688,10 @@ export class HostSync {
         } }
         : { kind: "create", coll: "actionReceipts", data: candidate.receipt }];
     }
+    const compatibilityError = this.draftCompatibilityError(ops);
+    if (compatibilityError) return { ok: false, error: compatibilityError };
+    const membershipError = levelTransactionError(ops, (ref) => this.store.resolve(ref));
+    if (membershipError) return { ok: false, error: membershipError };
     // Capture the START of each token path before applying any op. A multi-op transaction
     // fires once from first pre-image to final committed position, never from an optimistic drag.
     // Remember source-addressable PF1e conditions before the envelope. Condition cleanup belongs
@@ -3824,6 +4031,7 @@ export class HostSync {
       // A visible document may add/remove an asset reference; even a projected-away op can
       // change the legacy "unreferenced" policy. Never leave connected clients with stale metadata.
       this.sendProjectedManifest(session);
+      this.sendLevelFocus(session);
     }
     this.reconcileFxInstances();
   }
@@ -9762,6 +9970,11 @@ export class HostSync {
   private undoStackApply(
     which: "undo" | "redo",
   ): { ok: true; ops: Op[] } | { ok: false; error: string } {
+    const preview = which === "undo" ? this.undoStack.peekUndo() : this.undoStack.peekRedo();
+    if (preview) {
+      const error = this.draftCompatibilityError(preview.ops);
+      if (error) return { ok: false, error }; // do not consume history on an upgrade refusal
+    }
     const item =
       which === "undo"
         ? this.undoStack.applyUndo()

@@ -12437,3 +12437,383 @@ canvas box was tried and reverted: it changed pointer and drag behaviour (the fo
 image-preview flow both broke). Verified by `tests/core/windows.test.ts` (inset) and the hexcrawl, windows,
 canvas-toolbar, campaign-codex and image-handling Chromium e2e runs. `e2e/hexcrawl_fog.spec.ts` now closes the
 GM settings window before its drag, because that window now opens clear of the rail and can cover the target hex.
+
+## D-412 — Shared scene zoom control; reliable saves planned (2026-10-10)
+
+The GM and player boards now share `ZoomControl.svelte`: a top-right disclosure with a
+10–1000% logarithmic slider, percentage readout, keyboard controls and touch-sized targets.
+It zooms about the canvas centre, stays synchronized with wheel/toolbar/FX camera changes,
+and cancels scripted camera movement on manual input. Camera changes remain local to each
+viewer. The existing unmodified mouse-wheel controller remains cursor-pinned; DOM wheel
+line/page units are now normalized to CSS pixels. Help no longer incorrectly requires Alt.
+
+Verification: canvas/controller unit suites 47/47; production Chromium `file://` zoom spec
+passed (including narrow viewport), and manual-signaling join spec passed with player wheel,
+slider and GM-camera-independence assertions. The expanded two-canvas join scenario has a
+90-second budget (the initial parallel validation run exceeded its old 30-second budget).
+Typecheck/Svelte compiler passed with only the existing ReplayPanel advisory. Production
+bundle is 4,839,411 raw bytes, within budget. Not full cross-browser/touch-device acceptance.
+
+`SAVE_SYSTEM_PLAN.md` records the persistence audit, Foundry/Roll20 comparison, and phased
+local durability, explicit-save, backup, retention and cloud design. It is a proposal, not
+an implemented save feature or authorization to silently remove campaign history.
+
+## D-413 — Quiet local autosave, explicit Save now, and retryable failures (2026-10-10)
+
+**User constraint.** Saving must not introduce GM approval queues, per-edit notices or routine
+save toasts. Existing create/upload permissions remain the only authorization policy.
+
+**Delivery.** Settings and Session & world's World files section share `SavesPanel`: Save now,
+a quiet last-save timestamp, and a collapsed backup/portability section. One persistent shell
+banner appears on failure and offers Retry save. A failed Close world leaves the table mounted;
+Root only returns to the picker after the awaited close succeeds. No player notification protocol
+or approval UI was added.
+
+**Persistence corrections.** Host boot now actually starts the periodic document flush. Replayed
+OpLog changes mark their roots dirty (otherwise advancing a later flush watermark could lose the
+replayed state on the next restart). Journal records remain queued through failures, all persistence
+jobs serialize, and aborted transactions restore dirty roots without advancing cached/durable
+watermarks. Checkpoints delete stale roots and preserve new edits arriving during the transaction.
+Retries back off to at most one automatic attempt per 30 seconds while failures continue; Save now
+explicitly retries immediately. Failed close remains retryable.
+
+`SaveCoordinator` waits for registered active host action/upload, image-pipeline, asset and package
+work; performs strict GM fog readback; drains retained host fog writes; then flushes documents.
+Fog writes retry the newest per-user/per-scene value. Explicit saves checkpoint realtime strategic
+state without advancing it. Existing ZIP/folder exports run Save now first. Web Locks guard GM
+world opening on supported origins and release on close/boot failure; no cross-origin/fallback
+writer fencing is claimed. The lock is acquired before HostPersister.open updates world metadata.
+
+**Scope.** This is the local foundation and primary P1 UX, not completed P2–P5. No automatic
+history deletion, backup filters, cloud OAuth, versioned backup retention, all-domain frozen export,
+or resumable upload recovery is claimed. Pending uploads not yet accepted by the host are not saved
+world contents. A browser may terminate before an unload save completes. See the implementation
+update in `SAVE_SYSTEM_PLAN.md` for explicit remaining work.
+
+**Executed evidence.** Final full Vitest: **367 files passed / 2 skipped; 5,239 tests passed /
+12 skipped / zero failed**. Typecheck + 82-component Svelte compiler check passed (only the existing
+ReplayPanel advisory); full ESLint and diff whitespace check passed. Production `index.html`:
+**4,850,089 raw / 1,378,541 gzip bytes**, below the 6 MB raw budget. Chromium `file://`, one worker,
+zero retries: `e2e/saves.spec.ts` **3/3** (quiet autosave/manual save/reload/download; quota failure,
+failed close and recovery; two-GM-tab lock) plus `e2e/join.spec.ts` **1/1**. New unit coverage injects
+journal failure, transaction abort/concurrent edits, second-restart recovery, checkpoint deletion,
+failed-close retry, fog write/readback failure and realtime explicit checkpoints. An earlier full
+suite run under parallel validation load had one action-card rejection-message timing failure;
+the isolated case, the full sync suite and the subsequent full suite all passed without changing
+that assertion. No Firefox/WebKit or real mobile-device acceptance was run for this slice.
+
+## D-414 — Opt-in manual Google Drive backup prototype (2026-10-10)
+
+**Request.** Deliver a cloud-backup prototype without adding per-edit approvals or interrupting
+ordinary local saving. Drive is the first destination; GitHub remains a later provider.
+
+**Implementation.** The existing GM-only Saves panel now has a nested Google Drive prototype
+section. Public OAuth Web-client setup is remembered on this browser, not in world settings.
+Google Identity Services loads only after the GM explicitly enables sign-in, and the already-loaded
+client opens its popup directly from Connect. Request scope is only `drive.file`, with granted-scope
+aggregation disabled. Access tokens and resumable session URLs stay in memory; disconnect and world
+close clear them. Narrow GIS script/style/frame CSP allowances are documented rather than relaxing
+script policy to arbitrary HTTPS origins. Direct authentication deliberately requires HTTPS;
+`file://` retains its normal local backups and contacts no Google service.
+
+Each Back up now creates a complete world ZIP using Save now + the existing exporter and its
+media-rights checks. A conservative sequence/activity-stamp guard refuses observed world mutations
+during preparation (not a claim of P2's full frozen multi-domain snapshot). The upload is capped at
+64 MiB, uses a new Drive-generated ID and 4 MiB resumable chunks, and retries the same ID/bytes in the
+current session after probing the received range. Existing snapshots are never deleted or replaced.
+Drive's SHA-256 + size, or a full checked read-back if SHA-256 is absent, must agree before the verified
+marker/timestamp is set. Downloads always check actual size/hash again before yielding a ZIP. The UI
+lists up to 20 recent supported backups across worlds and links to the managed folder. Restore stays
+in the existing start-screen Open file → Open as new world flow, never automatic live-world replacement.
+
+Provider URLs are origin/path checked before attaching authorization, redirects are refused, reads
+are size-bounded, and errors never echo raw provider response bodies. No new credential enters a
+world archive. An abandoned/cancelled job may leave an incomplete file; reconnect abandons the
+memory-only retry job, so the documentation does not promise cross-session deduplication. Backups
+contain GM/private data and are not ArenaStar-encrypted; sharing/privacy warnings are visible before
+upload. Cloud errors stay in the expanded panel and do not masquerade as local-autosave failures.
+
+**Evidence.** Full unit suite: **370 files passed / 2 skipped; 5,261 tests passed / 12 skipped**.
+The 22 new provider/auth/controller unit tests pass, as does the final 33-test cloud/save/host-boot
+regression run. Full typecheck and ESLint pass (83 Svelte components; only the existing ReplayPanel
+advisory). Production bundle: **4,873,590 raw / 1,385,972 gzip bytes**, within the 6 MB budget.
+Chromium production-bundle acceptance: `cloud_backup` **2/2**, using simulated GIS/Drive with a real
+exported ZIP and actual browser CSP, plus `saves` **3/3** unchanged. Checks cover consent opt-in,
+checksum failure/retry without a new file ID, checked download/corruption, credential exclusion from
+ZIP/localStorage and local-file fallback. An initial browser run caught unbound native `fetch`
+invocation; binding the actual browser fetch receiver fixed it before final acceptance.
+
+**Gate remains open.** No live Google account was authenticated or uploaded to. OAuth registration,
+consent, provider CORS/session headers, cross-device restore and supported browser/mobile behavior
+need the real-provider gate in `CLOUD_BACKUP_PROTOTYPE.md`. No GitHub integration, background
+schedule, retention pruning, encrypted archives, persistent upload queue or production-ready
+cloud-save claim is made. `SAVE_SYSTEM_PLAN.md` records this as a prototype, not completion of P4/P5.
+
+
+## D-415 — Remembered cloud accounts, GM size limit and GitHub release backups (2026-10-10)
+
+**Request.** Session-only authentication is inconvenient; complete worlds with images/FX easily exceed
+192 MiB; add world-file backups in the GM's GitHub repository. This supersedes D-414's 64 MiB and
+session-only/no-GitHub exclusions, without changing quiet local autosave or adding per-edit approval.
+
+**Decision.** Add an optional same-origin, single-GM Node companion rather than persist expiring
+access tokens or long-lived credentials in browser storage. Google uses offline authorization code
++ PKCE and session-bound expiring state. A protected server-side refresh grant survives service
+restart; browser pairing uses a persistent HttpOnly/SameSite cookie (Secure on HTTPS, 90 days).
+Host/origin/header checks, hashed stored sessions, pairing rate limiting and bounded provider reads
+protect the API boundary. World close clears memory only. Explicit browser forgetting and Google
+account disconnection/revocation are separate operations. GitHub uses the companion's saved `gh`
+login or a securely provisioned fine-grained token. Static-only deployments retain explicitly
+**temporary** GIS mode, while ordinary local VTT use remains serverless. One-time service/OAuth setup
+is required; these are not magically authenticated by Arena's coding-session connection.
+
+The GM's device-local cloud cap defaults to 512 MiB and is configurable to 1–2048 MiB or zero for no
+additional cloud cap. World ZIP bounds rise to 1 GiB compressed / 2 GiB extracted and 512 MiB per
+binary entry; larger custom settings raise the archive/aggregate guards, while tighter JSON/path/count
+checks remain. Hashing uses bounded 4 MiB slices. Full ZIP generation and browser restore still use
+memory; the setting does not promise unlimited scale. GitHub transport enforces 2 GiB per asset.
+
+GitHub snapshots use new UUID-tagged draft releases in a **private**, writable repository. Upload byte
+count/hash and asset digest or streaming read-back must match before publication. Retry verifies the
+same existing asset without replacing it; failed partial drafts can require a fresh snapshot and are
+retained. No deletion, retention, auto upload or Git-history binary churn. Recent verified backups
+and checked downloads feed the existing Open as new world restore flow. CDN redirects never receive
+the GitHub credential. Vault/settings never enter world archives. Backups remain unencrypted and
+include GM notes/private chat. The companion is one trusted GM account context, not a multi-tenant
+server; protect its filesystem and do not run multiple instances against one credential directory.
+
+**Evidence.** Full Vitest: **371 files passed / 2 skipped; 5268 tests passed / 12 skipped**. Targeted
+cloud/auth/ZIP regression: **47 passed**. **6 Node HTTP integration tests** cover pairing and Google
+refresh across restart, PKCE/state, cancellation/revocation failure, private GitHub verify/publish/retry,
+read-back failure and redirect isolation. Chromium production bundle: cloud **3/3**, saves **3/3**;
+includes actual ZIP upload/download, remembered GitHub cookie after reload, persisted size preference
+and no credential in ZIP/localStorage. Typecheck/ESLint pass; 83 Svelte components, zero blockers and
+one existing ReplayPanel advisory. Build raw **4,886,984** / gzip **1,390,309** bytes, below 6 MB.
+
+**Open gate.** No real Google/GitHub account or repository was modified. Live consent/offline refresh,
+Release upload/quota behavior, >192 MiB media-world roundtrip/performance, reverse-proxy lifecycle,
+cross-device and Firefox/Safari/mobile acceptance remain required. Google Testing/expired/revoked
+grants and GitHub token expiry can still require reauthorization. The setup and precise lifecycle,
+limits and retained-failure semantics are in `CLOUD_BACKUP_PROTOTYPE.md`. Scheduling, retention,
+history presets, encryption and durable upload queues are not part of this revision.
+
+
+## D-416 — Native Faux Overhead foundation, not a complete multilevel release (2026-10-10)
+
+**Decision.** Implement the unavailable region-based Faux Overhead mechanism natively. The first
+slice stores an optional public `RegionDocument.fauxOverhead` behavior with cover Z, half-open feet
+band and normalized V2 component/holes footprint. Legacy convex automation geometry remains separate.
+Inverse Pixi masks clip tactical token art without touching map pixels or fog; CPU point predicates
+also gate canvas picking. Suppress identifying decorations conservatively near the cover. No new
+runtime dependency or upstream implementation is adopted.
+
+**Boundaries.** Region edits/removal are GM-only, including parent-scene/dotted edits. Validate the
+final staged region state and imported scenes; cap shape/scene complexity. Public masks cannot be
+hidden from the very replicas expected to render them. Use the normal host transaction/undo/save
+path, not a new per-edit acceptance workflow. Existing format-2 archives retain this cosmetic field;
+older clients ignore it, so this is explicitly not the new multilevel authority/world-format gate.
+
+**Evidence.** Full Vitest 5,283 passed / 12 skipped (374 files / 2 skipped); final targeted 289 passed.
+Nine Chromium single-file browser tests pass, including GPU pixel readback, local holes/component
+union, editor undo/redo and regression journeys for player fog, walls, saves and zoom. TypeScript,
+targeted ESLint and Svelte check pass (one pre-existing advisory). The browser tests caught and now
+cover Pixi's null-mask detachment and consecutive-hole cut behavior; clear `view.mask` before destroying
+its Graphics and cut all holes belonging to one component together.
+
+**Still open.** Stable native level records/scopes, actual finite-height wall/surface authority,
+per-level fog, ghosts, stair movement, roof groups, enhanced wall authoring, import/migration and
+performance/cross-browser gates remain tracked in `MULTILEVEL_IMPLEMENTATION.md`. No stacked-floor
+secrecy, dense-scene performance or complete design implementation is claimed by this slice.
+
+
+## D-417 — Guarded native wall corner and split gestures (2026-10-10)
+
+**Decision.** Add endpoint snapping, joined-corner dragging and plain-segment splitting to the
+existing GM wall tool. Use detached document previews and the normal atomic Ops/undo/save path;
+never stream intermediate corner updates into shared state or require manual save acceptance.
+Pick tolerance is eight CSS pixels. Joined membership uses exact coordinate coincidence (within
+1e-7 world units), not transitive proximity. Preserve coordinate order and metadata; split retains
+the original ID on its first half. Refuse protected portal/window/prefab subdivision and collapse.
+
+**Concurrency.** An optional intent-only `wallEdit: { sceneId, wallsHash }` contains a canonical
+SHA-256 digest of all walls at gesture start. The host checks GM/assistant role, same-scene bounded
+coordinate Ops and this precondition synchronously before ordinary validation/commit. Conservative
+scene-wide invalidation catches new attached walls and metadata changes; unrelated world traffic
+is allowed. Acknowledgment failures/stale edits surface as non-modal warnings. No generic Op schema,
+committed envelope, replay, archive or player projection carries the guard. Legacy unguarded intents
+remain unchanged; this is not an authorization grant or a replacement for capability negotiation.
+
+**Evidence.** Full suite: 5,305 passed / 12 skipped; 376 files passed / 2 skipped. Eleven Chromium
+single-file tests pass, including actual corner/split undo/redo, detached previews, protected doors
+and windows, Escape/blur/pointer cancellation and outside-canvas release; cover, fog, save and zoom
+regressions also pass. TypeScript, Svelte, targeted lint and production build pass.
+
+**Scope.** Flat geometry only. Native level IDs, topology partitioning, finite-height physical
+queries, host exposure, per-level fog and compatibility/migration gates remain unfinished. Split
+is not a general external-reference rewrite (old references keep the first-half identity). No
+freehand/merge, lock-authoring UI or cross-browser/dense-scene performance claim is made.
+
+
+## D-418 — Native spatial queries before live multilevel activation (2026-10-10)
+
+**Decision.** Implement `core/spatial/kernel.ts` as a detached, validated CPU snapshot with finite-height
+wall rays, independently restricted horizontal surface planes, continuous fixed-orientation rectangular
+body sweeps and authored support point probes. XY remains pixels; Z/body height use scene distance units.
+Do not infer collision from level membership, viewed floor or art alpha. Do not silently reinterpret
+legacy `oneWay`; the test adapter retains existing conservative two-sided behavior.
+
+**Contact contract.** Half-open wall bands; strict body-interior/plane overlap so standing on a floor
+and fitting exactly under a ceiling are allowed. Surface ray endpoint contacts block; coplanar rays do
+not cross. Solid hole rims and explicit signed wall directions are deterministic. Swept boundary contact
+is conservative and contact times are not automatic safe-stop positions. Shared plane footprints avoid
+independently drifting floor/ceiling openings. See `docs/multilevel/SPATIAL_KERNEL.md` for exact limits.
+
+**Safety boundary.** This slice adds no persisted schema, editable floor controls, live movement/fog
+replacement or new disclosure capability. Invalid input throws and must be rejected, never treated as
+clear. A support center probe is not full-body support or move permission. Full-scene adapters, revision
+caching/indexing, stairs, host authorization/exposure, per-level fog and archive/wire gates remain open.
+
+**Evidence.** 29 new kernel tests include geometric basement/ground/upper/roof separation, legacy rotated
+footprint conformance, malformed/sparse input rejection and seeded sweep/occupancy checks. Full Vitest:
+5,334 passed / 12 skipped; 377 files passed / 2 skipped. TypeScript and targeted ESLint pass. No new
+browser or multiplayer sealed-stack acceptance is claimed for this isolated kernel.
+
+
+## D-419 — Private native level drafts and fail-closed draft archives (2026-10-11)
+
+**Decision.** Add optional embedded `SceneDocument.levels` / `LevelDocument` records, store addressing,
+GM Scenes-sidebar draft editor and stable scene-copy reference remapping. These records are planning
+only: no token membership, wall scopes, physical surfaces, active navigation or fog conversion is
+inferred from their presence. Height/name/order changes never silently relocate tokens. Validate
+final staged bands/references atomically; limit to 32 levels, finite bounded floors and half-open,
+nonoverlapping bands. Gaps/unmatched feet produce audit warnings rather than automatic repairs.
+
+**Authority.** Only GM/assistant can author levels, including parent-array/dotted edits and deletion
+of a scene containing drafts. Player ownership does not override this. Omit drafts from snapshots,
+scene creates, updates and direct embedded Ops, including resolver-free projection. The editor uses
+minimal field diffs and detects stale local drafts; ordinary host field edits remain last-writer-wins,
+not a new compare-and-swap protocol. Normal save/undo stays automatic, with no per-edit approval queue.
+
+**Archive allocation.** Base export remains format 2. Presence of the levels field requires format 3
+and exactly the supported `scene-level-drafts-v1` feature marker. Reject unsupported required features,
+malformed levels and draft data mislabeled as format 1/2 before import writes. Old archive readers thus
+reject draft exports. This does not protect old binaries reopening shared local IndexedDB, nor supply
+a live wire handshake: require the same updated host/GM build. Future physical-stack capabilities
+must be separately required, so this draft-only reader rejects them. Full level/fog migration remains open.
+
+**Evidence.** Full Vitest: 5,347 passed / 12 skipped; 379 files passed / 2 skipped. Twelve Chromium
+single-file tests pass, including draft editing/validation, stable IDs, undo/redo and save/reopen,
+plus existing wall/cover/fog/save/zoom journeys. Host tests exercise player-owner rejection and
+snapshot/delta privacy; persistence tests cover scene/ZIP copy and rejected malformed/downgraded
+archives. TypeScript, targeted lint, Svelte (85 components, one existing advisory) and production
+build pass. No full multilevel gameplay, dense-scene or Firefox/WebKit/mobile acceptance is claimed.
+
+
+## D-420 — Draft-only capability negotiation and replay/undo compatibility (2026-10-11)
+
+**Decision.** Add optional bounded `hello.features` and `welcome.features`/`requiredFeatures` lists,
+with `scene-level-drafts-v1` as the first supported wire feature. Missing means legacy; unknown
+optional advertisements are tolerated, unknown required features are not. Send welcome before
+snapshot/replay, and refuse GM/assistant draft-bearing joins before data delivery if unsupported.
+Player projection still withholds drafts, so legacy players need no draft capability. Declarations
+never replace authentication, ownership or role checks.
+
+**Live edits and history.** Refuse draft-affecting commits while an authenticated GM lacks support;
+check both ordinary intent preflight and the final common commit boundary. Undo/redo checks happen
+before history is consumed, and GM failures surface as non-modal warnings. For a currently draft-free
+world, historical draft Ops force snapshot fallback for legacy GM reconnects instead of unsafe replay.
+Clients block unnegotiated draft sends/snapshots/Ops and clear capabilities on reconnect. Transport
+epoch fencing prevents old callbacks from re-establishing stale capabilities. Pending approval checks
+current world requirements and cannot revive a removed peer. Simulation re-welcomes retain features.
+
+**Evidence.** Full Vitest: 5,364 passed / 12 skipped; 380 files passed / 2 skipped. Seventeen new tests
+cover malformed/future feature lists, ordering, old GM/new player paths, blocked atomic transactions,
+replay fallback, preserved undo/redo, delayed approval and stale callbacks. Twelve Chromium built
+single-file regressions pass (draft editor, manual-join player fog, covers, walls, saves, zoom).
+TypeScript, targeted ESLint, Svelte (85 components; one pre-existing advisory), production build and
+whitespace checks pass. No testing of a historical external binary is claimed; legacy peers are
+simulated by featureless framed messages.
+
+**Boundary.** This gates draft schema compatibility only. Physical membership/scopes, host-authorized
+cross-floor disclosure, physical query integration, per-level fog and their required capabilities
+remain open. Other optional extensions and old IndexedDB readers are not certified by this marker.
+
+
+## D-421 — Explicit authoring membership before physical activation (2026-10-11)
+
+Add GM/API token level membership and wall topology scopes, validated against final staged scene state at both intent and central commit boundaries. Require feet/membership agreement only for explicitly assigned tokens; never auto-assign legacy tokens. Preserve stable references through scene copy, persistence and ZIP. Bindings get a distinct additive capability (`scene-level-scopes-v1`) rather than silently redefining draft-only compatibility.
+
+Keep membership metadata private in player snapshots and envelopes, including parent array/dotted replacements. Separate coincident-wall joint and corner-snap topology by exact normalized scope. Do not filter live physical queries by this authoring partition. No assignment UI, level navigation or stacked-floor gameplay is enabled in this change; host disclosure, per-level fog and live physics are still required. Existing automatic edit/save flow is unchanged.
+
+Verified: 5,378 Vitest passed / 12 skipped; 5 Chromium regressions passed; typecheck/Svelte, targeted ESLint and single-file build passed. Full design completion is not claimed.
+
+
+## D-422 — Explicit GM membership UI and binding audit (2026-10-11)
+
+Expose the D-421 contracts under the existing scene draft editor, not as a gameplay level switch. Token assignment previews and explicitly updates feet Z with membership; clearing membership leaves elevation alone. Wall assignment only updates scope and preserves geometry/axes/door metadata. Refuse locked/prefab walls and attached/summoned tokens in this editor. Show saved per-level binding counts/IDs and legacy totals so GMs can resolve deletion dependencies.
+
+Require compatible host, GM role, saved draft edits and a non-stale selected object/level revision. Reload is explicit after external changes; the local fence is not a host CAS. Preserve normal atomic undo/autosave with no approval queue. Physical authority, disclosure, fog isolation and scoped canvas tools remain pending.
+
+Verified: final full Vitest 5,382 passed / 12 skipped, 7 Chromium journeys passed; typecheck, targeted ESLint and build passed. Initial timing-sensitive FX gain-list failure passed unchanged on isolated and full rerun. Svelte: 86 components, zero blockers, one pre-existing ReplayPanel advisory.
+
+
+## D-423 — Per-level fog namespaces and scoped lighting, GM diagnostic first (2026-10-11)
+
+Add optional level IDs to fog wire requests/responses and isolate storage/cache/request keys. IndexedDB v5 uses a separate four-key levelFog store; old fog remains legacy-only. Use existing save coordination and archive infrastructure; declare fog capability and reject orphan/undeclared imports. Omit local orphan rows from exports. Do not spread old exploration across floors or infer player authority from a selected level.
+
+Only compatible GM/ASSISTANT sessions may request scoped fog until player exposure plans exist. Fence superseded scoped restores/polygons and capture readback destinations. Add LightDocument scopes, validated/copied/projected like wall scopes but separately negotiated. Share level-filtered sources between the GM fog diagnostic and renderer; retain all physical wall geometry and existing scene ambient settings. Provide a plainly labeled GM canvas diagnostic and light assignment/audit controls, not a multiplayer floor switch. Disable legacy manual fog painting in that diagnostic.
+
+Verified: 5,389 Vitest passed / 12 skipped; 9 Chromium journeys passed; typecheck, targeted lint and single-file build passed. Actual browser floor switch clears exploration/glow and restores the original floor from storage. Remaining: player disclosure plans, vertical light/surface tracing, per-level ambient, reset generations/base migration UX and full M2/M3 acceptance.
+
+
+## D-424 — Per-level ambient overrides with explicit inheritance (2026-10-11)
+
+Add optional finite LevelDocument.darkness in [0,1], with absence inheriting the scene and zero remaining a valid explicit override. Expose the choice in the GM draft editor. Use explicit field deletion to restore inheritance, preserving minimal atomic edits, undo and persistence. Require additive scene-level-ambient-v1 support rather than silently changing the earlier draft/light-scope capability contract.
+
+Share effective ambient values between GM diagnostic fog and lighting. Remove scene animation hints from explicit overrides and reset animation context on floor switches, preventing a bright previous floor from fading through a dark destination. Ambient changes affect current sight, not remembered exploration. No player disclosure or physical activation is implied; legacy darkness semantics remain intact.
+
+Verified: 5,400 Vitest passed / 12 skipped; 10 Chromium journeys passed; typecheck, targeted lint and build passed. Svelte: 86 components, zero blockers, one existing advisory. Player view plans, reset generations, vertical perception and the remaining full-design gates are still pending.
+
+## D-425 — Durable per-level fog resets, independent of undo (2026-10-11)
+
+Add `scene-level-fog-reset-v1` and a private level `fogEpoch` signal. Reset changes one scene/level generation for every user's remembered fog; it does not erase other levels or legacy fog. Do not use an undoable document field as sole authority: IndexedDB v6's independent `fogEpochs` ledger wins over structural undo/reopen. Persist the ledger before signaling clients. Serialize scoped fog tasks; require captured generation matches on reads/writes. Reject stale PNGs instead of relabeling them. Archive export canonicalizes live level generations and omits stale PNG rows; imports carry/seed the ledger.
+
+GM/ASSISTANT-only confirmed UI action in the existing diagnostic, correlated acknowledgment and failure/timeout status. It is deliberately not undoable. Currently visible areas can immediately be explored again. Old local PNG rows may remain but cannot be read under the new generation. Resets do not migrate legacy fog or enable player floor access.
+
+## D-426 — Host exposure planner and vertical-light query foundation; runtime still gated (2026-10-11)
+
+Native shared perception queries trace actual source/eye/target Z through the isolated wall/surface kernel, with separate sight/light channels and scene-unit 3D radii. Darkvision never bypasses occlusion; target-level ambient is explicit. Rotated body samples can authorize a token, never terrain between samples. Bound sources, bodies, viewers and rays; discard partial plans on failure.
+
+Add an immutable host-only planning API validating owned observers (including actor ownership), directed floor eligibility, manual/hidden-token restrictions, and geometry-aligned bodies. Player floor preference is not authority; unowned floor names remain undisclosed. Private per-session exposure tracking produces revisioned additions/removals without canonical world deletes and rejects stale/wrong-viewer plans.
+
+**Not connected to production projection or rendering.** No player-facing feature flag, endpoint or floor selector is enabled. Live authoritative geometry adapters, snapshot/delta/asset/FX/replay redaction, conservative terrain masks, generation barriers and action/hover authority remain required. This is not completion of player-authorized floor disclosure or live vertical lighting.
+
+Combined verification: 5,410 Vitest passed / 12 skipped; TypeScript and Svelte (86 components, zero blockers, one existing advisory), targeted ESLint and self-contained build passed. Chromium level journey now verifies reset cancellation, clearing remembered fog in darkness, and reopen. Additional sealed-plane/aperture, sight-vs-light, distance-unit, forged-observer, conceal-revision, stale PNG/history and archive/copy tests pass. No full multilevel multiplayer acceptance claimed.
+
+## D-427 — Player token-floor navigation before physical disclosure (2026-10-11)
+
+Add optional `scene-level-navigation-v1` and `level.focus` / `level.focus.state`. The host derives a small floor menu from the authenticated user's non-hidden controlled tokens, including actor ownership. It sends only those floor IDs/names, never private draft geometry, links or epochs. Unknown and unowned requests share the same error. Navigation is transient per-session state: no approval queue, document edit, movement, fog write or undo entry.
+
+The player shell's **Token floor focus** selector intersects the host's selected-floor token IDs with existing fog visibility for drawing and picking. It clears incompatible selection, supports returning to the shared scene, and revalidates floor choices after host commits. Capability negotiation, request correlation, revision rejection, reconnect clearing, timeout/retry and disabled-disconnected controls fence stale UI. Old peers continue to use their flat scene.
+
+**Deliberate scope limit:** this is token-floor focus, not isolated floor rendering or safe secret stacked-floor play. Shared artwork, lighting, legacy exploration, sheets, assets, FX and existing document projection are unchanged. D-426's physical exposure planner remains unconnected. The UI explicitly states this; full player perception switching must wait for conservative geometry/art masks and complete disclosure integration.
+
+Verified: **5,412 Vitest passed / 12 skipped**, 385 files passed / 2 skipped. **Three Chromium journeys passed**, including a real manual-join floor selector, drawing/picking intersection, return to shared view and live floor withdrawal after token reassignment, plus both existing player-fog journeys. Typecheck, targeted ESLint and single-file build passed; Svelte 86 components / zero blockers / one existing advisory. The first browser attempt timed out on an incorrect test-only session-close selector; corrected to the actual accessible button and passed.
+
+## D-428 — Usable discrete floor maps and stairs-first player travel (2026-10-11)
+
+User correction: a token-only floor filter is not usable when several maps overlap. The normal player path must be entering stair regions, not choosing a floor from a menu. D-427's token-only focus remains a legacy fallback, not the target experience.
+
+Add explicitly activated `SceneDocument.levelMode: "isolated"` with `scene-level-play-v1`. Each private level can assign up to 1,000 unique existing `tileIds` and explicitly choose `useSceneBackground`. Player floor scenes contain only the host-approved level's tokens, map tiles, scoped/all-level walls and lights, and effective ambient. Remove unassigned art and the global foreground; do not interpolate floor artwork from sparse sight samples. Unscoped drawings/templates/notes/regions/sounds/hexcrawl overlays and the legacy manual fog mask are excluded from this discrete view. Players without an eligible controlled token, or awaiting a matching host view revision, get an empty floor canvas, never all maps layered together.
+
+In isolated mode null `level.focus.levelId` means **follow a controlled token**. The host retains/revalidates the followed identity; selecting another controlled token can change it. Membership changes update the floor automatically. The manual menu is collapsed and labeled as a fallback. Selecting a floor is still not authority to move a token or reveal an unowned level.
+
+GM-authored `RegionDocument.stairs: {from,to}` derives transitions at the host. Only a committed XY move from outside to an endpoint inside a source-level region triggers. Preserve accepted XY and append destination membership + Floor Z in the SAME envelope/undo step. No trigger on creation, explicit elevation/membership edits, structural level/region edits or undo/redo. One transition per mover; overlap ambiguity rejects the transaction. Paired return regions require leaving and re-entering, preventing bounce. Validate the moving footprint against source movement walls and the stationary landing footprint against destination movement walls. Attached/summoned tokens are deliberately not auto-relocated by this first stair path. This is discrete floor travel, not gravity, arbitrary teleport, support physics or vertical LOS.
+
+Player exploration now uses authorized per-user/per-scene/per-level PNG namespaces and host-supplied reset epochs. A bounded session grant from a prior authorized read permits the player's last old-floor PNG to flush after leaving; it never grants a read or reset, and epoch fencing still applies. Rendering, picking and lighting consume the same filtered floor. Clear stale surfaces/images while switching; ignore views that do not match the replica sequence. Reset remains GM-only even though players can now read/write their authorized floor maps.
+
+GM setup lives in Scenes → Draft levels: assign map tiles/background and ambient per level, assign walls/lights under Membership, create rectangular stair/return regions, then enable isolated floor play. No silent migration, per-edit approval or world-history entries for view selection. Cross-references validate atomically; copy rekeys maps and stair endpoints; save/export/import preserve configuration. Incompatible live players block activation, and incompatible joins fail before snapshots.
+
+**Scope boundary:** ordinary document/asset/sheet/FX projection is not comprehensively redacted by floor; this implements a usable isolated canvas, not a secret-data guarantee. Cross-floor sight/light, conservative aperture terrain masks, floor-scoped auxiliary authoring, FX/audio and full action authority remain pending. The legacy GM diagnostic still presents the GM's all-art authoring canvas.
+
+Verified: **5,416 Vitest passed / 12 skipped**, 386 files passed / 2 skipped. **Five Chromium journeys passed**: actual player drag into stairs, GPU red→blue→red map pixels at identical XY, separate dark-floor exploration, preserved ground-floor exploration on return, collapsed fallback, plus legacy floor focus, ambient/reset/reopen and both player-fog regressions. TypeScript, targeted ESLint and self-contained build passed. Svelte: 87 components, zero blockers, one existing ReplayPanel advisory. Initial browser test fixture camera lookup/coordinate errors were corrected; final journey passes without retries.

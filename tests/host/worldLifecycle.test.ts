@@ -96,6 +96,8 @@ async function populatedWorld(worldId: string, root: MemDirHandle): Promise<Host
   });
   await db.put(STORES.simdeltas, { worldId, sceneId: DEFAULT_SCENE_ID, version: 1, bytes: new Uint8Array([1]) });
   await db.put(STORES.fog, { worldId, sceneId: DEFAULT_SCENE_ID, userId: "gm", png: new Uint8Array([1]) });
+  await db.put(STORES.fogEpochs, { worldId, sceneId: DEFAULT_SCENE_ID, levelId: "deleted-level", epoch: "fixture" });
+  await db.put(STORES.levelFog, { worldId, sceneId: DEFAULT_SCENE_ID, userId: "gm", levelId: "deleted-level", png: new Uint8Array([2]) });
   const opfs = await OpfsAssetStore.open(app.worldId, root);
   await opfs?.put(BLOB_HASH, BLOB_BYTES);
   await db.put(STORES.assets, { worldId, hash: BLOB_HASH, name: "blob", mime: "application/octet-stream", size: 2, chunks: 1 });

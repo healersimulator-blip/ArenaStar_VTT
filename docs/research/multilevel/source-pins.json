@@ -1,0 +1,170 @@
+{
+  "researchedAt": "2026-10-10",
+  "purpose": "Design research only; no upstream runtime code or assets adopted",
+  "arenaStarBaseline": "5ac64405b0b9307e9df32cd3494c27b94176deda",
+  "arenaStarWorkingTree": "Includes existing uncommitted save/cloud/zoom changes; local file references describe this working tree, not just the baseline commit",
+  "sources": [
+    {
+      "name": "Foundry VTT v14 public documentation",
+      "evidence": "public API contracts and release documentation; proprietary core source not inspected",
+      "urls": [
+        "https://foundryvtt.com/releases/14.359",
+        "https://foundryvtt.com/releases/14.354",
+        "https://foundryvtt.com/api/v14/classes/foundry.documents.BaseLevel.html",
+        "https://foundryvtt.com/api/v14/classes/foundry.documents.Level.html",
+        "https://foundryvtt.com/api/v14/classes/foundry.data.fields.SceneLevelsSetField.html",
+        "https://foundryvtt.com/api/v14/classes/foundry.data.regionBehaviors.DefineSurfaceRegionBehaviorType.html",
+        "https://foundryvtt.com/api/v14/classes/foundry.data.regionBehaviors.ChangeLevelRegionBehaviorType.html",
+        "https://foundryvtt.com/article/scene-regions/",
+        "https://foundryvtt.com/article/walls/"
+      ],
+      "legalStatus": "pending"
+    },
+    {
+      "name": "Baileywiki Better Levels",
+      "versionObserved": "2.0.14",
+      "evidence": "publisher-maintained product description, changelog and public manifest; implementation source NOT retrieved",
+      "urls": [
+        "https://foundrymods.com/modules/baileywiki-better-levels",
+        "https://foundrymods.com/api/v1/modules/baileywiki-better-levels",
+        "https://foundrymods.com/api/v1/manifest/baileywiki-better-levels"
+      ],
+      "downloadAttempt": "https://foundrymods.com/api/v1/modules/baileywiki-better-levels/download?version=2.0.14",
+      "downloadResult": "fetch_page returned HTTP 500; no ZIP inspected or archive checksum obtained",
+      "publicRepository": null,
+      "licenseVerified": false,
+      "legalStatus": "pending",
+      "followUp": "Optional future parity/source audit when Baileywiki download works; V13 Ripper predecessors now supply inspected implementation evidence for the independent ArenaStar design, not proof of Better Levels internals."
+    },
+    {
+      "name": "Monk's Wall Enhancement",
+      "repository": "https://github.com/ironmonk108/monks-wall-enhancement",
+      "commit": "79c722aef1cb772885ab28e8a267b5178c06fabe",
+      "commitDate": "2026-05-17T00:10:26Z",
+      "manifestVersion": "14.01",
+      "foundryCompatibility": {
+        "minimum": "14",
+        "verified": "14"
+      },
+      "evidence": "source, settings, manifest, README and LICENSE inspected via GitHub contents API at the exact commit",
+      "files": {
+        "monks-wall-enhancement.js": "b1b0b709ce2572bcd38d96547ce64321691fb84203827c0c74dcd68dc57b6353",
+        "settings.js": "70705a080d0a0e9b37c3f7f791acc94d9f27b0057f77a9e47db775b07ae9ca33",
+        "module.json": "d3039ed2b2cc7130e3ab0fe9a2202641e7937c4bf34190a2919cb045211d6dc7",
+        "README.md": "e96c39f6ece1cd529dd25cbd9f805c94b1c9933a8d5b9736a0d871fcaecb34d3",
+        "LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+      },
+      "licenseFact": "LICENSE contains GPLv3; README additionally asserts Commons Clause and a Foundry EULA limited-license condition. Do not rely on GitHub's GPL-only badge as the complete permission statement.",
+      "legalStatus": "pending",
+      "transfer": "Behavioral reference and pinned line-range links only; no verbatim upstream implementation committed"
+    },
+    {
+      "name": "Better Roofs \u2014 V13 predecessor",
+      "repository": "https://github.com/theripper93/Better-Roofs",
+      "commit": "df35cca8c73e7e8d420a81aada7b65c591c06d82",
+      "tagObserved": "3.0.0",
+      "sourceManifestVersion": "1.1",
+      "foundryCompatibility": {
+        "minimum": "13",
+        "verified": "13"
+      },
+      "evidence": "Pinned repository source inspected; static review only, not Foundry runtime or published release-archive verification",
+      "files": {
+        "LICENSE": "b9c297bfdb81a430c79b3ebbf8cc0a9700b366b80ee7c28321eee89086f7a187",
+        "module.json": "bddff1cf7f6c810e2811a661e927cbd9146adad67750831beabd4e715020273c",
+        "README.md": "9ccf505a55a46577db97c27d7c113ab145ad360decd097de31b81e61f4ca914d",
+        "scripts/main.js": "1ee56d7a1283420b02d0f376188fa9b94c6b003ab609c81019cb082f38610e29",
+        "scripts/roofs.js": "38ef4fa98f42bdab9f94b126379e0de84f1de72ead24ad0483c0c96f8c03d33b",
+        "scripts/helpers.js": "a0c86a51f6fdb81517fef9d6ac16ef7b3ddcc60a03228319acae53643119bba1",
+        "scripts/occlusionlink.js": "6167002d132e0d74854d0b04c09dc28fabb5c42ab58ba210d83e33da0e2e2e66",
+        "scripts/config.js": "af41ff2d20034b3bc48fc4047795aa8fb90e0348cced53e44e8cb916c4ec37df"
+      },
+      "legalStatus": "pending",
+      "transfer": "Behavioral reference and source-reading links; original ArenaStar design helpers only, no verbatim upstream implementation committed",
+      "licenseFact": "MIT License, copyright (c) 2023 theripper93, inspected at this pin; project adoption approval still pending",
+      "versionCaveat": "Repository manifest version differs from release-tag label. The exact commit and compatibility fields, not the stale numeric version alone, identify this source; release ZIP contents were not compared."
+    },
+    {
+      "name": "Levels \u2014 V13 predecessor",
+      "repository": "https://github.com/theripper93/Levels",
+      "commit": "17d4cfdd674b45e4abf4235416a23f889ba12163",
+      "tagObserved": "6.1.0",
+      "sourceManifestVersion": "4.2.7",
+      "foundryCompatibility": {
+        "minimum": "13",
+        "verified": "13",
+        "maximum": "13"
+      },
+      "evidence": "Pinned repository source inspected; static review only, not Foundry runtime or published release-archive verification",
+      "files": {
+        "module.json": "38f07fafbd9a163fc70f008f4d96d4bc7e6baeaf85b37536705091fc5f706502",
+        "README.md": "d553ba9d1f5d1c69aab6fa57ab33fd73a1c5de3ffa61c191beaf8d94c230a536",
+        "scripts/config.js": "82a5e9a16dfcc921e9b84875402bcc8bb0dce6717e882f1605b2a1ca9ca4b22f",
+        "scripts/main.js": "5a7c26bfeb20f8ca094112195d02649f19c98764402b58c56ec5c77d9f33cd7d",
+        "scripts/API.js": "dc277dcfb05d991a53971362114fd9bc6acb1dc7e71bc6d1a7038ed36eaa8a56",
+        "scripts/wrappers.js": "4c3c3e5b50af1818378faab8043547dc9fa77945d13c5bb5a46b7b9ac4ea085b",
+        "scripts/helpers.js": "12981e64f15d9e22ed665f45423a94daf2a99226b89f7d7b03363735fe0e675d",
+        "scripts/handlers/sightHandler.js": "9327baad40adb876548a16a0207cd2b9d1bd9f569dc2bf783f5528c4bd1ecd55",
+        "scripts/handlers/tileHandler.js": "16ec1d8df907eeeca613dfac65aab8f6aeb79114e5c1dd3b33c2c9f9abca86f5",
+        "scripts/handlers/tokenHandler.js": "abeb869d18c8f653d2e00866f316944a6b86cf5815bc1ccf2e79bb4d0dd75f08",
+        "scripts/handlers/regionHandler.js": "88f61efa0f022052d1a0bf67d59989dd6f226c771e6368a0c63c67b512a43426",
+        "scripts/handlers/drawingHandler.js": "a2dd8b48be3b41a9e933ebb1258559567eb863b28b64156db937b5d5fe7b5196",
+        "scripts/handlers/lightHandler.js": "964ece7c25abe306b7367af29f02531bba752507e771d0c36dc3bad07b1c6048",
+        "scripts/handlers/soundHandler.js": "dbc6d42dac07d2accc00c0a2969500a035a1941fc5f7fc0917ece914bf5e4c4b",
+        "scripts/handlers/fowHandler.js": "5175d589c8971232becd611ffebdd36299b0617983d6e083573978599e1e2ba2",
+        "scripts/handlers/FogManager.js": "ff857323b22214711ebe5377069e863f00a1dba1bd7f0b28269dd85fff8ca900"
+      },
+      "legalStatus": "pending",
+      "transfer": "Behavioral reference and source-reading links; original ArenaStar design helpers only, no verbatim upstream implementation committed",
+      "licenseFact": "No LICENSE/COPYING license grant located in inspected repository tree or README. FogManager.js at the predecessor pin labels a substantial section as original code retained due to protected methods; review underlying provenance separately. Public source is not a redistribution grant.",
+      "versionCaveat": "Repository manifest version differs from release-tag label. The exact commit and compatibility fields, not the stale numeric version alone, identify this source; release ZIP contents were not compared."
+    },
+    {
+      "name": "Better Roofs \u2014 V14 comparison",
+      "repository": "https://github.com/theripper93/Better-Roofs",
+      "commit": "83867b4d5b34711e7bec52d91946b1f1f170dbb9",
+      "tagObserved": "4.0.2",
+      "sourceManifestVersion": "1.1",
+      "foundryCompatibility": {
+        "minimum": "14",
+        "verified": "14",
+        "maximum": "14"
+      },
+      "evidence": "Pinned repository source inspected; static review only, not Foundry runtime or published release-archive verification",
+      "files": {
+        "LICENSE": "b9c297bfdb81a430c79b3ebbf8cc0a9700b366b80ee7c28321eee89086f7a187",
+        "module.json": "7bd308bb5d21ad3ace5be255b06e37f302d1beef9730147fae02bb93df71aa3a",
+        "scripts/main.js": "1ee56d7a1283420b02d0f376188fa9b94c6b003ab609c81019cb082f38610e29",
+        "scripts/roofs.js": "ebfb3f45f8894ef25b6b463f28bda0a3266223600a7136168d15c8e697122339",
+        "scripts/occlusionlink.js": "2b8e558944b53420026a4fdf18ba87d94efeca0e41dbba1184388dfdcb8b7c38"
+      },
+      "legalStatus": "pending",
+      "transfer": "Behavioral reference and source-reading links; original ArenaStar design helpers only, no verbatim upstream implementation committed",
+      "licenseFact": "MIT License, copyright (c) 2023 theripper93, inspected at this pin; project adoption approval still pending",
+      "versionCaveat": "Repository manifest version differs from release-tag label. The exact commit and compatibility fields, not the stale numeric version alone, identify this source; release ZIP contents were not compared."
+    },
+    {
+      "name": "Levels \u2014 V14 migration comparison",
+      "repository": "https://github.com/theripper93/Levels",
+      "commit": "230f3ac3d784932f15dad84fb43aa1dc66000b42",
+      "tagObserved": null,
+      "sourceManifestVersion": "4.2.7",
+      "foundryCompatibility": {
+        "minimum": "14",
+        "verified": "14",
+        "maximum": "14"
+      },
+      "evidence": "Pinned repository source inspected; static review only, not Foundry runtime or published release-archive verification",
+      "files": {
+        "module.json": "ca540b559c28992e00ff35183ba501551f0c00e51207ddcae8d7cb8776582e0d",
+        "README.md": "d553ba9d1f5d1c69aab6fa57ab33fd73a1c5de3ffa61c191beaf8d94c230a536",
+        "scripts/main.js": "ad09f77d7ad35ebfc0d8ef207af47adbfc78b2f6ecf1409a6aacdb1dc2230da5",
+        "scripts/migration.js": "ba2a90f54d16e5c5a1d94619d377c4f298d241368d5afb08771057429d25609e"
+      },
+      "legalStatus": "pending",
+      "transfer": "Behavioral reference and source-reading links; original ArenaStar design helpers only, no verbatim upstream implementation committed",
+      "licenseFact": "No LICENSE/COPYING license grant located in inspected repository tree or README. FogManager.js at the predecessor pin labels a substantial section as original code retained due to protected methods; review underlying provenance separately. Public source is not a redistribution grant.",
+      "versionCaveat": "Repository manifest version differs from release-tag label. The exact commit and compatibility fields, not the stale numeric version alone, identify this source; release ZIP contents were not compared."
+    }
+  ]
+}

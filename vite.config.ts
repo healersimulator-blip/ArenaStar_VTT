@@ -14,6 +14,17 @@ export default defineConfig({
     // Arena's live preview uses a generated *.e2b.app host. Vite's default
     // allow-list rejects it with 403 even though the server is reachable.
     allowedHosts: true,
+    // Optional same-origin companion for development; browser URLs stay relative.
+    ...(process.env.CLOUD_DEV_PROXY
+      ? {
+          proxy: {
+            "/api/cloud": {
+              target: process.env.CLOUD_DEV_PROXY,
+              changeOrigin: false,
+            },
+          },
+        }
+      : {}),
   },
   build: {
     target: "es2022",

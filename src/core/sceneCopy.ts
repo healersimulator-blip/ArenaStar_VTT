@@ -29,6 +29,7 @@ import type {
   DocRef,
   DrawingDocument,
   LightDocument,
+  LevelDocument,
   NoteDocument,
   RegionDocument,
   SceneDocument,
@@ -39,6 +40,7 @@ import type {
   WallDocument,
   WorldCollections,
 } from "./documents";
+import { sceneLevelsError } from "./levels";
 import type { DocId } from "./ids";
 import type { Op } from "./ops";
 import {
@@ -85,7 +87,7 @@ export type DuplicateScenePlan =
   | { ok: false; error: string };
 
 type SceneChildCollection = "tokens" | "walls" | "notes" | "cells" | "lights" | "sounds" |
-  "tiles" | "regions" | "drawings" | "templates";
+  "tiles" | "regions" | "levels" | "drawings" | "templates";
 type TagCollection = (typeof TAGGABLE_COLLECTIONS)[number] | "scenes";
 
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -95,7 +97,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const refKey = (coll: string, id: string) => `${coll}\u0000${id}`;
 const childKind: Record<SceneChildCollection, string> = {
   tokens: "t", walls: "w", notes: "n", cells: "c", lights: "l", sounds: "s",
-  tiles: "tl", regions: "rg", drawings: "d", templates: "tp",
+  tiles: "tl", regions: "rg", levels: "lv", drawings: "d", templates: "tp",
 };
 
 /** `"Forest road"` → `"Forest road (copy)"`. */
@@ -495,6 +497,8 @@ export function planDuplicateSceneOps(input: DuplicateSceneInput): DuplicateScen
     reservedIds.add(value);
     return value;
   };
+  const levelError = sceneLevelsError(scene);
+  if (levelError) return fail(levelError);
   if (!ID.test(id)) return fail("new scene ID is invalid");
   if (world?.scenes.some((existing) => existing._id === id)) return fail(`scene ID ${id} already exists`);
   if (world && !world.scenes.some((existing) => existing._id === scene._id))
@@ -511,7 +515,7 @@ export function planDuplicateSceneOps(input: DuplicateSceneInput): DuplicateScen
   const untypedIds = new Map<string, string[]>();
   const cloneRows = new Map<SceneChildCollection, BaseDocument[]>();
   const sourceIds = new Set<string>();
-  for (const coll of ["tokens", "walls", "notes", "cells", "lights", "sounds", "tiles", "regions", "drawings", "templates"] as const) {
+  for (const coll of ["tokens", "walls", "notes", "cells", "lights", "sounds", "tiles", "regions", "levels", "drawings", "templates"] as const) {
     const rows: BaseDocument[] = [];
     for (const sourceDoc of childDocs(scene, coll)) {
       const sourceKey = refKey(coll, sourceDoc._id);
@@ -549,12 +553,34 @@ export function planDuplicateSceneOps(input: DuplicateSceneInput): DuplicateScen
     sounds: getRows<SoundDocument>("sounds"),
     tiles: getRows<TileDocument>("tiles"),
     ...(scene.regions ? { regions: getRows<RegionDocument>("regions") } : {}),
+    ...(scene.levels ? { levels: getRows<LevelDocument>("levels") } : {}),
     drawings: getRows<DrawingDocument>("drawings"),
     templates: getRows<TemplateDocument>("templates"),
   };
 
+  for (const level of copy.levels ?? []) {
+    const links: string[] = [];
+    for (const target of level.visibleLevelIds) {
+      const mapped = ids.get(refKey("levels", target));
+      if (!mapped) return fail(`level ${level.name} references a missing level`);
+      links.push(mapped);
+    }
+    level.visibleLevelIds = links;
+    if (level.tileIds) level.tileIds = level.tileIds.map((id) => ids.get(refKey("tiles", id)) ?? id);
+  }
+  for (const region of copy.regions ?? []) if (region.stairs) {
+    region.stairs = { from: ids.get(refKey("levels", region.stairs.from)) ?? region.stairs.from, to: ids.get(refKey("levels", region.stairs.to)) ?? region.stairs.to };
+  }
+  for (const wall of [...copy.walls, ...copy.lights]) if (wall.levelScope?.mode === "levels") {
+    wall.levelScope.ids = wall.levelScope.ids.map((id) => ids.get(refKey("levels", id)) ?? id);
+  }
+  for (const token of copy.tokens) if (token.levelId !== undefined) {
+    const mapped = ids.get(refKey("levels", token.levelId));
+    if (!mapped) return fail("Token references a missing copied level");
+    token.levelId = mapped;
+  }
   const instanceIds = new Map<string, string>();
-  for (const coll of ["tokens", "walls", "notes", "cells", "lights", "sounds", "tiles", "regions", "drawings", "templates"] as const) {
+  for (const coll of ["tokens", "walls", "notes", "cells", "lights", "sounds", "tiles", "regions", "levels", "drawings", "templates"] as const) {
     const originals = childDocs(scene, coll);
     const clones = cloneRows.get(coll) ?? [];
     for (let index = 0; index < originals.length; index++) {

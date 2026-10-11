@@ -38,6 +38,7 @@ interface HelloMsg {
   ts: number;
   sig: string;
   lastSeq?: number; // reconnect: GM/assistant may use ops-since; player gets a projected snapshot
+  features?: string[]; // absent = legacy; compatibility declarations, not permissions
 }
 ```
 
@@ -50,8 +51,25 @@ interface IntentMsg {
   kind: "intent";
   txId: TxId;
   ops: Op[];
+  wallEdit?: { sceneId: string; wallsHash: string }; // GM authoring precondition only
 }
 ```
+
+`wallEdit` is optional for existing intents. The native wall editor includes a canonical SHA-256
+hash of the scene's wall documents captured when the gesture begins. The host requires GM/assistant
+identity, a matching current hash, bounded valid coordinate edits and same-scene wall-only Ops.
+A stale gesture is rejected atomically (including newly attached endpoints); unrelated actor/chat
+changes do not invalidate it. The guard is not an authorization grant and is never copied to the
+committed envelope, undo log, player projection or world archive. Only the current host UI uses
+this extension; legacy unguarded wall/door intents retain their existing behavior.
+
+Draft `levels` are ordinary embedded scene documents addressed by Ops, but only GM/assistant
+sessions receive or may edit them. Player projection removes both direct embedded Ops and
+whole-array/dotted scene paths, regardless of scene ownership. All GM clients must use an updated
+build. The draft-only capability handshake is described below; physical multilevel capabilities
+are still pending. Archive
+format 3 currently recognizes only `requiredFeatures: ["scene-level-drafts-v1"]`; physical levels,
+per-level fog and exposure capabilities are not enabled by that feature.
 
 ### roll (0x03 · client → host · ops)
 
@@ -1073,6 +1091,8 @@ After approval: assigned User document info + world info (§6.4).
 ```ts
 interface WelcomeMsg {
   kind: "welcome";
+  features?: string[]; // host-supported features
+  requiredFeatures?: string[]; // required for this recipient's world replica
   user: { id: UserId; role: Role; name: string };
   world: { id: WorldId; name: string; system: string; version: string };
   snapshotSeq: number;
@@ -1089,6 +1109,36 @@ interface WelcomeMsg {
   };
 }
 ```
+
+### Draft-level capability negotiation (D-420)
+
+`hello.features`, `welcome.features` and `welcome.requiredFeatures` accept at most 32 unique,
+1–64-character lowercase feature names (`[a-z][a-z0-9._-]*`). Absence means legacy support;
+malformed lists are rejected. Unknown optional advertisements are tolerated, but an unknown or
+unadvertised **required** feature closes the client before hydration. The current implemented
+feature is `scene-level-drafts-v1`, shared with the archive marker.
+
+- The host sends welcome **before** snapshot/replay. GM/assistant replicas of worlds with a
+  `SceneDocument.levels` field require draft support, including empty arrays. Known users and
+  delayed manual approvals are checked against current world state before sending any draft data.
+- Players do not need draft support: their projected replicas omit drafts. Advertising support
+  grants no authoring/read permissions and does not change role checks.
+- Draft-affecting commits are rejected while any authenticated GM/assistant session lacks support.
+  The common commit boundary covers scripts, scene copies and undo/redo as well as raw intents.
+  Rejected undo/redo capability checks do not consume their history entries; retry after upgrading
+  or disconnecting the incompatible GM. Ordinary edits remain available.
+- A legacy GM joining a currently draft-free world gets a fresh snapshot rather than raw replay
+  if the requested log range contains historical draft Ops. Compatible GM replay stays available.
+- Clients refuse unnegotiated draft sends, snapshots and Ops. Reconnect clears negotiated state;
+  old-transport callbacks are fenced by a connection epoch and cannot restore it. Re-announced
+  simulation welcomes retain capability metadata. Same-build trusted loopback sessions use the
+  local build's feature list; remote peers must advertise through hello.
+
+Declarations are compatibility information, not signed permission grants or proof of a remote
+implementation. This gate does not activate physical levels, migrate fog, gate every other
+optional feature (such as the wall-editor intent extension), or protect older binaries opening
+local IndexedDB directly. Future surfaces, physical membership, exposure and per-level fog need
+their own required features and acceptance tests.
 
 `sim` is the host-announced battle (N01): the active rules package's model
 columns and the scene the sim channel serves. On adoption a client without a
@@ -1473,3 +1523,57 @@ Ephemeral events, kind **20250** (NIP-01 20000–29999), tag `["t", <roomId>]`,
 content = the `vtt1.` code. selfId = nostr pubkey (hex). Sends fan out to every
 connected relay; receivers dedupe by event id, drop unverified signatures,
 never dispatch their own echoes, and honor the authenticated `to` field.
+
+### Authoring membership capability (D-421)
+
+`scene-level-scopes-v1` supplements `scene-level-drafts-v1` for GM/ASSISTANT replicas with explicit token `levelId` or wall `levelScope`. These are authoring contracts, not physical-runtime negotiation. Scenes with bindings require both features; scope-bearing operations (including dotted replacements and removals) require compatible registered GM sessions. Replay fallback, pre-data join refusal, client hydration/send checks and undo compatibility apply as for drafts. Players require neither feature because both metadata fields are stripped from their projection. Physical geometry is still replicated under the existing flat-scene policy; scopes do not authorize secret stacked floors.
+
+Token membership references an existing scene level and agrees with absolute feet elevation in the final transaction. Wall scope is `{"mode":"all"}` or `{"mode":"levels","ids":["existing-level"]}` (1–32 distinct existing IDs). An explicit draft level collection is required for scoped walls. Level deletion must atomically clear/reassign bindings. Format-3 archives declare the scopes feature when needed; imports reject missing declarations before writes. Ordinary legacy worlds retain format 2.
+
+### Per-level fog and light scopes (D-423)
+
+Fog messages accept optional `levelId: DocId`; absence is the legacy scene namespace. `fog.state` echoes it. Clients key pending requests by scene + level; the host keys maps by scene + level + authenticated user. IDs must match `[A-Za-z0-9_-]{1,128}`. Scoped requests require `scene-level-fog-v1`. Until authoritative player exposure plans are implemented, only GM/ASSISTANT sessions may read/write existing scene levels. Denied well-formed gets return null without disclosing existence; denied puts are ignored. Authorization is rechecked after asynchronous reads. Existing PNG byte limits apply. Fog is still exploration supplied by that user's client, never authority for target disclosure.
+
+`LightDocument.levelScope` has the wall-scope schema and requires `scene-level-lighting-v1` in addition to draft/scope features. Player projections strip the field; legacy lighting semantics remain unchanged outside the GM level diagnostic. Scoped lighting selects assigned/all-level light sources and same-level carried lights, not a physical wall filter. No player floor selector grants light/fog access.
+
+IndexedDB v5 adds `levelFog` with four-part `[worldId,sceneId,userId,levelId]` keys, preserving legacy three-part `fog` rows untouched. Archives use optional `fog.json.levelId` and declare the fog feature when carrying such rows. Scoped fog rows require existing scene levels; duplicate compound keys, undeclared features and orphans are rejected before import writes. Exports omit orphan scoped rows retained locally after level deletion. Legacy-to-base migration and reset-generation wire semantics remain pending.
+
+### Level ambient inheritance (D-424)
+
+Optional `LevelDocument.darkness` is a finite number in `[0,1]`. Absence inherits the scene; explicit zero overrides it; null is invalid. Clearing uses `-=darkness`. Only the GM level diagnostic consumes the override; ordinary scene/player rendering remains unchanged. These embedded drafts remain private under player projection.
+
+`scene-level-ambient-v1` supplements `scene-level-drafts-v1` when an override is present or an operation authors/removes one. Detection covers embedded creates/updates/removals and parent scene array/dotted replacements. Required world capabilities include ambient when any level carries the field; snapshots, replay fallback, central commit and undo compatibility use the existing gates. Archive format 3 must declare ambient when it carries overrides; imports reject missing declarations before writing. Scene-level `darkness` itself does not require this feature.
+
+### Level fog reset generations (D-425)
+
+`scene-level-fog-reset-v1` supplements draft/fog support. Private `LevelDocument.fogEpoch` is an optional nonempty `[A-Za-z0-9_-]{1,128}` string. Absence denotes the original generation. Fog messages accept optional `epoch` (empty/absent are equivalent); request/cache identities include it.
+
+Compatible GM/ASSISTANT sends `fog.put {sceneId,levelId,epoch,png:empty,resetRequestId}`. The host validates current generation and authority, persists a fresh UUID ledger generation, commits the private client invalidation signal without undo history, and returns `fog.state {sceneId,levelId,epoch,png:null,resetRequestId,resetError?}`. Clients correlate reset acknowledgments separately from PNG fetches; timeout is 15 seconds. Unauthorized requests do not receive a canonical private epoch. PNG puts/gets with a stale generation are ignored/null, respectively. Existing player floor restrictions remain.
+
+IndexedDB v6 adds `fogEpochs` keyed `[worldId,sceneId,levelId]`. This ledger is independent of structural undo. Scoped PNG rows carry their captured epoch. Exports omit stale rows, canonicalize scene metadata and write optional `fog-epochs.json`; imports reject undeclared, duplicate, orphan or mismatched epochs before writing, and seed missing ledger entries from validated level metadata. Legacy fog remains untouched.
+
+D-426 host exposure plans/deltas are **internal typed APIs only**, not registered wire kinds or negotiated capabilities. They must not be used as evidence that current player replicas, assets, replay or FX are multilevel-private.
+
+### level.focus (0x59 · client → host · ops)
+
+Optional `scene-level-navigation-v1`: `{kind,requestId,sceneId,levelId:string|null}`.
+The authenticated host accepts a floor only when the caller controls a non-hidden token assigned there (direct or actor ownership). Null returns to the ordinary shared scene. Unknown and unowned floors share one refusal. Rate limited; no canonical Ops, movement, fog writes or world history are created.
+
+### level.focus.state (0x5a · host → client · ops)
+
+`{kind,requestId,sceneId,revision,levels:[{id,name}],levelId,tokenIds:string[]|null,error?:"unavailable"|"rate_limited"}`.
+Only owned-floor labels are sent. Token IDs are already readable, non-hidden tokens on the selected floor; ordinary client fog remains an additional intersection. Host revalidates on world commits, withdrawing revoked floor choices. Clients ignore stale request/revision replies and clear focus on reconnect. Unsupported builds retain their legacy view.
+
+This is **token-floor presentation/navigation, not multilevel secrecy**: existing artwork, lighting, exploration, FX, sheets and flat-scene projection are unchanged. No drafts, bands, visibility links, hidden floor names or fog epochs are disclosed by this channel. It does not activate D-426 physical exposure planning or player scoped fog.
+
+### Discrete floor play and stairs (D-428)
+
+`scene-level-play-v1` supplements floor navigation. `SceneDocument.levelMode?: "isolated"` explicitly activates it. An activated world requires this capability for player joins as well as GM joins; incompatible live peers block activation/edits requiring the new contract. Private level records add optional `tileIds: string[]` (up to 1,000 distinct existing scene tile IDs) and `useSceneBackground: boolean`. Region records add GM-only `stairs: {from:levelId,to:levelId}` with distinct existing endpoints, at most 128 stair regions per scene. Projection strips the stair behavior even from public region records. Format-3 archives declare the feature; import validates references before writes, and scene copy rekeys both map and stair references.
+
+`level.focus` additionally accepts optional `followTokenId`. In isolated scenes, `levelId:null` follows an eligible controlled token rather than revealing the shared scene. The host remembers/revalidates that token, defaults deterministically when necessary and switches floors after committed membership changes. Explicit floor choice is a manual fallback, not a movement command.
+
+`level.focus.state` adds `worldSeq`, `mode:"follow"|"manual"`, optional `isolated`, `followTokenId`, and current-floor `presentation:{tileIds,wallIds,lightIds,useSceneBackground,darkness,epoch}`. No private elevation bands, stair destinations or directed visibility topology are exposed. The player applies the view only to the matching scene/replica sequence, otherwise drawing no floor content. The isolated canvas excludes unassigned auxiliary layers and the global foreground. Ordinary document/asset/sheet/FX projection is still not a secret-floor boundary.
+
+Stair traversal is host-generated from committed movement, never a client claim: outside→inside center entry on the source floor, one transition, unchanged endpoint XY, destination membership and floor Z appended atomically. Source/landing movement-wall footprint checks and overlap refusal apply. Undo/redo restore recorded state without re-entering stair triggers.
+
+Player scoped `fog.get`/`fog.put` are now accepted in isolated scenes only for currently owned-token floors, with normal capability and epoch checks. Successful authorized reads grant bounded old-floor write-only flushing for the same session/user (128 namespaces maximum); these grants do not permit reads after ownership is lost and never permit resets. Each floor remains separate from legacy exploration. Clients capture the host-provided epoch with every restore/readback; old-generation responses/uploads cannot fill a newer floor surface. GM reset authorization is independent of ordinary fog read/write authorization.

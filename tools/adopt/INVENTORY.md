@@ -24,6 +24,12 @@ therefore an edit to that file, reviewed like any other change. Repo-level summa
 | 9 | `SvenWerlen/fvtt-data-toolbox` | Data tooling (converters) | Phase 1 | **No LICENSE → all rights reserved** @ `e8209a49` (2024-12-23) | pending | Reference only; our converter is original code |
 | 10 | JB2A (content + modules) | Data + FX (free tier; Patreon paid assets) | Phase 1b / 6 | Free tier free; **paid assets not redistributable** | pending | User-supplied via `fx.json` provenance (P-5) or a deal |
 
+| 11 | `ironmonk108/monks-wall-enhancement` | Wall authoring and door UX | Multilevel/wall design M1–M5 | GPLv3 LICENSE; README additionally asserts Commons Clause + Foundry EULA @ `79c722aef1cb772885ab28e8a267b5178c06fabe` (manifest 14.01) | pending | **Research only**: pinned source-reading cards; no implementation/assets copied. Independent ArenaStar design examples, not a certified clean-room or approved port. See `docs/research/multilevel/SOURCES.md` |
+| 12 | Baileywiki Better Levels | Level builder, audit, Faux Overhead | Multilevel/wall design M0–M5 | **Not verified**: public manifest/product docs 2.0.14 observed 2026-10-10; ZIP retrieval failed, no source/archive pin or license inspected | pending | Documented-behavior reference only; obtain legitimate source archive and license/hash before code-level adoption. No upstream shader or implementation copied |
+
+| 13 | `theripper93/Better-Roofs` | Roof masks and linked occlusion | Multilevel design M2–M3 | MIT, copyright 2023 theripper93 @ V13 `df35cca8c73e7e8d420a81aada7b65c591c06d82`; V14 comparison `83867b4d5b34711e7bec52d91946b1f1f170dbb9` | pending | **Research only**; pinned reading cards, no upstream shader/implementation/assets copied. Original native contracts; any later port needs attribution and adoption approval. See `docs/research/multilevel/RIPPER_PREDECESSORS.md` |
+| 14 | `theripper93/Levels` | Elevation queries, fog, transitions, migration | Multilevel design M1–M5 | **No license grant located** in inspected trees/README @ V13 `17d4cfdd674b45e4abf4235416a23f889ba12163` and V14 `230f3ac3d784932f15dad84fb43aa1dc66000b42`; FogManager has additional underlying-code provenance concern | pending | **Research only**, no code redistribution; permission/provenance review required before any adoption. Not evidence of Baileywiki Better Levels internals |
+
 > **Not located** (recorded so we stop re-searching): Zenvy "PF1 Spell Animation" module —
 > three searches, exact slug not indexed. Treat as unavailable.
 

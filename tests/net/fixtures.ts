@@ -11,6 +11,8 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
     diff: { name: "x" },
   };
   switch (kind) {
+    case "level.focus": return { kind, sceneId: "s1", levelId: null, requestId: "r" };
+    case "level.focus.state": return { kind, sceneId: "s1", levelId: null, requestId: "r", revision: 1, levels: [], tokenIds: null };
     case "audio.cmd":
       return {
         kind: "audio.cmd",

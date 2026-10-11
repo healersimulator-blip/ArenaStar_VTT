@@ -235,3 +235,84 @@ describe("fog rides the world file (D-250)", () => {
     await expect(importWorldZip({ db, file: zipSync(broken), root: new MemDirHandle() })).rejects.toThrow(/fog\/0\.png/);
   });
 });
+
+test("level fog survives archive copy and rejects player-selected floor reads/writes", async () => {
+  const { draftLevel } = await import("../../src/core/levels");
+  const { hostApp, playerApp, share, pump } = await joinHostPlayer(); cleanup.push(hostApp.worldId);
+  const db = await openVttDb(), player = playerApp.client;
+  if (!player) throw new Error("player missing");
+  try {
+    await hostApp.gm.client.submitAndWait(["a", "b"].map((id, i) => ({ kind: "create", coll: "levels", parent: { coll: "scenes", id: DEFAULT_SCENE_ID }, data: draftLevel(id, id, i * 10, i * 10 + 10) })));
+    hostApp.gm.client.sendFogPng(DEFAULT_SCENE_ID, png(1), "a"); hostApp.gm.client.sendFogPng(DEFAULT_SCENE_ID, png(2), "b");
+    player.sendFogPng(DEFAULT_SCENE_ID, png(9), "a"); await settle(6);
+    expect(await player.requestFog(DEFAULT_SCENE_ID, "a")).toBeNull();
+    expect(await getFog(db, hostApp.worldId, DEFAULT_SCENE_ID, player.user?.id ?? "", "a")).toBeUndefined();
+    expect(await hostApp.gm.client.requestFog(DEFAULT_SCENE_ID)).toBeNull();
+    const [a, b] = await Promise.all([hostApp.gm.client.requestFog(DEFAULT_SCENE_ID, "a"), hostApp.gm.client.requestFog(DEFAULT_SCENE_ID, "b")]);
+    expect(a).toEqual(png(1)); expect(b).toEqual(png(2));
+    const file = await exportWorldZip({ db, root: null, worldId: hostApp.worldId, persister: hostApp.persister });
+    const copied = await importWorldZip({ db, root: null, file, mode: "copy", worldId: "level-fog-copy" }); cleanup.push(copied.worldId);
+    expect((await getFog(db, copied.worldId, DEFAULT_SCENE_ID, "gm", "a"))?.png).toEqual(png(1));
+    expect((await getFog(db, copied.worldId, DEFAULT_SCENE_ID, "gm", "b"))?.png).toEqual(png(2));
+    const entries = unzipSync(new Uint8Array(await file.arrayBuffer()));
+    const metadata = entries["world.json"]; if (!metadata) throw new Error("metadata");
+    const meta = JSON.parse(strFromU8(metadata)); expect(meta.requiredFeatures).toContain("scene-level-fog-v1");
+    meta.requiredFeatures = meta.requiredFeatures.filter((f: string) => f !== "scene-level-fog-v1");
+    const { strToU8 } = await import("fflate"); entries["world.json"] = strToU8(JSON.stringify(meta));
+    await expect(importWorldZip({ db, root: null, file: new Blob([new Uint8Array(zipSync(entries))]), mode: "copy", worldId: "invalid-level-fog" })).rejects.toThrow("per-level fog requires");
+  } finally { pump.stop(); playerApp.close(); share.close(); await hostApp.close(); db.close(); }
+});
+
+test("level reset fences delayed PNGs for every user, survives stale structural history, reboot and archive copy", async () => {
+  const { draftLevel } = await import("../../src/core/levels");
+  const { putFog, getFogEpoch } = await import("../../src/storage/idb");
+  const root = new MemDirHandle(), db = await openVttDb();
+  const worldId = "fog-reset-world"; cleanup.push(worldId);
+  await HostPersister.createWorld(db, { worldId: worldId as HostApp["worldId"], name: "Reset", system: "mass-battle-basic", systemVersion: "1.0.0" });
+  const app = await bootWorld(worldId, root), client = app.gm.client;
+  let archive: Blob;
+  try {
+    await client.submitAndWait(["a", "b"].map((id, i) => ({ kind: "create", coll: "levels", parent: { coll: "scenes", id: DEFAULT_SCENE_ID }, data: draftLevel(id, id, i * 10, i * 10 + 10) })));
+    const original = structuredClone(client.store.get("scenes", DEFAULT_SCENE_ID)?.levels ?? []);
+    client.sendFogPng(DEFAULT_SCENE_ID, png(1), "a"); client.sendFogPng(DEFAULT_SCENE_ID, png(2), "b"); client.sendFogPng(DEFAULT_SCENE_ID, png(3)); await settle(6);
+    await putFog(db, { worldId, sceneId: DEFAULT_SCENE_ID, levelId: "a", userId: "other", png: png(4) });
+    await client.resetLevelFog(DEFAULT_SCENE_ID, "a");
+    const epoch = client.store.get("scenes", DEFAULT_SCENE_ID)?.levels?.[0]?.fogEpoch;
+    expect(epoch).toBeTruthy(); expect((await getFogEpoch(db, worldId, DEFAULT_SCENE_ID, "a"))).toBe(epoch);
+    client.sendFogPng(DEFAULT_SCENE_ID, png(9), "a", ""); await settle(6);
+    expect(await client.requestFog(DEFAULT_SCENE_ID, "a")).toBeNull();
+    expect(await client.requestFog(DEFAULT_SCENE_ID, "a", "")).toBeNull();
+    expect(await client.requestFog(DEFAULT_SCENE_ID, "b")).toEqual(png(2));
+    expect(await client.requestFog(DEFAULT_SCENE_ID)).toEqual(png(3));
+    // Simulate an older structural undo restoring a pre-reset scene snapshot.
+    await client.submitAndWait([{ kind: "update", ref: { coll: "scenes", id: DEFAULT_SCENE_ID }, diff: { levels: JSON.parse(JSON.stringify(original)) } }]);
+    expect(await client.requestFog(DEFAULT_SCENE_ID, "a")).toBeNull();
+    expect(client.store.get("scenes", DEFAULT_SCENE_ID)?.levels?.[0]?.fogEpoch).toBe(epoch);
+    archive = await exportWorldZip({ db, worldId: app.worldId, root, persister: app.persister });
+    const files = unzipSync(new Uint8Array(await archive.arrayBuffer()));
+    expect(files["fog-epochs.json"]).toBeDefined();
+    const entries = JSON.parse(strFromU8(files["fog.json"] ?? new Uint8Array())) as WorldFileFog[];
+    expect(entries.some((entry) => entry.levelId === "a")).toBe(false); // every user's old generation excluded
+  } finally { await app.close(); }
+  const again = await bootWorld(worldId, root);
+  try {
+    expect(await again.gm.client.requestFog(DEFAULT_SCENE_ID, "a")).toBeNull();
+    again.gm.client.sendFogPng(DEFAULT_SCENE_ID, png(7), "a"); await settle(6);
+    expect(await again.gm.client.requestFog(DEFAULT_SCENE_ID, "a")).toEqual(png(7));
+  } finally { await again.close(); }
+  cleanup.push("fog-reset-copy");
+  await importWorldZip({ db, root: null, file: archive, mode: "copy", worldId: "fog-reset-copy" });
+  expect((await getFogEpoch(db, "fog-reset-copy", DEFAULT_SCENE_ID, "a"))).toBeTruthy();
+  expect(await getFog(db, "fog-reset-copy", DEFAULT_SCENE_ID, "gm", "a")).toBeUndefined();
+});
+
+test("player reset is rejected without changing the authoritative epoch", async () => {
+  const { draftLevel } = await import("../../src/core/levels");
+  const { hostApp, playerApp, share, pump } = await joinHostPlayer(); cleanup.push(hostApp.worldId);
+  try {
+    await hostApp.gm.client.submitAndWait([{ kind: "create", coll: "levels", parent: { coll: "scenes", id: DEFAULT_SCENE_ID }, data: draftLevel("a", "A") }]);
+    const player = playerApp.client; if (!player) throw new Error("player missing");
+    await expect(player.resetLevelFog(DEFAULT_SCENE_ID, "a")).rejects.toThrow("Only GMs");
+    expect(hostApp.gm.client.store.get("scenes", DEFAULT_SCENE_ID)?.levels?.[0]?.fogEpoch).toBeUndefined();
+  } finally { pump.stop(); playerApp.close(); share.close(); await hostApp.close(); }
+});

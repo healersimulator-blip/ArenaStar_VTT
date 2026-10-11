@@ -63,6 +63,8 @@ describe("frameMessage / deframeMessage (§6.1, §13)", () => {
 describe("channelFor (§6.1)", () => {
   test("compile-time exhaustive routing table over all kinds", () => {
     const routing: Record<MsgName, "ops" | "ephemeral" | "assets" | "sim"> = {
+      "level.focus": "ops",
+      "level.focus.state": "ops",
       hello: "ops",
       intent: "ops",
       roll: "ops",

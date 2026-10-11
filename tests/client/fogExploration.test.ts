@@ -612,6 +612,18 @@ describe("FogExploration loop", () => {
     expect(h.fog.stats().sceneId).toBe("s2");
   });
 
+  test("explicit save readback propagates failure and can retry the same dirty map", async () => {
+    const h = harness();
+    await h.fog.sync(scene("s1", { tokens: [token("t", 100, 100)] }), { style: "opaque" });
+    h.surface().readbackPng = () => Promise.reject(new Error("encoder failed"));
+    await expect(h.fog.flushStrict()).rejects.toThrow("encoder failed");
+    expect(h.fog.stats().dirty).toBe(true);
+    h.surface().readbackPng = () => Promise.resolve(new Uint8Array([7]));
+    await h.fog.flushStrict();
+    expect(h.transport.puts).toHaveLength(1);
+    expect(h.fog.stats().dirty).toBe(false);
+  });
+
   test("failed PNG readback retains dirty exploration for an explicit retry", async () => {
     const h = harness();
     await h.fog.sync(scene("s1", { tokens: [token("t", 100, 100)] }), { style: "opaque" });
@@ -637,4 +649,79 @@ describe("FogExploration loop", () => {
     await h.fog.flush();
     expect(h.transport.puts).toHaveLength(1);
   });
+});
+
+test("level fog resets shared surfaces and saves to the captured level during delayed readback", async () => {
+  const { draftLevel } = await import("../../src/core/levels");
+  const surface = new FakeSurface("shared"), writes: Array<[string | undefined, number]> = [], requests: Array<string | undefined> = [];
+  let release: ((png: Uint8Array) => void) | undefined;
+  const fog = new FogExploration({ surfaceFor: () => surface, hideSurface: () => {}, computer: new InlineVisionWorker(),
+    transport: { requestFog: async (_s, level) => { requests.push(level); return new Uint8Array([level === "a" ? 1 : 2]); }, sendFogPng: (_s, bytes, level) => { writes.push([level, bytes[0] ?? 0]); } },
+    user: () => ({ id: "gm", role: "GM" }), actors: () => [], setTimer: () => 1, clearTimer: () => {} });
+  const s = scene("s", { levels: [draftLevel("a", "A"), draftLevel("b", "B", 10, 20)], tokens: [token("ta", 100, 100, { levelId: "a" }), token("tb", 300, 300, { levelId: "b", elevation: 10 })] });
+  await fog.sync(s, { style: "translucent", levelId: "a" });
+  surface.readbackPng = () => new Promise((resolve) => { release = resolve; });
+  const save = fog.flush(); await Promise.resolve();
+  const switched = fog.sync(s, { style: "translucent", levelId: "b" });
+  expect(surface.shown).toBe(false);
+  if (!release) throw new Error("readback not started"); release(new Uint8Array([9]));
+  await save; await switched;
+  expect(writes).toEqual([["a", 9]]); expect(requests).toEqual(["a", "b"]);
+  expect(surface.resets).toBe(2); expect(fog.stats().levelId).toBe("b"); fog.destroy();
+});
+
+test("superseded level restore cannot merge into the next floor and players cannot choose a floor", async () => {
+  const { draftLevel } = await import("../../src/core/levels");
+  const surface = new FakeSurface("shared"); let release: ((png: Uint8Array) => void) | undefined;
+  const fog = new FogExploration({ surfaceFor: () => surface, hideSurface: () => {}, computer: new InlineVisionWorker(),
+    transport: { requestFog: (_s, l) => l === "a" ? new Promise((r) => { release = r; }) : Promise.resolve(new Uint8Array([2])), sendFogPng: () => {} },
+    user: () => ({ id: "gm", role: "GM" }), actors: () => [], setTimer: () => 1, clearTimer: () => {} });
+  const s = scene("s", { levels: [draftLevel("a", "A"), draftLevel("b", "B", 10, 20)] });
+  const a = fog.sync(s, { style: "translucent", levelId: "a" }); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  const b = fog.sync(s, { style: "translucent", levelId: "b" });
+  if (!release) throw new Error("restore not started"); release(new Uint8Array([1])); await a; await b;
+  expect(surface.merged).toEqual([new Uint8Array([2])]); fog.destroy();
+  const player = harness({ user: { id: "p", role: "PLAYER" } });
+  expect(() => player.fog.sync(s, { style: "opaque", levelId: "a" })).toThrow("requires a GM"); player.fog.destroy();
+});
+
+test("reset invalidates an in-flight readback but switching to another generation still saves the old floor", async () => {
+  const { draftLevel } = await import("../../src/core/levels");
+  const surface = new FakeSurface("reset"), writes: Array<[string | undefined, string | undefined]> = [];
+  let release: ((png: Uint8Array) => void) | undefined;
+  const fog = new FogExploration({ surfaceFor: () => surface, hideSurface: () => {}, computer: new InlineVisionWorker(),
+    transport: { requestFog: async () => null, sendFogPng: (_s, _bytes, level, epoch) => writes.push([level, epoch]) },
+    user: () => ({ id: "gm", role: "GM" }), actors: () => [], setTimer: () => 1, clearTimer: () => {} });
+  const s = scene("s", { levels: [draftLevel("a", "A"), { ...draftLevel("b", "B", 10, 20), fogEpoch: "b-generation" }], tokens: [token("t", 100, 100, { levelId: "a" })] });
+  await fog.sync(s, { style: "translucent", levelId: "a" });
+  surface.readbackPng = () => new Promise((r) => { release = r; });
+  const save = fog.flush(); await Promise.resolve(); await Promise.resolve();
+  const level = s.levels?.[0]; if (!level) throw new Error("fixture"); level.fogEpoch = "reset-generation";
+  const reset = fog.sync(s, { style: "translucent", levelId: "a" });
+  expect(surface.shown).toBe(false);
+  if (!release) throw new Error("readback missing"); release(new Uint8Array([9])); await save; await reset;
+  expect(writes).toEqual([]); expect(surface.resets).toBe(2);
+  release = undefined;
+  const switchFloor = fog.sync(s, { style: "translucent", levelId: "b" });
+  for (let i = 0; i < 50 && !release; i++) await Promise.resolve();
+  if (!release) throw new Error("switch readback missing"); (release as (png: Uint8Array) => void)(new Uint8Array([7])); await switchFloor;
+  expect(writes).toEqual([["a", "reset-generation"]]); fog.destroy();
+});
+
+test("host-authorized player floor restore fences old PNGs without exposing private level documents", async () => {
+  const surface = new FakeSurface("player-floor"); let level = "a";
+  let release: ((png: Uint8Array) => void) | undefined;
+  const requests: Array<[string | undefined, string | undefined]> = [];
+  const fog = new FogExploration({ surfaceFor: () => surface, hideSurface: () => {}, computer: new InlineVisionWorker(),
+    authorizedLevel: (_scene, id) => id === level ? { epoch: `epoch-${id}` } : null,
+    transport: { requestFog: (_s, id, epoch) => { requests.push([id, epoch]); return id === "a" ? new Promise((r) => { release = r; }) : Promise.resolve(new Uint8Array([2])); }, sendFogPng: () => {} },
+    user: () => ({ id: "p", role: "PLAYER" }), actors: () => [], setTimer: () => 1, clearTimer: () => {} });
+  const s = scene("s"); expect(s.levels).toBeUndefined();
+  const first = fog.sync(s, { style: "opaque", levelId: "a" });
+  for (let i = 0; i < 50 && !release; i++) await Promise.resolve();
+  level = "b"; const second = fog.sync(s, { style: "opaque", levelId: "b" });
+  expect(surface.shown).toBe(false);
+  if (!release) throw new Error("restore missing"); release(new Uint8Array([1])); await first; await second;
+  expect(requests).toEqual([["a", "epoch-a"], ["b", "epoch-b"]]); expect(surface.merged).toEqual([new Uint8Array([2])]); expect(surface.resets).toBe(2);
+  expect(() => fog.sync(s, { style: "opaque", levelId: "forged" })).toThrow("requires a GM"); fog.destroy();
 });

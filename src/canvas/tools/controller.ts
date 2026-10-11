@@ -30,7 +30,9 @@ import {
 import type { TemplateShape } from "../layers/templateGeometry";
 import { snapWorldWith, type SnapMode } from "../grid/snapMode";
 import type { MeasureGrid } from "../grid/measure";
-import type { DrawingDocument } from "../../core/documents";
+import { nearestWallEndpoint } from "../../core/wallEditing";
+import { WallEditorController, type WallEditorPort, type WallEditMode } from "./wallEditor";
+import type { DrawingDocument, WallDocument } from "../../core/documents";
 import type { WallKind } from "../vision/wallKinds";
 import type { DocId, UserId } from "../../core/ids";
 
@@ -53,6 +55,9 @@ export interface ToolOptions {
   fogBrush: FogBrush;
   fogShape: FogShape;
   wallKind: WallKind;
+  wallEditMode: WallEditMode;
+  wallEndpointSnap: boolean;
+  wallMoveJoined: boolean;
   wallDoorState: 0 | 1 | 2;
   lightRadius: number;
   lightColor: string;
@@ -70,6 +75,9 @@ export const DEFAULT_TOOL_OPTIONS: ToolOptions = {
   fogBrush: "reveal",
   fogShape: "rect",
   wallKind: "wall",
+  wallEditMode: "draw",
+  wallEndpointSnap: true,
+  wallMoveJoined: true,
   wallDoorState: 0,
   lightRadius: 40,
   lightColor: "#ffcc66",
@@ -106,9 +114,11 @@ export type ShapePreview =
       style: DrawingStyle;
     }
   | { kind: "fog"; brush: FogBrush; shape: FogShape; from: Point; to: Point; points: Point[] }
-  | { kind: "wall"; from: Point; to: Point; wallKind: WallKind };
+  | { kind: "wall"; from: Point; to: Point; wallKind: WallKind }
+  | { kind: "wallEdit"; walls: WallDocument[] };
 
 export interface ToolCallbacks {
+  wallEditing?: WallEditorPort;
   nextId: () => DocId;
   userId: UserId;
   grid: () => MeasureGrid | null;
@@ -142,7 +152,11 @@ export class ToolInteractionController {
   private start: Point | null = null;
   private lastMeasure: Point[] = [];
   private lastBroadcastKey = "";
-  constructor(private readonly callbacks: ToolCallbacks) {}
+  private readonly wallEditor: WallEditorController | null;
+  constructor(private readonly callbacks: ToolCallbacks) {
+    this.wallEditor = callbacks.wallEditing ? new WallEditorController(callbacks.wallEditing,
+      (walls) => callbacks.shapePreview(walls ? { kind: "wallEdit", walls } : null), callbacks.nextId) : null;
+  }
 
   activate(mode: ToolGesture): void {
     this.cancel();
@@ -171,6 +185,15 @@ export class ToolInteractionController {
   private snap(point: Point, event: ToolPointer, mode: SnapMode): Point {
     const snapMode = event.shiftKey ? "corner" : mode;
     return snapWorldWith(this.callbacks.grid(), point, snapMode);
+  }
+
+  private snapWall(event: ToolPointer): Point {
+    const context = this.callbacks.wallEditing?.context();
+    if (context && this.options().wallEndpointSnap && !event.ctrlKey) {
+      const endpoint = nearestWallEndpoint(context.walls, event.world, context.scale);
+      if (endpoint) return endpoint.point;
+    }
+    return this.snap(event.world, event, this.options().placementSnap);
   }
 
   pointerDown(event: ToolPointer): void {
@@ -211,7 +234,11 @@ export class ToolInteractionController {
       return;
     }
     if (this.mode === "wall") {
-      this.start = this.snap(event.world, event, options.placementSnap);
+      if (options.wallEditMode !== "draw") {
+        this.wallEditor?.down(event.world, options.wallEditMode, options.wallMoveJoined); return;
+      }
+      if (event.altKey) return; // Alt-click belongs to the existing eraser, never a new segment.
+      this.start = this.snapWall(event);
       this.emitWallPreview(this.start);
       return;
     }
@@ -262,14 +289,19 @@ export class ToolInteractionController {
       this.emitFogRectPreview({ ...event.world });
     } else if (this.mode === "fog" && options.fogShape === "poly" && this.points.length > 0) {
       this.emitFogPolyPreview({ ...event.world });
-    } else if (this.mode === "wall" && this.start) {
-      this.emitWallPreview(this.snap(event.world, event, options.placementSnap));
+    } else if (this.mode === "wall") {
+      if (options.wallEditMode !== "draw") {
+        this.wallEditor?.move(event.world, this.snap(event.world, event, options.placementSnap), options.wallEndpointSnap && !event.ctrlKey);
+      } else if (this.start) this.emitWallPreview(this.snapWall(event));
     }
   }
 
   pointerUp(event: ToolPointer): void {
-    if (!this.mode) return;
+    if (!this.mode || event.button !== 0) return;
     const options = this.options();
+    if (this.mode === "wall" && options.wallEditMode !== "draw") {
+      this.wallEditor?.up(event.world, this.snap(event.world, event, options.placementSnap), options.wallEndpointSnap && !event.ctrlKey); return;
+    }
     if (this.mode === "draw") {
       const shape = this.drawShapeFor(event);
       if (shape === "freehand") {
@@ -317,7 +349,7 @@ export class ToolInteractionController {
     }
     if (this.mode === "wall" && this.start) {
       const from = this.start;
-      const to = this.snap(event.world, event, options.placementSnap);
+      const to = this.snapWall(event);
       this.start = null;
       this.callbacks.shapePreview(null);
       if (Math.hypot(to.x - from.x, to.y - from.y) >= MIN_SHAPE_SIZE) {
@@ -349,6 +381,7 @@ export class ToolInteractionController {
    * rectangle fog brush with no drag does nothing. Called from Escape and right-click.
    */
   finishPoly(): void {
+    this.wallEditor?.cancel();
     const options = this.options();
     // Only a polygon commits this way: for every other shape Escape means "cancel".
     const polyDraw = this.mode === "draw" && options.drawShape === "poly";
@@ -406,6 +439,7 @@ export class ToolInteractionController {
   }
 
   cancel(): void {
+    this.wallEditor?.cancel();
     this.mode = null;
     this.points = [];
     this.start = null;

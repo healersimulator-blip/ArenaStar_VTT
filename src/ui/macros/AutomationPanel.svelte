@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import FauxOverheadEditor from "./FauxOverheadEditor.svelte";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { AssetManifest, AutomationDocument, DocRef, Json, MacroDocument, RollTableDocument, SceneDocument,
@@ -769,6 +770,7 @@
     {:else if selectedRegion}
       <p class="hint">Region {selectedRegion.name}: convex polygon, {selectedRegion.rotation ?? 0}° rotation
         {selectedRegion.hidden ? " · concealed from players" : " · projected to players"}.</p>
+      {#if canEdit && scene}<FauxOverheadEditor {client} sceneId={scene._id} region={selectedRegion} />{/if}
     {/if}
     {#if sourceKind === "tile"}
     <details data-zone-tile-create><summary>Create a rotated tile / zone in this scene</summary>

@@ -644,6 +644,28 @@ describe("token activation without movement side effects", () => {
     h.source.doubleClick(123, 117);
     expect(activated).toEqual(["a"]);
   });
+  test("DOM wheel normalizes pixel, line and page deltas and prevents page scroll", () => {
+    const target = new EventTarget();
+    const canvas = Object.assign(target, {
+      getBoundingClientRect: () => ({ left: 20, top: 30, height: 600 }),
+    }) as unknown as HTMLCanvasElement;
+    const source = domPointerSource(canvas);
+    const events: WheelEvt[] = [];
+    const listener = (e: WheelEvt) => { events.push(e); e.preventDefault(); };
+    source.addWheelListener(listener);
+    for (const deltaMode of [0, 1, 2]) {
+      const event = Object.assign(new Event("wheel", { cancelable: true }), {
+        clientX: 70, clientY: 90, deltaX: 0, deltaY: -2, deltaMode,
+      });
+      target.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    }
+    expect(events.map(e => e.deltaY)).toEqual([-2, -32, -1200]);
+    expect(events[0]).toMatchObject({ x: 50, y: 60 });
+    source.removeWheelListener(listener);
+    target.dispatchEvent(new Event("wheel"));
+    expect(events).toHaveLength(3);
+  });
   test("DOM adapter converts dblclick to canvas-relative coordinates and removes listeners", () => {
     const target = new EventTarget();
     const canvas = Object.assign(target, {

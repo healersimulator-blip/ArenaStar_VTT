@@ -1,3 +1,4 @@
+import { SaveWork } from "../storage/saveCoordinator";
 /**
  * §7 AssetServer (host) — content-addressed asset store.
  *
@@ -107,6 +108,7 @@ function bufferToHex(bytes: Uint8Array): string {
 }
 
 export class AssetServer {
+  readonly saveWork = new SaveWork();
   private readonly db: IDBPDatabase;
   private readonly opfs: OpfsAssetStore | null;
   private readonly chunkSize: number;
@@ -140,7 +142,16 @@ export class AssetServer {
    * are private until referenced by a viewer-visible document. Explicit
    * `world` sharing is a GM publishing decision, not inferred from a hash.
    */
-  async import(
+  import(
+    bytes: Uint8Array, name: string, mime: string,
+    visibility: NonNullable<AssetManifestEntry["visibility"]> = "referenced",
+    exportRights?: AssetManifestEntry["exportRights"],
+    metadata: Pick<AssetManifestEntry, "source" | "ingest" | "logicalFiles"> = {},
+  ): Promise<ImportedAsset> {
+    return this.saveWork.run(() => this.importInner(bytes, name, mime, visibility, exportRights, metadata));
+  }
+
+  private async importInner(
     bytes: Uint8Array, name: string, mime: string,
     visibility: NonNullable<AssetManifestEntry["visibility"]> = "referenced",
     exportRights?: AssetManifestEntry["exportRights"],
@@ -243,7 +254,11 @@ export class AssetServer {
     return (await getAsset(this.db, this.worldId, hash)) !== undefined;
   }
 
-  async remove(hash: AssetId): Promise<void> {
+  remove(hash: AssetId): Promise<void> {
+    return this.saveWork.run(() => this.removeInner(hash));
+  }
+
+  private async removeInner(hash: AssetId): Promise<void> {
     await deleteAsset(this.db, this.worldId, hash);
     await this.opfs?.remove(hash);
     this.onManifest?.(await this.manifest());
@@ -254,7 +269,11 @@ export class AssetServer {
    * Rewrites the IDB record and fires the manifest hook. Descriptors persist,
    * so restarts need no re-derivation.
    */
-  async describe(hash: AssetId, patch: Partial<AssetManifestEntry>): Promise<AssetManifestEntry> {
+  describe(hash: AssetId, patch: Partial<AssetManifestEntry>): Promise<AssetManifestEntry> {
+    return this.saveWork.run(() => this.describeInner(hash, patch));
+  }
+
+  private async describeInner(hash: AssetId, patch: Partial<AssetManifestEntry>): Promise<AssetManifestEntry> {
     const tx = this.db.transaction("assets", "readwrite");
     const record = await tx.store.get([this.worldId, hash]);
     if (!record) {
