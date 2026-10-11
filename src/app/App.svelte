@@ -3279,7 +3279,12 @@ const WALL_PICK_RADIUS = 12;
           tokenSelection.sceneId === shown._id ? tokenSelection.ids : []).map((t) => tokenRect(t))
       : [];
     // G-19 (D-443): in the isolated floor view, the floors it sees below show through, as players see them.
-    view.setLowerFloors(floor?.lower ?? new Map(), floor?.backgroundDepth || null);
+    // G-20 (D-445): with the tokens on those floors, beneath this floor's art.
+    const lowerTokens = floor && scene ? scene.tokens.flatMap((t) => {
+      const depth = floor.lowerTokens.get(t._id);
+      return depth === undefined ? [] : [{ id: t._id, img: t.img, x: t.x, y: t.y, width: t.width, height: t.height, rotation: t.rotation ?? 0, depth }];
+    }) : [];
+    view.setLowerFloors(floor?.lower ?? new Map(), floor?.backgroundDepth || null, lowerTokens);
     view
       .getTilesLayer({ loadTexture: tileImages.load })
       .sync(shown?.tiles ?? [], occupied, shown?.regions ?? [], shown ? { gridSize: shown.grid.size } : {});

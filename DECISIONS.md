@@ -13012,3 +13012,25 @@ Seeing tokens on other floors (G-20), light between floors (G-22) and falling (G
 **Not yet.** Nothing in play reads surfaces yet; G-20, G-22 and G-23 build on them.
 
 **Fix (D-443 follow-up).** The `lowerFloors` container was attached to the tiles-below layer in every scene, which changed that layer's children everywhere. Three tile-image tests caught it in the full run. The container is now attached only while it holds lower-floor art.
+
+## D-445 — Seeing tokens on lower floors through openings (G-20) (2026-10-11)
+
+With lower floors' art showing through openings (D-443) and floors that know where they are solid (D-444), the remaining V14 parity item for perception was tokens: a player at the edge of a stairwell should see who is standing at its foot.
+
+**Who decides.** The host decides, per viewer, in the floor focus view. `presentation.belowTokens` (`{id, depth}[]`, sent only when non-empty) lists the tokens on lower floors that this viewer's *own* vision tokens on the focused floor see. Players never send geometry.
+- **Observers.** At most 8 of the viewer's own vision tokens on the focused floor.
+- **Targets.** Tokens that are not hidden, are readable and are not masked for this viewer, on floors the focused floor sees below (its visibility list, D-443).
+
+**How "seen" is decided.** This uses the existing spatial kernel and perception model (D-426).
+- **Floor planes** come from D-444 surfaces. An untraced floor is solid, so nothing is seen through it.
+- **Walls.** Floor-scoped walls become one barrier per floor band. Walls scoped to every floor have no height limit, and unscoped walls do nothing, as elsewhere in floor play.
+- **Bodies.** A body is as tall as its size in cells times the grid distance (one cell for a medium creature), with eyes at 90 %. It is capped below its own ceiling, so a large creature never peeks through the floor above.
+- **Range.** The token's sight and darkvision ranges apply.
+- **Lighting.** A target needs light: its floor's ambient darkness, or that floor's own lights, set one grid distance above its floor. Darkvision also works. Light crossing floors is G-22.
+- **Budget.** A 20,000-ray budget fails closed: nothing extra is seen.
+
+**Drawing.** Seen tokens are drawn in the lower-floors container, just above their own floor's art and below nearer floors' art and this floor's art. They are tinted by depth like the art. Each is just its image (a disc until it loads): no bars, names, badges or picking. They stay out of the token layer (`tokenIds` is unchanged), so selection and targeting never reach another floor (G-27).
+
+**GM.** The isolated ("only") floor view draws every token on the floors it sees below, beneath the art. The art decides what shows. The ghost and all modes are unchanged.
+
+**Limits.** The replica still holds every non-hidden token, so this is fair presentation, not secrecy; the read boundary is G-33 (D-442). Only floors *below* are drawn, as a top-down view implies. The kernel is rebuilt per focus update, which is cheap for ordinary scenes; cache it if large scenes need it.

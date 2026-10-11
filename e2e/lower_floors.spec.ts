@@ -56,10 +56,10 @@ test("the upper floor shows the ground floor's art through its opening, dimmed, 
     await expect.poll(() => host.locator("#share-out").inputValue(), { timeout: 20000 }).not.toBe("");
     await player.fill("#answer-input", await host.locator("#share-out").inputValue()); await player.click("#answer-apply"); await waitForSurface(player, "playerCanvas");
     const floor = () => surfaceCall<{ levelId: string | null }>(player, "playerCanvas", "floorPresentation");
-    const lower = () => surfaceCall<{ tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null }>(player, "playerCanvas", "lowerFloors");
+    const lower = () => surfaceCall<{ tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> }>(player, "playerCanvas", "lowerFloors");
     const pixel = (x: number, y: number) => surfaceCallArg<number[]>(player, "playerCanvas", "floorMapPixel", { x, y });
     await expect.poll(async () => (await floor()).levelId).toBe(upper);
-    await expect.poll(lower).toEqual({ tiles: [{ id: red, depth: 1 }], backgroundDepth: null });
+    await expect.poll(lower).toEqual({ tiles: [{ id: red, depth: 1 }], backgroundDepth: null, tokens: [] });
     // Through the opening: the ground's red, dimmed. Elsewhere: the upper floor's own blue.
     await expect.poll(async () => { const [r = 0, g = 0, b = 0, a = 0] = await pixel(500, 500); return r > 120 && r < 210 && g < 30 && b < 30 && a === 255; }).toBe(true);
     await expect.poll(() => pixel(150, 150)).toEqual([0, 0, 255, 255]);
@@ -70,7 +70,7 @@ test("the upper floor shows the ground floor's art through its opening, dimmed, 
     // The GM seals Floor 2 again: the opening shows nothing underneath.
     await rows.nth(1).getByLabel("Floor 2 sees Ground", { exact: true }).uncheck();
     await editor.getByRole("button", { name: "Apply draft levels", exact: true }).click(); await expect(editor.getByRole("status").first()).toContainText("Draft saved");
-    await expect.poll(lower).toEqual({ tiles: [], backgroundDepth: null });
+    await expect.poll(lower).toEqual({ tiles: [], backgroundDepth: null, tokens: [] });
     await expect.poll(async () => (await pixel(500, 500))[0]).toBe(0);
     await expect.poll(() => pixel(150, 150)).toEqual([0, 0, 255, 255]);
   } finally { await pc.close(); await hc.close(); }

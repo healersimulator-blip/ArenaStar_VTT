@@ -61,7 +61,7 @@ import type { EffectsLayer } from "./layers/EffectsLayer";
 import { EffectsLayer as EffectsLayerImpl } from "./layers/EffectsLayer";
 import type { FxLayer } from "./layers/FxLayer";
 import { FxLayer as FxLayerImpl } from "./layers/FxLayer";
-import type { TilesLayer, TilesLayerOptions } from "./layers/TilesLayer";
+import type { LowerToken, TilesLayer, TilesLayerOptions } from "./layers/TilesLayer";
 import { TilesLayer as TilesLayerImpl } from "./layers/TilesLayer";
 import type { AreaPreviewLayer } from "./layers/AreaPreviewLayer";
 import { AreaPreviewLayer as AreaPreviewLayerImpl } from "./layers/AreaPreviewLayer";
@@ -229,9 +229,9 @@ export interface Stage {
    * dimmed; `backgroundDepth` dims the scene background when it is a lower floor's (0 or null = as is).
    * Call before syncing tiles.
    */
-  setLowerFloors(tiles: ReadonlyMap<string, number>, backgroundDepth: number | null): void;
+  setLowerFloors(tiles: ReadonlyMap<string, number>, backgroundDepth: number | null, tokens?: readonly LowerToken[]): void;
   /** Readback: lower-floor tiles drawn and the background's depth. */
-  lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null };
+  lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> };
   /** G-10/G-14: draw these stair markers (players: host-filtered; GM: every stairwell). */
   setStairMarkers(markers: readonly StairMarker[]): void;
   stairMarkerIds(): string[];
@@ -551,6 +551,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   let ghostAlpha = 0.25;
   let pendingTileGhosts: ReadonlySet<string> = new Set();
   let pendingLowerFloors: ReadonlyMap<string, number> = new Map();
+  let pendingLowerTokens: readonly LowerToken[] = [];
   let bgDepth: number | null = null;
   const applyBackgroundTint = (): void => { if (bgSprite) bgSprite.tint = bgDepth ? lowerFloorTint(bgDepth) : 0xffffff; };
   const tokenDocs = new Map<string, TokenDocument>();
@@ -901,6 +902,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         );
         tilesLayer.setGhosts(pendingTileGhosts, ghostAlpha);
         tilesLayer.setLowerFloors(pendingLowerFloors);
+        tilesLayer.setLowerTokens(pendingLowerTokens);
         tilesLayer.setVision(liveSight);
       }
       return tilesLayer;
@@ -1138,13 +1140,15 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
     },
     stairMarkerIds(): string[] { return stairMarkers.ids(); },
-    setLowerFloors(tiles, backgroundDepth): void {
+    setLowerFloors(tiles, backgroundDepth, tokens = []): void {
       pendingLowerFloors = tiles;
+      pendingLowerTokens = tokens;
       tilesLayer?.setLowerFloors(tiles);
+      tilesLayer?.setLowerTokens(tokens);
       bgDepth = backgroundDepth;
       applyBackgroundTint();
     },
-    lowerFloors() { return { tiles: tilesLayer?.lowerFloorTiles() ?? [], backgroundDepth: bgDepth }; },
+    lowerFloors() { return { tiles: tilesLayer?.lowerFloorTiles() ?? [], backgroundDepth: bgDepth, tokens: tilesLayer?.lowerTokenIds() ?? [] }; },
     setFauxOverhead(regions): void {
       overhead.setRegions(regions);
       applyOverheadDecorations();

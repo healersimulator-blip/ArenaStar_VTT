@@ -27,6 +27,9 @@ export interface TilesLayerOptions {
   loadTexture?: (img: string) => Promise<Texture | null>;
 }
 
+/** G-20 (D-445): a token on a lower floor, seen through this floor's openings. */
+export interface LowerToken { id: string; img: string; x: number; y: number; width: number; height: number; rotation: number; depth: number }
+
 /** D-438: per-sync roof inputs that are not tiles. */
 export interface RoofSyncOptions {
   /** Scene grid size in px: the unit of the radial opening radius. */
@@ -109,6 +112,56 @@ export class TilesLayer {
   private readonly lower: Container;
   private lowerDepth: ReadonlyMap<string, number> = new Map();
   setLowerFloors(depths: ReadonlyMap<string, number>): void { this.lowerDepth = depths; }
+  /**
+   * G-20 (D-445): tokens seen on lower floors. They are drawn in the same container, just above
+   * their own floor's art and below nearer floors' art and this floor's art, dimmed alike. Each is
+   * just its image (a disc while loading): no bars, names or picking.
+   */
+  private lowerTokenViews = new Map<string, { node: Sprite | Graphics; img: string; revision: number; token: LowerToken }>();
+  setLowerTokens(tokens: readonly LowerToken[]): void {
+    const seen = new Set<string>();
+    for (const token of tokens) {
+      seen.add(token.id);
+      let view = this.lowerTokenViews.get(token.id);
+      if (view && view.img !== token.img) { view.node.destroy(); this.lowerTokenViews.delete(token.id); view = undefined; }
+      if (!view) {
+        const disc = new Graphics().circle(0, 0, 0.5).fill({ color: 0xffffff });
+        view = { node: disc, img: token.img, revision: 0, token };
+        this.lowerTokenViews.set(token.id, view);
+        this.lower.addChild(disc);
+        const load = token.img ? this.opts.loadTexture?.(token.img) : undefined;
+        const live = view, revision = ++live.revision;
+        void load?.then((texture) => {
+          if (!texture || this.lowerTokenViews.get(token.id) !== live || live.revision !== revision || live.node.destroyed) return;
+          const sprite = new Sprite(texture);
+          sprite.anchor.set(0.5);
+          live.node.parent?.removeChild(live.node);
+          live.node.destroy();
+          live.node = sprite;
+          this.lower.addChild(sprite);
+          this.placeLowerToken(live);
+          this.placeLower();
+        }).catch(() => undefined);
+      }
+      view.token = token;
+      this.placeLowerToken(view);
+    }
+    for (const [id, view] of this.lowerTokenViews) if (!seen.has(id)) { view.node.parent?.removeChild(view.node); view.node.destroy(); this.lowerTokenViews.delete(id); }
+    this.placeLower();
+  }
+  private placeLowerToken(view: { node: Sprite | Graphics; token: LowerToken }): void {
+    const { node, token } = view;
+    node.position.set(token.x, token.y);
+    node.rotation = (token.rotation ?? 0) * Math.PI / 180;
+    if (node instanceof Sprite) { node.width = token.width; node.height = token.height; }
+    else node.scale.set(Math.min(token.width, token.height) * 0.8);
+    node.tint = lowerFloorTint(token.depth);
+    node.zIndex = -token.depth + 0.5;
+  }
+  /** Readback: lower-floor tokens drawn, with depth. */
+  lowerTokenIds(): Array<{ id: string; depth: number }> {
+    return [...this.lowerTokenViews.values()].map((v) => ({ id: v.token.id, depth: v.token.depth })).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
   /** The container sits at the bottom of the tiles-below layer only while it holds lower-floor art. */
   private placeLower(): void {
     if (this.lower.children.length && this.lower.parent !== this.below) this.below.addChildAt(this.lower, 0);
@@ -615,6 +668,8 @@ export class TilesLayer {
   destroy(): void {
     for (const view of this.views.values()) this.detach(view);
     this.views.clear();
+    for (const view of this.lowerTokenViews.values()) view.node.destroy();
+    this.lowerTokenViews.clear();
     this.lower.parent?.removeChild(this.lower);
     this.lower.destroy();
     for (const graphics of this.regionViews.values()) {

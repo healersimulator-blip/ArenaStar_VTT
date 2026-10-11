@@ -1,6 +1,6 @@
 # Multilevel implementation status
 
-**2026-10-11 — native cover, wall authoring, spatial kernel, level drafts, isolated floor play, stairwells with player choice (D-430), pass-through and door-linked stairs (D-437), floor scopes for presentation objects (D-432), the floor-play check (D-433), roofs (D-438), floor merge/reorder/rescale (D-439), token elevation cues (D-440), importing a scene as a floor (D-441), seeing lower floors (D-443) and solid floors with openings (D-444); the complete design is not finished.**
+**2026-10-11 — native cover, wall authoring, spatial kernel, level drafts, isolated floor play, stairwells with player choice (D-430), pass-through and door-linked stairs (D-437), floor scopes for presentation objects (D-432), the floor-play check (D-433), roofs (D-438), floor merge/reorder/rescale (D-439), token elevation cues (D-440), importing a scene as a floor (D-441), seeing lower floors (D-443), solid floors with openings (D-444) and seeing tokens below (D-445); the complete design is not finished.**
 
 Target: [Multilevel, walls and Faux Overhead design](MULTILEVEL_WALLS_DESIGN.md).
 
@@ -27,6 +27,8 @@ Legacy scenes are not silently migrated. Legacy `{from,to}` stairs keep working;
 **Seeing lower floors (D-443).** In Draft levels, each floor lists the floors it **sees below**. The presets are *Sealed*, *Down to ground* and *All below*. On an isolated floor, and in the GM's isolated floor view, the art of those floors is drawn beneath this floor's art and dimmed by depth, so stairwells, holes and the open air beside a tower show what lies below. Only art is shown: tokens, walls and lights stay on their own floor.
 
 **Solid floors with openings (D-444).** Each draft floor can store where it is solid. **Trace from floor art** turns the opaque parts of its map art into solid floor and the transparent parts into openings, with a preview; untraced floors are solid everywhere. The floor-play check warns about an opening with nothing beneath it. These shapes feed the spatial kernel for the coming cross-floor sight, light and falling work.
+
+**Seeing tokens below (D-445).** A player's tokens can see tokens on the floors below through those openings: from the edge of a stairwell, the goblin at its foot. The host checks a real 3D sightline (openings, walls, range, light or darkvision). Seen tokens are drawn dimmed beneath the floor's art and cannot be picked; the GM's isolated view shows all of them.
 
 **A scene as a floor (D-441).** The same panel imports another scene (or one floor of a multilevel scene) into an existing floor or a new floor on top: its map becomes a floor map tile, and its tiles, walls and lights are copied, scaled so grid cells match, and stamped with the floor. Tokens and regions stay behind. One undo step removes it all.
 

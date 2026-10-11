@@ -179,4 +179,32 @@ describe("G-19 (D-443): art seen on lower floors", () => {
     expect(f.layer.lowerFloorTiles()).toEqual([]);
     f.layer.destroy();
   });
+
+  test("G-20 (D-445): tokens seen below sit just above their floor's art, dimmed alike, and leave cleanly", async () => {
+    let resolve: (texture: Texture | null) => void = () => undefined;
+    const f = fixture(true, () => new Promise((r) => { resolve = r; }));
+    const ground = tile("ground", { above: false, occlusion: { mode: "fade", alpha: 0 } });
+    f.layer.setLowerFloors(new Map([["ground", 2]]));
+    f.layer.setLowerTokens([{ id: "goblin", img: "goblin.png", x: 500, y: 400, width: 100, height: 100, rotation: 90, depth: 2 }]);
+    f.layer.sync([ground], []);
+    const lower = f.below.children[0] as Container;
+    expect(lower.label).toBe("lowerFloors");
+    const disc = lower.children.find((child) => child.zIndex === -1.5);
+    expect(disc?.tint).toBe(0x808080);
+    expect([disc?.x, disc?.y]).toEqual([500, 400]);
+    expect(f.layer.lowerTokenIds()).toEqual([{ id: "goblin", depth: 2 }]);
+    // The image replaces the placeholder disc, sized and rotated like the token.
+    resolve(Texture.WHITE); await Promise.resolve(); await Promise.resolve();
+    const sprite = lower.children.find((child) => child instanceof Sprite && child.zIndex === -1.5) as Sprite;
+    expect([sprite.width, sprite.height, sprite.tint]).toEqual([100, 100, 0x808080]);
+    expect(sprite.rotation).toBeCloseTo(Math.PI / 2);
+    expect(lower.children.filter((child) => child.zIndex === -1.5)).toHaveLength(1);
+    // Out of sight: gone; with nothing left below, the container detaches.
+    f.layer.setLowerTokens([]);
+    f.layer.setLowerFloors(new Map());
+    f.layer.sync([ground], []);
+    expect(f.layer.lowerTokenIds()).toEqual([]);
+    expect(lower.parent).toBeNull();
+    f.layer.destroy();
+  });
 });

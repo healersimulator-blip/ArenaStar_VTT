@@ -41,6 +41,11 @@ export interface FloorPresentation {
    * elevation badges (D-440) measured from 0 instead of from the floor they stand on.
    */
   floorZ?: number;
+  /**
+   * G-20 (D-445): tokens on lower floors this viewer's vision tokens see through the openings,
+   * per viewer (added by the focus view, never by `floorPresentation`). Drawn beneath this floor's art.
+   */
+  belowTokens?: Array<{ id: string; depth: number }>;
 }
 export interface FloorBelow {
   levelId: string;

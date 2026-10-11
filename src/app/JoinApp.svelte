@@ -1181,11 +1181,17 @@
     // Only projected tiles are present; hidden GM tiles and their images never arrive.
     // D-438: roofs open for this player's own vision tokens (the selection narrows them).
     // G-19 (D-443): floors seen beneath this one show through its art, dimmed by depth (art only).
-    view.setLowerFloors(lowerFloorDepths(presentation), backgroundDepth(presentation) || null);
+    // G-20 (D-445): tokens down there that the host says this player's tokens see through the openings.
+    const replicaTokens = scene ? (client.store.get("scenes", scene._id) as SceneDocument | undefined)?.tokens ?? [] : [];
+    const lowerTokens = (presentation?.belowTokens ?? []).flatMap(({ id, depth }) => {
+      const t = replicaTokens.find((x) => x._id === id);
+      return t ? [{ id, img: t.img, x: t.x, y: t.y, width: t.width, height: t.height, rotation: t.rotation ?? 0, depth }] : [];
+    });
+    view.setLowerFloors(lowerFloorDepths(presentation), backgroundDepth(presentation) || null, lowerTokens);
     view.getTilesLayer({ loadTexture: tileImages.load }).sync(scene?.tiles ?? [],
       scene ? roofViewerTokens(scene, client.user, client.store.getAll("actors") as readonly ActorDocument[], selection).map(tokenRect) : [],
       scene?.regions ?? [], scene ? { gridSize: scene.grid.size } : {});
-    tileImages.retain([...(scene?.tiles ?? []).map((tile) => tile.img), ...(scene?.tokens ?? []).map((token) => token.img)]);
+    tileImages.retain([...(scene?.tiles ?? []).map((tile) => tile.img), ...(scene?.tokens ?? []).map((token) => token.img), ...lowerTokens.map((t) => t.img)]);
     const fetcher = current.fetcher;
     if (fetcher) sceneBackground.sync(scene?.img ?? null, client.store.world.assetManifest,
       (hash, priority) => fetcher.request(hash, priority), view, scene);

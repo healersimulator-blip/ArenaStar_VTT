@@ -1,4 +1,5 @@
 import { floorPresentation, type FloorPresentation } from "./levelPlay";
+import { tokensSeenBelow } from "./crossFloorSight";
 /** Floor focus is presentation, not secret-floor disclosure or movement authority. */
 import type { ActorDocument, BaseDocument, SceneDocument } from "./documents";
 import { docVisibleTo } from "./projection";
@@ -35,6 +36,11 @@ export function levelFocusView(scene: SceneDocument | undefined, actors: readonl
     const { regions, drawings, templates, notes } = presentation.offFloor;
     const r = readable(scene.regions), d = readable(scene.drawings), t = readable(scene.templates), n = readable(scene.notes);
     presentation.offFloor = { regions: regions.filter((id) => r.has(id)), drawings: drawings.filter((id) => d.has(id)), templates: templates.filter((id) => t.has(id)), notes: notes.filter((id) => n.has(id)) };
+  }
+  // G-20 (D-445): tokens below that this viewer's own vision tokens see through the openings.
+  if (presentation && level && isolated && presentation.below?.length) {
+    const belowTokens = tokensSeenBelow(scene, actors, user, level._id);
+    if (belowTokens.length) presentation.belowTokens = belowTokens;
   }
   const extra = isolated ? { isolated: true, ...(follow ? { followTokenId: follow._id } : {}), ...(presentation ? { presentation } : {}) } : {};
   return { ...extra, levels, levelId, tokenIds: levelId === null ? (isolated ? [] : null) : scene.tokens.filter((t) => t.levelId === levelId && !t.hidden && can(user, "read", t, "tokens", { parent: scene })).map((t) => t._id).sort() };
