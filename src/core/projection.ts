@@ -1188,11 +1188,11 @@ export function projectEnvelope(
     if (op.kind === "update" && coll === "scenes") {
       const originalDiff = op.diff;
       const diff = Object.fromEntries(Object.entries(op.diff).filter(([key]) =>
-        !/^(?:-=)?levels(?:\.|$)/.test(key) && !/^(?:-=)?(?:walls|lights|tokens|regions)\.\d+\.(?:levelId|levelScope|stairs)(?:\.|$)/.test(key)
+        !/^(?:-=)?levels(?:\.|$)/.test(key) && !/^(?:-=)?(?:walls|lights|tokens|regions|drawings|templates|notes)\.\d+\.(?:levelId|levelScope|stairs)(?:\.|$)/.test(key)
       ).map(([key, value]) => {
-        if (/^(?:walls|lights|tokens)$/.test(key) && Array.isArray(value))
+        if (/^(?:walls|lights|tokens|regions|drawings|templates|notes)$/.test(key) && Array.isArray(value))
           return [key, value.map((doc) => doc && typeof doc === "object" && !Array.isArray(doc) ? stripPrefabMarker(doc as unknown as BaseDocument) as unknown as Json : doc)];
-        if (/^(?:walls|lights|tokens|regions)\.\d+$/.test(key) && value && typeof value === "object" && !Array.isArray(value))
+        if (/^(?:walls|lights|tokens|regions|drawings|templates|notes)\.\d+$/.test(key) && value && typeof value === "object" && !Array.isArray(value))
           return [key, stripPrefabMarker(value as unknown as BaseDocument) as unknown as Json];
         return [key, value];
       }));

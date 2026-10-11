@@ -183,6 +183,13 @@ point `LD_LIBRARY_PATH` at the library directory and pass its `executablePath()`
 variable above. That is how the acceptance runs in this repository's own sandbox were made
 (repeatedly, after the CDN turned out to be unreachable).
 
+**Unpack `swiftshader.tar.br` into the same directory as the `chromium` executable** (so
+`libEGL.so`, `libGLESv2.so`, `libvk_swiftshader.so` and `vk_swiftshader_icd.json` sit beside it).
+Chromium looks for them there; `LD_LIBRARY_PATH` or ANGLE flags alone are not enough. Without them
+WebGL is unavailable and Pixi silently falls back to its Canvas2D renderer, so pixel tests then
+exercise the fallback rather than the normal path (D-429: Faux Overhead covers hide whole tokens
+there, and `e2e/faux_overhead.spec.ts` asserts that contract when it detects Canvas2D).
+
 Containers without user namespaces cannot start the Chromium sandbox; there,
 `PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1` is the explicit opt-in that relaxes it. It is the only
 case in which the config passes a browser-security flag, it applies only alongside the

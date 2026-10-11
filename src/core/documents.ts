@@ -144,6 +144,8 @@ export interface FauxOverheadBehavior {
 }
 
 export interface RegionDocument extends BaseDocument {
+  /** G-06 floor scope for presentation (covers, markers); absent = shown on every floor. */
+  levelScope?: LevelScope;
   /** GM-authored entry transition; host changes membership and feet Z together. */
   stairs?: import("./levelPlay").StairBehavior;
   type: "region";
@@ -188,6 +190,8 @@ export interface TileDocument extends BaseDocument {
 }
 
 export interface DrawingDocument extends BaseDocument {
+  /** G-06 floor scope in isolated floor play; absent = shown on every floor (legacy). */
+  levelScope?: LevelScope;
   type: "drawing";
   /**
    * §10 tool shapes: freehand, poly (closed polygon), line (open 2-point segment),
@@ -205,6 +209,8 @@ export interface DrawingDocument extends BaseDocument {
 }
 
 export interface TemplateDocument extends BaseDocument {
+  /** G-06 floor scope in isolated floor play; absent = shown on every floor (legacy). */
+  levelScope?: LevelScope;
   type: "template";
   kind: "cone" | "circle" | "ray" | "rect";
   x: number;
@@ -215,6 +221,8 @@ export interface TemplateDocument extends BaseDocument {
 }
 
 export interface NoteDocument extends BaseDocument {
+  /** G-06 floor scope in isolated floor play; absent = shown on every floor (legacy). */
+  levelScope?: LevelScope;
   type: "note";
   x: number;
   y: number;

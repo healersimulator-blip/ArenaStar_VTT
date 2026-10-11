@@ -74,7 +74,15 @@ corepack pnpm test:fx:visual
 ```
 
 The temporary executable/library paths must exist; they are not repository artifacts. The override
-is not needed on a normal Playwright installation.
+is not needed on a normal Playwright installation. Unpack the package's `swiftshader.tar.br` next to
+`/tmp/chromium` (not only into `LD_LIBRARY_PATH`); otherwise the browser has no WebGL, Pixi falls back
+to Canvas2D and pixel-level specs test the fallback (D-429).
+
+## Multilevel batch (D-429)
+
+`corepack pnpm build && corepack pnpm test:multilevel` runs the 12 floor-play journeys (isolated floors,
+level ambient/bindings/drafts/perception, player floor focus, Faux Overhead, wall editing and the
+three-floor stairwell choice) in one Chromium worker, so wording changes cannot silently break them.
 
 ## Open failures at D-323
 

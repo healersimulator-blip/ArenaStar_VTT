@@ -1,5 +1,6 @@
 import { LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
-import type { LevelFocusStateMsg } from "../core/messages";
+import type { LevelFocusStateMsg, StairOfferMsg } from "../core/messages";
+import { MAX_STAIR_LEVELS, STAIRS_V2_FEATURE } from "../core/levelPlay";
 import { fogVersionKey, fogLevelIdError, LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "../core/levelFog";
 /**
  * §5 ClientSync — the client-side sync endpoint.
@@ -88,6 +89,8 @@ export interface ClientEvents {
   /** D-250: the host's answer to `requestFog` (also resolves the pending promise). */
   fogState: FogStateMsg;
   levelFocus: LevelFocusStateMsg | null;
+  /** G-01 (D-430): the host's stairwell choice (or notice) for a token this user moved. */
+  stairOffer: StairOfferMsg;
 }
 
 /** Which intents are latency-sensitive enough for optimistic echo (§5 default). */
@@ -941,6 +944,8 @@ export class ClientSync {
       case "asset.share":
       case "fog.put":
       case "level.focus":
+      case "stair.choose":
+      case "stair.request":
       case "fog.get":
       case "relay.offer":
       case "turn.ready":
@@ -948,6 +953,13 @@ export class ClientSync {
       case "report.detail":
       case "sim.snapshot.get":
         return; // client→host kinds and later-milestone kinds are never received here
+      case "stair.offer": {
+        if (!this.supportsFeature(STAIRS_V2_FEATURE) || typeof msg.offerId !== "string" || typeof msg.sceneId !== "string" || typeof msg.tokenId !== "string" ||
+            !["open", "locked", "none", "ended"].includes(msg.status) || !Array.isArray(msg.choices) || msg.choices.length > MAX_STAIR_LEVELS ||
+            !Array.from(msg.choices).every((c) => c && typeof c.levelId === "string" && typeof c.name === "string" && ["up", "down", "level"].includes(c.direction)) ||
+            !Number.isFinite(msg.ttlMs) || (msg.label !== undefined && typeof msg.label !== "string") || (msg.error !== undefined && typeof msg.error !== "string")) return;
+        this.bus.emit("stairOffer", msg); return;
+      }
       case "level.focus.state": {
         if (!this.supportsFeature(LEVEL_NAVIGATION_FEATURE) || msg.requestId !== this.levelFocusRequest || !Number.isSafeInteger(msg.revision) || msg.revision < 1 ||
             (this.levelFocus?.requestId === msg.requestId && msg.revision <= this.levelFocus.revision)) return;
@@ -1152,6 +1164,16 @@ export class ClientSync {
     const requestId = globalThis.crypto.randomUUID();
     this.levelFocusRequest = requestId;
     this.send({ kind: "level.focus", requestId, sceneId, levelId, ...(followTokenId ? { followTokenId } : {}) });
+  }
+  /** G-01: answer a stairwell offer; `null` stays on the current floor. */
+  chooseStair(offerId: string, levelId: string | null): void {
+    if (!this.supportsFeature(STAIRS_V2_FEATURE)) throw new Error("Upgrade required: stairwell choices");
+    this.send({ kind: "stair.choose", offerId, levelId });
+  }
+  /** G-08: ask for the stairwell choice of a token already standing on stairs. */
+  requestStairs(sceneId: string, tokenId: string): void {
+    if (!this.supportsFeature(STAIRS_V2_FEATURE)) throw new Error("Upgrade required: stairwell choices");
+    this.send({ kind: "stair.request", sceneId, tokenId });
   }
   private clearLevelFocus(): void {
     this.levelFocus = null; this.levelFocusRequest = null;

@@ -55,3 +55,10 @@ test("assignment operations undo and redo as one transaction without mutating XY
   expect(store.applyEnvelope({ seq: 3, by: "gm", ts: 0, txId: "redo", ops }).ok).toBe(true);
   expect(store.get("scenes", "s")).toEqual(after);
 });
+test("G-06: notes, drawings, templates and regions use the same scope plans", () => {
+  const s = scene();
+  s.notes = [{ _id: "pin", type: "note", name: "Pin", ownership: { default: 2 }, flags: {}, system: {}, x: 1, y: 1, text: "", icon: "" }];
+  expect(planWallBinding(s, "pin", { mode: "levels", ids: ["upper"] }, "notes")).toEqual([{ kind: "update", ref: { coll: "notes", id: "pin", parent: { coll: "scenes", id: s._id } }, diff: { levelScope: { mode: "levels", ids: ["upper"] } } }]);
+  expect(() => planWallBinding(s, "missing", { mode: "all" }, "drawings")).toThrow("no longer exists");
+  expect(bindingRevision(s, "regions", "none")).toContain(s._id);
+});

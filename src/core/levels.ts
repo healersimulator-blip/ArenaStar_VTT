@@ -2,15 +2,15 @@ import { levelPlayError } from "./levelPlay";
 /** Draft-only level contracts. No migration, token movement or physical activation is implicit. */
 import type { BaseDocument, DocRef, LevelDocument, SceneDocument } from "./documents";
 import type { Op } from "./ops";
-import { sceneMembershipError } from "./levelMembership";
+import { sceneMembershipError, isScopedCollection } from "./levelMembership";
 import { applyDiff } from "./diff";
 import { elevationBandError, inElevationBand } from "./multilevelGeometry";
 export const MAX_LEVELS = 32;
 const idPattern = /^[A-Za-z0-9_-]{1,128}$/;
 
-export function sceneLevelsError(scene: { levels?: unknown; walls?: unknown; lights?: unknown; tokens?: unknown; tiles?: unknown; regions?: unknown; levelMode?: unknown }): string | null {
+export function sceneLevelsError(scene: { levels?: unknown; walls?: unknown; lights?: unknown; tokens?: unknown; tiles?: unknown; regions?: unknown; levelMode?: unknown; drawings?: unknown; templates?: unknown; notes?: unknown }): string | null {
   if (scene.levels === undefined && (scene.levelMode !== undefined || (Array.isArray(scene.regions) && scene.regions.some((r) => r?.stairs !== undefined)))) return "Floor play and stairs require levels";
-  if (scene.levels === undefined) return sceneMembershipError({ walls: scene.walls, lights: scene.lights, tokens: scene.tokens });
+  if (scene.levels === undefined) return sceneMembershipError({ walls: scene.walls, lights: scene.lights, tokens: scene.tokens, regions: scene.regions, drawings: scene.drawings, templates: scene.templates, notes: scene.notes });
   if (!Array.isArray(scene.levels) || scene.levels.length > MAX_LEVELS) return "Scene needs an array of at most 32 draft levels";
   const ids = new Set<string>();
   for (const raw of scene.levels) {
@@ -65,7 +65,7 @@ export function levelTransactionError(ops: readonly Op[], resolve: (ref: DocRef)
   const scenes = new Map<string, SceneDocument>();
   for (const op of ops) {
     const coll = op.kind === "create" ? op.coll : op.ref.coll;
-    if (coll !== "scenes" && coll !== "levels" && coll !== "walls" && coll !== "lights" && coll !== "tokens" && coll !== "tiles" && coll !== "regions") continue;
+    if (coll !== "scenes" && coll !== "levels" && coll !== "tokens" && coll !== "tiles" && !isScopedCollection(coll)) continue;
     const ref: DocRef = op.kind === "create" ? { coll, id: op.data._id, ...(op.parent ? { parent: op.parent } : {}) } : op.ref;
     const parent = coll === "scenes" ? ref : ref.parent;
     if (!parent || parent.coll !== "scenes" || parent.parent) return "Levels require a direct scene parent";
@@ -73,7 +73,10 @@ export function levelTransactionError(ops: readonly Op[], resolve: (ref: DocRef)
     if (coll === "scenes" && op.kind === "create") { scenes.set(ref.id, structuredClone(op.data) as SceneDocument); continue; }
     const source = scenes.get(parent.id) ?? resolve(parent) as SceneDocument | undefined;
     if (!source) continue; // Store preflight rejects missing parents.
-    if ((coll === "walls" || coll === "lights" || coll === "tokens") && source.levels === undefined) {
+    // Presentation kinds (G-06) are validated only when their scope changes, so ordinary
+    // drawing/template/note edits cost what they did before floor scopes existed.
+    const presentation = coll === "drawings" || coll === "templates" || coll === "notes";
+    if ((coll === "tokens" || isScopedCollection(coll)) && (source.levels === undefined || presentation)) {
       const field = coll === "tokens" ? "levelId" : "levelScope";
       const touched = op.kind === "create" ? Object.hasOwn(op.data, field) : op.kind === "update" &&
         Object.keys(op.diff).some((key) => key.replace(/^-=/, "").split(".")[0] === field);
@@ -83,7 +86,7 @@ export function levelTransactionError(ops: readonly Op[], resolve: (ref: DocRef)
     if (coll === "scenes" && op.kind === "update") {
       const applied = applyDiff(scene, op.diff); if (!applied.ok) return applied.error;
       scene = applied.value;
-    } else if (coll === "levels" || coll === "walls" || coll === "lights" || coll === "tokens" || coll === "tiles" || coll === "regions") {
+    } else if (coll === "levels" || coll === "tokens" || coll === "tiles" || isScopedCollection(coll)) {
       if (scene[coll] !== undefined && !Array.isArray(scene[coll])) return "Scene embedded records must be arrays";
       const rows: BaseDocument[] = [...(scene[coll] ?? [])], index = rows.findIndex((l) => l._id === ref.id);
       if (op.kind === "create") rows.push(structuredClone(op.data));

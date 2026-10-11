@@ -19,7 +19,7 @@ test("GM wall scope authoring audits bindings, blocks stale edits, undoes and pe
   const level = await editor.locator("[data-level-id]").first().getAttribute("data-level-id");
   if (!level) throw new Error("level missing");
   const bindings = editor.locator("[data-level-bindings]"); await bindings.locator(":scope > summary").click();
-  await expect(bindings).toContainText("do not hide other floors");
+  await expect(bindings).toContainText("this is not full secret-data redaction");
   await bindings.getByLabel("Membership object type", { exact: true }).selectOption("walls");
   await bindings.getByLabel("Membership object", { exact: true }).selectOption(wall.id);
   await bindings.getByLabel("Wall level scope", { exact: true }).selectOption("levels");

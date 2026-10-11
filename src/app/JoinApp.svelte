@@ -1,6 +1,9 @@
 <!-- eslint-disable @typescript-eslint/no-non-null-assertion -->
 <script lang="ts">
-  import { floorScene } from "../core/levelPlay";
+  import { floorScene, type StairMarker } from "../core/levelPlay";
+  import type { StairOfferMsg } from "../core/messages";
+  import StairChooser from "../ui/StairChooser.svelte";
+  import { tileTriggerPolygonContains } from "../core/tileTriggerZone";
   import { focusedTokenIds, LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
   import type { LevelFocusStateMsg } from "../core/messages";
   import ZoomControl from "../ui/canvas/ZoomControl.svelte";
@@ -91,6 +94,7 @@
   import { copyText } from "../ui/clipboard";
   import { FogExploration } from "../client/fogExploration";
   import { FxPlayer } from "../client/fxPlayer";
+  import { refusalNotifier, type RefusalNotifier } from "../client/moveRefusals";
   import FxViewPrefsPanel from "../ui/macros/FxViewPrefsPanel.svelte";
   import { fogMaskLog } from "../core/fogMask";
   import { drawingBounds } from "../canvas/layers/drawingGeometry";
@@ -118,6 +122,58 @@
   let guideOpen = $state(false);
   /** SQ-13: one-line FX delivery warnings for this viewer (max 4, newest last). */
   let fxNotices = $state<string[]>([]);
+  // G-02 (D-429): host refusals of this player's canvas moves, shown briefly instead of a silent snap-back.
+  let moveNotices = $state<Array<{ id: number; message: string; tone: "warn" | "info" }>>([]);
+  let moveNoticeSeq = 0;
+  let moveRefusals: RefusalNotifier | null = null;
+  function showMoveNotice(message: string, tone: "warn" | "info" = "warn"): void {
+    const id = ++moveNoticeSeq;
+    moveNotices = [...moveNotices.slice(-2), { id, message, tone }];
+    globalThis.setTimeout(() => { moveNotices = moveNotices.filter((n) => n.id !== id); }, 6000);
+  }
+  // G-01/G-08/G-18 (D-430): the host's stairwell choice, "take stairs" and the floor-change cue.
+  let stairOffer = $state<StairOfferMsg | null>(null);
+  let stairOfferTimer: ReturnType<typeof setTimeout> | undefined;
+  let onStairs = $state<{ tokenId: string; label: string } | null>(null);
+  let floorFade = $state(false);
+  let floorFadeTimer: ReturnType<typeof setTimeout> | undefined;
+  function stairTokenName(tokenId: string): string {
+    return (app?.client?.store.get("scenes", floorFocus?.sceneId ?? "") as SceneDocument | undefined)?.tokens.find((t) => t._id === tokenId)?.name ?? "";
+  }
+  function answerStairs(levelId: string | null): void {
+    const offer = stairOffer;
+    if (!offer) return;
+    stairOffer = null; clearTimeout(stairOfferTimer);
+    try { app?.client?.chooseStair(offer.offerId, levelId); } catch (error) { showMoveNotice(String(error)); }
+  }
+  function takeStairs(): void {
+    const scene = activeScene(), here = onStairs;
+    if (!scene || !here) return;
+    try { app?.client?.requestStairs(scene._id, here.tokenId); } catch (error) { showMoveNotice(String(error)); }
+  }
+  function onStairOffer(offer: StairOfferMsg): void {
+    if (offer.status === "open") {
+      stairOffer = offer; clearTimeout(stairOfferTimer);
+      stairOfferTimer = setTimeout(() => { if (stairOffer?.offerId === offer.offerId) stairOffer = null; }, Math.max(1000, offer.ttlMs));
+    } else if (offer.status === "ended") {
+      if (stairOffer?.offerId === offer.offerId) { stairOffer = null; clearTimeout(stairOfferTimer); }
+    }
+    if (offer.status === "locked") showMoveNotice("These stairs are locked.");
+    else if (offer.status === "none") showMoveNotice(offer.error ?? "There are no stairs to take here.");
+    else if (offer.error) showMoveNotice(offer.error);
+  }
+  /** Which stair marker (if any) the followed token is standing in: drives "Take stairs". */
+  function standingOnStairs(scene: SceneDocument | null, markers: readonly StairMarker[]): { tokenId: string; label: string } | null {
+    const tokenId = floorFocus?.followTokenId;
+    const token = tokenId ? scene?.tokens.find((t) => t._id === tokenId) : undefined;
+    if (!token) return null;
+    for (const marker of markers) {
+      const polygon: Array<{ x: number; y: number }> = [];
+      for (let i = 0; i + 1 < marker.points.length; i += 2) polygon.push({ x: marker.points[i] ?? 0, y: marker.points[i + 1] ?? 0 });
+      if (!marker.locked && tileTriggerPolygonContains(polygon, token)) return { tokenId: token._id, label: marker.label ?? "stairs" };
+    }
+    return null;
+  }
   let guideFocus = $state<HTMLDivElement | null>(null);
   let guideTrigger = $state<HTMLButtonElement | null>(null);
   let guideReturnFocus: HTMLElement | null = null;
@@ -1082,6 +1138,10 @@
     view.setTokenHpBarMode(hpBarMode === "hover" ? "hover" : "all");
     view.setTokenImageLoader(tileImages.load);
     view.setFauxOverhead(scene?.regions ?? []);
+    const focusNow = client.levelFocus;
+    const markers = scene && focusNow?.isolated && focusNow.sceneId === scene._id && focusNow.worldSeq === client.store.seq ? focusNow.presentation?.stairs ?? [] : [];
+    view.setStairMarkers(markers);
+    onStairs = standingOnStairs(scene, markers);
     view.syncTokens(
       tokens,
       undefined,
@@ -1258,6 +1318,7 @@
                 frame.x = x; frame.y = y; frame.width = 1; frame.height = 1;
                 return Array.from(view.app.renderer.extract.pixels({ target: layer, frame, resolution: 1 }).pixels).slice(0, 4);
               },
+              stairMarkers: () => view.stairMarkerIds(),
               floorPresentation: () => ({ levelId: client.levelFocus?.levelId ?? null, mode: client.levelFocus?.mode ?? null, tileIds: activeScene()?.tiles.map((t) => t._id) ?? [], lightIds: activeScene()?.lights.map((l) => l._id) ?? [], img: activeScene()?.img ?? null, darkness: activeScene()?.darkness ?? null }),
               // D-271: what this player's hexcrawl overlay painted (its own cover included).
               hexOverlay: () => {
@@ -1473,7 +1534,7 @@
           stage: view,
           source: domPointerSource(view.app.canvas as HTMLCanvasElement),
           client: {
-            submit: (ops: Op[]) => client.submit(ops),
+            submit: (ops: Op[]) => moveRefusals ? moveRefusals.track(client.submit(ops)) : client.submit(ops),
           },
           getTokens: tokenViews,
           getGrid: () => squareGrid(activeScene()?.grid),
@@ -1495,9 +1556,16 @@
             );
           },
         });
+        moveRefusals = refusalNotifier(client.bus, (message) => showMoveNotice(message));
+        client.bus.on("stairOffer", onStairOffer);
         client.bus.on("levelFocus", (state) => {
           clearTimeout(floorFocusTimer); floorFocusPending = false;
           const changedFloor = floorFocus?.sceneId !== state?.sceneId || floorFocus?.levelId !== state?.levelId;
+          if (changedFloor && state?.isolated && floorFocus?.sceneId === state.sceneId && floorFocus.levelId && state.levelId && state.mode !== "manual") {
+            const name = state.levels.find((l) => l.id === state.levelId)?.name ?? "another floor";
+            showMoveNotice(`You arrive on ${name}.`, "info");
+            floorFade = true; clearTimeout(floorFadeTimer); floorFadeTimer = setTimeout(() => { floorFade = false; }, 400);
+          }
           floorFocus = state;
           if (!state) floorFocusScene = null;
           floorFocusError = state?.error === "unavailable" ? "That floor is no longer available. View updated by the host." : state?.error === "rate_limited" ? "Too many floor requests. Try again shortly." : "";
@@ -1574,6 +1642,8 @@
       clearCopyTimer();
       if (pollTimer !== null) clearInterval(pollTimer);
       controller?.destroy();
+      moveRefusals?.dispose();
+      moveRefusals = null;
       fog?.destroy();
       fog = null;
       sceneBackground.destroy();
@@ -1585,7 +1655,7 @@
     };
   });
   onDestroy(() => {
-    clearTimeout(floorFocusTimer);
+    clearTimeout(floorFocusTimer); clearTimeout(stairOfferTimer); clearTimeout(floorFadeTimer);
     if (imageNoticeTimer !== null) clearTimeout(imageNoticeTimer);
   });
 </script>
@@ -1609,6 +1679,10 @@
       <div class="notify-stack" aria-live="polite" data-player-notify-stack>
         {#each fxNotices as message, i (message + ":" + String(i))}
           <div class="notify" data-player-notify>{message}</div>
+        {/each}
+        {#each moveNotices as notice (notice.id)}
+          {#if notice.tone === "warn"}<div class="notify notify-refused" role="status" data-player-move-refused>{notice.message}</div>
+          {:else}<div class="notify" role="status" data-player-floor-notice>{notice.message}</div>{/if}
         {/each}
       </div>
       <div class="player-actions" aria-label="Player actions">
@@ -1719,12 +1793,14 @@
     {#if canvasError}<p class="error" role="alert">canvas: {canvasError}</p>{/if}
     <section class="shell" aria-label="Player shell">
       <div class="canvas-area">
-        <div class="board" style="position: relative;">
+        <div class="board" class:floor-fade={floorFade} style="position: relative;">
+          {#if stairOffer}<StairChooser offer={stairOffer} tokenName={stairTokenName(stairOffer.tokenId)} onChoose={answerStairs} />{/if}
           {#if floorFocus?.sceneId === activeScene()?._id && (floorFocus?.levels.length ?? 0) > 0}
             <div class="floor-focus" data-player-floor-focus>
               {#if floorFocus?.isolated}
                 <strong>{floorFocus.levels.find((l) => l.id === floorFocus?.levelId)?.name ?? "No floor"}</strong>
-                <small>{floorFocus.mode === "manual" ? "Manual fallback" : "Following token · walk into stairs to change floors"}</small>
+                <small>{floorFocus.mode === "manual" ? "Manual fallback" : onStairs ? `On the ${onStairs.label}` : "Following token · walk into stairs to change floors"}</small>
+                {#if onStairs && !stairOffer && app?.client?.supportsFeature("scene-level-stairs-v2")}<button type="button" class="take-stairs" data-take-stairs onclick={takeStairs}>Take stairs</button>{/if}
               {/if}
               <details open={!floorFocus?.isolated}>
               <summary>{floorFocus?.isolated ? "Manual floor fallback" : "Token floor focus"}</summary>
@@ -2198,6 +2274,10 @@
     font-size: 0.75rem;
     line-height: 1.25;
   }
+  .notify-refused { border-color: #a0523c; background: #2e1712; color: #ffc9b8; }
+  .take-stairs { margin-top: 4px; padding: 3px 8px; border: 1px solid #a88c52; border-radius: 4px; background: #3a301c; color: #fff3d6; cursor: pointer; font-size: 0.75rem; }
+  .board.floor-fade :global(canvas) { animation: floor-fade 0.4s ease-out; }
+  @keyframes floor-fade { from { opacity: 0.25; } to { opacity: 1; } }
   #pstatus {
     display: flex;
     flex-direction: column;

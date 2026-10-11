@@ -8,7 +8,7 @@ test("GM edits and persists draft levels with stable IDs, validation and atomic 
   await page.locator('[data-tab="scenes"]').click();
   const editor = page.locator('[data-level-drafts]').first();
   await editor.locator(":scope > summary").click();
-  await expect(editor).toContainText("Planning only");
+  await expect(editor).toContainText("Drafts alone do not activate floor play");
   await editor.getByRole("button", { name: "Add draft level", exact: true }).click();
   await editor.getByRole("button", { name: "Add draft level", exact: true }).click();
   const rows = editor.locator("[data-level-id]");

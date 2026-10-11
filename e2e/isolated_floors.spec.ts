@@ -22,11 +22,17 @@ test("stairs are default: overlapping colored floor maps swap, fog stays separat
     await bindings.getByLabel("Membership object", { exact: true }).selectOption("hero"); await bindings.getByLabel("Token destination level", { exact: true }).selectOption(base);
     await bindings.getByRole("button", { name: "Apply assignment", exact: true }).click(); await expect(bindings.getByRole("status")).toContainText("Assignment saved");
     const play = editor.locator("[data-level-play]"); await play.locator(":scope > summary").click();
-    await play.getByLabel("Stairs source floor", { exact: true }).selectOption(base); await play.getByLabel("Stairs destination floor", { exact: true }).selectOption(upper);
+    // D-430: one stairwell region serves both directions (no separate return region).
+    await play.getByLabel("Stairwell floor Base", { exact: true }).check(); await play.getByLabel("Stairwell floor Level 2", { exact: true }).check();
     await play.getByLabel("Stairs X", { exact: true }).fill("300"); await play.getByLabel("Stairs Y", { exact: true }).fill("100");
     await play.getByLabel("Stairs width", { exact: true }).fill("100"); await play.getByLabel("Stairs height", { exact: true }).fill("100");
-    await play.getByRole("button", { name: "Create stairs", exact: true }).click(); await expect(play.locator("[data-stair-region]")).toHaveCount(2);
-    await play.getByLabel("Enable isolated floor play", { exact: true }).check(); await expect(play.getByRole("status")).toContainText("enabled");
+    await play.getByRole("button", { name: "Create stairwell", exact: true }).click(); await expect(play.locator("[data-stair-region]")).toHaveCount(1);
+    // D-433: activation runs the floor-play check; acknowledged warnings still enable it.
+    await play.getByLabel("Enable isolated floor play", { exact: true }).click();
+    const preflight = play.locator("[data-level-preflight]");
+    await expect(preflight.or(play.getByRole("status").filter({ hasText: "enabled" }))).toBeVisible();
+    if (await preflight.isVisible()) await preflight.getByRole("button", { name: "Enable anyway", exact: true }).click();
+    await expect(play.getByRole("status")).toContainText("enabled");
     await host.click("#gm-settings"); const settings = host.locator('[data-window="settings"]');
     await settings.locator("[data-scene-fog-range]").fill("3"); await settings.locator("[data-scene-fog-range]").press("Enter"); await settings.locator("[data-scene-fog]").check(); await settings.locator("[data-window-close]").click();
     await host.click("#share"); const fragment = manualFragment(await host.locator("#invite-link").inputValue());

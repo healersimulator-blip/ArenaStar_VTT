@@ -14,6 +14,11 @@ import {
 /**
  * Native inverse vector masks. Only token containers are masked; the map and fog never
  * enter this layer. Masks stay in world coordinates while token animations move beneath them.
+ *
+ * G-05 (D-429): Pixi's Canvas2D renderer ignores `inverse` and would draw only the covered part
+ * of a token — the exact opposite of a cover. Without inverse masks the layer is conservative:
+ * a token is hidden whole while any eligible cover overlaps its rotation-safe bounds, so a
+ * covered pixel is never revealed. Picking and decorations follow the same rule.
  */
 export class FauxOverheadLayer {
   private covers: CompiledOverhead[] = [];
@@ -28,9 +33,20 @@ export class FauxOverheadLayer {
       key: string;
     }
   >();
-  constructor(private readonly parent: Container) {}
+  private conservativeDirty = false;
+  constructor(
+    private readonly parent: Container,
+    private readonly inverseMasks = true,
+  ) {}
   get active(): boolean {
     return this.covers.length > 0;
+  }
+  get coverCount(): number {
+    return this.covers.length;
+  }
+  /** True when the renderer cannot cut covers out of tokens (whole-token hiding instead). */
+  get conservative(): boolean {
+    return !this.inverseMasks;
   }
 
   setRegions(regions: readonly RegionDocument[]): void {
@@ -53,6 +69,7 @@ export class FauxOverheadLayer {
     this.signature = signature;
     this.covers = compileOverhead(regions);
     this.revision++;
+    this.conservativeDirty = true;
     for (const { token, view } of this.views.values())
       this.syncToken(token, view);
   }
@@ -72,6 +89,10 @@ export class FauxOverheadLayer {
     state.mask?.destroy();
     state.mask = null;
     const covers = this.covers.filter((cover) => overheadAffects(cover, token));
+    if (!this.inverseMasks) {
+      view.renderable = !this.obscured(token._id);
+      return;
+    }
     if (!covers.length) return;
     const mask = new Graphics();
     mask.label = `overheadMask:${token._id}`;
@@ -92,10 +113,19 @@ export class FauxOverheadLayer {
 
   pointVisible(id: string, point: SpatialPoint): boolean {
     const state = this.views.get(id);
+    if (!this.inverseMasks && this.obscured(id)) return false;
     return (
       !!state?.view.visible &&
       !overheadCoversPoint(this.covers, state.token, point)
     );
+  }
+
+  /** Conservative mode only: re-evaluate every token each frame while animations move them. */
+  refreshConservative(): void {
+    if (this.inverseMasks || (!this.active && !this.conservativeDirty)) return;
+    this.conservativeDirty = false;
+    for (const { token, view } of this.views.values())
+      view.renderable = !this.obscured(token._id);
   }
 
   /** Conservative decoration/marquee gate, not a token LOS or whole-body visibility test. */
@@ -122,6 +152,7 @@ export class FauxOverheadLayer {
     if (!state) return;
     state.view.mask = null;
     state.view.setMask({ inverse: false });
+    if (!this.inverseMasks) state.view.renderable = true;
     state.mask?.destroy();
     this.views.delete(id);
   }

@@ -1,28 +1,28 @@
 # Multilevel implementation status
 
-**2026-10-11 — native cover, wall-authoring, spatial-kernel, GM level-draft and draft wire-compatibility slices; the complete design is not finished.**
+**2026-10-11 — native cover, wall authoring, spatial kernel, level drafts, isolated floor play, stairwells with player choice (D-430), floor scopes for presentation objects (D-432) and the floor-play check (D-433); the complete design is not finished.**
 
 Target: [Multilevel, walls and Faux Overhead design](MULTILEVEL_WALLS_DESIGN.md).
 
-## Current player experience: isolated maps, stairs first (D-428)
+Review 2026-10-11: [GAP analysis vs Levels, Better Roofs and Foundry V14 Scene Levels](MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md). It covers status defects S1–S8 (overlapping stairs silently refused, floorless tokens hidden on isolated floors, auxiliary layers removed, Faux Overhead inverted on the Canvas2D renderer, two stale specs), gaps G-01 to G-33 and a recommended sequence.
 
-The earlier token-only focus limitation is superseded for scenes with **isolated floor play** enabled. Players see one floor's assigned map tiles/background, scoped walls/lights, effective ambient and separate remembered exploration—not three overlapping maps. The default view follows a controlled token. Walking into a GM-authored stair region changes floor and feet elevation atomically, and the view follows automatically. Manual floor selection is a collapsed fallback.
+## Current player experience: isolated floors, stairwells with a choice (D-428 → D-433)
+
+Players in a scene with **isolated floor play** see one floor: its map tiles/background, its walls and lights, its ambient light and its own remembered fog. The view follows a controlled token. Walking into a stairwell either changes floor at once (one possible destination) or asks the player which floor (several destinations, or a stairwell set to always ask); "Take stairs" on the floor chip asks again while standing on the stairs, and Esc stays. Stairs are outlined with up/down arrows and an optional label (hidden passages are not marked). Arriving shows "You arrive on …" with a short cross-fade. Refused moves say why (a wall, a blocked landing, locked stairs). Drawings, templates and notes without a floor appear on every floor; floor-scoped ones only on theirs. New tokens always land on a floor.
 
 ### Set up a playable stack
 
 1. Place each floor map as a scene tile using the normal image tools.
 2. In **Scenes → Draft levels**, create/save the floors. Tick each floor's map tiles; optionally assign the existing scene background to one floor. Set ambient overrides if needed.
-3. Under **Membership**, assign tokens, walls and lights. Unassigned tiles/walls/lights do not participate in the isolated player floor.
-4. Open **Floor artwork & stair travel**. Choose source/destination floors and rectangle bounds in scene pixels. **Create return stairs** makes the reverse direction at the same XY. Existing Active Zones authoring can edit region polygons/rotation.
-5. Enable **isolated floor play**. Compatible players follow their controlled token; finish a move with its center inside the stairs. For the return direction, leave the region and enter again.
+3. Under **Membership**, assign tokens, walls and lights (and, if wanted, drawings, templates, notes and regions). Walls/lights/tiles on no floor do not take part in floor play; the floor-play check offers "put these walls/lights on every floor" and "assign tokens by elevation".
+4. Open **Floor play & stairs → Create stairwell**: tick the floors it connects (2–8), choose both ways / up only / down only, travel at once or always ask, an optional label and "hidden passage", and either a rectangle in scene pixels or an existing region drawn in Active Zones. Each stairwell row can be locked, switched to always ask, hidden from markers, converted (legacy) or removed.
+5. Enable **isolated floor play**. The floor-play check runs first: errors block, warnings can be fixed in place or acknowledged with **Enable anyway**. The same check stays live in the panel.
 
-Legacy scenes are not silently migrated. The new option excludes the global foreground and unscoped drawings, notes, templates, cosmetic regions, sounds and hexcrawl layers; these need explicit floor authoring before being restored. Legacy manual fog masks are not copied across floors. The GM's legacy diagnostic remains an all-art authoring view.
+Legacy scenes are not silently migrated. Legacy `{from,to}` stairs keep working; overlapping ones now combine into one choice, and identical-geometry pairs can be merged into a stairwell from the check. The GM canvas still shows every floor at once (with every stairwell labelled); a GM floor switch is the next slice (G-12).
 
-The host rejects ambiguous overlapping stairs and source/landing wall collisions. No spawn/undo bounce or automatic relocation of attached/summoned tokens. Save/reopen, archive copies and scene duplication preserve/rekey configuration. Floor selection itself is session state, not a document edit or movement command.
+**Remaining** (tracked as G-items in the [gap analysis](MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md#5-gap-list-and-how-to-bridge-each-gap)): GM floor view/build mode and stamping by the GM's active floor, bulk assignment, token elevation UI and "move to floor", path-crossing stair triggers with route continuation, door-linked locks, cross-floor sight/light, surfaces with holes, roofs (fog reveal, linked fades, better fade modes), import/merge tools, and comprehensive snapshot/asset/sheet/FX secrecy.
 
-**Remaining:** comprehensive snapshot/asset/sheet/FX secrecy, cross-floor sight/light/terrain masks, scoped auxiliary authoring, audio and full cross-floor action/support physics. This is discrete playable-floor rendering/travel, not completion of the entire multilevel design.
-
-Validation: **5,416 Vitest passed / 12 skipped; five Chromium journeys passed**. The new browser journey drags an actual player's token through stairs and checks GPU map pixels changing red→blue→red at the same coordinates, isolated dark-floor fog and remembered ground-floor exploration on return. Typecheck, targeted lint and single-file build passed; Svelte 87 components / zero blockers / one existing advisory.
+Validation (D-429–D-433): **5,430 Vitest passed / 12 skipped** (389 files, 2 skipped); **`test:multilevel` 12/12 Chromium journeys passed on WebGL**, including the new three-floor stairwell journey (player chooses down, "Take stairs" + Esc, keyboard choice up, locked stairs explained); the Faux Overhead specs also pass on the Canvas2D fallback. Typecheck, lint and single-file build passed; Svelte 88 components / zero blockers / one existing advisory.
 
 ## Implemented and usable now
 
@@ -186,8 +186,8 @@ A private draft level collection and draft archive/wire gates now exist. Explici
 | Slice | State / next work |
 |---|---|
 | M0 contracts | Source research and initial geometry contracts exist; unit semantics, physical-feature capability allocation and measured budgets still need completion |
-| M1 structure/authoring | Flat wall tools and private embedded level drafts/editor/copy implemented; explicit membership/topology contracts implemented; assignment UI and binding audit implemented; scoped drawing, level navigation, base-level upgrade and physical-feature client gates remain |
-| M2 authority/physics | Isolated finite-height wall/surface and body-sweep kernel implemented; isolated owned-observer exposure planner added; live adapters, revision/index ownership, movement/portal permissions, stairs and complete host redaction remain |
+| M1 structure/authoring | Flat wall tools, level drafts/editor/copy, membership/topology contracts, assignment UI, binding audit, floor scopes for drawings/templates/notes/regions (D-432), creation stamping (D-431) and the floor-play check with quick fixes (D-433) implemented; GM floor switch/build mode, bulk assignment, level generator and physical-feature client gates remain |
+| M2 authority/physics | Finite-height wall/surface and body-sweep kernel; owned-observer exposure planner (not wired); stairwells v2 with host-revalidated private choices, locks, arrivals and attached followers (D-430). Path-crossing triggers/route continuation, door-linked locks, live surface physics, revision/index ownership and complete host redaction remain |
 | M3 perception/fog | Opt-in player floor maps, scoped lighting/ambient, per-level fog/reset and token-follow views implemented; full secret-data projection, cross-floor masks/vertical rendering and scoped audio remain |
 | M4 Faux/advanced barriers | Initial native solid cover implemented; authorized token-only ghosts, keep-lit art, roof assemblies, proximity/limited channel policies and advanced door/window presentation remain |
 | M5 portability/acceptance | Draft archive and live capability gates implemented; physical-feature negotiation, full multilevel/fog archive schema, external adapters, audit, large-world performance and cross-browser/mobile acceptance remain |

@@ -1,6 +1,7 @@
 import { floorPresentation, type FloorPresentation } from "./levelPlay";
 /** Floor focus is presentation, not secret-floor disclosure or movement authority. */
-import type { ActorDocument, SceneDocument } from "./documents";
+import type { ActorDocument, BaseDocument, SceneDocument } from "./documents";
+import { docVisibleTo } from "./projection";
 import type { PermissionUser } from "./ownership";
 import { can } from "./permissions";
 export const LEVEL_NAVIGATION_FEATURE = "scene-level-navigation-v1";
@@ -26,6 +27,13 @@ export function levelFocusView(scene: SceneDocument | undefined, actors: readonl
   const level = scene.levels?.find((l) => l._id === levelId);
   const presentation = level ? floorPresentation(scene, level) : undefined;
   if (presentation) presentation.tileIds = presentation.tileIds.filter((id) => scene.tiles.some((t) => t._id === id && !t.hidden && can(user, "read", t, "tiles", { parent: scene })));
+  if (presentation?.offFloor) {
+    // Only IDs this viewer already receives (projection rules: hidden regions, pin visibility, ownership).
+    const readable = (rows: readonly BaseDocument[] | undefined) => new Set((rows ?? []).filter((d) => docVisibleTo(user, d, scene)).map((d) => d._id));
+    const { regions, drawings, templates, notes } = presentation.offFloor;
+    const r = readable(scene.regions), d = readable(scene.drawings), t = readable(scene.templates), n = readable(scene.notes);
+    presentation.offFloor = { regions: regions.filter((id) => r.has(id)), drawings: drawings.filter((id) => d.has(id)), templates: templates.filter((id) => t.has(id)), notes: notes.filter((id) => n.has(id)) };
+  }
   const extra = isolated ? { isolated: true, ...(follow ? { followTokenId: follow._id } : {}), ...(presentation ? { presentation } : {}) } : {};
   return { ...extra, levels, levelId, tokenIds: levelId === null ? (isolated ? [] : null) : scene.tokens.filter((t) => t.levelId === levelId && !t.hidden && can(user, "read", t, "tokens", { parent: scene })).map((t) => t._id).sort() };
 }

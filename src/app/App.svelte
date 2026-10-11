@@ -3,6 +3,9 @@
   import { LEVEL_LIGHTING_FEATURE } from "../core/capabilities";
   import SavesPanel from "../ui/settings/SavesPanel.svelte";
   import ZoomControl from "../ui/canvas/ZoomControl.svelte";
+  import StairChooser from "../ui/StairChooser.svelte";
+  import { stairMarkers } from "../core/levelPlay";
+  import type { StairOfferMsg } from "../core/messages";
   import { SceneLightingPlayer } from "../client/sceneLighting";
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
   import { detectMapGridFromBytes } from "../client/gridDetection";
@@ -79,6 +82,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
   import { FogExploration } from "../client/fogExploration";
+  import { refusalNotifier, type RefusalNotifier } from "../client/moveRefusals";
   import { createVisionComputer } from "../workers/visionComputer";
   import { ModuleIframe } from "../packages/moduleIframe";
   import { dice3dStats, diceInfoFromRecord, showDice3D } from "../dice/dice3d";
@@ -963,6 +967,29 @@ const WALL_PICK_RADIUS = 12;
   let lastRulesVersion = "";
   let lastByType: Record<string, number> = {};
   let notifyLog = $state<{ message: string; level: string }[]>([]);
+  let gmMoveRefusals: RefusalNotifier | null = null;
+  // G-01 (D-430): a stairwell choice for a token the GM moved (NPCs included).
+  let gmStairOffer = $state<StairOfferMsg | null>(null);
+  let gmStairTimer: ReturnType<typeof setTimeout> | undefined;
+  function gmStairNotice(message: string): void { notifyLog = [...notifyLog.slice(-49), { message, level: "warn" }]; }
+  function onGmStairOffer(offer: StairOfferMsg): void {
+    if (offer.status === "open") {
+      gmStairOffer = offer; clearTimeout(gmStairTimer);
+      gmStairTimer = setTimeout(() => { if (gmStairOffer?.offerId === offer.offerId) gmStairOffer = null; }, Math.max(1000, offer.ttlMs));
+    } else if (offer.status === "ended" && gmStairOffer?.offerId === offer.offerId) { gmStairOffer = null; clearTimeout(gmStairTimer); }
+    if (offer.status === "locked") gmStairNotice("Those stairs are locked. Unlock them in Draft levels → Floor play & stairs.");
+    else if (offer.status === "none") gmStairNotice(offer.error ?? "There are no stairs to take there.");
+    else if (offer.error) gmStairNotice(offer.error);
+  }
+  function answerGmStairs(levelId: string | null): void {
+    const offer = gmStairOffer;
+    if (!offer) return;
+    gmStairOffer = null; clearTimeout(gmStairTimer);
+    try { app?.gm.client.chooseStair(offer.offerId, levelId); } catch (error) { gmStairNotice(String(error)); }
+  }
+  function gmStairTokenName(tokenId: string): string {
+    return (app?.gm.client.store.get("scenes", gmStairOffer?.sceneId ?? "") as SceneDocument | undefined)?.tokens.find((t) => t._id === tokenId)?.name ?? "";
+  }
   /**
    * D-187: the held move whose attacks of opportunity are the table's to take. While this
    * is set the token has *not* moved (the controller restored the render on `"cancel"`),
@@ -3087,6 +3114,7 @@ const WALL_PICK_RADIUS = 12;
     // suppress and expiry all re-render the badges with no invalidation step.
     view.setTokenImageLoader(tileImages.load);
     view.setFauxOverhead(scene?.regions ?? []);
+    view.setStairMarkers(scene?.levels?.length ? stairMarkers(scene, null, true) : []);
     view.syncTokens(
       tokens,
       tokenBadgesMap(tokens, {
@@ -3509,6 +3537,11 @@ const WALL_PICK_RADIUS = 12;
         `${r.reason}: ${r.detail}`,
       );
     });
+    // G-02 (D-429): a refused canvas move (a GM drag included) is explained, not silently undone.
+    gmMoveRefusals = refusalNotifier(current.gm.bus, (message) => {
+      notifyLog = [...notifyLog.slice(-49), { message, level: "warn" }];
+    });
+    const offGmStairs = current.gm.bus.on("stairOffer", onGmStairOffer);
     const onKey = (e: KeyboardEvent): void => {
       if (isTypingTarget(e.target)) return;
       if (e.key === "Escape") {
@@ -3560,6 +3593,10 @@ const WALL_PICK_RADIUS = 12;
       offFxDelivery?.();
       offFxDelivery = null;
       offRejected();
+      gmMoveRefusals?.dispose();
+      gmMoveRefusals = null;
+      offGmStairs();
+      clearTimeout(gmStairTimer);
       offWm();
       globalThis.removeEventListener("keydown", onKey);
       globalThis.removeEventListener("keydown", onBackgroundKey);
@@ -3578,6 +3615,11 @@ const WALL_PICK_RADIUS = 12;
           hostElement,
         });
         stage = view;
+        if (view.rendererName === "canvas") {
+          // G-05 (D-429): one notice per session; the canvas stays correct, only less precise.
+          notifyLog = [...notifyLog.slice(-49), { level: "warn", message:
+            "Graphics acceleration is unavailable, so the map uses the slower Canvas2D renderer. Faux Overhead covers hide a whole token while it is under them instead of cutting the cover out." }];
+        }
         view.onBackgroundNaturalSize((size) => {
           backgroundNatural = size;
           syncBackgroundEditor();
@@ -4240,7 +4282,7 @@ const WALL_PICK_RADIUS = 12;
           stage: view,
           source: domPointerSource(view.app.canvas as HTMLCanvasElement),
           client: {
-            submit: (ops: Op[]) => current.gm.client.submit(ops),
+            submit: (ops: Op[]) => gmMoveRefusals ? gmMoveRefusals.track(current.gm.client.submit(ops)) : current.gm.client.submit(ops),
           },
           getTokens: tokenViews,
           getGrid: () => sceneGridSpec(activeScene()?.grid),
@@ -5006,6 +5048,7 @@ const WALL_PICK_RADIUS = 12;
         </div>
         <div class="dice3d-host" bind:this={dice3dHost}></div>
         <div class="board" style="position: relative;">
+          {#if gmStairOffer}<StairChooser offer={gmStairOffer} tokenName={gmStairTokenName(gmStairOffer.tokenId)} onChoose={answerGmStairs} />{/if}
           <ZoomControl {stage} onInput={() => fxPlayer?.cancelCamera()} />
           {#if !viewingAs && (levelPreviewScene?.levels?.length ?? 0) > 0}
             <div class="level-perception-preview" style="position:absolute;right:12px;top:58px;z-index:30;background:#182331;color:#e6eef9;padding:8px;max-width:270px;font-size:11px;border:1px solid #52657a;border-radius:5px">

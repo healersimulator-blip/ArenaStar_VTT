@@ -1535,6 +1535,8 @@ export interface VttE2eSurface {
 export interface PlayerCanvasSurface {
   floorMapPixel(spec: { x: number; y: number }): number[];
   floorPresentation(): { levelId: string | null; mode: string | null; tileIds: string[]; lightIds: string[]; img: string | null; darkness: number | null };
+  /** G-10 (D-430): IDs of the stair markers drawn on this player's floor. */
+  stairMarkers(): string[];
   /** The player's fog loop after everything queued landed, plus the layer's style/visibility. */
   fogState(): Promise<{
     sceneId: string | null;

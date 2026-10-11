@@ -5,13 +5,14 @@
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import { DRAFT_LEVELS_FEATURE, LEVEL_SCOPES_FEATURE, LEVEL_LIGHTING_FEATURE } from "../../core/capabilities";
   import { levelBindings } from "../../core/levelMembership";
-  import { bindingRevision, planTokenBinding, planWallBinding, type BindingKind } from "./levelBindingEditor";
+  import { bindingRevision, bindingRows, planTokenBinding, planWallBinding, type BindingKind } from "./levelBindingEditor";
+  const KIND_LABEL: Record<BindingKind, string> = { tokens: "Token", walls: "Wall", lights: "Light", drawings: "Drawing", templates: "Template", notes: "Note", regions: "Region" };
   let { scene, client, bus, draftDirty = false }: { scene: SceneDocument; client: ClientSync; bus: EventBus<ClientEvents>; draftDirty?: boolean } = $props();
   let compatible = $state(false), busy = $state(false), message = $state("");
   let kind = $state<BindingKind>("tokens"), id = $state(""), destination = $state("");
   let mode = $state<"legacy" | "all" | "levels">("legacy"), ids = $state<string[]>([]), revision = $state("");
   const levels = $derived([...(scene.levels ?? [])].sort((a, b) => a.sort - b.sort || a._id.localeCompare(b._id)));
-  const selected = $derived(scene[kind].find((doc) => doc._id === id));
+  const selected = $derived(bindingRows(scene, kind).find((doc) => doc._id === id));
   const stale = $derived(!!id && revision !== bindingRevision(scene, kind, id));
   const gm = $derived(client.user?.role === "GM" || client.user?.role === "ASSISTANT");
   onMount(() => {
@@ -23,7 +24,7 @@
   function load() {
     revision = bindingRevision(scene, kind, id); message = "";
     destination = scene.tokens.find((t) => kind === "tokens" && t._id === id)?.levelId ?? "";
-    const scope = (kind === "tokens" ? undefined : scene[kind].find((w) => w._id === id)?.levelScope);
+    const scope = (kind === "tokens" ? undefined : bindingRows(scene, kind).find((w) => w._id === id)?.levelScope);
     mode = scope?.mode ?? "legacy"; ids = scope?.mode === "levels" ? [...scope.ids] : [];
   }
   const selectionKey = $derived(JSON.stringify([scene._id, kind, id]));
@@ -49,18 +50,18 @@
 <details class="bindings" data-level-bindings={scene._id}>
   <summary>Membership &amp; wall scopes · experimental authoring</summary>
   <p>Assignments remain draft-only until isolated floor play is enabled above. Active floor play uses assigned walls and lights; this is not full secret-data redaction.</p>
-  <p>Assigning a token explicitly moves its feet to the saved level's Floor Z. Clearing membership keeps its elevation. Scoped walls and lights participate in isolated floor play and the GM lighting diagnostic. Unassigned walls/lights stay in the legacy view.</p>
+  <p>Assigning a token explicitly moves its feet to the saved level's Floor Z. Clearing membership keeps its elevation. Scoped walls and lights participate in isolated floor play and the GM lighting diagnostic. Unassigned walls/lights stay in the legacy view. Drawings, templates, notes and regions without a floor appear on every floor in floor play.</p>
   {#if !compatible}<p role="alert">Upgrade required: host must support level scopes.</p>{/if}
   {#if draftDirty}<p role="alert">Apply or reload your draft level edits before assigning objects.</p>{/if}
   <fieldset disabled={!gm || !compatible || busy || draftDirty}>
-    <label>Object type<select aria-label="Membership object type" bind:value={kind} onchange={() => { id = ""; }}><option value="tokens">Token</option><option value="walls">Wall</option><option value="lights">Light</option></select></label>
-    <label>Object<select aria-label="Membership object" bind:value={id}><option value="">Select an object…</option>{#each scene[kind] as doc (doc._id)}<option value={doc._id}>{doc.name || doc.type} · {doc._id}</option>{/each}</select></label>
+    <label>Object type<select aria-label="Membership object type" bind:value={kind} onchange={() => { id = ""; }}>{#each Object.entries(KIND_LABEL) as [value, text] (value)}<option {value}>{text}</option>{/each}</select></label>
+    <label>Object<select aria-label="Membership object" bind:value={id}><option value="">Select an object…</option>{#each bindingRows(scene, kind) as doc (doc._id)}<option value={doc._id}>{doc.name || doc.type} · {doc._id}</option>{/each}</select></label>
     {#if selected}
       {#if kind === "tokens"}
         <label>Destination level<select aria-label="Token destination level" bind:value={destination}><option value="">Unassigned · keep elevation</option>{#each levels as level (level._id)}<option value={level._id}>{level.name} · Floor Z {level.floorZ}</option>{/each}</select></label>
         <p>Current feet Z: {scene.tokens.find((t) => t._id === id)?.elevation ?? 0}. {destination ? `Apply moves feet to Z ${levels.find((l) => l._id === destination)?.floorZ ?? "missing level"}.` : "No elevation change."}</p>
       {:else}
-        <label>{kind === "lights" ? "Light scope" : "Wall scope"}<select aria-label={kind === "lights" ? "Light level scope" : "Wall level scope"} bind:value={mode}><option value="legacy">Legacy / unassigned</option><option value="all">All levels · explicit</option><option value="levels">Selected levels</option></select></label>
+        <label>{KIND_LABEL[kind]} scope<select aria-label={`${KIND_LABEL[kind]} level scope`} bind:value={mode}><option value="legacy">{kind === "walls" || kind === "lights" ? "Legacy / unassigned" : "Unassigned · every floor"}</option><option value="all">All levels · explicit</option><option value="levels">Selected levels</option></select></label>
         {#if mode === "levels"}{#each levels as level (level._id)}<label class="check"><input type="checkbox" checked={ids.includes(level._id)} onchange={(e) => toggle(level._id, e.currentTarget.checked)} />{level.name}</label>{/each}{/if}
       {/if}
       <button type="button" onclick={apply} disabled={stale || (kind !== "tokens" && mode === "levels" && !ids.length)}>{busy ? "Saving assignment…" : "Apply assignment"}</button>
@@ -73,7 +74,8 @@
   <p>Unassigned tokens: {scene.tokens.filter((t) => t.levelId === undefined).length}. Legacy walls: {scene.walls.filter((w) => w.levelScope === undefined).length}. All-level walls: {scene.walls.filter((w) => w.levelScope?.mode === "all").length}.</p>
   {#each levels as level (level._id)}
     {@const bindings = levelBindings(scene, level._id)}
-    <details data-level-binding-audit={level._id}><summary>{level.name}: {bindings.tokens.length} tokens · {bindings.walls.length} walls · {bindings.lights.length} lights</summary><p>Tokens: {bindings.tokens.join(", ") || "none"}<br />Walls: {bindings.walls.join(", ") || "none"}<br />Lights: {bindings.lights.join(", ") || "none"}</p></details>
+    {@const extra = bindings.drawings.length + bindings.templates.length + bindings.notes.length + bindings.regions.length}
+    <details data-level-binding-audit={level._id}><summary>{level.name}: {bindings.tokens.length} tokens · {bindings.walls.length} walls · {bindings.lights.length} lights{extra ? ` · ${extra} other` : ""}</summary><p>Tokens: {bindings.tokens.join(", ") || "none"}<br />Walls: {bindings.walls.join(", ") || "none"}<br />Lights: {bindings.lights.join(", ") || "none"}{#if extra}<br />Drawings: {bindings.drawings.join(", ") || "none"}<br />Templates: {bindings.templates.join(", ") || "none"}<br />Notes: {bindings.notes.join(", ") || "none"}<br />Regions: {bindings.regions.join(", ") || "none"}{/if}</p></details>
   {/each}
 </details>
 

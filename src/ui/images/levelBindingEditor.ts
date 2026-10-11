@@ -1,12 +1,16 @@
-import type { LevelScope, SceneDocument } from "../../core/documents";
+import type { LevelScope, SceneDocument, WallDocument } from "../../core/documents";
 import type { Op } from "../../core/ops";
-import { levelScopeError, tokenLevelAssignment, wallTopologyKey } from "../../core/levelMembership";
+import { levelScopeError, tokenLevelAssignment, wallTopologyKey, type ScopedCollection } from "../../core/levelMembership";
 import { wallEditLocked } from "../../core/wallEditing";
 
-export type BindingKind = "tokens" | "walls" | "lights";
+/** G-06 (D-432): drawings, templates, notes and regions are scoped like walls and lights. */
+export type BindingKind = "tokens" | ScopedCollection;
+export function bindingRows(scene: SceneDocument, kind: BindingKind): ReadonlyArray<{ _id: string; name: string; type: string; levelScope?: LevelScope; levelId?: string; flags: Record<string, unknown> }> {
+  return (scene[kind] ?? []) as ReadonlyArray<{ _id: string; name: string; type: string; levelScope?: LevelScope; levelId?: string; flags: Record<string, unknown> }>;
+}
 /** Local stale-editor fence, not a host compare-and-swap or physical authorization. */
 export function bindingRevision(scene: SceneDocument, kind: BindingKind, id: string): string {
-  return JSON.stringify([scene._id, scene.levels, scene[kind].find((doc) => doc._id === id)]);
+  return JSON.stringify([scene._id, scene.levels, bindingRows(scene, kind).find((doc) => doc._id === id)]);
 }
 export function planTokenBinding(scene: SceneDocument, id: string, levelId: string | null): Op[] {
   const token = scene.tokens.find((doc) => doc._id === id);
@@ -18,11 +22,11 @@ export function planTokenBinding(scene: SceneDocument, id: string, levelId: stri
   const level = scene.levels?.find((l) => l._id === levelId);
   return token.levelId === levelId && (token.elevation ?? 0) === level?.floorZ ? [] : [op];
 }
-export function planWallBinding(scene: SceneDocument, id: string, scope: LevelScope | undefined, kind: "walls" | "lights" = "walls"): Op[] {
-  const wall = scene[kind].find((doc) => doc._id === id);
-  if (!wall) throw new Error("Wall no longer exists. Reload the selection.");
-  if (wall.flags.prefab !== undefined || (wall.type === "wall" && wallEditLocked(wall))) throw new Error("Locked or prefab walls cannot be reassigned here.");
-  if (scope !== undefined && scene.levels === undefined) throw new Error("Save draft levels before assigning a wall scope.");
+export function planWallBinding(scene: SceneDocument, id: string, scope: LevelScope | undefined, kind: ScopedCollection = "walls"): Op[] {
+  const wall = bindingRows(scene, kind).find((doc) => doc._id === id);
+  if (!wall) throw new Error(`${kind === "walls" ? "Wall" : "Object"} no longer exists. Reload the selection.`);
+  if (wall.flags.prefab !== undefined || (kind === "walls" && wallEditLocked(wall as unknown as WallDocument))) throw new Error("Locked or prefab objects cannot be reassigned here.");
+  if (scope !== undefined && scene.levels === undefined) throw new Error("Save draft levels before assigning a floor scope.");
   const error = levelScopeError(scope, scene.levels ?? []);
   if (error) throw new Error(error);
   if (wallTopologyKey(wall) === wallTopologyKey(scope === undefined ? {} : { levelScope: scope })) return [];

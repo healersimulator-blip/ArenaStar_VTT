@@ -31,6 +31,8 @@ import {
   type NaturalSize,
 } from "../core/backgroundTransform";
 import { FauxOverheadLayer } from "./layers/FauxOverheadLayer";
+import { StairMarkersLayer } from "./layers/StairMarkersLayer";
+import type { StairMarker } from "../core/levelPlay";
 import type { RegionDocument, TokenDocument } from "../core/documents";
 import type { Camera, Viewport } from "./camera";
 import { fitRect, screenToWorld } from "./camera";
@@ -125,6 +127,8 @@ export interface StageOptions {
 
 export interface Stage {
   readonly app: Application;
+  /** Pixi renderer in use: "webgl", "webgpu" or "canvas" (no inverse masks; see G-05). */
+  readonly rendererName: string;
   readonly root: Container;
   readonly camera: Camera;
   readonly viewport: Viewport;
@@ -208,6 +212,11 @@ export interface Stage {
   ): void;
   /** Cosmetic region masks only: never touches fog history or LOS. */
   setFauxOverhead(regions: readonly RegionDocument[]): void;
+  /** Compiled Faux Overhead covers on this canvas (renderer-independent readback). */
+  fauxOverheadCoverCount(): number;
+  /** G-10/G-14: draw these stair markers (players: host-filtered; GM: every stairwell). */
+  setStairMarkers(markers: readonly StairMarker[]): void;
+  stairMarkerIds(): string[];
   tokenPointVisible(id: string, point: { x: number; y: number }): boolean;
   tokenMarqueeSelectable(id: string): boolean;
   /** Current locally rendered top-left; differs from document position during an animation. */
@@ -514,6 +523,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const templatesHolder = new Container();
   templatesHolder.label = "templates";
   root.addChild(templatesHolder);
+  // G-10/G-14 (D-430): stair markers sit under walls, lighting and fog.
+  const stairsHolder = new Container();
+  stairsHolder.label = "stairs";
+  root.addChild(stairsHolder);
+  const stairMarkers = new StairMarkersLayer(stairsHolder);
   const wallsHolder = new Container();
   wallsHolder.label = "walls";
   root.addChild(wallsHolder);
@@ -538,7 +552,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   tokenLayer.label = "tokens";
   root.addChild(tokenLayer);
   const tokenViews = new Map<string, Container>();
-  const overhead = new FauxOverheadLayer(tokenLayer);
+  // G-05 (D-429): Canvas2D has no inverse stencil masks; the layer then hides whole tokens.
+  const rendererName = String((app.renderer as { name?: unknown }).name ?? "unknown");
+  const overhead = new FauxOverheadLayer(tokenLayer, rendererName !== "canvas");
   const tokenArtwork = new Map<string, { image: string | null; revision: number; sprite: Sprite | null }>();
   let tokenImageLoader: ((image: string) => Promise<Texture | null>) | null = null;
   /** D-251: fog's token gate (null = draw every token). */
@@ -668,6 +684,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
 
   const stage: Stage = {
     app,
+    rendererName,
     root,
     viewport,
     get camera(): Camera {
@@ -1017,6 +1034,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
       applyOverheadDecorations();
     },
+    fauxOverheadCoverCount(): number { return overhead.coverCount; },
+    setStairMarkers(markers): void { stairMarkers.sync(markers); },
+    stairMarkerIds(): string[] { return stairMarkers.ids(); },
     setFauxOverhead(regions): void {
       overhead.setRegions(regions);
       applyOverheadDecorations();
@@ -1158,6 +1178,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
       tokenArtwork.clear();
       overhead.destroy();
+      stairMarkers.destroy();
       tokenViews.clear();
       tokenMovement.clear();
       tokenRotation.clear();
@@ -1206,6 +1227,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         );
       }
     }
+    overhead.refreshConservative();
     if (overhead.active) applyOverheadDecorations();
     const cam = state.camera;
     if (!grid) {
