@@ -1,3 +1,7 @@
+import { getFogEpoch, putFogEpoch } from "../storage/idb";
+import { CloudBackupController } from "../storage/cloud/cloudBackup";
+import { acquireWorldLock } from "../storage/worldLock";
+import { SaveCoordinator, SaveWork } from "../storage/saveCoordinator";
 /**
  * §2/§14 GM-tab composition root — boots Host Core + Client Core in one
  * browser tab over the InMemoryTransport loopback.
@@ -13,7 +17,12 @@ import { DocumentStore, type StoreMeta } from "../core/store";
 import { OpLog } from "../core/oplog";
 import { UndoStack } from "../core/undo";
 import { createEventBus } from "../core/events";
-import type { ActorDocument, SceneDocument, TokenDocument, UserDocument } from "../core/documents";
+import type {
+  ActorDocument,
+  SceneDocument,
+  TokenDocument,
+  UserDocument,
+} from "../core/documents";
 import type { WorldId } from "../core/ids";
 import { HostSync, gmSessionUser, type HostEvents } from "../host/sync";
 import { AssetServer, wireManifestToStore } from "../host/assets";
@@ -31,11 +40,19 @@ import { installHostLifecycle } from "../host/lifecycle";
 import { SimBridge } from "../host/simBridge";
 import { TurnChannel } from "../host/turnChannel";
 import SimWorkerCtor from "../workers/sim.worker.ts?worker&inline";
-import { InlineSimRunner, WorkerSimRunner, type SimRunner } from "../workers/simWorkerClient";
+import {
+  InlineSimRunner,
+  WorkerSimRunner,
+  type SimRunner,
+} from "../workers/simWorkerClient";
 import { MASS_BATTLE_SCHEMA_COLUMNS } from "../packages";
 import { readZipPackage } from "../packages/packageLoader";
 import { type CompendiumPack } from "../core/compendium";
-import { clearParsedPackCache, packCacheKey, parsePackCached } from "../core/compendiumCache";
+import {
+  clearParsedPackCache,
+  packCacheKey,
+  parsePackCached,
+} from "../core/compendiumCache";
 import {
   codeSteps,
   compareVersions,
@@ -43,7 +60,14 @@ import {
   planMigrationChain,
   type MigrationStep,
 } from "../core/migrations";
-import { getFog, getPackage, getWorld, listPackages, putFog, putPackage } from "../storage/idb";
+import {
+  getFog,
+  getPackage,
+  getWorld,
+  listPackages,
+  putFog,
+  putPackage,
+} from "../storage/idb";
 import type { BaseDocument, CollectionName } from "../core/documents";
 import { TOP_LEVEL_COLLECTIONS } from "../core/documents";
 import { diffFlat, type JsonRecord } from "../core/diff";
@@ -135,7 +159,9 @@ export interface HostPackages {
    * `warnings` is present only when something is worth telling the GM — today: declared
    * dependencies that are not imported.
    */
-  activate(id: string): Promise<{ ok: true; warnings?: string[] } | { ok: false; error: string }>;
+  activate(
+    id: string,
+  ): Promise<{ ok: true; warnings?: string[] } | { ok: false; error: string }>;
   deactivate(): Promise<{ ok: true } | { ok: false; error: string }>;
   /**
    * True once any scene has resolved a turn (a checkpoint exists): the strategic ruleset is
@@ -160,6 +186,8 @@ export interface HostApp {
   readonly log: OpLog;
   readonly host: HostSync;
   readonly persister: HostPersister;
+  readonly saves: SaveCoordinator;
+  readonly cloudBackups: CloudBackupController;
   readonly assets: AssetServer;
   readonly pipeline: ImportPipeline;
   /** §12 what the sim booted with this world load. */
@@ -235,7 +263,12 @@ function gmUserDoc(): UserDocument {
   };
 }
 
-export function makeToken(id: string, x: number, y: number, name = id): TokenDocument {
+export function makeToken(
+  id: string,
+  x: number,
+  y: number,
+  name = id,
+): TokenDocument {
   return {
     _id: id,
     type: "token",
@@ -256,7 +289,22 @@ export function makeToken(id: string, x: number, y: number, name = id): TokenDoc
   };
 }
 
-export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp> {
+export async function bootHostApp(
+  options: HostAppOptions = {},
+): Promise<HostApp> {
+  const lock = { release: () => {} };
+  try {
+    return await bootHostAppLocked(options, lock);
+  } catch (error) {
+    lock.release();
+    throw error;
+  }
+}
+
+async function bootHostAppLocked(
+  options: HostAppOptions,
+  lock: { release: () => void },
+): Promise<HostApp> {
   const db = options.db ?? (await openVttDb());
   const now = options.now ?? (() => Date.now());
 
@@ -265,8 +313,11 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
   let meta: StoreMeta;
   let worldRec: WorldsRecord | undefined;
   if (options.worldId) {
+    lock.release = await acquireWorldLock(options.worldId);
     persister = await HostPersister.open(db, options.worldId, { now });
-    const rec = (await listWorlds(db)).find((w) => w.worldId === options.worldId);
+    const rec = (await listWorlds(db)).find(
+      (w) => w.worldId === options.worldId,
+    );
     worldRec = rec;
     meta = {
       worldId: options.worldId,
@@ -278,6 +329,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     const worlds = await listWorlds(db);
     const latest = worlds[0];
     if (latest) {
+      lock.release = await acquireWorldLock(latest.worldId);
       persister = await HostPersister.open(db, latest.worldId, { now });
       worldRec = latest;
       meta = {
@@ -294,6 +346,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
         system: BUILTIN_SYSTEM_ID,
         systemVersion: BUILTIN_SYSTEM_VERSION,
       };
+      lock.release = await acquireWorldLock(meta.worldId);
       persister = await HostPersister.createWorld(db, meta, { now });
       worldRec = await getWorld(db, worldId);
     }
@@ -303,6 +356,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
   const log = new OpLog();
   const store = new DocumentStore({ meta });
   await persister.attach(store, log);
+  const saves = new SaveCoordinator(persister, now);
 
   if (store.seq === 0) {
     // Fresh world: one seed envelope (GM user + default scene) — a normal
@@ -347,7 +401,11 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       error: null,
     };
     const declared: MigrationStep[] = activePkgRec?.manifest.migrations ?? [];
-    const chain = planMigrationChain(declared, persistedVersion, currentVersion);
+    const chain = planMigrationChain(
+      declared,
+      persistedVersion,
+      currentVersion,
+    );
     if (!chain.ok) {
       migrationBoot = { ...base, error: chain.error };
     } else {
@@ -386,7 +444,10 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
         ops.push({
           kind: "update",
           ref: { coll, id: before._id },
-          diff: diffFlat(before as unknown as JsonRecord, after as unknown as JsonRecord),
+          diff: diffFlat(
+            before as unknown as JsonRecord,
+            after as unknown as JsonRecord,
+          ),
         });
       }
       if (ops.length > 0) {
@@ -399,11 +460,17 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
         };
         const appliedEnv = store.applyEnvelope(envelope);
         if (!appliedEnv.ok) {
-          migrationBoot = { ...base, error: `migration envelope rejected: ${appliedEnv.error}` };
+          migrationBoot = {
+            ...base,
+            error: `migration envelope rejected: ${appliedEnv.error}`,
+          };
         } else {
           const appended = log.append(envelope, appliedEnv.value.inverses);
           if (!appended.ok) {
-            migrationBoot = { ...base, error: `migration log: ${appended.error}` };
+            migrationBoot = {
+              ...base,
+              error: `migration log: ${appended.error}`,
+            };
           } else {
             await persister.drain();
             await persister.patchWorld({ version: currentVersion });
@@ -436,8 +503,13 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
   const assets = await AssetServer.open({ worldId: meta.worldId, db, root });
   // The asset server exists before HostSync; the hook begins fan-out once sessions are available.
   let manifestHost: HostSync | null = null;
-  wireManifestToStore(assets, store, () => manifestHost?.broadcastAssetManifests());
-  const pipeline = new ImportPipeline(assets, options.codec ?? new AssetWorkerCodec());
+  wireManifestToStore(assets, store, () =>
+    manifestHost?.broadcastAssetManifests(),
+  );
+  const pipeline = new ImportPipeline(
+    assets,
+    options.codec ?? new AssetWorkerCodec(),
+  );
 
   // ── HostSync + GM loopback (§2: GM UI never calls host internals) ──────────
   const hostBus = createEventBus<HostEvents>();
@@ -457,15 +529,28 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     // mutate a compendium entry just to summon it.
     resolveSummonSource: async (ref): Promise<ActorDocument | undefined> => {
       const rec = await getPackage(db, meta.worldId, ref.packageId);
-      const descriptor = rec?.manifest.packs?.find((pack) =>
-        pack.file === ref.packFile && pack.type === "actors");
+      const descriptor = rec?.manifest.packs?.find(
+        (pack) => pack.file === ref.packFile && pack.type === "actors",
+      );
       if (!rec || !descriptor) return undefined;
       const body = rec.files[descriptor.file];
       if (!body) return undefined;
       let parsed: unknown;
-      try { parsed = JSON.parse(body); } catch { return undefined; }
-      const pack = parsePackCached(packCacheKey({ worldId: meta.worldId, packageId: rec.id,
-        version: rec.version, importedAt: rec.importedAt, file: descriptor.file }), parsed);
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        return undefined;
+      }
+      const pack = parsePackCached(
+        packCacheKey({
+          worldId: meta.worldId,
+          packageId: rec.id,
+          version: rec.version,
+          importedAt: rec.importedAt,
+          file: descriptor.file,
+        }),
+        parsed,
+      );
       if (pack?.type !== "actors") return undefined;
       const entry = pack.entries.find((row) => row.id === ref.entryId);
       if (!entry || entry.data.type !== "actor") return undefined;
@@ -477,13 +562,23 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
           !Array.isArray(data.system) ? data.system : {},
         items: Array.isArray(data.items) ? data.items : [],
         effects: Array.isArray(data.effects) ? data.effects : [],
-        ...(entry.img && data.img === undefined ? { img: entry.img } : {}) } as ActorDocument;
+        ...(entry.img && data.img === undefined ? { img: entry.img } : {}),
+      } as ActorDocument;
     },
     // D-250: explored fog per user + scene lives in the world's `fog` store, so a reload,
     // a player's reconnect and the world file all bring the same map back.
     fogStore: {
-      put: (userId, sceneId, png) => putFog(db, { worldId: meta.worldId, sceneId, userId, png }),
-      get: async (userId, sceneId) => (await getFog(db, meta.worldId, sceneId, userId))?.png ?? null,
+      getEpoch: (sceneId, levelId) => getFogEpoch(db, meta.worldId, sceneId, levelId),
+      setEpoch: (sceneId, levelId, epoch) => saves.writeAndFlush(JSON.stringify(["fog-epoch", sceneId, levelId]), () => putFogEpoch(db, { worldId: meta.worldId, sceneId, levelId, epoch })),
+      getState: async (userId, sceneId, levelId) => (await getFog(db, meta.worldId, sceneId, userId, levelId)) ?? null,
+      put: async (userId, sceneId, png, levelId, epoch) => {
+        const copy = new Uint8Array(png);
+        saves.write(JSON.stringify(["fog", userId, sceneId, levelId ?? null]), () =>
+          putFog(db, { worldId: meta.worldId, sceneId, userId, png: copy, ...(levelId === undefined ? {} : { levelId }), ...(epoch ? { epoch } : {}) }),
+        );
+      },
+      get: async (userId, sceneId, levelId) =>
+        (await getFog(db, meta.worldId, sceneId, userId, levelId))?.png ?? null,
     },
   });
   manifestHost = host;
@@ -520,7 +615,12 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     try {
       if (!runner.loadRules) throw new Error("runner cannot load packages");
       const info = await runner.loadRules(pkgSource, 5_000);
-      rulesBoot = { source: "package", packageId: pkg.id, version: info.version, error: null };
+      rulesBoot = {
+        source: "package",
+        packageId: pkg.id,
+        version: info.version,
+        error: null,
+      };
       simSys = pkg.manifest.rules?.modelColumns ?? MASS_BATTLE_SCHEMA_COLUMNS;
       rulesSource = pkgSource;
     } catch (e) {
@@ -608,7 +708,13 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
   });
   gmBus.on("asset", (msg) => fetcher.onChunk(msg));
 
-  const removeLifecycle = installHostLifecycle(persister);
+  saves.addDomain(() => host.saveWork.drain());
+  saves.addDomain(() => pipeline.saveWork.drain());
+  saves.addDomain(() => assets.saveWork.drain());
+  saves.addDomain(() => channel.saveState());
+  const packageWork = new SaveWork();
+  saves.addDomain(() => packageWork.drain());
+  const removeLifecycle = installHostLifecycle(saves);
 
   // ── §12 package management (world-scoped; activation applies at load) ──────
   const summarize = (
@@ -628,7 +734,9 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       trustRequested: rec.manifest.module?.trusted === true,
       trusted: trustedIds.includes(rec.id),
       dependencies,
-      missingDependencies: dependencies.filter((dep) => !importedIds.includes(dep)),
+      missingDependencies: dependencies.filter(
+        (dep) => !importedIds.includes(dep),
+      ),
     };
   };
   const activePackageId = async (): Promise<string | null> =>
@@ -653,7 +761,7 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     await persister.patchWorld({ trustedPackages: next });
     return { ok: true };
   };
-  const packages: HostPackages = {
+  const packageImpl: HostPackages = {
     async list() {
       const active = await activePackageId();
       const trusted = await trustedIds();
@@ -681,7 +789,12 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       clearParsedPackCache();
       return {
         ok: true,
-        summary: summarize(rec, await activePackageId(), await trustedIds(), await importedIds()),
+        summary: summarize(
+          rec,
+          await activePackageId(),
+          await trustedIds(),
+          await importedIds(),
+        ),
       };
     },
     async activate(id) {
@@ -703,7 +816,9 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
         version: rec.manifest.version,
       });
       const present = await importedIds();
-      const missing = (rec.manifest.dependencies ?? []).filter((dep) => !present.includes(dep));
+      const missing = (rec.manifest.dependencies ?? []).filter(
+        (dep) => !present.includes(dep),
+      );
       return missing.length === 0
         ? { ok: true }
         : {
@@ -730,7 +845,10 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       const rec = await getPackage(db, meta.worldId, id);
       if (!rec) return { ok: false, error: `package not imported: ${id}` };
       if (rec.manifest.module?.trusted !== true) {
-        return { ok: false, error: "package does not request in-page execution" };
+        return {
+          ok: false,
+          error: "package does not request in-page execution",
+        };
       }
       const current = await trustedIds();
       if (!current.includes(id)) await writeTrusted([...current, id]);
@@ -742,7 +860,11 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
       return writeTrusted(current.filter((x) => x !== id));
     },
     async compendia() {
-      const out: Array<{ packageId: string; packFile: string; pack: CompendiumPack }> = [];
+      const out: Array<{
+        packageId: string;
+        packFile: string;
+        pack: CompendiumPack;
+      }> = [];
       for (const rec of await listPackages(db, meta.worldId)) {
         for (const descriptor of rec.manifest.packs ?? []) {
           const text = rec.files[descriptor.file];
@@ -774,6 +896,48 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     },
   };
 
+  const packages: HostPackages = {
+    ...packageImpl,
+    importZip: (bytes) => packageWork.run(() => packageImpl.importZip(bytes)),
+    activate: (id) => packageWork.run(() => packageImpl.activate(id)),
+    deactivate: () => packageWork.run(() => packageImpl.deactivate()),
+    grantTrust: (id) => packageWork.run(() => packageImpl.grantTrust(id)),
+    revokeTrust: (id) => packageWork.run(() => packageImpl.revokeTrust(id)),
+  };
+  const cloudBackups = new CloudBackupController({
+    worldId: meta.worldId,
+    worldName: meta.name,
+    archive: async () => {
+      await saves.saveNow();
+      const stamp = () =>
+        [
+          store.seq,
+          host.saveWork.version,
+          pipeline.saveWork.version,
+          assets.saveWork.version,
+          packageWork.version,
+          channel.saveWork.version,
+          saves.writeVersion,
+        ].join(":");
+      const before = stamp();
+      const { exportWorldZip } = await import("../host/worldFile");
+      const blob = await exportWorldZip({
+        db,
+        worldId: meta.worldId,
+        root,
+        persister,
+      });
+      if (stamp() !== before)
+        throw new Error(
+          "The world changed while preparing its backup. Retry between actions; pause realtime simulation first.",
+        );
+      return blob;
+    },
+  });
+  void cloudBackups.restore();
+  saves.start();
+  let closed = false;
+
   return {
     rulesBoot,
     moduleBoot,
@@ -787,22 +951,28 @@ export async function bootHostApp(options: HostAppOptions = {}): Promise<HostApp
     log,
     host,
     persister,
+    saves,
+    cloudBackups,
     assets,
     pipeline,
     gm: { client: gmClient, bus: gmBus, cache, fetcher, channel },
     async close(): Promise<void> {
+      if (closed) return;
+      // Fail before tearing down the live app: the GM can retry without losing the world UI.
+      await saves.saveNow();
+      // Final document flush must finish before a caller may replace world rows (D-179).
+      await persister.close();
+      closed = true;
+      cloudBackups.dispose();
+      saves.stop();
+      channel.stop();
       removeLifecycle();
       runner.terminate();
       gmClient.close();
       host.removeSession("gm");
       host.dispose();
       assets.close();
-      // Awaited, not `void`: this is the final documents flush. Returning
-      // before it settles lets a subsequent world-row replacement (the §8
-      // world.zip import) interleave with it — the batched write of a document
-      // created after the export commits AFTER the restore's delete+put, so
-      // the reloaded world carries a token the archive never had.
-      await persister.close();
+      lock.release();
     },
   };
 }

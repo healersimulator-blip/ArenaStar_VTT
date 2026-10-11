@@ -40,6 +40,8 @@ export interface StageLike {
   readonly camera: Camera;
   setCamera(camera: Camera): void;
   syncTokens(tokens: readonly TokenDocument[]): void;
+  tokenPointVisible?(id: string, point: { x: number; y: number }): boolean;
+  tokenMarqueeSelectable?(id: string): boolean;
   tokenVisualPosition?(id: string): { x: number; y: number } | undefined;
   setMarquee(
     a: { x: number; y: number } | null,
@@ -106,6 +108,7 @@ export function pickToken(
   views: readonly TokenView[],
   world: { x: number; y: number },
   visualPosition?: (tokenId: string) => { x: number; y: number } | undefined,
+  pointVisible?: (tokenId: string, point: { x: number; y: number }) => boolean,
 ): TokenView | undefined {
   for (let i = views.length - 1; i >= 0; i--) {
     const view = views[i];
@@ -115,7 +118,7 @@ export function pickToken(
     const x = visual?.x ?? rect.x;
     const y = visual?.y ?? rect.y;
     if (
-      world.x >= x &&
+      pointVisible?.(view.token._id, world) !== false && world.x >= x &&
       world.x <= x + rect.width &&
       world.y >= y &&
       world.y <= y + rect.height
@@ -325,6 +328,7 @@ export class CanvasController {
             this.options.getTokens(),
             screenToWorld(this.options.stage.camera, ev.x, ev.y),
             (id) => this.options.stage.tokenVisualPosition?.(id),
+            (id, p) => this.options.stage.tokenPointVisible?.(id, p) !== false,
           );
     if (hit && this.options.onTokenActivate) {
       ev.preventDefault();
@@ -429,7 +433,7 @@ export class CanvasController {
     }
     const hit = this.options.tokenLayerActive?.() === false
       ? null
-      : pickToken(this.options.getTokens(), world, (id) => this.options.stage.tokenVisualPosition?.(id));
+      : pickToken(this.options.getTokens(), world, (id) => this.options.stage.tokenVisualPosition?.(id), (id, p) => this.options.stage.tokenPointVisible?.(id, p) !== false);
     if (hit) {
       this.selection.clear();
       this.selection.add(hit.token._id);
@@ -633,7 +637,7 @@ export class CanvasController {
         this.selection.clear();
         const rect = marqueeRect(this.startWorld, world);
         for (const view of this.options.getTokens()) {
-          if (tokenInMarquee(view.token, rect)) {
+          if (this.options.stage.tokenMarqueeSelectable?.(view.token._id) !== false && tokenInMarquee(view.token, rect)) {
             this.selection.add(view.token._id);
           }
         }
@@ -657,7 +661,7 @@ export class CanvasController {
           if (!moved) {
             const camera = this.options.stage.camera;
             const world = screenToWorld(camera, ev.x, ev.y);
-            const hit = pickToken(this.options.getTokens(), world, (id) => this.options.stage.tokenVisualPosition?.(id));
+            const hit = pickToken(this.options.getTokens(), world, (id) => this.options.stage.tokenVisualPosition?.(id), (id, p) => this.options.stage.tokenPointVisible?.(id, p) !== false);
             if (hit && this.options.onContextMenu) {
               this.mode = "idle";
               this.panButton = 0;
@@ -821,7 +825,8 @@ export function domPointerSource(
           x: ev.clientX - rect.left,
           y: ev.clientY - rect.top,
           deltaX: ev.deltaX,
-          deltaY: ev.deltaY,
+          // Normalize line/page wheels to CSS pixels (trackpads already use pixels).
+          deltaY: ev.deltaY * (ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? rect.height : 1),
           preventDefault: () => ev.preventDefault(),
         });
       };

@@ -99,6 +99,37 @@ optionally renamed) or *Restore* (the archive's own id — overwrites that world
 ruleset or content pack is named for what it is and offers *New world with it…*. Inside a
 world, **Close world…** returns to the start screen; the sidebar has no importer of its own.
 
+## Local autosave and Save now
+
+Changes accepted from the GM and permitted players save automatically on the **GM's device**.
+There are no extra approval prompts or per-edit notifications. In **Settings → Saves & backups**
+(or **Session & world → World files**), **Save now** waits for local persistence and displays a
+confirmation. A storage failure produces one persistent banner with **Retry save**; keep the world
+open until it recovers. Close world stays on the table if saving fails.
+
+**Backups & portability** expands to the existing complete world ZIP download and, where supported,
+Save to folder. These are portable copies, not automatic cloud synchronization. Download a backup
+regularly: browser storage can be removed, and another browser/profile/origin has different local
+worlds. Stored media's export permissions still apply; externally linked media is not embedded.
+
+The host retries failed document/journal and fog writes. Save now also waits for active host action,
+asset-import and package work, and captures a realtime strategic checkpoint when applicable.
+Web Locks prevent opening the same world in two GM tabs on origins supporting that API.
+All chat and action history remains intact. **Cloud backups** offers manual, checksum-verified
+Google Drive copies and private **GitHub release-asset** backups. An optional same-origin Node
+companion remembers Google offline authorization and the browser pairing between sessions, and
+uses its saved GitHub CLI login (or a securely configured token). Local play remains serverless;
+static-only deployments can still choose explicitly temporary Google sign-in.
+
+The GM chooses a ZIP cap (default **512 MiB**, not the old 64 MiB; 0 removes the extra cloud cap).
+ZIP structural/memory safety bounds and provider limits still apply. See
+[CLOUD_BACKUP_PROTOTYPE.md](CLOUD_BACKUP_PROTOTYPE.md) for one-time companion/OAuth setup,
+credential/privacy boundaries, size/restore details and **pending live Google/GitHub acceptance**.
+Automated tests use mocked providers, including restart/reconnection and real world-ZIP browser flows.
+
+Automatic scheduling, versioned-retention management and history-exclusion/cleanup presets remain
+planned; see `SAVE_SYSTEM_PLAN.md`. Cloud backups do not replace local autosave.
+
 ## Fog of war (§9)
 
 Fog is a per-scene switch under **Settings → Scene** (*Fog of war*, with an optional *Sight
@@ -162,3 +193,54 @@ The override affects only the Chromium project. Without it, Playwright uses its 
 browser as before. Record the actual browser version when using an alternate binary; this
 is not Firefox/WebKit or full supported-matrix acceptance. Browser executables and their
 libraries stay outside Git.
+
+
+## Draft level planning (GM only)
+
+Open **Scenes → Draft levels · GM only** to plan named elevation bands with stable IDs.
+Validation, normal autosave, undo/redo and scene-copy reference remapping are implemented.
+Drafts are private on updated hosts and **do not activate stacked-floor gameplay** or move tokens.
+Backups with drafts use format 3 and require an updated reader; legacy worlds still use format 2.
+Live joins and draft edits now require compatible GM clients; incompatible GMs must upgrade or
+disconnect before draft changes can commit. Legacy players still receive draft-free projections.
+Use updated builds when reopening local browser storage too; wire/archive checks cannot protect old local readers.
+Expand **Membership & wall scopes · experimental authoring** to assign tokens or wall scopes and inspect the saved binding audit. Token assignment explicitly moves feet to the selected Floor Z; clearing membership keeps elevation. This does not hide other floors or activate multilevel physics.
+Saved levels also enable the **GM fog & lighting diagnostic** on the canvas. It stores exploration separately per level and renders scoped lights; assign placed lights through the same membership editor. Enable scene fog in Settings first. This remains GM-only: player level disclosure, vertical light tracing and per-level reset controls are not implemented. Each draft level can now inherit scene ambient lighting or override its darkness from 0 to 1; the choice affects the GM diagnostic only.
+See [usage and remaining gates](MULTILEVEL_IMPLEMENTATION.md).
+
+## Native wall editing
+
+GM: **GM Info → Wall** now offers **Draw**, **Move corner**, and **Split**. Draw/corner tools
+snap to nearby endpoints in screen pixels; Ctrl bypasses endpoint snapping. Shared corners move
+together by default. Splitting preserves plain-wall metadata and direction while protecting
+existing doors, windows and prefab walls. Corner/split gestures preview locally, commit atomically,
+and undo in one step; concurrent wall edits are rejected rather than overwritten.
+
+These are flat-scene authoring tools, not level-aware physics. See
+[usage, constraints and remaining multilevel work](MULTILEVEL_IMPLEMENTATION.md).
+
+## Native Faux Overhead (first multilevel slice)
+
+GM: **Macros → Active Zones → Region → Faux Overhead** enables an elevation-gated cover over
+painted-in map artwork. Native vector masks support partial overlap, concave footprints and openings;
+covered pixels cannot be picked, and identifying token decorations are suppressed near cover. Edits
+use ordinary undo/autosave and survive world ZIP export/import.
+
+This is **cosmetic tactical-token clipping**, not a physical floor or secrecy boundary. Full level
+navigation, host-side cross-level visibility, per-level fog, ghosts, stairs and advanced barrier behavior
+are still pending. Use the same updated build on all clients. See [implementation status and usage](MULTILEVEL_IMPLEMENTATION.md)
+and the [complete target design](MULTILEVEL_WALLS_DESIGN.md).
+
+### Multilevel follow-up status (D-425 / D-426)
+
+The GM level diagnostic supports **Reset this level’s fog**, with confirmation, durable reset generations, stale-upload protection and backup/restore. Other floors and legacy fog are unaffected; resets cannot be undone. Shared vertical sight/light queries and an owned-observer host exposure planner are implemented and tested, but **not connected to live player projection or rendering**. Player floor switching remains gated; secret stacked-floor play is not yet supported. See `MULTILEVEL_IMPLEMENTATION.md` for remaining integration requirements.
+
+### Player token-floor navigation (D-427)
+
+Assign player-controlled tokens to saved levels in the GM scene editor. Compatible players then see **Token floor focus**, with a host-approved floor list. Switching filters displayed/pickable tokens while preserving normal fog restrictions; **Shared scene · all floors** returns to the existing display. Choices update when token membership or ownership changes. **Artwork, lighting and fog remain shared: this is navigation, not secret-room isolation or full player multilevel perception.**
+
+### Isolated floor maps and stairs-first travel (D-428)
+
+This supersedes the token-only limitation above for explicitly enabled scenes. In **Scenes → Draft levels**, assign each floor's map tiles/background, assign wall/light scopes, then open **Floor artwork & stair travel** to create stairs and enable isolated floor play. Players see one floor's maps, lighting and remembered fog; the view follows their controlled token through stairs by default. The manual selector is a collapsed fallback.
+
+A stair trip completes when a move ends inside the source-floor region; XY is preserved and floor/elevation change in one undoable transaction. Return stairs require leaving and entering again. Unassigned artwork/global foreground and auxiliary layers are excluded rather than mixed. This is playable discrete-floor rendering, **not comprehensive network/asset/FX secrecy or cross-floor sight/light**. Detailed setup and limits: `MULTILEVEL_IMPLEMENTATION.md`.

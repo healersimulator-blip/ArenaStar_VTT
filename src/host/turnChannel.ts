@@ -1,3 +1,4 @@
+import { SaveWork } from "../storage/saveCoordinator";
 /**
  * §5A turn/sim channel (host): drives the TurnEngine state machine and the
  * SimBridge, commits strategic document changes as Ops (through HostSync's
@@ -118,6 +119,27 @@ export interface RealtimeStats {
 }
 
 export class TurnChannel {
+  readonly saveWork = new SaveWork();
+  private saving = false;
+
+  /** Save an explicit realtime recovery point without advancing the simulation. */
+  async saveState(): Promise<void> {
+    this.saving = true;
+    try {
+      await this.saveWork.drain();
+      if (this.bridge.started && this.engine.phase !== "idle" && (this.engine.phase === "paused" || this.engine.mode === "realtime")) {
+        await this.bridge.tickCheckpoint(this.engine.turnNumber, this.rtTick,
+          tickSeed(this.seed, this.engine.turnNumber, this.rtTick), "realtime:save");
+      }
+    } finally { this.saving = false; }
+  }
+
+  stop(): void {
+    this.saving = true;
+    if (this.rtTimer !== null) this.rtDriver.stop(this.rtTimer);
+    this.rtTimer = null;
+  }
+
   private readonly host: HostSync;
   private readonly store: DocumentStore;
   private readonly bridge: SimBridge;
@@ -291,7 +313,14 @@ export class TurnChannel {
   // ─── campaign lifecycle ─────────────────────────────────────────────────────
 
   /** Start the campaign (GM): loads the SimBridge, creates Turn 1 (§8A resume). */
-  async start(
+  start(
+    mode: "stepwise" | "realtime" | "simultaneous",
+    initial?: { bytes: Uint8Array; maxHpMax: number },
+  ): Promise<number> {
+    return this.saveWork.run(() => this.startInner(mode, initial));
+  }
+
+  private async startInner(
     mode: "stepwise" | "realtime" | "simultaneous",
     initial?: { bytes: Uint8Array; maxHpMax: number },
   ): Promise<number> {
@@ -465,7 +494,11 @@ export class TurnChannel {
 
   // ─── advance (§5A steps 2–4) ────────────────────────────────────────────────
 
-  private async advance(): Promise<void> {
+  private advance(): Promise<void> {
+    return this.saveWork.run(() => this.advanceInner());
+  }
+
+  private async advanceInner(): Promise<void> {
     if (this.resolving) return;
     const step = turnEngineReduce(
       this.engine,
@@ -731,7 +764,12 @@ export class TurnChannel {
    * into one frame per flush interval, emit a 1 Hz report, and checkpoint
    * every K ticks. Tests drive this directly with synthetic `nowMs`.
    */
-  async pumpRealtime(nowMs?: number): Promise<void> {
+  pumpRealtime(nowMs?: number): Promise<void> {
+    if (this.saving) return Promise.resolve();
+    return this.saveWork.run(() => this.pumpRealtimeInner(nowMs));
+  }
+
+  private async pumpRealtimeInner(nowMs?: number): Promise<void> {
     const eng = this.engine;
     if (eng.phase !== "orders" || eng.mode !== "realtime" || this.rtPumping)
       return;
@@ -920,7 +958,13 @@ export class TurnChannel {
   }
 
   /** §5A tick checkpoint (K-tick interval + pause/scene change). */
-  private async realtimeCheckpoint(
+  private realtimeCheckpoint(
+    reason: "interval" | "pause",
+  ): Promise<void> {
+    return this.saveWork.run(() => this.realtimeCheckpointInner(reason));
+  }
+
+  private async realtimeCheckpointInner(
     reason: "interval" | "pause",
   ): Promise<void> {
     const turnNumber =
@@ -1142,7 +1186,11 @@ export class TurnChannel {
     }
   }
 
-  private async undoTurn(): Promise<void> {
+  private undoTurn(): Promise<void> {
+    return this.saveWork.run(() => this.undoTurnInner());
+  }
+
+  private async undoTurnInner(): Promise<void> {
     const step = turnEngineReduce(
       this.engine,
       { type: "turn.undo" },

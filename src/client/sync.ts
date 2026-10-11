@@ -1,3 +1,6 @@
+import { LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
+import type { LevelFocusStateMsg } from "../core/messages";
+import { fogVersionKey, fogLevelIdError, LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "../core/levelFog";
 /**
  * §5 ClientSync — the client-side sync endpoint.
  *
@@ -8,6 +11,8 @@
  * - optimistic UI (§5): latency-sensitive ops apply locally to an overlay
  *   echo store; commit reconciles (drop pending), rejected rolls back.
  */
+import { SUPPORTED_WIRE_FEATURES, featureListError, requiredOpFeatures, requiredWorldFeatures } from "../core/capabilities";
+import type { WallEditGuard } from "../core/wallEditing";
 import { DocumentStore, type StoreMeta } from "../core/store";
 import { estimateClockOffset, type ClockSample } from "../core/audio";
 import type { Op, OpEnvelope } from "../core/ops";
@@ -82,6 +87,7 @@ export interface ClientEvents {
   rollHighlight: RollHighlightRequest;
   /** D-250: the host's answer to `requestFog` (also resolves the pending promise). */
   fogState: FogStateMsg;
+  levelFocus: LevelFocusStateMsg | null;
 }
 
 /** Which intents are latency-sensitive enough for optimistic echo (§5 default). */
@@ -149,6 +155,7 @@ export class ClientSync {
   /** §11 pending client seeds, keyed by committed rollId. */
   private readonly committedRolls = new Map<string, string>();
   /** D-250: `requestFog` waiters per sceneId. */
+  private readonly fogResetWaiters = new Map<string, { resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private readonly fogWaiters = new Map<DocId, Array<(png: Uint8Array | null) => void>>();
   private readonly assetUploadWaiters = new Map<string, Set<AssetUploadWaiter>>();
   private readonly assetHostWaiters = new Map<string, { resolve: (msg: AssetLibraryResultMsg | AssetCleanupResultMsg) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
@@ -192,7 +199,7 @@ export class ClientSync {
     this.ephemeralBucket = createEphemeralRateLimiter(this.now);
     this.simSys = options.simSys ?? null;
     this.simSceneId = options.simSceneId ?? null;
-    this.transport.onMessage = (_channel, bytes) => this.onFrame(bytes);
+    this.bindTransport();
   }
 
   /** The optimistic overlay the UI renders (§5 optimistic UI). */
@@ -201,6 +208,19 @@ export class ClientSync {
   }
 
   private hello: HelloMsg | null = null;
+  private hostFeatures: ReadonlySet<string> = new Set();
+  private connectionEpoch = 0;
+  private bindTransport(): void {
+    const epoch = ++this.connectionEpoch;
+    this.transport.onMessage = (_channel, bytes) => {
+      if (epoch === this.connectionEpoch) this.onFrame(bytes);
+    };
+  }
+  /** Both peers must advertise support; compatibility does not grant authoring permissions. */
+  supportsFeature(feature: string): boolean {
+    return this.hostFeatures.has(feature) && SUPPORTED_WIRE_FEATURES.includes(feature) &&
+      (this.hello?.features ?? SUPPORTED_WIRE_FEATURES).includes(feature);
+  }
   /** Snapshot applied at least once (gates §14 buffering vs D-065 gap-skipping). */
   private hasSnapshot = false;
 
@@ -211,7 +231,12 @@ export class ClientSync {
   // ─── Outgoing ───────────────────────────────────────────────────────────────
 
   connect(hello: HelloMsg): void {
-    const withSeq: HelloMsg = this.store.seq > 0 ? { ...hello, lastSeq: this.store.seq } : hello;
+    const featureError = featureListError(hello.features);
+    if (featureError) throw new Error(featureError);
+    const declared = { ...hello, features: [...(hello.features ?? SUPPORTED_WIRE_FEATURES)] };
+    const withSeq: HelloMsg = this.store.seq > 0 ? { ...declared, lastSeq: this.store.seq } : declared;
+    this.hostFeatures = new Set();
+    this.clearLevelFocus();
     this.hello = withSeq;
     this.send(withSeq);
   }
@@ -223,8 +248,11 @@ export class ClientSync {
    */
   reattach(transport: Transport): void {
     if (!this.hello) throw new Error("reattach: client was never connected");
+    this.hostFeatures = new Set();
+    this.clearLevelFocus(); // never reuse capabilities from a previous host/connection
+    this.transport.onMessage = null;
     this.transport = transport;
-    this.transport.onMessage = (_channel, bytes) => this.onFrame(bytes);
+    this.bindTransport();
     // re-stamp lastSeq from the CURRENT replica seq (connect() stored the
     // original, possibly from seq 0)
     const withSeq: HelloMsg =
@@ -234,14 +262,14 @@ export class ClientSync {
   }
 
   /** Submit an intent; optimistic ops are echoed locally (§5). */
-  submit(ops: Op[]): TxId {
+  submit(ops: Op[], wallEdit?: WallEditGuard): TxId {
     const txId = globalThis.crypto.randomUUID();
-    this.sendIntent(txId, ops);
+    this.sendIntent(txId, ops, wallEdit);
     return txId;
   }
 
   /** Submit and wait until the host commits this transaction or explicitly rejects it. */
-  submitAndWait(ops: Op[], timeoutMs = 30_000): Promise<TxId> {
+  submitAndWait(ops: Op[], timeoutMs = 30_000, wallEdit?: WallEditGuard): Promise<TxId> {
     const txId = globalThis.crypto.randomUUID();
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -268,10 +296,10 @@ export class ClientSync {
         this.pending.delete(txId);
         this.inFlight.delete(txId);
         this.rebuildEcho();
-        finish(() => reject(new Error("The host did not acknowledge this image action in time.")));
+        finish(() => reject(new Error("The host did not acknowledge this edit in time.")));
       }, timeoutMs);
       try {
-        this.sendIntent(txId, ops);
+        this.sendIntent(txId, ops, wallEdit);
       } catch (error) {
         this.pending.delete(txId);
         this.inFlight.delete(txId);
@@ -281,14 +309,16 @@ export class ClientSync {
     });
   }
 
-  private sendIntent(txId: TxId, ops: Op[]): void {
+  private sendIntent(txId: TxId, ops: Op[], wallEdit?: WallEditGuard): void {
+    if (requiredOpFeatures(ops).some((f) => !this.supportsFeature(f)))
+      throw new Error("Upgrade required: draft levels need a compatible host and GM client");
     this.inFlight.add(txId);
     const optimistic = ops.filter((op) => this.policy(op));
     if (optimistic.length > 0) {
       this.pending.set(txId, optimistic);
       this.rebuildEcho();
     }
-    this.send({ kind: "intent", txId, ops });
+    this.send({ kind: "intent", txId, ops, ...(wallEdit ? { wallEdit } : {}) });
   }
 
   // ─── §7 audio + clock sync ──────────────────────────────────────────────────
@@ -765,10 +795,16 @@ export class ClientSync {
   }
 
   close(): void {
+    this.hostFeatures = new Set();
+    this.clearLevelFocus();
+    ++this.connectionEpoch;
+    this.transport.onMessage = null;
     this.transport.close();
     // nothing more can arrive: release fog restores as "nothing stored"
     for (const waiters of this.fogWaiters.values()) for (const w of waiters) w(null);
     this.fogWaiters.clear();
+    for (const w of this.fogResetWaiters.values()) { clearTimeout(w.timer); w.reject(new Error("Connection closed during fog reset")); }
+    this.fogResetWaiters.clear();
     for (const waiters of this.assetUploadWaiters.values()) for (const waiter of waiters) {
       globalThis.clearTimeout(waiter.timer);
       waiter.reject(new Error("The connection closed during image upload"));
@@ -795,7 +831,13 @@ export class ClientSync {
 
   private dispatch(msg: WireMessage): void {
     switch (msg.kind) {
-      case "welcome":
+      case "welcome": {
+        const error = featureListError(msg.features) ?? featureListError(msg.requiredFeatures);
+        this.hostFeatures = new Set(error ? [] : msg.features ?? []);
+        if (error || (msg.requiredFeatures ?? []).some((feature) => !this.supportsFeature(feature))) {
+          this.bus.emit("kick", { reason: error ?? "Upgrade required: unsupported host capabilities" });
+          this.close(); return;
+        }
         this.user = msg.user;
         this.world = msg.world;
         // §5A/N01: adopt the host-announced battle (schema/scene) before any
@@ -803,7 +845,11 @@ export class ClientSync {
         if (msg.sim) this.adoptSimInfo(msg.sim);
         this.bus.emit("welcome", { user: msg.user, world: msg.world });
         return;
+      }
       case "snapshot":
+        if (requiredWorldFeatures(msg.world.collections.scenes ?? [], "GM").some((f) => !this.supportsFeature(f))) {
+          this.bus.emit("kick", { reason: "Upgrade required: unnegotiated draft-level snapshot" }); this.close(); return;
+        }
         this.applySnapshot(msg);
         return;
       case "asset.manifest":
@@ -812,6 +858,9 @@ export class ClientSync {
         this.bus.emit("assetManifest", msg.manifest);
         return;
       case "ops":
+        if (requiredOpFeatures(msg.envelope.ops).some((f) => !this.supportsFeature(f))) {
+          this.bus.emit("kick", { reason: "Upgrade required: unnegotiated draft-level operations" }); this.close(); return;
+        }
         this.applyCommitted(msg);
         return;
       case "rejected":
@@ -891,6 +940,7 @@ export class ClientSync {
       case "asset.upload.cancel":
       case "asset.share":
       case "fog.put":
+      case "level.focus":
       case "fog.get":
       case "relay.offer":
       case "turn.ready":
@@ -898,9 +948,21 @@ export class ClientSync {
       case "report.detail":
       case "sim.snapshot.get":
         return; // client→host kinds and later-milestone kinds are never received here
+      case "level.focus.state": {
+        if (!this.supportsFeature(LEVEL_NAVIGATION_FEATURE) || msg.requestId !== this.levelFocusRequest || !Number.isSafeInteger(msg.revision) || msg.revision < 1 ||
+            (this.levelFocus?.requestId === msg.requestId && msg.revision <= this.levelFocus.revision)) return;
+        if (!Array.isArray(msg.levels) || msg.levels.length > 32 || !Array.from(msg.levels).every((l) => l && typeof l.id === "string" && typeof l.name === "string") ||
+            (msg.levelId !== null && !msg.levels.some((l) => l.id === msg.levelId)) || (msg.tokenIds !== null && (!Array.isArray(msg.tokenIds) || !Array.from(msg.tokenIds).every((id) => typeof id === "string")))) return;
+        this.levelFocus = msg; this.bus.emit("levelFocus", msg); return;
+      }
       case "fog.state": {
-        const waiters = this.fogWaiters.get(msg.sceneId) ?? [];
-        this.fogWaiters.delete(msg.sceneId);
+        if (msg.resetRequestId) {
+          const waiter = this.fogResetWaiters.get(msg.resetRequestId);
+          if (waiter) { clearTimeout(waiter.timer); this.fogResetWaiters.delete(msg.resetRequestId); if (msg.resetError) waiter.reject(new Error(msg.resetError)); else waiter.resolve(); }
+          return;
+        }
+        const waiters = this.fogWaiters.get(fogVersionKey(msg.sceneId, msg.levelId, undefined, msg.epoch)) ?? [];
+        this.fogWaiters.delete(fogVersionKey(msg.sceneId, msg.levelId, undefined, msg.epoch));
         for (const w of waiters) w(msg.png);
         this.bus.emit("fogState", msg);
         return;
@@ -1082,23 +1144,58 @@ export class ClientSync {
    * §8/§9 fog explored-map upload (PNG readback of the fog texture). The host keeps it per
    * user + scene, persists it and hands it back through `requestFog` (D-250).
    */
-  sendFogPng(sceneId: DocId, png: Uint8Array): void {
-    this.send({ kind: "fog.put", sceneId, png });
+  levelFocus: LevelFocusStateMsg | null = null;
+  private levelFocusRequest: string | null = null;
+  requestLevelFocus(sceneId: string, levelId: string | null, followTokenId?: string): void {
+    if (!this.supportsFeature(LEVEL_NAVIGATION_FEATURE)) throw new Error("Upgrade required: player floor navigation");
+    if (!sceneId || sceneId.length > 128 || (levelId !== null && (typeof levelId !== "string" || fogLevelIdError(levelId)))) throw new Error("Invalid floor focus");
+    const requestId = globalThis.crypto.randomUUID();
+    this.levelFocusRequest = requestId;
+    this.send({ kind: "level.focus", requestId, sceneId, levelId, ...(followTokenId ? { followTokenId } : {}) });
+  }
+  private clearLevelFocus(): void {
+    this.levelFocus = null; this.levelFocusRequest = null;
+    this.bus.emit("levelFocus", null);
+  }
+  sendFogPng(sceneId: DocId, png: Uint8Array, levelId?: string, epoch = this.levelFogEpoch(sceneId, levelId)): void {
+    this.checkFogLevel(levelId);
+    this.send({ kind: "fog.put", sceneId, png, ...(levelId === undefined ? {} : { levelId }), ...(epoch ? { epoch } : {}) });
   }
 
   /**
    * D-250: this user's stored explored map for a scene — null when nothing is stored or the
    * connection closes first. Concurrent requests for one scene share the answer.
    */
-  requestFog(sceneId: DocId): Promise<Uint8Array | null> {
+  private levelFogEpoch(sceneId: string, levelId?: string): string {
+    if (levelId && this.levelFocus?.isolated && this.levelFocus.sceneId === sceneId && this.levelFocus.levelId === levelId) return this.levelFocus.presentation?.epoch ?? "";
+    return this.store.get("scenes", sceneId)?.levels?.find((l) => l._id === levelId)?.fogEpoch ?? "";
+  }
+  resetLevelFog(sceneId: string, levelId: string): Promise<void> {
+    this.checkFogLevel(levelId);
+    if (!this.supportsFeature(LEVEL_FOG_RESET_FEATURE)) return Promise.reject(new Error("Upgrade required: fog reset support"));
+    if (this.user?.role !== "GM" && this.user?.role !== "ASSISTANT") return Promise.reject(new Error("Only GMs reset level fog"));
+    const requestId = globalThis.crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.fogResetWaiters.delete(requestId); reject(new Error("Fog reset timed out; reconnect and check saved state")); }, 15000);
+      this.fogResetWaiters.set(requestId, { resolve, reject, timer });
+      this.send({ kind: "fog.put", sceneId, levelId, epoch: this.levelFogEpoch(sceneId, levelId), png: new Uint8Array(), resetRequestId: requestId });
+    });
+  }
+  private checkFogLevel(levelId?: string): void {
+    if (fogLevelIdError(levelId)) throw new Error("Invalid fog level ID");
+    if (levelId !== undefined && !this.supportsFeature(LEVEL_FOG_FEATURE)) throw new Error("Upgrade required: per-level fog host support");
+  }
+  requestFog(sceneId: DocId, levelId?: string, epoch = this.levelFogEpoch(sceneId, levelId)): Promise<Uint8Array | null> {
+    this.checkFogLevel(levelId);
+    const key = fogVersionKey(sceneId, levelId, undefined, epoch);
     return new Promise((resolve) => {
-      const waiters = this.fogWaiters.get(sceneId);
+      const waiters = this.fogWaiters.get(key);
       if (waiters) {
         waiters.push(resolve);
         return;
       }
-      this.fogWaiters.set(sceneId, [resolve]);
-      this.send({ kind: "fog.get", sceneId });
+      this.fogWaiters.set(key, [resolve]);
+      this.send({ kind: "fog.get", sceneId, ...(levelId === undefined ? {} : { levelId }), ...(epoch ? { epoch } : {}) });
     });
   }
 

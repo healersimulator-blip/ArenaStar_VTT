@@ -1,0 +1,34 @@
+import { test, expect } from "@playwright/test";
+import { entry, hostCall, waitForSurface } from "./lib";
+
+test("scene wheel zoom and accessible slider share the camera", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await expect.poll(() => hostCall(page, "camera")).not.toBeNull();
+  const camera = () => hostCall<{ x: number; y: number; scale: number }>(page, "camera");
+  const before = await camera();
+  const canvas = page.locator(".canvas-host canvas");
+  await canvas.hover({ position: { x: 200, y: 200 } });
+  await page.mouse.wheel(0, -200);
+  await expect.poll(async () => (await camera()).scale).toBeGreaterThan(before.scale);
+  await page.mouse.wheel(0, 200);
+  await expect.poll(async () => (await camera()).scale).toBeCloseTo(before.scale);
+  await page.getByLabel("Scene zoom", { exact: true }).click();
+  const slider = page.getByRole("slider", { name: "Scene zoom level" });
+  await slider.fill("0");
+  await expect.poll(async () => (await camera()).scale).toBeCloseTo(1);
+  await slider.focus();
+  await page.keyboard.press("End");
+  await expect.poll(async () => (await camera()).scale).toBe(10);
+  await page.keyboard.press("Home");
+  await expect.poll(async () => (await camera()).scale).toBeCloseTo(0.1);
+  await page.keyboard.press("Escape");
+  await expect(slider).not.toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByLabel("Scene zoom", { exact: true }).click();
+  await expect(slider).toBeVisible();
+  const box = await slider.boundingBox();
+  if (!box) throw new Error("Zoom slider missing");
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(390);
+});

@@ -554,6 +554,17 @@
         </div>
         <p class="hint">{fogStrokes} mask stroke(s) · Esc closes a polygon</p>
       {:else if active === "wall"}
+        <div class="swatches" role="group" aria-label="Wall editing mode">
+          {#each [{ id: "draw", label: "Draw" }, { id: "corner", label: "Move corner" }, { id: "split", label: "Split" }] as mode (mode.id)}
+            <button type="button" data-wall-edit-mode={mode.id}
+              class:active={settings.wallEditMode === mode.id} aria-pressed={settings.wallEditMode === mode.id}
+              onclick={() => settings.wallEditMode = mode.id as ToolOptions["wallEditMode"]}><span class="label">{mode.label}</span></button>
+          {/each}
+        </div>
+        <label><input type="checkbox" data-wall-endpoint-snap bind:checked={settings.wallEndpointSnap} />Snap to endpoints (8 px)</label>
+        {#if settings.wallEditMode === "corner"}
+          <label><input type="checkbox" data-wall-joined bind:checked={settings.wallMoveJoined} />Move joined endpoints</label>
+        {/if}
         <div class="swatches">
           <button
             type="button"
@@ -597,7 +608,13 @@
         <button type="button" data-canvas-action="delete-last-placement" onclick={() => act("delete-last-placement")}>
           <span class="label">Erase last</span>
         </button>
-        <p class="hint">Drag to place · click a door to open/close · Alt-click erases a wall</p>
+        {#if settings.wallEditMode === "draw"}
+          <p class="hint">Drag to place · click a door to open/close · Alt-click erases · Ctrl bypasses endpoint snapping</p>
+        {:else if settings.wallEditMode === "corner"}
+          <p class="hint">Drag a gold endpoint · shared corners move together · Ctrl bypasses endpoint snapping · Esc cancels</p>
+        {:else}
+          <p class="hint">Click a plain wall to split · doors/windows and prefab walls are protected · one undo per edit</p>
+        {/if}
       {:else if active === "light"}
         <div class="swatches">
           {#each [1, 2, 3, 6] as cells (cells)}

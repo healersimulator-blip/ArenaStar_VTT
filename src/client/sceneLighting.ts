@@ -4,13 +4,14 @@ import type { VisionComputer } from "../workers/visionWorkerClient";
 import type { LightView } from "../canvas/layers/LightingLayer";
 import type { Stage } from "../canvas/stage";
 import { DarknessAnimation } from "../canvas/darknessAnimation";
-import { sceneLightSources } from "../canvas/vision/darkness";
+import { sceneLightSources, sceneForLevelPerception } from "../canvas/vision/darkness";
 import { sightSegments } from "../canvas/vision/wallSight";
 import { flatSegments } from "../core/fogExploration";
 
 type LightingView = Pick<Stage, "camera" | "viewport" | "onFrame"> & {getLightingLayer(): Pick<ReturnType<Stage["getLightingLayer"]>, "sync">};
 export class SceneLightingPlayer {
   private animation = new DarknessAnimation();
+  private ambientContext = "";
   private readonly media = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)");
   private view: LightingView | undefined;
   private unframe: (() => void) | undefined;
@@ -19,7 +20,8 @@ export class SceneLightingPlayer {
   private revision = 0;
   private destroyed = false;
   constructor(private readonly computer: VisionComputer) {}
-  sync(scene: SceneDocument | null, view: LightingView): void {
+  sync(scene: SceneDocument | null, view: LightingView, levelId?: string, presentationKey?: string): void {
+    if (scene && levelId !== undefined) scene = sceneForLevelPerception(scene, levelId);
     if (this.destroyed) return;
     if (view !== this.view) {
       this.unframe?.();
@@ -27,6 +29,8 @@ export class SceneLightingPlayer {
       this.animation = new DarknessAnimation();
       this.unframe = view.onFrame(() => this.draw());
     }
+    const ambientContext = JSON.stringify([scene?._id, presentationKey ?? levelId ?? null]);
+    if (ambientContext !== this.ambientContext) { this.ambientContext = ambientContext; this.animation = new DarknessAnimation(); }
     this.animation.update(scene, performance.now(), this.media?.matches === true);
     const sources = scene ? sceneLightSources({
       lights: scene.lights,
@@ -34,7 +38,7 @@ export class SceneLightingPlayer {
     }) : [];
     // Light restriction is independent of sight (a window can pass light).
     const segments = sightSegments((scene?.walls ?? []).map((wall) => ({...wall, sight:wall.light})));
-    const key = JSON.stringify([scene?._id, sources, segments]);
+    const key = JSON.stringify([scene?._id, presentationKey ?? levelId ?? null, sources, segments]);
     if (key !== this.key) {
       this.key = key;
       const revision = ++this.revision;

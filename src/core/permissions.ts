@@ -47,7 +47,7 @@ export function can(
 ): boolean {
   if (user.role === "GM" || user.role === "ASSISTANT") return true;
   // Action pre-images are host-only, even when a malformed import publishes them.
-  if (coll === "actionReceipts") return false;
+  if (coll === "actionReceipts" || coll === "levels") return false;
   // Playback state belongs to the host regardless of imported ownership maps.
   // A player receives only authorized, resolved cues, never instance documents.
   if (coll === "fxInstances") return false;

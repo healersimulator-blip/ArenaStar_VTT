@@ -1,3 +1,4 @@
+import { loadCloudPreferences } from "../storage/cloud/preferences";
 /** Bounded ZIP extraction shared by the World ZIP importer and its preview classifier. */
 import {
   Unzip,
@@ -25,9 +26,13 @@ export interface ZipExtractionLimits {
  * selected-content bundle limits, but still bound compressed input, entry count, and expansion.
  */
 export const WORLD_ZIP_LIMITS: Readonly<ZipExtractionLimits> = Object.freeze({
-  maxArchiveBytes: 256 * 1024 * 1024,
-  maxUncompressedBytes: 512 * 1024 * 1024,
-  maxEntryBytes: 128 * 1024 * 1024,
+  get maxArchiveBytes() {
+    return Math.max(1024, loadCloudPreferences().maxMiB) * 1024 * 1024;
+  },
+  get maxUncompressedBytes() {
+    return Math.max(2048, loadCloudPreferences().maxMiB * 2) * 1024 * 1024;
+  },
+  maxEntryBytes: 512 * 1024 * 1024,
   maxEntries: 100_000,
   maxPathBytes: 4096,
 });

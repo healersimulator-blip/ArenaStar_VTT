@@ -1,3 +1,4 @@
+import type { LevelFocusView } from "./levelNavigation";
 /**
  * §13 Message protocol — every message type, with a 1-byte MsgKind prefix in
  * front of a msgpack-encoded payload (§6.1). Wire format:
@@ -9,6 +10,7 @@
  */
 import type { AssetId, DocId, PeerId, TxId, UserId, WorldId } from "./ids";
 import type { AssetManifest, Json, Role, RollMode } from "./documents";
+import type { WallEditGuard } from "./wallEditing";
 import type { Op, OpEnvelope } from "./ops";
 import type { TagRef } from "./tags";
 import type { ModelColumnType, TurnMode, TurnPhase } from "./strategic";
@@ -80,6 +82,8 @@ export const MsgKind = {
   "codex.purchase": 0x56,
   "codex.purchase.result": 0x57,
   "codex.claim": 0x58,
+  "level.focus": 0x59,
+  "level.focus.state": 0x5a,
   // D-394 — permitted personal macro authoring in the GM world (not execution).
   "macros.save": 0x51,
   // SQ-02 — private acknowledgement naming the exact host-approved run a requester may cancel.
@@ -138,6 +142,8 @@ export interface HelloMsg {
   /** Reconnect (§5): GM/assistant may receive ops-since-seq; players get fresh
    * recipient-projected snapshots until history-aware delta projection exists. */
   lastSeq?: number;
+  /** Compatibility declarations only; omission means legacy support. */
+  features?: string[];
 }
 
 /** §5 flow: intents carry uncommitted ops; host replies ops (commit) or rejected. */
@@ -145,6 +151,8 @@ export interface IntentMsg {
   kind: "intent";
   txId: TxId;
   ops: Op[];
+  /** GM wall-editor precondition, checked only by the host; never part of committed Ops. */
+  wallEdit?: WallEditGuard;
 }
 
 /** §11: rolls are executed on the host from `roll` intents. */
@@ -747,6 +755,11 @@ export interface AssetCleanupResultMsg {
  * keeps the latest per user + scene and persists it (D-250: `fog` store, world file `fog/`).
  */
 export interface FogPutMsg {
+  epoch?: string;
+  /** GM-only destructive reset, correlated by request ID; requires reset capability. */
+  resetRequestId?: string;
+  /** Optional explicit level; absent remains the legacy scene namespace. */
+  levelId?: DocId;
   kind: "fog.put";
   sceneId: DocId;
   png: Uint8Array;
@@ -754,12 +767,20 @@ export interface FogPutMsg {
 
 /** D-250: ask for one's own stored explored map of a scene (answered with `fog.state`). */
 export interface FogGetMsg {
+  epoch?: string;
+  /** Optional explicit level; absent remains the legacy scene namespace. */
+  levelId?: DocId;
   kind: "fog.get";
   sceneId: DocId;
 }
 
 /** D-250: the stored explored map for the asking user + scene; `png` null = nothing stored. */
 export interface FogStateMsg {
+  epoch?: string;
+  resetRequestId?: string;
+  resetError?: string;
+  /** Optional explicit level; absent remains the legacy scene namespace. */
+  levelId?: DocId;
   kind: "fog.state";
   sceneId: DocId;
   png: Uint8Array | null;
@@ -845,6 +866,8 @@ export interface WelcomeSimInfo {
 /** §6.4: after approval the client is welcomed, then receives the snapshot. */
 export interface WelcomeMsg {
   kind: "welcome";
+  features?: string[];
+  requiredFeatures?: string[];
   user: WelcomeUser;
   world: WorldInfo;
   /** Snapshot follows; client buffers ops with seq > this. */
@@ -1001,7 +1024,26 @@ export interface RelayFrameMsg {
 
 // ─── Union ────────────────────────────────────────────────────────────────────
 
+export interface LevelFocusMsg {
+  kind: "level.focus";
+  followTokenId?: string;
+  requestId: string;
+  sceneId: string;
+  levelId: string | null;
+}
+export interface LevelFocusStateMsg extends LevelFocusView {
+  kind: "level.focus.state";
+  worldSeq?: number;
+  mode?: "follow" | "manual";
+  requestId: string;
+  sceneId: string;
+  revision: number;
+  error?: "unavailable" | "rate_limited";
+}
+
 export type WireMessage =
+  | LevelFocusMsg
+  | LevelFocusStateMsg
   | HelloMsg
   | IntentMsg
   | RollMsg

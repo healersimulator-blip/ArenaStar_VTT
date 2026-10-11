@@ -1,3 +1,4 @@
+import { fogLevelIdError, fogEpochError } from "../core/levelFog";
 /**
  * §8 Persistence — IndexedDB "vtt" schema and typed helpers (via `idb`).
  *
@@ -20,13 +21,15 @@ import type { Op, OpEnvelope } from "../core/ops";
 import type { DocId as SceneId, UserId, WorldId } from "../core/ids";
 
 export const DB_NAME = "vtt";
-export const DB_VERSION = 4;
+export const DB_VERSION = 6;
 
 export const STORES = {
   worlds: "worlds",
   documents: "documents",
   oplog: "oplog",
   fog: "fog",
+  levelFog: "levelFog",
+  fogEpochs: "fogEpochs",
   settings: "settings",
   /** §7: asset metadata (host); `bytes` is set only when OPFS is unavailable. */
   assets: "assets",
@@ -50,6 +53,8 @@ export interface WorldsRecord {
    * startup.
    */
   flushedSeq: number;
+  /** Last successful local document flush (not an off-device backup). */
+  lastSavedAt?: number;
   /** Seq below which the oplog has been compacted away (checkpoint base). */
   oplogBase: number;
   /** §12 active system package id (applies at world load; null/absent = built-in). */
@@ -73,6 +78,8 @@ export interface OplogRecord {
 }
 
 export interface FogRecord {
+  epoch?: string;
+  levelId?: string;
   worldId: WorldId;
   sceneId: SceneId;
   userId: UserId;
@@ -100,6 +107,8 @@ export function openVttDb(): Promise<IDBPDatabase> {
       if (!db.objectStoreNames.contains(STORES.oplog)) {
         db.createObjectStore(STORES.oplog, { keyPath: ["worldId", "seq"] });
       }
+      if (!db.objectStoreNames.contains(STORES.fogEpochs)) db.createObjectStore(STORES.fogEpochs, { keyPath: ["worldId", "sceneId", "levelId"] });
+      if (!db.objectStoreNames.contains(STORES.levelFog)) db.createObjectStore(STORES.levelFog, { keyPath: ["worldId", "sceneId", "userId", "levelId"] });
       if (!db.objectStoreNames.contains(STORES.fog)) {
         db.createObjectStore(STORES.fog, { keyPath: ["worldId", "sceneId", "userId"] });
       }
@@ -150,6 +159,8 @@ export const WORLD_SCOPED_STORES = [
   STORES.documents,
   STORES.oplog,
   STORES.fog,
+  STORES.levelFog,
+  STORES.fogEpochs,
   STORES.assets,
   STORES.checkpoints,
   STORES.turnReports,
@@ -189,7 +200,9 @@ export async function putDocumentRecord(db: IDBPDatabase, rec: DocumentsRecord):
 // ─── fog / settings ───────────────────────────────────────────────────────────
 
 export async function putFog(db: IDBPDatabase, rec: FogRecord): Promise<void> {
-  await db.put(STORES.fog, rec);
+  if (fogEpochError(rec.epoch) || (rec.levelId === undefined && rec.epoch)) throw new Error("Invalid fog epoch");
+  if (fogLevelIdError(rec.levelId)) throw new Error("Invalid fog level ID");
+  await db.put(rec.levelId === undefined ? STORES.fog : STORES.levelFog, rec);
 }
 
 export async function getFog(
@@ -197,13 +210,17 @@ export async function getFog(
   worldId: WorldId,
   sceneId: SceneId,
   userId: UserId,
+  levelId?: string,
 ): Promise<FogRecord | undefined> {
-  return db.get(STORES.fog, [worldId, sceneId, userId]);
+  if (fogLevelIdError(levelId)) throw new Error("Invalid fog level ID");
+  return levelId === undefined ? db.get(STORES.fog, [worldId, sceneId, userId]) : db.get(STORES.levelFog, [worldId, sceneId, userId, levelId]);
 }
 
 /** Every explored-fog row of a world (D-250: the world file's `fog/` entries). */
 export async function listFogForWorld(db: IDBPDatabase, worldId: WorldId): Promise<FogRecord[]> {
-  return db.getAll(STORES.fog, IDBKeyRange.bound([worldId], [worldId, []]));
+  const range = IDBKeyRange.bound([worldId], [worldId, []]);
+  const rows = await Promise.all([db.getAll(STORES.fog, range), db.getAll(STORES.levelFog, range)]);
+  return rows.flat();
 }
 
 export async function putSetting(db: IDBPDatabase, rec: SettingsRecord): Promise<void> {
@@ -325,4 +342,17 @@ export async function deleteAsset(
 export async function listAssets(db: IDBPDatabase, worldId: WorldId): Promise<AssetRecord[]> {
   const range = IDBKeyRange.bound([worldId, ""], [worldId, "\uffff"]);
   return db.getAll(STORES.assets, range);
+}
+
+/** Non-undoable reset ledger. Scene history cannot bring an old fog generation back. */
+export interface FogEpochRecord { worldId: WorldId; sceneId: string; levelId: string; epoch: string }
+export async function getFogEpoch(db: IDBPDatabase, worldId: WorldId, sceneId: string, levelId: string): Promise<string | undefined> {
+  return (await db.get(STORES.fogEpochs, [worldId, sceneId, levelId]) as FogEpochRecord | undefined)?.epoch;
+}
+export async function putFogEpoch(db: IDBPDatabase, row: FogEpochRecord): Promise<void> {
+  if (!row.epoch || fogEpochError(row.epoch) || fogLevelIdError(row.levelId)) throw new Error("Invalid fog reset record");
+  await db.put(STORES.fogEpochs, row);
+}
+export async function listFogEpochs(db: IDBPDatabase, worldId: WorldId): Promise<FogEpochRecord[]> {
+  return db.getAll(STORES.fogEpochs, IDBKeyRange.bound([worldId], [worldId, []]));
 }

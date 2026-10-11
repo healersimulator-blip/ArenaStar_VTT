@@ -4,6 +4,7 @@
  * Foundry-style shape, `system` holds RulesModule/system-package data.
  */
 import type { AssetId, DocId, UserId } from "./ids";
+import type { ElevationBand, RegionShapeV2 } from "./multilevelGeometry";
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -56,7 +57,11 @@ export interface TokenLight {
   alpha: number;
 }
 
+export type LevelScope = { mode: "all" } | { mode: "levels"; ids: string[] };
+
 export interface TokenDocument extends BaseDocument {
+  /** Experimental GM-authored membership; no physical activation is implied. */
+  levelId?: DocId;
   type: "token";
   x: number;
   y: number;
@@ -87,6 +92,8 @@ export interface TokenDocument extends BaseDocument {
  * (door state applies), 2 = permits (DECISIONS D-009).
  */
 export interface WallDocument extends BaseDocument {
+  /** GM authoring topology, not a substitute for physical wall height. */
+  levelScope?: LevelScope;
   type: "wall";
   /** [x1, y1, x2, y2]. */
   c: [number, number, number, number];
@@ -104,6 +111,8 @@ export function isDoorWall(w: Pick<WallDocument, "sight" | "move" | "sound" | "l
 }
 
 export interface LightDocument extends BaseDocument {
+  /** Explicit authoring scope; only consumed by level-aware lighting queries. */
+  levelScope?: LevelScope;
   type: "light";
   x: number;
   y: number;
@@ -124,7 +133,19 @@ export interface SoundDocument extends BaseDocument {
   loop: boolean;
 }
 
+/** Native cosmetic cover. Does not create physical surfaces or grant perception. */
+export interface FauxOverheadBehavior {
+  kind: "fauxOverhead";
+  coverZ: number;
+  /** Half-open feet-elevation eligibility, independent of legacy triggerElevation. */
+  affectedElevation: ElevationBand;
+  /** Optional normalized concave/holed footprint; absent uses the region's convex shape. */
+  footprint?: RegionShapeV2;
+}
+
 export interface RegionDocument extends BaseDocument {
+  /** GM-authored entry transition; host changes membership and feet Z together. */
+  stairs?: import("./levelPlay").StairBehavior;
   type: "region";
   x: number;
   y: number;
@@ -134,6 +155,8 @@ export interface RegionDocument extends BaseDocument {
   rotation?: number;
   /** Convex polygon in normalized, region-local coordinates. */
   shape: { kind: "polygon"; points: Array<[number, number]> };
+  /** Public presentation geometry only; never changes LOS, light, movement or explored fog. */
+  fauxOverhead?: FauxOverheadBehavior;
   /** GM-only regions are retained in the host scene but omitted from player replicas. */
   hidden?: boolean;
   /** Inclusive active vertical band in scene grid units. */
@@ -695,7 +718,26 @@ export interface SceneGrid {
   hexLayout: HexLayout;
 }
 
+/** GM-only draft structure. Presence never enables multilevel physics or visibility. */
+export interface LevelDocument extends BaseDocument {
+  /** Explicit floor artwork: unassigned tiles and the global foreground never bleed through. */
+  tileIds?: string[];
+  useSceneBackground?: boolean;
+  /** Host-authored reset identity. Old explored maps never belong to a newer epoch. */
+  fogEpoch?: string;
+  /** Optional ambient darkness [0,1]; absent inherits the scene. Used by isolated floor views and GM diagnostics. */
+  darkness?: number;
+  type: "level";
+  bottom: number | null;
+  top: number | null;
+  floorZ: number;
+  sort: number;
+  visibleLevelIds: string[];
+}
+
 export interface SceneDocument extends BaseDocument {
+  /** Explicit activation after artwork/scopes/stairs have been authored. */
+  levelMode?: "isolated";
   type: "scene";
   active: boolean;
   /** Background image — asset hash or HTTPS URL. */
@@ -752,6 +794,8 @@ export interface SceneDocument extends BaseDocument {
   tiles: TileDocument[];
   /** Optional on legacy scenes; first-class convex scene regions (D-358). */
   regions?: RegionDocument[];
+  /** Experimental GM-only level drafts; never a runtime activation flag. */
+  levels?: LevelDocument[];
   drawings: DrawingDocument[];
   templates: TemplateDocument[];
   notes: NoteDocument[];
@@ -909,6 +953,7 @@ export type EmbeddedCollectionName =
   | "sounds"
   | "tiles"
   | "regions"
+  | "levels"
   | "drawings"
   | "templates"
   | "notes"

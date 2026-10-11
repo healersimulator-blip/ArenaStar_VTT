@@ -1,4 +1,8 @@
 <script lang="ts">
+  import { LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "../core/levelFog";
+  import { LEVEL_LIGHTING_FEATURE } from "../core/capabilities";
+  import SavesPanel from "../ui/settings/SavesPanel.svelte";
+  import ZoomControl from "../ui/canvas/ZoomControl.svelte";
   import { SceneLightingPlayer } from "../client/sceneLighting";
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
   import { detectMapGridFromBytes } from "../client/gridDetection";
@@ -300,8 +304,26 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
      * screen, where worlds are listed, opened, imported, exported and deleted. Null hides
      * the button (embedding without a start screen).
      */
-    onExit?: (() => void) | null;
+    onExit?: (() => void | Promise<void>) | null;
   } = $props();
+
+  let saveError = $state<string | null>(null);
+  let closingWorld = $state(false);
+  $effect(() => {
+    const current = app;
+    if (!current) return;
+    const unsubscribe = current.saves.subscribe(status => { saveError = status.error; });
+    const unprepare = current.saves.beforeSave(async () => { await fog?.flushStrict(); });
+    return () => { unsubscribe(); unprepare(); };
+  });
+
+  async function closeWorldSafely(): Promise<void> {
+    if (!app || closingWorld) return;
+    closingWorld = true;
+    try { await onExit?.(); }
+    catch (error) { saveError = error instanceof Error ? error.message : String(error); }
+    finally { closingWorld = false; }
+  }
 
   const caps = detectCapabilities();
   const rows: Array<[string, boolean]> = Object.entries(caps);
@@ -496,6 +518,28 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
 /** Wall pick tolerance in screen pixels (D-257). */
 const WALL_PICK_RADIUS = 12;
   const sceneBackground = new SceneBackgroundPlayer();
+  const levelPreviewScene = $derived.by(() => { void storeVersion; return activeScene(); });
+  let levelPreview = $state<{ sceneId: string; levelId: string } | null>(null);
+  function previewLevel(scene: SceneDocument | null): string | undefined {
+    if (viewingAs || !scene || levelPreview?.sceneId !== scene._id ||
+        !app?.gm.client.supportsFeature(LEVEL_FOG_FEATURE) || !app.gm.client.supportsFeature(LEVEL_LIGHTING_FEATURE)) return undefined;
+    return scene.levels?.some((l) => l._id === levelPreview?.levelId) ? levelPreview.levelId : undefined;
+  }
+  function chooseLevelPreview(id: string) {
+    const scene = activeScene();
+    levelPreview = scene && id ? { sceneId: scene._id, levelId: id } : null;
+    refresh();
+  }
+  let fogResetBusy = $state(false), fogResetMessage = $state("");
+  async function resetPreviewFog() {
+    const scene = activeScene(), levelId = previewLevel(scene);
+    if (!scene || !levelId || !app || fogResetBusy) return;
+    if (!confirm("Reset remembered fog for this level for every user? Other levels and legacy fog are unchanged. This reset cannot be undone; currently visible areas will be explored again.")) return;
+    fogResetBusy = true; fogResetMessage = "";
+    try { await app.gm.client.resetLevelFog(scene._id, levelId); fogResetMessage = "Level fog reset. Currently visible areas may immediately be explored again."; refresh(); }
+    catch (error) { fogResetMessage = error instanceof Error ? error.message : String(error); }
+    finally { fogResetBusy = false; }
+  }
   const sceneLighting = new SceneLightingPlayer(createVisionComputer());
   /** `$state.raw`: the stage is a Pixi object graph — assignment must re-run the
    *  effects that read it, but it must never be deep-proxied. */
@@ -538,7 +582,7 @@ const WALL_PICK_RADIUS = 12;
   /** D-256: commit one GM fog brush stroke (op + the live layer). */
   function paintFog(mode: "reveal" | "hide", poly: number[]) {
     const scene = activeScene();
-    if (!scene || poly.length < 6) return;
+    if (!scene || poly.length < 6 || previewLevel(scene)) return;
     fogMask = appendFogMask(fogMask, { mode, poly });
     app?.gm.client.submit(fogMaskOps(scene, fogMask));
     stage?.peekFogLayer()?.applyManualMask(fogMask);
@@ -861,6 +905,10 @@ const WALL_PICK_RADIUS = 12;
    */
   $effect(() => {
     void toolReady;
+    void canvasLayer;
+    void toolOptions.wallEditMode;
+    void toolOptions.wallMoveJoined;
+    void viewingAs;
     const tool = toolController;
     if (!tool) return;
     if (GESTURE_TOOLS.has(canvasTool)) {
@@ -869,6 +917,7 @@ const WALL_PICK_RADIUS = 12;
       tool.cancel();
       shapePreview = null;
     }
+    syncWallsOverlay();
   });
   let tokenSelection = $state.raw<{
     sceneId: string | null;
@@ -2437,11 +2486,13 @@ const WALL_PICK_RADIUS = 12;
   }
 
   function undo(): void {
-    if (app) app.host.undo();
+    const result = app?.host.undo();
+    if (result && !result.ok) notifyLog = [...notifyLog.slice(-49), { message: result.error ?? "Undo refused", level: "warn" }];
   }
 
   function redo(): void {
-    if (app) app.host.redo();
+    const result = app?.host.redo();
+    if (result && !result.ok) notifyLog = [...notifyLog.slice(-49), { message: result.error ?? "Redo refused", level: "warn" }];
   }
 
   const hotbarSlots = $derived.by(() => {
@@ -2991,12 +3042,17 @@ const WALL_PICK_RADIUS = 12;
    * and the surface a door is clicked on, so it must be on screen exactly when the GM is
    * working on that layer.
    */
+  let wallGestureSceneId: string | null = null;
   function syncWallsOverlay(): void {
     const view = stage;
     if (!view) return;
     const scene = activeScene();
     const show = canvasLayer === "gm";
-    view.getWallsLayer().sync(show ? (scene?.walls ?? []) : [], view.camera);
+    if (wallGestureSceneId !== (scene?._id ?? null)) {
+      wallGestureSceneId = scene?._id ?? null;
+      if (canvasTool === "wall") toolController?.activate("wall");
+    }
+    view.getWallsLayer().sync(show ? (scene?.walls ?? []) : [], view.camera, canvasTool === "wall" && toolOptions.wallEditMode === "corner");
   }
 
   function refresh(): void {
@@ -3010,7 +3066,7 @@ const WALL_PICK_RADIUS = 12;
         !scene?.tokens.some((token) => token._id === pendingSpellAim?.casterTokenId)))
       settleSpellAim({ ok: false, error: "The caster or aiming scene changed; no slot was spent." });
     fxPlayer?.syncScene();
-    sceneLighting.sync(scene, view);
+    sceneLighting.sync(scene, view, previewLevel(scene));
     if (tokenSelection.sceneId !== (scene?._id ?? null)) clearTokenSelection();
     // A preview belongs to the scene it was resolved against; switching scenes
     // clears it rather than repainting stale cells.
@@ -3030,6 +3086,7 @@ const WALL_PICK_RADIUS = 12;
     // E06 (D-147): condition/effect chips derive on read from the client replica, so apply,
     // suppress and expiry all re-render the badges with no invalidation step.
     view.setTokenImageLoader(tileImages.load);
+    view.setFauxOverhead(scene?.regions ?? []);
     view.syncTokens(
       tokens,
       tokenBadgesMap(tokens, {
@@ -3058,7 +3115,7 @@ const WALL_PICK_RADIUS = 12;
     // switched. The GM's cover is translucent (everything stays visible under it); god view
     // off previews the opaque cover players get — and a **view as** preview is always the
     // opaque cover, because a see-through version of what a player sees is not what they see.
-    void fog?.sync(scene, { style: fogStyle() });
+    void fog?.sync(scene, { style: fogStyle(), ...(previewLevel(scene) ? { levelId: previewLevel(scene) as string } : {}) });
     // D-256: the GM's manual Hide/Reveal mask is a replicated scene flag — replay it onto
     // the fog layer on every replica change (idempotent: later strokes win).
     const mask = fogMaskLog(scene);
@@ -3141,6 +3198,7 @@ const WALL_PICK_RADIUS = 12;
   async function exportWorld(): Promise<void> {
     if (!app) return;
     try {
+      await app.saves.saveNow();
       const blob = await exportWorldZip({
         db: app.db,
         worldId: app.worldId,
@@ -3162,6 +3220,7 @@ const WALL_PICK_RADIUS = 12;
     if (!app || typeof window.showDirectoryPicker !== "function") return;
     try {
       const handle = await window.showDirectoryPicker();
+      await app.saves.saveNow();
       const res = await exportWorldToFolder(
         {
           db: app.db,
@@ -3583,6 +3642,18 @@ const WALL_PICK_RADIUS = 12;
             const sc = activeScene();
             if (sc) current.gm.client.submit([{ kind: "create", coll: "drawings", parent: { coll: "scenes", id: sc._id }, data: drawing }]);
           },
+          wallEditing: {
+            context: () => {
+              const sc = activeScene();
+              return sc && !viewingAs && canvasLayer === "gm" ? { sceneId: sc._id, walls: sc.walls, scale: view.camera.scale } : null;
+            },
+            commit: (plan) => {
+              void current.gm.client.submitAndWait(plan.ops, 30_000, plan.guard).catch((error: unknown) => {
+                notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }];
+              });
+            },
+            error: (message) => { notifyLog = [...notifyLog.slice(-49), { message, level: "warn" }]; },
+          },
           // D-256: the rail's live sub-tool settings (shapes, styles, brushes, light).
           options: () => toolOptions,
           promptText: (at) => {
@@ -3623,10 +3694,15 @@ const WALL_PICK_RADIUS = 12;
             if (key) onPathClick(key);
             return;
           }
+          if (canvasTool === "wall" && e.button === 0) canvas.setPointerCapture(e.pointerId);
           if (GESTURE_TOOLS.has(canvasTool)) toolController?.pointerDown(toolPointer(e));
         };
         const onToolMove = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController?.pointerMove(toolPointer(e)); };
         const onToolUp = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController?.pointerUp(toolPointer(e)); };
+        const onToolCancel = () => { if (canvasTool === "wall") toolController?.dismissGesture(); };
+        canvas.addEventListener("pointercancel", onToolCancel);
+        canvas.addEventListener("lostpointercapture", onToolCancel);
+        globalThis.addEventListener("blur", onToolCancel);
         // Right-click / Escape finish a multi-click gesture instead of opening a menu.
         const onToolContext = (e: MouseEvent) => {
           if (!GESTURE_TOOLS.has(canvasTool)) return;
@@ -3687,7 +3763,7 @@ const WALL_PICK_RADIUS = 12;
           wallDownAt = { x: e.clientX, y: e.clientY };
         };
         const onWallClick = (e: MouseEvent) => {
-          if (canvasTool !== "wall" || e.button !== 0 || canvasLayer !== "gm") return;
+          if (canvasTool !== "wall" || toolOptions.wallEditMode !== "draw" || e.button !== 0 || canvasLayer !== "gm" || viewingAs) return;
           const down = wallDownAt;
           if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
           const scene = activeScene();
@@ -3726,7 +3802,7 @@ const WALL_PICK_RADIUS = 12;
           const scene = activeScene();
           if (!scene) return null;
           const point = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
-          if (pickToken(tokenViews(), point)) return null;
+          if (pickToken(tokenViews(), point, undefined, (id, p) => view.tokenPointVisible(id, p))) return null;
           const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, point));
           return tile ? { scene, tile, point } : null;
         };
@@ -3769,7 +3845,7 @@ const WALL_PICK_RADIUS = 12;
           const scene = activeScene();
           if (!scene || scene._id !== candidate.sceneId) return;
           const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
-          if (pickToken(tokenViews(), world)) return;
+          if (pickToken(tokenViews(), world, undefined, (id, p) => view.tokenPointVisible(id, p))) return;
           const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, world));
           if (!tile || tile._id !== candidate.tileId ||
               Math.hypot(world.x - candidate.point.x, world.y - candidate.point.y) > 4 / (view.camera.scale || 1)) return;
@@ -3789,7 +3865,7 @@ const WALL_PICK_RADIUS = 12;
             if (scene) {
               const point = toWorld(e);
               const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, point));
-              if (tile && !pickToken(tokenViews(), point)) target = { scene, tile, point };
+              if (tile && !pickToken(tokenViews(), point, undefined, (id, p) => view.tokenPointVisible(id, p))) target = { scene, tile, point };
             }
           }
           const previous = tileHoverForAutomation;
@@ -3813,7 +3889,7 @@ const WALL_PICK_RADIUS = 12;
           const scene = activeScene();
           if (!scene) return;
           const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
-          if (pickToken(tokenViews(), world)) return;
+          if (pickToken(tokenViews(), world, undefined, (id, p) => view.tokenPointVisible(id, p))) return;
           const tile = [...scene.tiles].reverse().find((item) => tileContainsPoint(item, world));
           if (tile) current.gm.client.requestAutomationTileTrigger(scene._id, tile._id, world, tileDown.tokenId, "rightClick");
         };
@@ -3843,6 +3919,9 @@ const WALL_PICK_RADIUS = 12;
           canvas.removeEventListener("pointerdown", onToolDown);
           canvas.removeEventListener("pointermove", onToolMove);
           canvas.removeEventListener("pointerup", onToolUp);
+          canvas.removeEventListener("pointercancel", onToolCancel);
+          canvas.removeEventListener("lostpointercapture", onToolCancel);
+          globalThis.removeEventListener("blur", onToolCancel);
           canvas.removeEventListener("contextmenu", onToolContext);
           canvas.removeEventListener("dblclick", onTextEdit);
           canvas.removeEventListener("click", onPinClick);
@@ -3872,9 +3951,9 @@ const WALL_PICK_RADIUS = 12;
           // **nothing is ever uploaded for them**: a preview must not overwrite the map a player
           // explored. With no preview this is the ordinary GM session, exactly as before.
           transport: {
-            requestFog: async (sceneId) => {
+            requestFog: async (sceneId, levelId, epoch) => {
               const viewed = viewAsPlayer;
-              if (viewed === null) return current.gm.client.requestFog(sceneId);
+              if (viewed === null) return current.gm.client.requestFog(sceneId, levelId, epoch);
               try {
                 const stored = await getFog(current.db, current.worldId, sceneId, viewed.id);
                 return stored?.png ?? null;
@@ -3882,8 +3961,8 @@ const WALL_PICK_RADIUS = 12;
                 return null;
               }
             },
-            sendFogPng: (sceneId, png) => {
-              if (viewAsPlayer === null) current.gm.client.sendFogPng(sceneId, png);
+            sendFogPng: (sceneId, png, levelId, epoch) => {
+              if (viewAsPlayer === null) current.gm.client.sendFogPng(sceneId, png, levelId, epoch);
             },
           },
           user: () => viewAsPlayer ?? current.gm.client.user,
@@ -4441,6 +4520,7 @@ const WALL_PICK_RADIUS = 12;
             await fog?.settle();
             const stats = fog?.stats() ?? {
               sceneId: null,
+              levelId: null,
               enabled: false,
               restored: false,
               restoredBytes: 0,
@@ -4451,11 +4531,12 @@ const WALL_PICK_RADIUS = 12;
             };
             const layer = view.peekFogLayer();
             const stored = stats.sceneId
-              ? ((await getFog(current.db, current.worldId, stats.sceneId, GM_USER_ID))
+              ? ((await getFog(current.db, current.worldId, stats.sceneId, GM_USER_ID, stats.levelId ?? undefined))
                   ?.png.length ?? 0)
               : 0;
             return {
               sceneId: stats.sceneId,
+              levelId: stats.levelId,
               enabled: stats.enabled,
               restored: stats.restored,
               restoredBytes: stats.restoredBytes,
@@ -4726,7 +4807,7 @@ const WALL_PICK_RADIUS = 12;
                 data: {
                   _id: id,
                   type: "tile" as const,
-                  name: "Roof",
+                  name: spec.name ?? "Roof",
                   ownership: { default: 0 },
                   flags: {},
                   system: {},
@@ -4734,7 +4815,7 @@ const WALL_PICK_RADIUS = 12;
                   y: spec.y,
                   width: spec.width,
                   height: spec.height,
-                  img: "",
+                  img: spec.img ?? "",
                   above: spec.above,
                   occlusion: { mode: spec.mode, alpha: spec.alpha },
                 },
@@ -4807,7 +4888,8 @@ const WALL_PICK_RADIUS = 12;
     const style = fogStyle();
     fxPlayer?.syncScene();
 
-    void fog?.sync(activeScene(), { style });
+    const scene = activeScene();
+    void fog?.sync(scene, { style, ...(previewLevel(scene) ? { levelId: previewLevel(scene) as string } : {}) });
   });
 
   // D-262: a preview changes *who* the shell is for the parts of the paint that are not the fog
@@ -4850,7 +4932,7 @@ const WALL_PICK_RADIUS = 12;
       <button data-icon-button id="gm-settings" class="header-icon" aria-label="World settings" title="World settings" onclick={() => openWindow("settings", "Settings", "settings")}><Icon name="settings" /></button>
       <span class="header-separator" aria-hidden="true"></span>
       <button data-icon-button id="export-world" class="header-icon optional-action" aria-label="Export world" title="Export world" onclick={exportWorld}><Icon name="export" /></button>
-      <button data-icon-button id="close-world" class="header-icon optional-action" aria-label="Close world" title="Close world" onclick={async () => { await fog?.flush(); onExit?.(); }}><Icon name="close" /></button>
+      <button data-icon-button id="close-world" class="header-icon optional-action" aria-label="Close world" title="Close world" disabled={closingWorld} onclick={closeWorldSafely}><Icon name="close" /></button>
       <button data-icon-button id="session-open" class="header-icon session-trigger" bind:this={sessionTrigger} data-session-trigger
         aria-label="Session & world" aria-expanded={sessionOpen} title="Session & world" onclick={openSession}><Icon name="sliders" /></button>
       <button id="share" class="invite-trigger" title={share ? "Open session & invitation" : "Invite players"}
@@ -4858,6 +4940,12 @@ const WALL_PICK_RADIUS = 12;
         onclick={() => { openSession(); if (!share) void beginShare(); }}><Icon name="share" size={18} /><span>{share ? "Session" : "Invite"}</span></button>
     </div>
   </header>
+  {#if saveError}
+    <div class="save-warning" role="alert" data-save-warning>
+      <span>Saving needs attention. Keep this world open and check available storage. {saveError}</span>
+      <button type="button" onclick={() => { void app?.saves.saveNow().catch(() => undefined); }}>Retry save</button>
+    </div>
+  {/if}
   {#if bootError}<p class="error" role="alert">Boot failed: {bootError}</p>{/if}
   {#if canvasError}<p class="error" role="alert">canvas: {canvasError}</p>{/if}
   {#if app?.rulesBoot?.error}<p class="error rules-boot-error" role="alert">Strategic rules could not load: {app.rulesBoot.error}. Built-in rules are still available.</p>{/if}
@@ -4917,7 +5005,23 @@ const WALL_PICK_RADIUS = 12;
         </div>
         </div>
         <div class="dice3d-host" bind:this={dice3dHost}></div>
-        <div class="board">
+        <div class="board" style="position: relative;">
+          <ZoomControl {stage} onInput={() => fxPlayer?.cancelCamera()} />
+          {#if !viewingAs && (levelPreviewScene?.levels?.length ?? 0) > 0}
+            <div class="level-perception-preview" style="position:absolute;right:12px;top:58px;z-index:30;background:#182331;color:#e6eef9;padding:8px;max-width:270px;font-size:11px;border:1px solid #52657a;border-radius:5px">
+              <label>GM fog &amp; lighting diagnostic
+                <select aria-label="GM level perception preview" value={previewLevel(levelPreviewScene) ?? ""} onchange={(e) => chooseLevelPreview(e.currentTarget.value)}>
+                  <option value="">Legacy whole-scene view</option>
+                  {#each levelPreviewScene?.levels ?? [] as level (level._id)}<option value={level._id}>{level.name}</option>{/each}
+                </select>
+              </label>
+              {#if previewLevel(levelPreviewScene)}
+                <button type="button" data-level-fog-reset disabled={fogResetBusy || !app?.gm.client.supportsFeature(LEVEL_FOG_RESET_FEATURE)} onclick={resetPreviewFog}>Reset this level’s fog</button>
+                {#if fogResetMessage}<p role="status">{fogResetMessage}</p>{/if}
+              {/if}
+              {#if previewLevel(levelPreviewScene)}<p>Diagnostic only: all artwork and tokens remain visible to GM. Enable scene fog to explore this level. Lighting uses assigned sources and this level’s ambient setting (or scene inheritance); walls remain flat. Manual fog painting is disabled here.</p>{/if}
+            </div>
+          {/if}
           <div class="toolrail">
             <CanvasToolbar
               bind:active={canvasTool}
@@ -5065,6 +5169,14 @@ const WALL_PICK_RADIUS = 12;
                 {:else}
                   <polyline points={preview.points.map((p) => { const q = measurePoint(p); return `${q.x},${q.y}`; }).join(" ")} fill={preview.brush === "hide" ? "#0a0f1599" : "#ffd47933"} stroke={preview.brush === "hide" ? "#8892a6" : "#ffd479"} stroke-width="2" stroke-dasharray="6 4" />
                 {/if}
+              {:else if preview.kind === "wallEdit"}
+                {#each preview.walls as wall (wall._id)}
+                  {@const a = measurePoint({ x: wall.c[0], y: wall.c[1] })}
+                  {@const b = measurePoint({ x: wall.c[2], y: wall.c[3] })}
+                  <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#ffd479" stroke-width="3" stroke-dasharray="6 4" />
+                  <circle cx={a.x} cy={a.y} r="5" fill="#ffd479" />
+                  <circle cx={b.x} cy={b.y} r="5" fill="#ffd479" />
+                {/each}
               {:else}
                 {@const a = measurePoint(preview.from)}
                 {@const b = measurePoint(preview.to)}
@@ -5247,6 +5359,10 @@ const WALL_PICK_RADIUS = 12;
           getFxAsset={(hash) => app?.assets.get(hash) ?? Promise.resolve(undefined)}
           onUndo={undo}
           onRedo={redo}
+          saves={app.saves}
+          cloud={app.cloudBackups}
+          onBackup={exportWorld}
+          onBackupFolder={typeof globalThis.showDirectoryPicker === "function" ? exportToFolder : null}
           packages={app.packages}
           rulesBoot={app.rulesBoot}
           {agents}
@@ -5550,9 +5666,8 @@ const WALL_PICK_RADIUS = 12;
         </section>
           <section class="session-card world-card">
             <div class="section-heading"><h2>World files</h2><p data-world-name>{worldName}</p></div>
-            <p class="hint">Your table saves locally as you play. Export a copy to keep or move it.</p>
-            {#if typeof globalThis.showDirectoryPicker === "function"}<button id="export-folder" type="button" onclick={exportToFolder}>Save to folder…</button>{/if}
-            <p class="hint">Use the export and close shortcuts in the top bar when you need them.</p>
+            <SavesPanel saves={app.saves} cloud={app.cloudBackups} onBackup={exportWorld}
+              onFolder={typeof globalThis.showDirectoryPicker === "function" ? exportToFolder : null} />
           </section>
           <details class="capabilities"><summary>System health & capabilities ({ready}/{rows.length} available)</summary>
     <ul>
@@ -5604,6 +5719,8 @@ const WALL_PICK_RADIUS = 12;
   />
 {/if}
 <style>
+  .save-warning { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; background: #482823; color: #ffddd1; }
+  .save-warning button { flex-shrink: 0; padding: 8px 12px; }
   .image-drop-hint { position:fixed; inset:18px; z-index:4999; display:grid; place-items:center; border:3px dashed #78dccc; border-radius:18px; background:#10201edb; color:#e5fff9; font-size:clamp(18px,3vw,30px); font-weight:700; text-align:center; pointer-events:none; box-shadow:inset 0 0 0 1px #ffffff22; }
   .dice3d-host {
     position: absolute;
@@ -6032,7 +6149,6 @@ const WALL_PICK_RADIUS = 12;
   .session-card, .capabilities { padding: 15px; border: 1px solid #405564; border-radius: 11px; background: #1c2b37; }
   .session-card h3 { margin: 0 0 10px; color: #eff7f7; font-size: .92rem; }
   .world-card { display: flex; flex-direction: column; gap: 9px; }
-  .world-card .hint { margin: 0; }
   .capabilities { margin: 0; }
   .capabilities summary { cursor: pointer; color: #d1e4e5; font-size: .86rem; font-weight: 650; }
   .capabilities ul { display: grid; grid-template-columns: 1fr; gap: 8px; list-style: none; margin: 15px 0 0; padding: 0; }

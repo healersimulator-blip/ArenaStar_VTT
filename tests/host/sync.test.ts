@@ -1,3 +1,6 @@
+import { DRAFT_LEVELS_FEATURE } from "../../src/core/capabilities";
+import { draftLevel } from "../../src/core/levels";
+import { planWallSplit, wallEditGuard } from "../../src/core/wallEditing";
 import { environmentPlaceables } from "../fixtures/automationPlaceables";
 // Checklist: S03 — host/GM/two-player replication of a sheet edit and host rejection of a forged non-owner update.
 import { editSelectedRoster, selectedTokens } from "../../src/ui/combat/tokenSelection";
@@ -28,7 +31,7 @@ import { createTransportPair, flushMicrotasks } from "../../src/net/memory";
 import { createEventBus, type EventBus } from "../../src/core/events";
 import { summarizeSkips } from "../../src/core/fxDelivery";
 import { DocumentStore, OpLog, UndoStack, type StoreMeta } from "../../src/core";
-import type { FxStartMsg, HelloMsg } from "../../src/core/messages";
+import type { FxStartMsg, HelloMsg, WireMessage } from "../../src/core/messages";
 import type { Op, OpEnvelope } from "../../src/core/ops";
 import type {
   ActorDocument,
@@ -53,7 +56,7 @@ import type {
   WallDocument,
   WorldCollections,
 } from "../../src/core/documents";
-import { frameMessage, channelFor } from "../../src/net/frame";
+import { frameMessage, deframeMessage, channelFor } from "../../src/net/frame";
 import { tagEditOps } from "../../src/core/tags";
 import type { ActionCard, ActionFxContext } from "../../src/core/action";
 import { planDuplicateSceneOps } from "../../src/core/sceneCopy";
@@ -11668,4 +11671,328 @@ describe("structured action cards and pending resolution", () => {
     expect(rejected.at(-1)?.detail).toMatch(/change only through host resolution/);
     expect((h.hostStore.get("messages", "plain-chat") as MessageDocument).system).toEqual({ legacy: "kept" });
   });
+});
+
+
+test("native Faux Overhead is public GM-authored geometry; dotted and multi-op invalid edits roll back", async () => {
+  const h = await setup();
+  const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const rejected: ClientEvents["rejected"][] = [];
+  const playerRejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  bus.on("rejected", (event) => playerRejected.push(event));
+  const region: RegionDocument = { _id: "native-roof", type: "region", name: "Roof", ownership: { default: 1 }, flags: {}, system: {},
+    x: 100, y: 100, width: 200, height: 100, shape: { kind: "polygon", points: [[0, 0], [1, 0], [1, 1], [0, 1]] },
+    fauxOverhead: { kind: "fauxOverhead", coverZ: 10, affectedElevation: { bottom: 0, top: 10 } } };
+  const ref = { coll: "regions" as const, id: region._id, parent: { coll: "scenes" as const, id: "s1" } };
+  h.gm.submit([{ kind: "create", coll: "regions", parent: ref.parent, data: region }]);
+  await flushMicrotasks();
+  expect(rejected).toHaveLength(0);
+  expect(player.store.get("scenes", "s1")?.regions?.[0]?.fauxOverhead).toEqual(region.fauxOverhead);
+  // Even an explicitly scene-owning player cannot author/remove the public cover.
+  h.gm.submit([{ kind: "update", ref: ref.parent, diff: { ownership: { default: 3 } } }]);
+  await flushMicrotasks();
+  player.submit([{ kind: "delete", ref }]);
+  await flushMicrotasks();
+  expect(playerRejected.at(-1)?.reason).toBe("forbidden");
+  player.submit([{ kind: "update", ref: ref.parent, diff: { "-=regions": null } }]);
+  await flushMicrotasks();
+  expect(playerRejected.at(-1)?.reason).toBe("forbidden");
+  player.submit([{ kind: "update", ref, diff: { "fauxOverhead.coverZ": 20 } }]);
+  await flushMicrotasks();
+  expect(playerRejected.at(-1)?.reason).toBe("forbidden");
+  h.gm.submit([{ kind: "update", ref, diff: { "fauxOverhead.affectedElevation.top": -10 } }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  expect(h.hostStore.get("scenes", "s1")?.regions?.[0]?.fauxOverhead?.affectedElevation.top).toBe(10);
+  h.gm.submit([{ kind: "update", ref, diff: { hidden: true } }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("invalid_schema");
+  h.gm.submit([{ kind: "update", ref, diff: { "-=fauxOverhead": null } }]);
+  await flushMicrotasks();
+  const before = h.hostStore.seq;
+  h.gm.submit([
+    { kind: "update", ref, diff: { fauxOverhead: region.fauxOverhead as unknown as Json } },
+    { kind: "update", ref, diff: { "ownership.default": 0 } },
+  ]);
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(before);
+  expect(h.hostStore.get("scenes", "s1")?.regions?.[0]?.fauxOverhead).toBeUndefined();
+  h.gm.submit([{ kind: "update", ref: ref.parent, diff: { regions: [{ ...region, hidden: true }] as unknown as Json } }]);
+  await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(before);
+});
+
+
+test("host checks wall-edit revision and permissions without publishing preconditions or partially splitting", async () => {
+  const h = await setup();
+  const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const rejected: ClientEvents["rejected"][] = [], playerRejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  bus.on("rejected", (event) => playerRejected.push(event));
+  const wall: WallDocument = { _id: "edit-wall", type: "wall", name: "Wall", ownership: { default: 3 }, flags: {}, system: {},
+    c: [0, 0, 100, 0], door: 0, oneWay: true, move: 0, sight: 0, sound: 0, light: 0 };
+  h.gm.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: "s1" }, data: wall }]);
+  await flushMicrotasks();
+  const source = h.hostStore.get("scenes", "s1"); if (!source) throw new Error("scene");
+  const plan = planWallSplit("s1", source.walls, wall._id, { x: 50, y: 0 }, "split-half", 1);
+  if (!plan.ok) throw new Error(plan.error);
+  player.submit(plan.value.ops, plan.value.guard);
+  await flushMicrotasks();
+  expect(playerRejected.at(-1)?.reason).toBe("forbidden");
+  h.gm.submit([{ kind: "update", ref: { coll: "walls", id: wall._id, parent: { coll: "scenes", id: "s1" } }, diff: { name: "Changed" } }]);
+  await flushMicrotasks();
+  const seq = h.hostStore.seq;
+  h.gm.submit(plan.value.ops, plan.value.guard);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.detail).toContain("Walls changed");
+  expect(h.hostStore.seq).toBe(seq);
+  expect(h.hostStore.get("scenes", "s1")?.walls).toHaveLength(1);
+  expect(h.hostStore.get("scenes", "s1")?.walls[0]?.c).toEqual(wall.c);
+  const walls = h.hostStore.get("scenes", "s1")?.walls ?? [];
+  const fresh = planWallSplit("s1", walls, wall._id, { x: 50, y: 0 }, "split-half", 1);
+  if (!fresh.ok) throw new Error(fresh.error);
+  // Unrelated traffic must not reject a valid wall preimage.
+  h.gm.submit([{ kind: "update", ref: { coll: "scenes", id: "s1" }, diff: { name: "Scene renamed" } }]);
+  await flushMicrotasks();
+  const committed: OpEnvelope[] = [];
+  h.gmBus.on("ops", ({ envelope }) => committed.push(envelope));
+  const wait = h.gm.submitAndWait(fresh.value.ops, 1000, fresh.value.guard);
+  await flushMicrotasks(); await wait;
+  expect(h.hostStore.get("scenes", "s1")?.walls.map((w) => w.c)).toEqual([[0, 0, 50, 0], [50, 0, 100, 0]]);
+  expect(committed.at(-1)?.ops).toHaveLength(2);
+  expect(committed.at(-1)).not.toHaveProperty("wallEdit");
+  expect(player.store.get("scenes", "s1")?.walls.map((w) => w.c)).toEqual([[0, 0, 50, 0], [50, 0, 100, 0]]);
+  const updatedWalls = h.hostStore.get("scenes", "s1")?.walls ?? [];
+  const currentGuard = wallEditGuard("s1", updatedWalls);
+  h.gm.submit([{ kind: "update", ref: { coll: "walls", id: wall._id, parent: { coll: "scenes", id: "s1" } }, diff: { c: [0, 0, 0, 0] } }], currentGuard);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.detail).toContain("collapse");
+});
+
+
+test("draft level host transactions enforce final bands, private projection and scene-owner restrictions", async () => {
+  const h = await setup();
+  const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const gmRejected: ClientEvents["rejected"][] = [], denied: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (r) => gmRejected.push(r)); bus.on("rejected", (r) => denied.push(r));
+  const parent = { coll: "scenes" as const, id: "s1" };
+  const base = draftLevel("base", "Secret basement", -10, 0), upper = draftLevel("upper", "Secret ground", 0, 10);
+  base.visibleLevelIds = ["upper"];
+  h.gm.submit([
+    { kind: "update", ref: parent, diff: { ownership: { default: 3 } } },
+    { kind: "create", coll: "levels", parent, data: base },
+    { kind: "create", coll: "levels", parent, data: upper },
+  ]);
+  await flushMicrotasks();
+  expect(gmRejected).toEqual([]);
+  expect(h.hostStore.get("scenes", "s1")?.levels).toEqual([base, upper]);
+  expect(player.store.get("scenes", "s1")).not.toHaveProperty("levels");
+  const { client: latePlayer } = await h.addPlayer(OTHER_ID, "Ivy");
+  expect(latePlayer.store.get("scenes", "s1")).not.toHaveProperty("levels");
+  expect(JSON.stringify(latePlayer.store.get("scenes", "s1"))).not.toContain("Secret basement");
+  const original = structuredClone(h.hostStore.get("scenes", "s1")?.levels);
+  const seq = h.hostStore.seq;
+  h.gm.submit([{ kind: "update", ref: { coll: "levels", id: "base", parent }, diff: { top: 5 } }]);
+  await flushMicrotasks();
+  expect(gmRejected.at(-1)?.detail).toContain("overlap"); expect(h.hostStore.seq).toBe(seq);
+  expect(h.hostStore.get("scenes", "s1")?.levels).toEqual(original);
+  h.gm.submit([
+    { kind: "update", ref: { coll: "levels", id: "base", parent }, diff: { top: 5 } },
+    { kind: "update", ref: { coll: "levels", id: "upper", parent }, diff: { bottom: 5, floorZ: 5 } },
+  ]);
+  await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.levels?.[1]?.floorZ).toBe(5);
+  const attempts: Op[][] = [
+    [{ kind: "create", coll: "levels", parent, data: draftLevel("forged", "Forged", 20, 30) }],
+    [{ kind: "update", ref: { coll: "levels", id: "base", parent }, diff: { name: "Forged" } }],
+    [{ kind: "delete", ref: { coll: "levels", id: "base", parent } }],
+    [{ kind: "update", ref: parent, diff: { levels: [] } }],
+    [{ kind: "update", ref: parent, diff: { "levels.0.name": "Forged" } }],
+    [{ kind: "update", ref: parent, diff: { "-=levels": null } }],
+    [{ kind: "delete", ref: parent }],
+  ];
+  const before = h.hostStore.seq;
+  for (const ops of attempts) { player.submit(ops); await flushMicrotasks(); expect(denied.at(-1)?.reason).toBe("forbidden"); }
+  expect(denied).toHaveLength(attempts.length); expect(h.hostStore.seq).toBe(before);
+  expect(player.store.get("scenes", "s1")).not.toHaveProperty("levels");
+  // A target cannot disappear while a directed draft link still names it.
+  h.gm.submit([{ kind: "delete", ref: { coll: "levels", id: "upper", parent } }]);
+  await flushMicrotasks(); expect(gmRejected.at(-1)?.detail).toContain("missing level");
+  h.gm.submit([
+    { kind: "delete", ref: { coll: "levels", id: "upper", parent } },
+    { kind: "update", ref: { coll: "levels", id: "base", parent }, diff: { visibleLevelIds: [] } },
+  ]);
+  await flushMicrotasks(); expect(h.hostStore.get("scenes", "s1")?.levels).toHaveLength(1);
+});
+
+
+async function capabilityPeer(h: Harness, peer: string, hello: HelloMsg) {
+  const pair = createTransportPair(), frames: WireMessage[] = [];
+  pair.b.onMessage = (_channel, bytes) => { const msg = deframeMessage(bytes); if (msg.ok) frames.push(msg.value); };
+  h.host.addSession(peer, pair.a);
+  pair.b.send("ops", frameMessage(hello)); await flushMicrotasks();
+  return { pair, frames };
+}
+
+test("draft-capability negotiation precedes all GM data; legacy players remain projected", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "create", coll: "levels", parent: { coll: "scenes", id: "s1" }, data: draftLevel("private-level", "Hidden plan") }]);
+  await flushMicrotasks();
+  const hello: HelloMsg = { kind: "hello", pubkey: GM_ID, displayName: "GM", ts: 1, sig: "valid" };
+  const old = await capabilityPeer(h, "old-gm", hello);
+  expect(old.frames.map((m) => m.kind)).toEqual(["kick"]);
+  expect(old.frames[0]).toMatchObject({ reason: expect.stringContaining("Upgrade required") });
+  expect(JSON.stringify(old.frames)).not.toContain("Hidden plan");
+  const modern = await capabilityPeer(h, "new-gm", { ...hello, features: [DRAFT_LEVELS_FEATURE] });
+  expect(modern.frames[0]).toMatchObject({ kind: "welcome", requiredFeatures: [DRAFT_LEVELS_FEATURE] });
+  expect(modern.frames[1]?.kind).toBe("snapshot");
+  expect(JSON.stringify(modern.frames)).toContain("Hidden plan");
+  const oldPlayer = await capabilityPeer(h, "old-player", { ...hello, pubkey: PLAYER_ID, displayName: "Rex" });
+  expect(oldPlayer.frames[0]).toMatchObject({ kind: "welcome", requiredFeatures: [] });
+  expect(JSON.stringify(oldPlayer.frames)).not.toContain("Hidden plan");
+});
+
+test("an incompatible live GM blocks draft commits atomically but not ordinary edits", async () => {
+  const h = await setup();
+  await capabilityPeer(h, "old-gm", { kind: "hello", pubkey: GM_ID, displayName: "GM", ts: 1, sig: "valid" });
+  const denied: ClientEvents["rejected"][] = []; h.gmBus.on("rejected", (m) => denied.push(m));
+  const seq = h.hostStore.seq, parent = { coll: "scenes" as const, id: "s1" };
+  const draft: Op = { kind: "create", coll: "levels", parent, data: draftLevel("l", "Level") };
+  h.gm.submit([{ kind: "update", ref: parent, diff: { name: "Must not apply" } }, draft]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq); expect(h.hostStore.get("scenes", "s1")).not.toHaveProperty("levels");
+  expect(denied.at(-1)?.detail).toContain("Upgrade or disconnect");
+  h.gm.submit([{ kind: "update", ref: parent, diff: { name: "Ordinary edit" } }]); await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.name).toBe("Ordinary edit");
+  h.host.removeSession("old-gm", "upgrade"); h.gm.submit([draft]); await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.levels).toHaveLength(1);
+});
+
+test("legacy GM catch-up avoids historical draft Ops; blocked undo preserves its history entry", async () => {
+  const h = await setup(), before = h.hostStore.seq;
+  h.gm.submit([{ kind: "create", coll: "levels", parent: { coll: "scenes", id: "s1" }, data: draftLevel("old-level", "Historical secret") }]); await flushMicrotasks();
+  const modern = await capabilityPeer(h, "modern-replay", { kind: "hello", pubkey: GM_ID, displayName: "GM", ts: 1, sig: "valid", lastSeq: before, features: [DRAFT_LEVELS_FEATURE] });
+  expect(modern.frames[0]?.kind).toBe("welcome"); expect(modern.frames.some((m) => m.kind === "ops")).toBe(true);
+  h.gm.submit([{ kind: "update", ref: { coll: "scenes", id: "s1" }, diff: { "-=levels": null } }]); await flushMicrotasks();
+  const old = await capabilityPeer(h, "old-replay", { kind: "hello", pubkey: GM_ID, displayName: "GM", ts: 1, sig: "valid", lastSeq: before });
+  expect(old.frames[0]?.kind).toBe("welcome"); expect(old.frames.some((m) => m.kind === "snapshot")).toBe(true);
+  expect(old.frames.some((m) => m.kind === "ops")).toBe(false); expect(JSON.stringify(old.frames)).not.toContain("Historical secret");
+  const seq = h.hostStore.seq;
+  expect(h.host.undo()).toMatchObject({ ok: false, error: expect.stringContaining("Upgrade or disconnect") });
+  expect(h.hostStore.seq).toBe(seq);
+  h.host.removeSession("old-replay", "upgrade");
+  expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.levels?.[0]?.name).toBe("Historical secret");
+});
+
+test("malformed hello feature declarations fail without approving or sending world data", async () => {
+  const h = await setup();
+  const bad = await capabilityPeer(h, "bad-cap", { kind: "hello", pubkey: GM_ID, displayName: "GM", ts: 1, sig: "valid", features: ["duplicate", "duplicate"] });
+  expect(bad.frames.map((m) => m.kind)).toEqual(["kick"]);
+  expect(bad.frames[0]).toMatchObject({ reason: expect.stringContaining("Capabilities") });
+});
+
+test("a compatibility-blocked redo can be retried after the legacy GM disconnects", async () => {
+  const h = await setup();
+  h.gm.submit([{ kind: "update", ref: { coll: "scenes", id: "s1" }, diff: { levels: [draftLevel("l", "Draft")] as unknown as Json } }]);
+  await flushMicrotasks(); expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")).not.toHaveProperty("levels");
+  await capabilityPeer(h, "legacy-redo", { kind: "hello", pubkey: GM_ID, displayName: "GM", ts: 1, sig: "valid" });
+  const seq = h.hostStore.seq;
+  expect(h.host.redo()).toMatchObject({ ok: false, error: expect.stringContaining("Upgrade or disconnect") });
+  expect(h.hostStore.seq).toBe(seq);
+  h.host.removeSession("legacy-redo", "upgrade"); expect(h.host.redo().ok).toBe(true); await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.levels?.[0]?._id).toBe("l");
+});
+
+test("pending assistant approval rechecks world requirements and cannot revive a closed peer", async () => {
+  const h = await setup();
+  const pending: { approve?: (role?: UserDocument["role"]) => void } = {};
+  h.hostBus.on("join:request", (request) => { pending.approve = request.approve; });
+  const delayed = await capabilityPeer(h, "pending-old", { kind: "hello", pubkey: "pending-assistant", displayName: "Assistant", ts: 1, sig: "valid" });
+  expect(delayed.frames).toEqual([]);
+  h.gm.submit([{ kind: "create", coll: "levels", parent: { coll: "scenes", id: "s1" }, data: draftLevel("new", "Private") }]); await flushMicrotasks();
+  const seq = h.hostStore.seq;
+  if (!pending.approve) throw new Error("approval missing"); pending.approve("ASSISTANT"); await flushMicrotasks();
+  expect(delayed.frames.map((m) => m.kind)).toEqual(["kick"]);
+  expect(h.hostStore.get("users", "pending-assistant")).toBeUndefined(); expect(h.hostStore.seq).toBe(seq);
+  await capabilityPeer(h, "pending-closed", { kind: "hello", pubkey: "closed-assistant", displayName: "Assistant", ts: 1, sig: "valid", features: [DRAFT_LEVELS_FEATURE] });
+  h.host.removeSession("pending-closed", "closed before approval");
+  pending.approve("ASSISTANT"); await flushMicrotasks();
+  expect(h.hostStore.get("users", "closed-assistant")).toBeUndefined(); expect(h.hostStore.seq).toBe(seq);
+});
+
+test("membership is atomic, GM-only and private, with a distinct capability gate", async () => {
+  const h = await setup(), parent = tokenRef.parent;
+  const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const denied: ClientEvents["rejected"][] = []; bus.on("rejected", (r) => denied.push(r));
+  const rejected: ClientEvents["rejected"][] = []; h.gmBus.on("rejected", (r) => rejected.push(r));
+  h.gm.submit([0, 10].map((z) => ({ kind: "create" as const, coll: "levels" as const, parent, data: draftLevel(`floor-${z}`, `Floor ${z}`, z, z + 10) })));
+  await flushMicrotasks();
+  const old = await capabilityPeer(h, "drafts-only", { kind: "hello", pubkey: GM_ID, displayName: "GM", ts: 1, sig: "valid", features: [DRAFT_LEVELS_FEATURE] });
+  expect(old.frames[0]?.kind).toBe("welcome");
+  const assign: Op = { kind: "update", ref: tokenRef, diff: { levelId: "floor-10", elevation: 10 } };
+  const before = h.hostStore.seq;
+  h.gm.submit([assign]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(before); expect(rejected.at(-1)?.detail).toContain("Upgrade or disconnect");
+  h.host.removeSession("drafts-only", "upgrade");
+  h.gm.submit([assign]); await flushMicrotasks();
+  expect(h.hostStore.resolve(tokenRef)).toMatchObject({ levelId: "floor-10", elevation: 10 });
+  expect(player.store.resolve(tokenRef)).not.toHaveProperty("levelId");
+  expect(player.store.resolve(tokenRef)).toMatchObject({ elevation: 10 });
+  const late = await capabilityPeer(h, "late-drafts-only", { kind: "hello", pubkey: GM_ID, displayName: "GM", ts: 1, sig: "valid", features: [DRAFT_LEVELS_FEATURE] });
+  expect(late.frames.map((m) => m.kind)).toEqual(["kick"]);
+  for (const diff of [{ levelId: "floor-0", elevation: 0 }, { "-=levelId": null }]) {
+    player.submit([{ kind: "update", ref: tokenRef, diff }]); await flushMicrotasks();
+    expect(denied.at(-1)?.reason).toBe("forbidden");
+  }
+  const seq = h.hostStore.seq;
+  h.gm.submit([{ kind: "update", ref: tokenRef, diff: { elevation: 0 } }]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq); expect(rejected.at(-1)?.detail).toContain("elevation");
+  h.gm.submit([{ kind: "delete", ref: { coll: "levels", id: "floor-10", parent } }]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq); expect(rejected.at(-1)?.detail).toContain("missing");
+  expect(h.host.undo().ok).toBe(true); await flushMicrotasks();
+  expect(h.hostStore.resolve(tokenRef)).not.toHaveProperty("levelId");
+  expect(h.host.redo().ok).toBe(true); await flushMicrotasks();
+  expect(h.hostStore.resolve(tokenRef)).toMatchObject({ levelId: "floor-10", elevation: 10 });
+});
+
+test("ambient overrides require separately capable GMs, stay private and reject invalid host state", async () => {
+  const { LEVEL_AMBIENT_FEATURE } = await import("../../src/core/capabilities");
+  const h = await setup(), parent = { coll: "scenes" as const, id: "s1" };
+  const { client: player } = await h.addPlayer(PLAYER_ID, "Rex");
+  h.gm.submit([{ kind: "create", coll: "levels", parent, data: draftLevel("ambient", "Ambient") }]); await flushMicrotasks();
+  await capabilityPeer(h, "pre-ambient", { kind: "hello", pubkey: GM_ID, displayName: "GM", ts: 1, sig: "valid", features: [DRAFT_LEVELS_FEATURE] });
+  const rejected: ClientEvents["rejected"][] = []; h.gmBus.on("rejected", (m) => rejected.push(m));
+  const ref = { coll: "levels" as const, id: "ambient", parent }, seq = h.hostStore.seq;
+  h.gm.submit([{ kind: "update", ref, diff: { darkness: 1 } }]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq); expect(rejected.at(-1)?.detail).toContain("Upgrade or disconnect");
+  h.host.removeSession("pre-ambient", "upgrade");
+  h.gm.submit([{ kind: "update", ref, diff: { darkness: 1 } }]); await flushMicrotasks();
+  expect(h.hostStore.resolve(ref)).toMatchObject({ darkness: 1 });
+  expect(player.store.get("scenes", "s1")).not.toHaveProperty("levels");
+  expect(player.store.get("scenes", "s1")?.darkness).toBe(h.hostStore.get("scenes", "s1")?.darkness);
+  const late = await capabilityPeer(h, "ambient-modern", { kind: "hello", pubkey: GM_ID, displayName: "GM", ts: 1, sig: "valid", features: [DRAFT_LEVELS_FEATURE, LEVEL_AMBIENT_FEATURE] });
+  expect(late.frames[0]).toMatchObject({ kind: "welcome", requiredFeatures: [DRAFT_LEVELS_FEATURE, LEVEL_AMBIENT_FEATURE] });
+  const before = h.hostStore.seq;
+  h.gm.submit([{ kind: "update", ref, diff: { darkness: 2 } }]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(before); expect(rejected.at(-1)?.detail).toContain("Level darkness");
+  expect(h.host.undo().ok).toBe(true); await flushMicrotasks(); expect(h.hostStore.resolve(ref)).not.toHaveProperty("darkness");
+  expect(h.host.redo().ok).toBe(true); await flushMicrotasks(); expect(h.hostStore.resolve(ref)).toMatchObject({ darkness: 1 });
+});
+
+test("isolated floor activation refuses legacy players before data and blocks incompatible live peers", async () => {
+  const h = await setup(), parent = { coll: "scenes" as const, id: "s1" };
+  h.gm.submit([{ kind: "create", coll: "levels", parent, data: draftLevel("base", "Private floor") }]); await flushMicrotasks();
+  const old = await capabilityPeer(h, "old-floor-player", { kind: "hello", pubkey: PLAYER_ID, displayName: "Rex", ts: 1, sig: "valid" });
+  expect(old.frames[0]?.kind).toBe("welcome");
+  const seq = h.hostStore.seq;
+  h.gm.submit([{ kind: "update", ref: parent, diff: { levelMode: "isolated" } }]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq); expect(h.hostStore.get("scenes", "s1")?.levelMode).toBeUndefined();
+  h.host.removeSession("old-floor-player", "upgrade");
+  h.gm.submit([{ kind: "update", ref: parent, diff: { levelMode: "isolated" } }]); await flushMicrotasks();
+  expect(h.hostStore.get("scenes", "s1")?.levelMode).toBe("isolated");
+  const reconnect = await capabilityPeer(h, "old-floor-reconnect", { kind: "hello", pubkey: PLAYER_ID, displayName: "Rex", ts: 1, sig: "valid" });
+  expect(reconnect.frames.map((m) => m.kind)).toEqual(["kick"]);
+  expect(JSON.stringify(reconnect.frames)).not.toContain("Private floor");
 });

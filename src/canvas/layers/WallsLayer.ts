@@ -7,6 +7,7 @@ import { Container, Graphics } from "pixi.js";
 import type { Camera } from "../camera";
 import type { WallDocument } from "../../core/documents";
 import { WALL_COLORS, wallStroke } from "../vision/wallSight";
+import { wallEditLocked } from "../../core/wallEditing";
 import { wallKindOf } from "../vision/wallKinds";
 
 export class WallsLayer {
@@ -21,12 +22,12 @@ export class WallsLayer {
   }
 
   /** GM-only overlay; hidden entirely for players via container.visible. */
-  sync(walls: readonly WallDocument[], camera: Camera): void {
+  sync(walls: readonly WallDocument[], camera: Camera, showEndpoints = false): void {
     const zoomBucket = Math.max(1, Math.round(6 / camera.scale));
-    const key = `${walls.length}|${zoomBucket}|${walls
+    const key = `${showEndpoints}|${walls.length}|${showEndpoints ? camera.scale : zoomBucket}|${walls
       .map(
         (w) =>
-          `${w.c.join(",")};${w.door}${w.oneWay ? 1 : 0}${w.sight}${w.move}${w.light}${w.sound}`,
+          `${wallEditLocked(w)};${w.c.join(",")};${w.door}${w.oneWay ? 1 : 0}${w.sight}${w.move}${w.light}${w.sound}`,
       )
       .join("#")}`;
     if (key === this.key) return;
@@ -74,6 +75,11 @@ export class WallsLayer {
           .lineTo(mx, my)
           .lineTo(mx + Math.cos(ang - 2.5) * s, my + Math.sin(ang - 2.5) * s)
           .stroke({ width: lw, color: WALL_COLORS.oneWay, alpha: 0.95 });
+      }
+      if (showEndpoints) {
+        const endpointColor = wallEditLocked(w) ? 0xcc4444 : 0xffd479;
+        g.circle(x1, y1, 4 / camera.scale).fill(endpointColor);
+        g.circle(x2, y2, 4 / camera.scale).fill(endpointColor);
       }
       if (kind === "door") {
         // the dot is the click target (D-257): its colour is the door's state

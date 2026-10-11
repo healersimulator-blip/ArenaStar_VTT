@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { CloudBackupController } from "../../storage/cloud/cloudBackup";
+  import type { SaveCoordinator } from "../../storage/saveCoordinator";
   /**
    * §10 window host — renders WindowManager windows over the canvas, chrome
    * INLINE: the Svelte compiler only marks {#each} items reactive (flags 21)
@@ -51,6 +53,10 @@
     packages = null,
     rulesBoot = null,
     agents = null,
+    saves = null,
+    cloud = null,
+    onBackup = null,
+    onBackupFolder = null,
     bindings = {},
     isGM = false,
     importImage = null,
@@ -70,6 +76,10 @@
     onEncounterBattleScene = null,
     resolveAsset = null,
   }: {
+    saves?: SaveCoordinator | null;
+    cloud?: CloudBackupController | null;
+    onBackup?: (() => Promise<void>) | null;
+    onBackupFolder?: (() => Promise<void>) | null;
     manager: WindowManager;
     /** App-derived copy (manager.list() is a live ref — each{} needs fresh identity). */
     windows: readonly WindowSpec[];
@@ -290,6 +300,10 @@
             {onPickSummon} {onPickAnchor} {onPreviewFx} {onStopFxPreview} />
         {:else if win.kind === "settings"}
           <SettingsPanel
+            saves={isGM ? saves : null}
+            cloud={isGM ? cloud : null}
+            {onBackup}
+            {onBackupFolder}
             {client}
             {bus}
             {onUndo}

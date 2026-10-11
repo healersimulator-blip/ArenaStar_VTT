@@ -1,4 +1,5 @@
 import type { RegionDocument, SceneDocument, TileDocument } from "./documents";
+import { fauxOverheadError } from "./fauxOverhead";
 import { tileTriggerElevationError, tileTriggerZoneError } from "./tileTriggerZone";
 
 /** Validate the persisted, deliberately bounded first-class scene-region shape. */
@@ -22,6 +23,14 @@ export function regionGeometryError(value: unknown): string | null {
   if (region.hidden !== undefined && typeof region.hidden !== "boolean") return "region hidden must be boolean";
   if (region.sort !== undefined && (!Number.isSafeInteger(region.sort) || Math.abs(region.sort as number) > 1_000_000))
     return "region sort must be a bounded integer";
+  const overheadError = fauxOverheadError(region.fauxOverhead);
+  if (overheadError) return overheadError;
+  if (region.fauxOverhead !== undefined) {
+    const ownership = region.ownership as Record<string, unknown> | undefined;
+    if (region.hidden === true || !ownership || typeof ownership.default !== "number" || ownership.default < 1 ||
+        Object.values(ownership).some((level) => typeof level !== "number" || level < 1))
+      return "Faux Overhead regions must be public (not hidden, with at least LIMITED ownership for everyone)";
+  }
   return null;
 }
 

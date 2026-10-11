@@ -83,3 +83,14 @@ describe("IndexedDB vtt schema (§8)", () => {
     db.close();
   });
 });
+
+test("level fog isolates worlds, scenes, users, floors and the unmigrated legacy map", async () => {
+  const db = await openVttDb();
+  for (const levelId of [undefined, "a", "b"]) await putFog(db, { worldId: "isolated", sceneId: "s", userId: "u", ...(levelId === undefined ? {} : { levelId }), png: new Uint8Array([levelId === undefined ? 0 : levelId === "a" ? 1 : 2]) });
+  expect((await getFog(db, "isolated", "s", "u"))?.png[0]).toBe(0);
+  expect((await getFog(db, "isolated", "s", "u", "a"))?.png[0]).toBe(1);
+  expect((await getFog(db, "isolated", "s", "u", "b"))?.png[0]).toBe(2);
+  for (const [w, s, u, l] of [["other", "s", "u", "a"], ["isolated", "other", "u", "a"], ["isolated", "s", "other", "a"], ["isolated", "s", "u", "c"]] as const)
+    expect(await getFog(db, w, s, u, l)).toBeUndefined();
+  await deleteWorldData(db, "isolated"); expect(await getFog(db, "isolated", "s", "u", "a")).toBeUndefined(); db.close();
+});

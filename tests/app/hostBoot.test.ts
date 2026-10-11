@@ -148,3 +148,29 @@ describe("GM-tab boot (§2/§8/§14)", () => {
     await app.close();
   });
 });
+
+test("host boot actually runs periodic autosave without a manual save", async () => {
+  const app = await boot();
+  try {
+    app.gm.client.submit([{ kind: "update", ref: { coll: "scenes", id: DEFAULT_SCENE_ID }, diff: { name: "Autosaved" } }]);
+    await settle();
+    await expect.poll(() => app.persister.flushedSeq, { timeout: 3000 }).toBe(app.store.seq);
+    const stored = await app.db.get("documents", [app.worldId, "scenes", DEFAULT_SCENE_ID]);
+    expect(stored.doc.name).toBe("Autosaved");
+    expect(app.saves.status.lastSavedAt).toBeGreaterThan(0);
+    expect(app.saves.status.error).toBeNull();
+  } finally { await app.close(); }
+});
+
+test("Save now includes same-turn GM edits and fog without a manual settle", async () => {
+  const app = await boot();
+  try {
+    app.gm.client.submit([{ kind: "update", ref: { coll: "scenes", id: DEFAULT_SCENE_ID }, diff: { name: "Explicit save" } }]);
+    app.gm.client.sendFogPng(DEFAULT_SCENE_ID, new Uint8Array([1, 2, 3]));
+    const receipt = await app.saves.saveNow();
+    expect(receipt.sequence).toBe(app.store.seq);
+    const stored = await app.db.get("documents", [app.worldId, "scenes", DEFAULT_SCENE_ID]);
+    expect(stored.doc.name).toBe("Explicit save");
+    expect((await app.db.get("fog", [app.worldId, DEFAULT_SCENE_ID, "gm"])).png).toEqual(new Uint8Array([1, 2, 3]));
+  } finally { await app.close(); }
+});

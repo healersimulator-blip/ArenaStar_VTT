@@ -1,3 +1,4 @@
+import { SaveWork } from "../storage/saveCoordinator";
 /**
  * Host image pipeline: validate source bytes before decode, preserve originals by default, and
  * produce content-addressed thumbnails/mid-res/WebP map tiles. Asset bytes live outside HostSync ops;
@@ -48,6 +49,7 @@ const QUALITY = 0.8;
 const TILE_QUALITY = 0.85;
 
 export class ImportPipeline {
+  readonly saveWork = new SaveWork();
   private readonly thumbEdge: number;
   private readonly midEdge: number;
   private readonly tileEdge: number;
@@ -65,7 +67,16 @@ export class ImportPipeline {
   }
 
   /** Validate bytes and dimensions before asking the image codec to allocate a bitmap. */
-  async importImage(
+  importImage(
+    bytes: Uint8Array,
+    name: string,
+    _callerMime: string,
+    options: ImageImportOptions = {},
+  ): Promise<ImportedImage> {
+    return this.saveWork.run(() => this.importImageInner(bytes, name, _callerMime, options));
+  }
+
+  private async importImageInner(
     bytes: Uint8Array,
     name: string,
     _callerMime: string,

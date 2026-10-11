@@ -1,0 +1,44 @@
+import { expect, test } from "@playwright/test";
+import { entry, waitForSurface } from "./lib";
+
+test("GM edits and persists draft levels with stable IDs, validation and atomic undo", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await page.locator('[data-tab="scenes"]').click();
+  const editor = page.locator('[data-level-drafts]').first();
+  await editor.locator(":scope > summary").click();
+  await expect(editor).toContainText("Planning only");
+  await editor.getByRole("button", { name: "Add draft level", exact: true }).click();
+  await editor.getByRole("button", { name: "Add draft level", exact: true }).click();
+  const rows = editor.locator("[data-level-id]");
+  await expect(rows).toHaveCount(2);
+  await rows.nth(0).getByLabel("Level name", { exact: true }).fill("Ground draft");
+  const ids = await rows.evaluateAll((nodes) => nodes.map((n) => n.getAttribute("data-level-id")));
+  const apply = editor.getByRole("button", { name: "Apply draft levels", exact: true });
+  await rows.nth(0).getByLabel("top", { exact: true }).fill("12");
+  await expect(editor.getByRole("alert")).toContainText("overlap");
+  await expect(apply).toBeDisabled();
+  await rows.nth(1).getByLabel("bottom", { exact: true }).fill("12");
+  await rows.nth(1).getByLabel("floorZ", { exact: true }).fill("12");
+  await apply.click();
+  await expect(editor.getByRole("status")).toContainText("Draft saved");
+  await page.locator("#gm-undo").click();
+  await expect(rows).toHaveCount(0);
+  await page.locator("#gm-redo").click();
+  await expect(rows).toHaveCount(2);
+  expect(await rows.evaluateAll((nodes) => nodes.map((n) => n.getAttribute("data-level-id")))).toEqual(ids);
+  await rows.nth(0).getByLabel("Level name", { exact: true }).fill("Renamed ground");
+  await apply.click();
+  await expect(editor.getByRole("status")).toContainText("Draft saved");
+  expect(await rows.nth(0).getAttribute("data-level-id")).toBe(ids[0]);
+  // Explicit close flushes ordinary autosave; no extra per-edit approval queue.
+  await page.getByRole("button", { name: "Close world", exact: true }).click();
+  await page.getByRole("button", { name: /^Open$/, exact: false }).first().click();
+  await waitForSurface(page, "app");
+  await page.locator('[data-tab="scenes"]').click();
+  await editor.locator(":scope > summary").click();
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0).getByLabel("Level name", { exact: true })).toHaveValue("Renamed ground");
+  expect(await rows.nth(0).getAttribute("data-level-id")).toBe(ids[0]);
+});

@@ -9,3 +9,10 @@ playwright-report/
 
 # PF1e content vendor checkouts (git-ignored — pinned commits, see tools/adopt/INVENTORY.md)
 tools/content/vendor/
+
+# Cloud companion secrets must live outside the checkout. Defense in depth.
+.arenastar-cloud/
+**/credentials.json
+**/credentials.json.tmp
+.env
+.env.local

@@ -1312,6 +1312,8 @@ export interface GmFogSurface {
   }>;
   /** §9 e2e: create a tile doc through the client op path; returns its id. */
   seedTile(spec: {
+    img?: string;
+    name?: string;
     x: number;
     y: number;
     width: number;
@@ -1456,6 +1458,7 @@ export interface GmFogSurface {
    * store holds for the GM on the active scene.
    */
   fogState(): Promise<{
+    levelId?: string | null;
     sceneId: string | null;
     enabled: boolean;
     restored: boolean;
@@ -1530,6 +1533,8 @@ export interface VttE2eSurface {
 
 /** D-251: what the player's canvas shows under fog. */
 export interface PlayerCanvasSurface {
+  floorMapPixel(spec: { x: number; y: number }): number[];
+  floorPresentation(): { levelId: string | null; mode: string | null; tileIds: string[]; lightIds: string[]; img: string | null; darkness: number | null };
   /** The player's fog loop after everything queued landed, plus the layer's style/visibility. */
   fogState(): Promise<{
     sceneId: string | null;

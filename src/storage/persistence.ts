@@ -33,6 +33,14 @@ export interface HostPersisterOptions {
 
 const DEFAULT_FLUSH_MS = 500;
 
+export interface PersistenceStatus {
+  /** This status concerns local document durability, never a cloud backup. */
+  lastSavedAt: number | null;
+  error: string | null;
+  unsaved: boolean;
+}
+
+
 /**
  * Keys `HostPersister.patchWorld` may change on a world record. `| undefined` is explicit so
  * `exactOptionalPropertyTypes` still allows clearing an optional field (deactivating a package).
@@ -50,15 +58,22 @@ export class HostPersister {
   private detachStore: (() => void) | null = null;
   private dirty = new Map<CollectionName, Set<DocId>>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  /** Serialized oplog writes; flush() drains this before batching documents. */
-  private oplogChain: Promise<void> = Promise.resolve();
-  private flushing: Promise<void> = Promise.resolve();
+  /** Failed jobs do not poison the serial executor. Journal records survive failures. */
+  private tasks: Promise<unknown> = Promise.resolve();
+  private pendingLog: OplogRecord[] = [];
+  private journalScheduled = false;
+  private readonly now: () => number;
+  private error: string | null = null;
+  private failures = 0;
+  private retryAt = 0;
+  private readonly listeners = new Set<(status: PersistenceStatus) => void>();
   private closed = false;
 
   private constructor(db: IDBPDatabase, record: WorldsRecord, options: HostPersisterOptions = {}) {
     this.db = db;
     this.record = record;
     this.flushMs = options.flushMs ?? DEFAULT_FLUSH_MS;
+    this.now = options.now ?? Date.now;
   }
 
   /** Create a fresh world record (new world flow). */
@@ -140,6 +155,11 @@ export class HostPersister {
       if (!applied.ok) {
         throw new Error(`persistence: oplog tail corrupt at seq ${entry.seq}: ${applied.error}`);
       }
+      for (const change of applied.value.changes) {
+        const ids = this.dirty.get(change.root.coll) ?? new Set<DocId>();
+        ids.add(change.root.id);
+        this.dirty.set(change.root.coll, ids);
+      }
       const appended = log.append(entry.env, entry.inverses);
       if (!appended.ok) throw new Error(`persistence: ${appended.error}`);
     }
@@ -154,21 +174,58 @@ export class HostPersister {
     );
   }
 
-  /**
-   * Await all queued immediate oplog appends (§6.5 beforeunload guard calls
-   * this + flush() before allowing the tab to close).
-   */
-  drain(): Promise<void> {
-    return this.oplogChain;
+  get status(): PersistenceStatus {
+    return {
+      lastSavedAt: this.record.lastSavedAt ?? null,
+      error: this.error,
+      unsaved: this.pendingLog.length > 0 || this.dirty.size > 0 ||
+        (this.store !== null && this.record.flushedSeq !== this.store.seq),
+    };
   }
 
-  /** Start the periodic documents batch (§8 write-behind). */
+  subscribe(listener: (status: PersistenceStatus) => void): () => void {
+    this.listeners.add(listener);
+    listener(this.status);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  private publish(): void {
+    for (const listener of this.listeners) {
+      try { listener(this.status); } catch { /* UI observers cannot break storage. */ }
+    }
+  }
+
+  private run<T>(job: () => Promise<T>): Promise<T> {
+    const result = this.tasks.then(job);
+    this.tasks = result.catch((error: unknown) => {
+      this.error = error instanceof Error ? error.message : String(error);
+      this.retryAt = this.now() + Math.min(30_000, 500 * 2 ** Math.min(this.failures++, 6));
+      this.publish();
+    });
+    return result;
+  }
+
+  /** Retry every retained record in order. Never advance past a failed sequence. */
+  private async writeJournal(): Promise<void> {
+    while (this.pendingLog.length) {
+      const record = this.pendingLog[0];
+      await this.db.put(STORES.oplog, record);
+      this.pendingLog.shift();
+    }
+  }
+
+  drain(): Promise<void> {
+    return this.run(() => this.writeJournal());
+  }
+
+  /** Quiet background autosave, with bounded retry frequency while storage is unavailable. */
   start(): void {
     if (this.timer !== null || this.closed) return;
+    let ticking = false;
     this.timer = setInterval(() => {
-      this.flushing = this.flush().catch((error: unknown) => {
-        console.error("vtt: persister flush failed", error);
-      });
+      if (ticking || this.now() < this.retryAt || (!this.status.unsaved && !this.error)) return;
+      ticking = true;
+      void this.flush().catch(() => undefined).finally(() => { ticking = false; });
     }, this.flushMs);
   }
 
@@ -186,9 +243,11 @@ export class HostPersister {
       env,
       inverses: [...inverses],
     };
-    this.oplogChain = this.oplogChain.then(async () => {
-      await this.db.put(STORES.oplog, record);
-    });
+    this.pendingLog.push(structuredClone(record));
+    if (!this.journalScheduled && this.now() >= this.retryAt) {
+      this.journalScheduled = true;
+      void this.drain().catch(() => undefined).finally(() => { this.journalScheduled = false; });
+    }
     for (const change of changes) {
       let set = this.dirty.get(change.root.coll);
       if (!set) {
@@ -199,71 +258,80 @@ export class HostPersister {
     }
   }
 
-  /**
-   * Drain pending oplog writes, then batch-write every dirty root in one
-   * transaction that also advances worlds.flushedSeq (atomic, D-027).
-   * Deleted roots (no longer resolvable) are removed from the store.
-   */
-  async flush(): Promise<void> {
-    await this.oplogChain;
-    if (!this.store) return;
-    const dirty = this.dirty;
-    this.dirty = new Map();
-    if (dirty.size === 0 && this.record.flushedSeq === this.store.seq) {
-      await this.db.put(STORES.worlds, this.record);
-      return;
-    }
-    const seq = this.store.seq;
-    const tx = this.db.transaction([STORES.documents, STORES.worlds], "readwrite");
+  private restoreDirty(dirty: Map<CollectionName, Set<DocId>>): void {
     for (const [coll, ids] of dirty) {
-      for (const id of ids) {
-        const doc = this.store.get(coll, id);
-        const key = [this.record.worldId, coll, id] as IDBValidKey;
-        if (doc) {
-          void tx
-            .objectStore(STORES.documents)
-            .put({ worldId: this.record.worldId, coll, id, doc } satisfies DocumentsRecord);
-        } else {
-          void tx.objectStore(STORES.documents).delete(key);
-        }
-      }
+      const current = this.dirty.get(coll) ?? new Set<DocId>();
+      for (const id of ids) current.add(id);
+      this.dirty.set(coll, current);
     }
-    this.record = { ...this.record, flushedSeq: seq };
-    void tx.objectStore(STORES.worlds).put(this.record);
-    await tx.done;
   }
 
-  /**
-   * Checkpoint (§8): rewrite all documents + compact the IDB oplog ≤ store.seq
-   * + persist the new base — one transaction — then compact the in-memory log.
-   */
-  async checkpoint(): Promise<void> {
-    await this.oplogChain;
+  /** Snapshot synchronously, then atomically commit docs + watermark. New edits stay dirty. */
+  private async writeDocuments(checkpoint: boolean): Promise<void> {
+    await this.writeJournal();
     const store = this.store;
     if (!store) return;
     const seq = store.seq;
-    const tx = this.db.transaction([STORES.documents, STORES.oplog, STORES.worlds], "readwrite");
-    const docStore = tx.objectStore(STORES.documents);
-    for (const coll of TOP_LEVEL_COLLECTIONS) {
-      for (const doc of store.getAll(coll) as readonly BaseDocument[]) {
-        void docStore.put({
-          worldId: this.record.worldId,
-          coll,
-          id: doc._id,
-          doc,
-        } satisfies DocumentsRecord);
+    const dirty = this.dirty;
+    this.dirty = new Map();
+    const next: WorldsRecord = { ...this.record, flushedSeq: seq, lastSavedAt: this.now(),
+      ...(checkpoint ? { oplogBase: seq } : {}) };
+    let abort: (() => void) | null = null;
+    let settled: Promise<unknown> | null = null;
+    try {
+      const tx = this.db.transaction([STORES.documents, STORES.oplog, STORES.worlds], "readwrite");
+      abort = () => tx.abort();
+      settled = tx.done;
+      const requests: Promise<unknown>[] = [];
+      const add = (request: Promise<unknown>): void => {
+        void request.catch(() => undefined);
+        requests.push(request);
+      };
+      add(tx.done);
+      const docs = tx.objectStore(STORES.documents);
+      if (checkpoint) {
+        // Delete stale roots too: otherwise a checkpoint can resurrect deleted documents.
+        add(docs.delete(IDBKeyRange.bound([this.worldId], [this.worldId, []])));
+        for (const coll of TOP_LEVEL_COLLECTIONS) {
+          for (const doc of store.getAll(coll) as readonly BaseDocument[]) {
+            add(docs.put({ worldId: this.worldId, coll, id: doc._id, doc } satisfies DocumentsRecord));
+          }
+        }
+        add(tx.objectStore(STORES.oplog).delete(
+          IDBKeyRange.bound([this.worldId], [this.worldId, seq]),
+        ));
+      } else {
+        for (const [coll, ids] of dirty) {
+          for (const id of ids) {
+            const doc = store.get(coll, id);
+            add(doc
+              ? docs.put({ worldId: this.worldId, coll, id, doc } satisfies DocumentsRecord)
+              : docs.delete([this.worldId, coll, id]));
+          }
+        }
       }
+      add(tx.objectStore(STORES.worlds).put(next));
+      await Promise.all(requests);
+      this.record = next;
+      if (checkpoint) this.log?.compact(seq);
+      this.error = null;
+      this.failures = 0;
+      this.retryAt = 0;
+      this.publish();
+    } catch (error) {
+      try { abort?.(); } catch { /* Already aborted or finished. */ }
+      await settled?.catch(() => undefined);
+      this.restoreDirty(dirty);
+      throw error;
     }
-    const oplogStore = tx.objectStore(STORES.oplog);
-    const keys = (await oplogStore.getAllKeys(
-      IDBKeyRange.bound([this.record.worldId], [this.record.worldId, seq]),
-    )) as IDBValidKey[];
-    for (const key of keys) void oplogStore.delete(key);
-    this.record = { ...this.record, flushedSeq: seq, oplogBase: seq };
-    void tx.objectStore(STORES.worlds).put(this.record);
-    await tx.done;
-    this.log?.compact(seq);
-    this.dirty.clear();
+  }
+
+  flush(): Promise<void> {
+    return this.run(() => this.writeDocuments(false));
+  }
+
+  checkpoint(): Promise<void> {
+    return this.run(() => this.writeDocuments(true));
   }
 
   /**
@@ -273,30 +341,35 @@ export class HostPersister {
    * final flush on close — which is how "activate a system package, reload" lost the activation.
    * A key set to `undefined` is deleted from the record rather than stored as undefined.
    */
-  async patchWorld(patch: WorldsRecordPatch): Promise<WorldsRecord> {
-    const merged: Record<string, unknown> = { ...this.record };
-    for (const [key, value] of Object.entries(patch)) merged[key] = value;
-    // Rebuild instead of mutating: structuredClone keeps `key: undefined`, and the optional
-    // §12 fields must be *absent* when cleared for `worldRec.activeRulesPackage` to read falsy.
-    const next = Object.fromEntries(
-      Object.entries(merged).filter(([, value]) => value !== undefined),
-    ) as unknown as WorldsRecord;
-    this.record = next;
-    await this.db.put(STORES.worlds, this.record);
-    return this.record;
+  patchWorld(patch: WorldsRecordPatch): Promise<WorldsRecord> {
+    const copy = structuredClone(patch);
+    return this.run(async () => {
+      const next = Object.fromEntries(
+        Object.entries({ ...this.record, ...copy }).filter(([, value]) => value !== undefined),
+      ) as unknown as WorldsRecord;
+      await this.db.put(STORES.worlds, next);
+      this.record = next;
+      return next;
+    });
   }
 
   /** Final flush + stop the timer. */
   async close(): Promise<void> {
     if (this.closed) return;
-    this.closed = true;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    // A failed close remains retryable; keep observing edits until the flush succeeds.
+    try {
+      do { await this.flush(); } while (this.status.unsaved);
+    } catch (error) {
+      this.start();
+      throw error;
+    }
+    this.closed = true;
     this.detachStore?.();
     this.detachStore = null;
-    await this.flushing;
-    await this.flush();
+    this.listeners.clear();
   }
 }

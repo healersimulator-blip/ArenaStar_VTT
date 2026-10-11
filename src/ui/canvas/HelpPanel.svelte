@@ -59,7 +59,7 @@
     { keys: "Click a door (wall tool, GM info)", action: "Open or close it · a locked door ignores the click" },
     { keys: "Alt + click a wall (GM info)", action: "Erase that wall" },
     { keys: "Click a map pin", action: "Tooltip · double-click opens the linked handout" },
-    { keys: "Alt + wheel", action: "Zoom · Ctrl+A selects the layer's content" },
+    { keys: "Mouse wheel", action: "Zoom · Ctrl+A selects the layer's content" },
   ];
 
   /**

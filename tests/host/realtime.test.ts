@@ -321,6 +321,22 @@ describe("realtime mode (§5A: 5 Hz tick / coalesced flush / 1 Hz report / check
     expect(stats.coalescedMax).toBeGreaterThanOrEqual(2); // ≥2 ticks/frame
   });
 
+  test("Save now creates a realtime recovery point without advancing or pausing the game", async () => {
+    const s = await setup();
+    const tick = (s.channel as unknown as { __tick: (v: number) => void }).__tick;
+    await s.channel.start("realtime");
+    await elapse(s.channel, tick, 1_000_000, 500, 50);
+    const before = s.channel.realtimeStats();
+    await s.channel.saveState();
+    const db = await openVttDb();
+    const checkpoints = await listCheckpoints(db, s.worldId, SCENE_ID);
+    expect(checkpoints.some(cp => cp.rulesVersion === "realtime:save")).toBe(true);
+    expect(s.channel.realtimeStats().ticksTotal).toBe(before.ticksTotal);
+    expect(s.channel.realtimeStats().running).toBe(true);
+    db.close();
+    s.channel.stop();
+  });
+
   test("pause freezes the clock, checkpoints, and broadcasts paused phase; resume continues", async () => {
     const s = await setup();
     const tick = (s.channel as unknown as { __tick: (v: number) => void }).__tick;

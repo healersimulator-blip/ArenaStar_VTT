@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { HostPersister } from "../../src/storage/persistence";
 import { openVttDb, STORES, type WorldsRecord } from "../../src/storage/idb";
 import { DocumentStore, type StoreMeta } from "../../src/core/store";
@@ -9,7 +9,7 @@ import type { Op, OpEnvelope } from "../../src/core/ops";
 import type { ActorDocument, SceneDocument, TokenDocument } from "../../src/core/documents";
 import type { Json } from "../../src/core/documents";
 
-import type { IDBPDatabase } from "idb";
+import { unwrap, type IDBPDatabase } from "idb";
 
 /** World-scoped row count (the fake IDB is shared across tests in this file). */
 async function countFor(db: IDBPDatabase, store: string, worldId: string): Promise<number> {
@@ -376,6 +376,118 @@ describe("HostPersister — lifecycle", () => {
     expect(after.oplogBase).toBe(before.oplogBase);
 
     await persister.close();
+    db.close();
+  });
+});
+
+describe("save reliability — retries and atomic watermarks", () => {
+  test("a failed journal write retains ordered edits and does not poison later saves", async () => {
+    const { worldId, store, log, persister, db } = await freshSetup();
+    const original = db.put.bind(db);
+    let blocked = true;
+    const spy = vi.spyOn(db, "put").mockImplementation(async (...args) => {
+      if (args[0] === STORES.oplog && blocked) throw new Error("disk full");
+      return original(...args);
+    });
+    commit(store, log, env(1, [{ kind: "create", coll: "actors", data: actorDoc("a1") }]));
+    await expect(persister.drain()).rejects.toThrow("disk full");
+    commit(store, log, env(2, [{ kind: "update", ref: { coll: "actors", id: "a1" }, diff: { name: "Latest edit" } }]));
+    expect(persister.status.error).toBe("disk full");
+    expect(persister.flushedSeq).toBe(0);
+    blocked = false;
+    await persister.flush();
+    expect(persister.status.error).toBeNull();
+    expect(persister.status.unsaved).toBe(false);
+    expect((await db.getAll(STORES.oplog)).filter(r => r.worldId === worldId).map(r => r.seq)).toEqual([1, 2]);
+    expect((await db.get(STORES.documents, [worldId, "actors", "a1"])).doc.name).toBe("Latest edit");
+    spy.mockRestore();
+    await persister.close(); db.close();
+  });
+
+  test("an aborted flush restores dirty roots and does not advance the saved watermark", async () => {
+    const { worldId, store, log, persister, db } = await freshSetup();
+    commit(store, log, env(1, [{ kind: "create", coll: "actors", data: actorDoc("a1") }]));
+    await persister.drain();
+    const rawDb = unwrap(db);
+    const original = rawDb.transaction.bind(rawDb);
+    let abortNext = true;
+    const spy = vi.spyOn(rawDb, "transaction").mockImplementation((...args) => {
+      const tx = original(...args);
+      if (abortNext && Array.isArray(args[0]) && args[0].includes(STORES.documents)) {
+        abortNext = false;
+        queueMicrotask(() => {
+          // A newer edit arrives during the aborted transaction; both roots must survive.
+          commit(store, log, env(2, [{ kind: "create", coll: "actors", data: actorDoc("a2") }]));
+          tx.abort();
+        });
+      }
+      return tx;
+    });
+    await expect(persister.flush()).rejects.toThrow();
+    expect(persister.flushedSeq).toBe(0);
+    expect((await db.get(STORES.worlds, worldId)).flushedSeq).toBe(0);
+    expect(persister.status.unsaved).toBe(true);
+    await persister.flush();
+    expect(await countFor(db, STORES.documents, worldId)).toBe(2);
+    expect(persister.flushedSeq).toBe(2);
+    spy.mockRestore();
+    await persister.close(); db.close();
+  });
+
+  test("recovered log tail survives a second restart after a document flush", async () => {
+    const { worldId, store, log, persister, db } = await freshSetup();
+    commit(store, log, env(1, [{ kind: "create", coll: "actors", data: actorDoc("a1") }]));
+    await persister.drain();
+    db.close(); // simulate process death before the first documents batch
+    const db2 = await openVttDb();
+    const recovered = await HostPersister.open(db2, worldId);
+    const store2 = new DocumentStore({ meta: { ...baseMeta, worldId } });
+    await recovered.attach(store2, new OpLog());
+    await recovered.close();
+    const reopened = await HostPersister.open(db2, worldId);
+    const store3 = new DocumentStore({ meta: { ...baseMeta, worldId } });
+    await reopened.attach(store3, new OpLog());
+    expect(store3.get("actors", "a1")?.name).toBe("Actor a1");
+    expect(store3.seq).toBe(1);
+    await reopened.close(); db2.close();
+  });
+
+  test("checkpoint deletes stale roots and retains edits received while committing", async () => {
+    const { worldId, store, log, persister, db } = await freshSetup();
+    commit(store, log, env(1, [{ kind: "create", coll: "actors", data: actorDoc("a1") }]));
+    await persister.flush();
+    commit(store, log, env(2, [{ kind: "delete", ref: { coll: "actors", id: "a1" } }]));
+    const rawDb = unwrap(db);
+    const original = rawDb.transaction.bind(rawDb);
+    let inject = true;
+    const spy = vi.spyOn(rawDb, "transaction").mockImplementation((...args) => {
+      const tx = original(...args);
+      if (inject && Array.isArray(args[0]) && args[0].includes(STORES.documents)) {
+        inject = false;
+        queueMicrotask(() => commit(store, log, env(3, [{ kind: "create", coll: "actors", data: actorDoc("a2") }])));
+      }
+      return tx;
+    });
+    await persister.checkpoint();
+    expect(await db.get(STORES.documents, [worldId, "actors", "a1"])).toBeUndefined();
+    expect(persister.flushedSeq).toBe(2);
+    expect(persister.status.unsaved).toBe(true);
+    await Promise.all([persister.patchWorld({ name: "Renamed" }), persister.flush()]);
+    expect((await db.get(STORES.worlds, worldId)).name).toBe("Renamed");
+    expect((await db.get(STORES.documents, [worldId, "actors", "a2"])).doc.name).toBe("Actor a2");
+    spy.mockRestore();
+    await persister.close(); db.close();
+  });
+
+  test("failed close can be retried and still captures subsequent edits", async () => {
+    const { store, log, persister, db } = await freshSetup();
+    commit(store, log, env(1, [{ kind: "create", coll: "actors", data: actorDoc("a1") }]));
+    const spy = vi.spyOn(db, "put").mockRejectedValue(new Error("storage unavailable"));
+    await expect(persister.close()).rejects.toThrow("storage unavailable");
+    commit(store, log, env(2, [{ kind: "update", ref: { coll: "actors", id: "a1" }, diff: { name: "Not lost" } }]));
+    spy.mockRestore();
+    await persister.close();
+    expect(persister.flushedSeq).toBe(2);
     db.close();
   });
 });

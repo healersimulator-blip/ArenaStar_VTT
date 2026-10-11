@@ -1,4 +1,5 @@
 <script lang="ts">
+  import LevelDraftEditor from "./LevelDraftEditor.svelte";
   import { onMount } from "svelte";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
@@ -209,6 +210,7 @@
         {#if image}<img src={image} alt="" loading="lazy" />{:else}<span class="thumb-placeholder">✦</span>{/if}
         <span class="scene-title"><strong>{scene.name}</strong><small>{alignmentHint(scene)}{scene.active ? " · Active" : ""}</small></span>
       </button>
+      {#if isGm}<LevelDraftEditor {scene} {client} {bus} />{/if}
     {/each}
   </div>
 </section>

@@ -47,11 +47,11 @@
 
   async function closeWorld(): Promise<void> {
     const current = app;
-    app = null;
-    mode = "picker";
     // AWAITED: the persister's final batched flush must land before the start screen lists
     // or exports this world (D-179) — otherwise the archive would miss the last edits.
     if (current) await current.close();
+    app = null;
+    mode = "picker";
     await onApp?.(null);
   }
 
@@ -64,7 +64,7 @@
     if (autoHost) void host(null);
     // Teardown only: nothing replaces the world rows here, so the final flush
     // does not have to be awaited (D-179) — but it must not be left implicit.
-    return () => void app?.close();
+    return () => { void app?.close().catch(error => console.error("World close failed", error)); };
   });
 </script>
 
@@ -90,7 +90,7 @@
     <!-- App wires its canvas, bus listeners and status in onMount from the `app` prop, so it
          must not mount before the boot has produced one (mounting on null left a dead shell:
          no canvas, status "—" — found by the D-248 picker-import e2e). -->
-    <App {app} {bootError} {initialSetup} onExit={() => void closeWorld()} />
+    <App {app} {bootError} {initialSetup} onExit={closeWorld} />
   {:else}
     <main class="vtt-ui">
       <p class="sub" role="status" data-booting>Starting world…</p>
