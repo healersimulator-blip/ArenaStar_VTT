@@ -99,7 +99,6 @@ export class TilesLayer {
     this.lower = new Container();
     this.lower.label = "lowerFloors";
     this.lower.sortableChildren = true;
-    below.addChildAt(this.lower, 0);
   }
 
   /**
@@ -110,6 +109,11 @@ export class TilesLayer {
   private readonly lower: Container;
   private lowerDepth: ReadonlyMap<string, number> = new Map();
   setLowerFloors(depths: ReadonlyMap<string, number>): void { this.lowerDepth = depths; }
+  /** The container sits at the bottom of the tiles-below layer only while it holds lower-floor art. */
+  private placeLower(): void {
+    if (this.lower.children.length && this.lower.parent !== this.below) this.below.addChildAt(this.lower, 0);
+    else if (!this.lower.children.length && this.lower.parent) this.lower.parent.removeChild(this.lower);
+  }
   /** Readback: the lower-floor tiles currently drawn, with their depth. */
   lowerFloorTiles(): Array<{ id: string; depth: number }> {
     return [...this.views.keys()].filter((id) => this.lowerDepth.has(id)).sort().map((id) => ({ id, depth: this.lowerDepth.get(id) as number }));
@@ -186,6 +190,7 @@ export class TilesLayer {
       const view = this.views.get(tile._id);
       if (view) this.draw(view);
     }
+    this.placeLower();
     const images = new Set([...this.views.values()].map((view) => view.loadedImage));
     for (const image of this.art.keys()) if (!images.has(image)) this.art.delete(image);
     this.syncRegions(regions);
@@ -349,6 +354,7 @@ export class TilesLayer {
         if (!this.lowerDepth.has(view.tile._id)) this.drawAdornment(view);
         this.containerFor(view.tile).addChild(view.g); // trigger outline above the loaded image
         this.styleLower(view);
+        this.placeLower();
         // D-438: the art now decides "under", and openings/copies move onto the sprite.
         this.clearRoofExtras(view);
         if (view.tile.above) this.refreshRoofs();
@@ -609,6 +615,8 @@ export class TilesLayer {
   destroy(): void {
     for (const view of this.views.values()) this.detach(view);
     this.views.clear();
+    this.lower.parent?.removeChild(this.lower);
+    this.lower.destroy();
     for (const graphics of this.regionViews.values()) {
       graphics.parent?.removeChild(graphics);
       graphics.destroy();

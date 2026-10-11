@@ -8,6 +8,7 @@ import type { Op } from "./ops";
 import { inElevationBand } from "./multilevelGeometry";
 import { stairDoor, stairLandingBlocked, stairLocked, stairRegionPolygon, stairSpec, type StairBehaviorV2, type StairEdge } from "./levelPlay";
 import { wallEditLocked } from "./wallEditing";
+import { floorSolidAt, surfaceOpenings } from "./floorSurface";
 
 export type LevelAuditFix = "walls-all" | "lights-all" | "tokens-by-band" | "merge-stairs";
 export interface LevelAuditFinding {
@@ -56,6 +57,14 @@ export function levelPlayAudit(scene: SceneDocument): LevelAuditFinding[] {
     message: `${plural(floorless.length, "token")} ${floorless.length === 1 ? "has" : "have"} no floor. Players cannot see ${floorless.length === 1 ? "it" : "them"} in floor play.` });
   for (const level of levels) if (!(level.tileIds?.length) && level.useSceneBackground !== true)
     findings.push({ code: "floor-without-art", severity: "warning", ids: [level._id], message: `${level.name} has no map art: assign tiles or the scene background.` });
+  // G-21 (D-444): an opening in a traced floor with no floor anywhere beneath it.
+  for (const level of levels) {
+    if (!level.surface) continue;
+    const below = levels.filter((l) => l._id !== level._id && l.floorZ < level.floorZ);
+    const voids = surfaceOpenings(level.surface).filter((p) => !below.some((l) => floorSolidAt(l, p)));
+    if (voids.length) findings.push({ code: "opening-over-void", severity: "warning", ids: [level._id],
+      message: `${level.name} has ${plural(voids.length, "opening")} with no floor beneath ${voids.length === 1 ? "it" : "them"}.` });
+  }
   const assigned = new Set(levels.flatMap((l) => l.tileIds ?? []));
   const loose = scene.tiles.filter((t) => !t.hidden && !assigned.has(t._id));
   if (loose.length && assigned.size) findings.push({ code: "unassigned-tiles", severity: "info", ids: loose.map((t) => t._id),

@@ -31,7 +31,9 @@
   import { createAgentManager, type AgentManager } from "./agentManager";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
-  import { roofViewerTokens } from "../core/roofs";
+  import { roofViewerTokens, type RoofArtMask } from "../core/roofs";
+  import { roofArtMaskFromTexture } from "../canvas/roofArt";
+  import { FLOOR_ART_MAX_SIDE } from "../core/floorSurface";
   import { elevationCues, elevationViewer, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
@@ -1026,6 +1028,11 @@ const WALL_PICK_RADIUS = 12;
     return { bytes: await owner.gm.fetcher.request(hash, "scene"),
       mime: owner.gm.client.store.world.assetManifest[hash]?.mime ?? "image/png" };
   });
+  /** G-21 (D-444): floor tracing reads tile art alpha through the shared texture cache. */
+  async function floorArtMask(image: string): Promise<RoofArtMask | null> {
+    const texture = await tileImages.load(image);
+    return texture && !texture.destroyed ? roofArtMaskFromTexture(texture, FLOOR_ART_MAX_SIDE) : null;
+  }
   let share = $state<HostShare | null>(null);
   let shareError = $state<string | null>(null);
   let peerCode = $state("");
@@ -5746,6 +5753,7 @@ const WALL_PICK_RADIUS = 12;
               {resolveAsset}
               onActivate={activateScene}
               onRequestImages={(sources, action) => openImageImport(sources, action, "file")}
+              loadArtMask={floorArtMask}
             />
           {:else if activeTab === "images"}
             <ImageHandlingPanel

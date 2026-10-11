@@ -3,6 +3,7 @@
   import RoofEditor from "./RoofEditor.svelte";
   import { onMount } from "svelte";
   import type { ClientSync, ClientEvents } from "../../client/sync";
+  import type { RoofArtMask } from "../../core/roofs";
   import type { EventBus } from "../../core/events";
   import type { SceneDocument } from "../../core/documents";
   import { DEFAULT_SCENE_EXPRESS_DEFAULTS, sceneExpressDefaultsOf, type ImageAction, type SceneExpressDefaults } from "../../core/imageHandling";
@@ -17,12 +18,15 @@
     resolveAsset,
     onActivate,
     onRequestImages,
+    loadArtMask,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     resolveAsset: (image: string | null | undefined) => string | null;
     onActivate: (sceneId: string) => void;
     onRequestImages: (sources: ImageSource[], action: ImageAction) => void;
+    /** G-21 (D-444): tile art alpha for tracing floor shapes. */
+    loadArtMask?: (image: string) => Promise<RoofArtMask | null>;
   } = $props();
 
   let scenes = $state<SceneDocument[]>([]);
@@ -211,7 +215,7 @@
         {#if image}<img src={image} alt="" loading="lazy" />{:else}<span class="thumb-placeholder">✦</span>{/if}
         <span class="scene-title"><strong>{scene.name}</strong><small>{alignmentHint(scene)}{scene.active ? " · Active" : ""}</small></span>
       </button>
-      {#if isGm}<LevelDraftEditor {scene} {client} {bus} /><RoofEditor {scene} {client} />{/if}
+      {#if isGm}<LevelDraftEditor {scene} {client} {bus} {loadArtMask} /><RoofEditor {scene} {client} />{/if}
     {/each}
   </div>
 </section>

@@ -20,7 +20,7 @@ function scratchCanvas(width: number, height: number): DrawableCanvas | null {
   return canvas;
 }
 
-export function roofArtMaskFromTexture(texture: Texture): RoofArtMask | null {
+export function roofArtMaskFromTexture(texture: Texture, maxSide = ROOF_ART_MAX_SIDE): RoofArtMask | null {
   try {
     const resource = (texture.source as { resource?: unknown } | undefined)?.resource;
     if (!resource || typeof resource !== "object") return null;
@@ -31,7 +31,7 @@ export function roofArtMaskFromTexture(texture: Texture): RoofArtMask | null {
     if (!isImage) return null;
     const frame = texture.frame;
     if (!(frame.width > 0 && frame.height > 0)) return null;
-    const scale = Math.min(1, ROOF_ART_MAX_SIDE / Math.max(frame.width, frame.height));
+    const scale = Math.min(1, maxSide / Math.max(frame.width, frame.height));
     const width = Math.max(1, Math.round(frame.width * scale));
     const height = Math.max(1, Math.round(frame.height * scale));
     const canvas = scratchCanvas(width, height);

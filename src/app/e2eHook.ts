@@ -246,6 +246,8 @@ export interface AppSurface {
   tokenPos(): { x: number; y: number } | null;
   sceneImg(): string | null;
   activeSceneId(): string | null;
+  /** G-21 (D-444): the active scene's floor surfaces as stored (null = solid everywhere). */
+  levelSurfaces(): Array<{ id: string; name: string; surface: { components: number; openings: number; vertices: number; source: string | null } | null }>;
   /** D-270: one scene's map hash by id — what "import targets the active scene" is asserted with. */
   sceneImgById(id: string): string | null;
   gridSize(): number | null;
@@ -2655,6 +2657,15 @@ function appSurface(app: HostApp): AppSurface {
     activeSceneId: () => {
       const scenes = client.store.getAll("scenes");
       return (scenes.find((sc) => sc.active) ?? scenes[0])?._id ?? null;
+    },
+    levelSurfaces: () => {
+      const scenes = client.store.getAll("scenes");
+      const active = scenes.find((sc) => sc.active) ?? scenes[0];
+      return (active?.levels ?? []).map((l) => ({ id: l._id, name: l.name, surface: l.surface ? {
+        components: l.surface.footprint.components.length,
+        openings: l.surface.footprint.components.reduce((n, c) => n + c.holes.length, 0),
+        vertices: l.surface.footprint.components.reduce((n, c) => n + c.outer.length + c.holes.reduce((m, h) => m + h.length, 0), 0),
+        source: l.surface.source ?? null } : null }));
     },
     sceneCount: () => client.store.getAll("scenes").length,
     /**

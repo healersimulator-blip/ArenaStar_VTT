@@ -10,7 +10,11 @@
   import type { ClientSync } from "../../client/sync";
   import type { LevelDocument, SceneDocument } from "../../core/documents";
   import { draftLevel, generateLevels, levelDraftAudit, levelDraftOps, levelVisibilityPreset, MAX_LEVELS, sceneLevelsError, type LevelVisibilityPreset } from "../../core/levels";
-  let { scene, client, bus }: { scene: SceneDocument; client: ClientSync; bus: EventBus<ClientEvents> } = $props();
+  import { surfaceSummary, surfaceSvgPath, traceLevelArt } from "../../core/floorSurface";
+  import type { RoofArtMask } from "../../core/roofs";
+  let { scene, client, bus, loadArtMask }: { scene: SceneDocument; client: ClientSync; bus: EventBus<ClientEvents>;
+    /** G-21 (D-444): a tile image's alpha, for tracing floors. Absent: tracing is unavailable. */
+    loadArtMask?: (image: string) => Promise<RoofArtMask | null> } = $props();
   let compatible = $state(false), ambientCompatible = $state(false);
   onMount(() => {
     compatible = client.supportsFeature(DRAFT_LEVELS_FEATURE);
@@ -62,6 +66,26 @@
   }
   const lowerRows = (level: LevelDocument) => rows.filter((r) => r._id !== level._id && Number.isFinite(r.floorZ) && r.floorZ < level.floorZ)
     .sort((a, b) => b.floorZ - a.floorZ);
+  // G-21 (D-444): where each floor is solid. Opaque art is floor; transparent parts are openings.
+  let tracing = $state<string | null>(null);
+  async function trace(level: LevelDocument) {
+    if (!loadArtMask || tracing) return;
+    tracing = level._id; message = "";
+    try {
+      const own = scene.tiles.filter((t) => level.tileIds?.includes(t._id));
+      const masks = new Map(await Promise.all(own.map(async (t) => [t._id, t.img ? await loadArtMask(t.img).catch(() => null) : null] as const)));
+      const result = traceLevelArt(scene, $state.snapshot(level) as LevelDocument, (t) => masks.get(t._id) ?? null);
+      if (!result.surface) { message = `${level.name}: ${result.notes.join(" ")}`; return; }
+      level.surface = result.surface;
+      dirty = true;
+      message = [`${level.name} traced: ${surfaceSummary(result.surface)}.`, ...result.notes, "Apply draft levels to save it."].join(" ");
+    } catch (error) { message = error instanceof Error ? error.message : String(error); }
+    finally { tracing = null; }
+  }
+  function solidEverywhere(level: LevelDocument) {
+    delete level.surface;
+    dirty = true;
+  }
   function remove(id: string) {
     rows = rows.filter((l) => l._id !== id).map((l) => ({ ...l, visibleLevelIds: l.visibleLevelIds.filter((target) => target !== id) }));
     dirty = true;
@@ -125,6 +149,22 @@
           {/each}
           <small>Place each floor map as a tile, then assign it here. No unassigned tile or global foreground appears in isolated floor play.</small>
         </fieldset>
+        <fieldset class="surface" data-level-surface={level._id}>
+          <strong>Solid floor</strong>
+          <span data-surface-status>{surfaceSummary(level.surface)}</span>
+          {#if level.surface}
+            <svg class="surface-preview" role="img" aria-label={`${level.name || level._id} floor shape`} viewBox={`0 0 ${scene.width} ${scene.height}`} preserveAspectRatio="xMidYMid meet">
+              <rect x="0" y="0" width={scene.width} height={scene.height} class="scene-box" />
+              <path d={surfaceSvgPath(level.surface)} fill-rule="evenodd" class="solid" />
+            </svg>
+          {/if}
+          <div class="surface-actions">
+            <button type="button" onclick={() => trace(level)} disabled={!loadArtMask || tracing !== null || !(level.tileIds?.length || level.useSceneBackground)}
+              title="Opaque pixels of this floor's map art become solid floor; transparent parts become openings">{tracing === level._id ? "Tracing…" : "Trace from floor art"}</button>
+            {#if level.surface}<button type="button" onclick={() => solidEverywhere(level)}>Solid everywhere</button>{/if}
+          </div>
+          <small>Opaque map art is solid floor; transparent parts (stairwells, holes, open air) are openings. Untraced floors are solid everywhere.</small>
+        </fieldset>
         {#if lowerRows(level).length}
           <fieldset class="sees" data-level-sees={level._id}>
             <strong>Sees floors below</strong>
@@ -172,6 +212,10 @@
 </details>
 
 <style>
+  .surface-preview { display:block; width:140px; height:90px; margin:4px 0; }
+  .surface-preview .scene-box { fill:#11161d; stroke:#3b4656; stroke-width:0.5%; }
+  .surface-preview .solid { fill:#6b7f99; }
+  .surface-actions { display:flex; gap:4px; flex-wrap:wrap; }
   .level-drafts { border:1px solid #3b4656; border-radius:6px; padding:8px; color:#d8dee8; font-size:11px; }
   summary { cursor:pointer; font-weight:600; } p { line-height:1.5; margin:8px 0; color:#b2bdca; }
   fieldset { border:0; padding:0; margin:0; min-width:0; }

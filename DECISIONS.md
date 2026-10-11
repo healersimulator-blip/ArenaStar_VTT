@@ -12989,3 +12989,26 @@ Presets only rewrite entries for floors *below*. Entries for floors above are ke
 **Fix: a GM-only change blanked players' floors.** The host stamped every floor focus state with its own `seq`. An envelope projected away entirely never reaches the player (draft-level edits, for example), so the player's replica stayed at the older `seq` and treated the focus as stale. Its floor went blank until some unrelated visible change arrived. The host now records the `seq` of the last snapshot or envelope each session received (`Session.sentSeq`) and stamps focus states with that. Applying draft levels during isolated play triggered it, and a host test now covers it.
 
 **Fix: players' height badges measured from 0.** Players never receive `levels` or `levelId`, so on an isolated floor the D-440 badge showed absolute elevation ("+10 ft" for a token standing on a floor at Z 10). The presentation now carries the floor's own `floorZ`. On an isolated floor, every token a player sees stands on that floor, so badges measure from it.
+
+## D-444 — Solid floors with openings, traced from floor art (G-21) (2026-10-11)
+
+Seeing tokens on other floors (G-20), light between floors (G-22) and falling (G-23) all need to know where a floor is solid. Art transparency (G-19) only says what to *draw*.
+
+**Model.** `LevelDocument.surface?: {x, y, width, height, footprint, source?}` is the *solid* part of the floor's plane at `floorZ`. The footprint is a `RegionShapeV2` normalized to the box (scene pixels): components are solid areas, holes are openings. A floor without a surface is solid everywhere, which is how every floor behaved before.
+- **One shape per floor**, not free-floating surface regions like V14's Define Surface. A floor's plane is the natural unit, and it doubles as the ceiling of the floor below. It stays GM-only with the levels (the projection strips `levels`).
+- **Budget.** A surface is limited to 128 vertices, so 32 floors fit the spatial kernel's 4,096. It may have at most 16 areas, with at most 16 openings each.
+- **Deferred.** Surfaces at other heights inside a band, such as a bridge or a mezzanine.
+
+**Tracing.** Draft levels → each floor gets **Solid floor**: a status ("Solid everywhere" or "1 solid area · 1 opening"), a preview of the shape, **Trace from floor art** and **Solid everywhere**. *Apply draft levels* saves the shape like any other draft change (one undo step).
+- **Art.** Alpha masks of up to 256 px per side come from the GM's shared tile-texture cache. The scene background counts as opaque over the scene, and art that cannot be read counts as solid over its rectangle.
+- **Sampling.** The art is sampled at a quarter grid cell (at most 200 cells per side). Single-cell specks and pinholes are dropped, and diagonal-only contacts are closed so every ring is simple.
+- **Contours.** The rectilinear boundaries are walked and collinear vertices merged. If the shape is over budget, the grid coarsens ×1.5 and tracing retries.
+- **Limits.** Past 16 areas or 16 openings, the largest are kept and the rest reported. Every result is validated; tracing yields either a valid shape or nothing.
+
+**Kernel.** `floorSurfaces(scene)` gives one plane per floor: it blocks movement, sight, light and sound, and it supports movement. Untraced floors reach a scene-size margin past the edges. Sight through a stairwell is clear; through solid floor it is blocked; `supportBelow` falls through an opening to the next floor.
+
+**Check.** A new warning, `opening-over-void`, flags an opening with no floor anywhere beneath it: a hole in the lowest floor, or a shaft through every traced floor. Untraced floors count as solid.
+
+**Not yet.** Nothing in play reads surfaces yet; G-20, G-22 and G-23 build on them.
+
+**Fix (D-443 follow-up).** The `lowerFloors` container was attached to the tiles-below layer in every scene, which changed that layer's children everywhere. Three tile-image tests caught it in the full run. The container is now attached only while it holds lower-floor art.

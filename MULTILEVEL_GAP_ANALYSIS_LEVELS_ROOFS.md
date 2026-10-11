@@ -199,7 +199,7 @@ Legend: ✅ have · ◐ partial · ❌ missing · — not applicable. Gap IDs re
 | Capability | Levels V13 | Foundry V14 core / Better Roofs | ArenaStar (PR #45) | Gap |
 |---|---|---|---|---|
 | Wall heights | wall-height bottom/top | walls tagged to levels | ✅ floor scopes; finite heights exist only in the unconnected kernel | G-21 |
-| Solid floors and ceilings with holes | tile planes; holes from alpha | Define Surface regions with hole tool | ◐ kernel surfaces with holes, not connected and no authoring | G-21 |
+| Solid floors and ceilings with holes | tile planes; holes from alpha | Define Surface regions with hole tool | ✅ a solid shape per floor, traced from its art, previewed and checked (D-444); play consumers in G-20/G-22/G-23 | G-21 |
 | See tokens on other floors through openings | 3D line-of-sight sampling | visibility lists plus surfaces | ◐ planner exists, nothing uses it | G-20 |
 | See lower-floor art from above | show-if-above, basement rules | visibility lists | ✅ through the floor art's transparent parts, dimmed by depth (D-443) | G-19 |
 | Light passing between floors | light masking by viewer height | unassigned lights; floors restrict light | ❌ hard per-floor scope | G-22 |
@@ -685,7 +685,8 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-29 Scene as a floor | **Done** — import another scene (or one floor of a multilevel scene) into an existing floor or a new floor on top: its map becomes a floor map tile, its tiles, walls and lights are copied and stamped, scaled so grid cells match, one undo step; tokens and regions stay behind. No per-level `background` field: a floor map tile already is one | D-441 · `src/core/levelImport.ts` |
 | G-33 Withhold other floors | **Deferred, design recorded** — do after G-20, which decides what other floors a player legitimately sees; the plan is a per-session floor set as a projection read boundary with a scene resend on floor change | D-442 |
 | G-19 See lower floors | **Done (art)** — per-floor "Sees floors below" with Sealed / Down to ground / All below presets; isolated player floors and the GM's isolated view draw the visible lower floors' art beneath, dimmed by depth, through the floor art's transparent parts. Tokens on other floors wait for G-20. Also fixed: GM-only changes no longer blank players' floors, and players' height badges measure from their floor | D-443 · `visibleFloorsBelow` |
-| G-20 to G-23, G-27, G-30 | Open (slices D and F) | — |
+| G-21 Solid floors with openings | **Done (model + authoring)** — `LevelDocument.surface` (solid area, holes = openings; absent = solid everywhere); "Trace from floor art" with preview; kernel planes via `floorSurfaces`; `opening-over-void` check. Surfaces inside a band (bridges) deferred | D-444 · `traceSurface` |
+| G-20, G-22, G-23, G-27, G-30 | Open (slices D and F) | — |
 
 ---
 

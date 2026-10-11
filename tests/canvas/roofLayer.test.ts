@@ -173,6 +173,8 @@ describe("G-19 (D-443): art seen on lower floors", () => {
     f.layer.setLowerFloors(new Map());
     f.layer.sync([ground, lowerRoof], [at(200, 200)]);
     expect(lower.children).toHaveLength(0);
+    expect(lower.parent).toBeNull(); // only attached while it holds art: plain scenes keep their layer contents
+    expect(f.below.children.map((child) => child.label)).not.toContain("lowerFloors");
     expect(f.layer.roofStateOf("porchRoof")).toMatchObject({ under: true });
     expect(f.layer.lowerFloorTiles()).toEqual([]);
     f.layer.destroy();

@@ -741,6 +741,20 @@ export interface SceneGrid {
   hexLayout: HexLayout;
 }
 
+/**
+ * G-21 (D-444): where a floor's plane is solid. The footprint is normalized to the box (scene
+ * pixels); holes are openings. Validated by `levelSurfaceError` (src/core/floorSurface.ts).
+ */
+export interface LevelSurface {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  footprint: RegionShapeV2;
+  /** How it was made (informational). */
+  source?: "art" | "drawn";
+}
+
 /** GM-only draft structure. Presence never enables multilevel physics or visibility. */
 export interface LevelDocument extends BaseDocument {
   /** Explicit floor artwork: unassigned tiles and the global foreground never bleed through. */
@@ -756,6 +770,8 @@ export interface LevelDocument extends BaseDocument {
   floorZ: number;
   sort: number;
   visibleLevelIds: string[];
+  /** G-21 (D-444): the solid part of this floor; absent means solid everywhere. */
+  surface?: LevelSurface;
 }
 
 export interface SceneDocument extends BaseDocument {
