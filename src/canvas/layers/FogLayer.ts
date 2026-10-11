@@ -78,6 +78,8 @@ export class FogLayer {
   private readonly brush = new Container();
   private currentStyle: FogLayerStyle = "opaque";
   private destroyed = false;
+  /** D-438: told about every live-sight update (the stage forwards it to the roofs). */
+  onVisible: ((polys: readonly Float32Array[]) => void) | null = null;
 
   constructor(
     private readonly app: Application,
@@ -221,6 +223,8 @@ export class FogLayer {
    * explored area (nothing is currently seen).
    */
   setVisible(polys: readonly Float32Array[]): void {
+    // D-438: roofs read the same live sight (vision openings, G-24 reveal through fog).
+    this.onVisible?.(polys);
     const dim = new Graphics();
     dim
       .rect(0, 0, this.visibleTexture.width, this.visibleTexture.height)
@@ -300,6 +304,8 @@ export class FogLayer {
 
   destroy(): void {
     this.destroyed = true;
+    this.onVisible?.([]);
+    this.onVisible = null;
     this.container.destroy({ children: true });
     this.brush.destroy({ children: true });
     this.texture.destroy();

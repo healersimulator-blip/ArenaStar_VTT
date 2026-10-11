@@ -143,6 +143,16 @@ export function fogViewers(
   return out;
 }
 
+/** The user controls the token directly, or through its linked actor (GM/ASSISTANT: every token). */
+export function userControlsToken(
+  user: PermissionUser,
+  token: TokenDocument,
+  scene: SceneDocument,
+  actors: readonly ActorDocument[],
+): boolean {
+  return controlsToken(user, token, scene, actors);
+}
+
 function controlsToken(
   user: PermissionUser,
   token: TokenDocument,

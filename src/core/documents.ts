@@ -186,7 +186,22 @@ export interface TileDocument extends BaseDocument {
   /** Inclusive active vertical band in scene grid units; absent has no elevation restriction. */
   triggerElevation?: { min: number; max: number };
   above: boolean;
-  occlusion: { mode: "roof" | "fade"; alpha: number };
+  /**
+   * Roof behaviour of an overhead tile (D-438):
+   * - `roof` fades the tile while a viewer token is under its art or outline.
+   * - `fade` is always at `alpha`.
+   * - `radial` opens a circle of `radius` grid cells around each viewer under it.
+   * - `vision` opens what those viewers see.
+   * Canvas2D, or a scene without live sight, falls back to `roof`.
+   */
+  occlusion: { mode: "roof" | "fade" | "radial" | "vision"; alpha: number; radius?: number };
+  /**
+   * G-25 (D-438): tiles with the same group id fade together while a `source` member is
+   * occupied. A `follower` never opens the group by itself.
+   */
+  roofGroup?: { id: string; role: "source" | "follower" };
+  /** G-24 (D-438): drawn above the fog while current sight touches the roof's outline. Never explored. */
+  revealInFog?: boolean;
 }
 
 export interface DrawingDocument extends BaseDocument {

@@ -12,6 +12,7 @@
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
   import { TileImageCache } from "../canvas/imageTexture";
   import { tokenRect } from "../canvas/tokens";
+  import { roofViewerTokens } from "../core/roofs";
   import { onDestroy, onMount } from "svelte";
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
   import { parseInvite } from "./hostShare";
@@ -1166,8 +1167,10 @@
     // player at all, so there is nothing else to paint it from).
     syncHexOverlay(view, hexOverlay, scene, "player", client.store.getAll("settings"));
     // Only projected tiles are present; hidden GM tiles and their images never arrive.
+    // D-438: roofs open for this player's own vision tokens (the selection narrows them).
     view.getTilesLayer({ loadTexture: tileImages.load }).sync(scene?.tiles ?? [],
-      (scene?.tokens ?? []).filter((token) => token.vision).map(tokenRect), scene?.regions ?? []);
+      scene ? roofViewerTokens(scene, client.user, client.store.getAll("actors") as readonly ActorDocument[], selection).map(tokenRect) : [],
+      scene?.regions ?? [], scene ? { gridSize: scene.grid.size } : {});
     tileImages.retain([...(scene?.tiles ?? []).map((tile) => tile.img), ...(scene?.tokens ?? []).map((token) => token.img)]);
     const fetcher = current.fetcher;
     if (fetcher) sceneBackground.sync(scene?.img ?? null, client.store.world.assetManifest,
@@ -1319,6 +1322,10 @@
                 return Array.from(view.app.renderer.extract.pixels({ target: layer, frame, resolution: 1 }).pixels).slice(0, 4);
               },
               stairMarkers: () => view.stairMarkerIds(),
+              roofStates: () => {
+                const layer = view.getTilesLayer({ loadTexture: tileImages.load });
+                return Object.fromEntries((activeScene()?.tiles ?? []).map((t) => [t._id, layer.roofStateOf(t._id)]));
+              },
               floorPresentation: () => ({ levelId: client.levelFocus?.levelId ?? null, mode: client.levelFocus?.mode ?? null, tileIds: activeScene()?.tiles.map((t) => t._id) ?? [], lightIds: activeScene()?.lights.map((l) => l._id) ?? [], img: activeScene()?.img ?? null, darkness: activeScene()?.darkness ?? null }),
               // D-271: what this player's hexcrawl overlay painted (its own cover included).
               hexOverlay: () => {
@@ -1520,6 +1527,8 @@
         controller = new CanvasController({
           onSelectionChange: (ids) => {
             selection = [...ids];
+            // D-438: the selection decides which owned tokens open roofs (deferred: never re-enter refresh).
+            if (activeScene()?.tiles.some((tile) => tile.above)) queueMicrotask(refresh);
             if (ids.length === 1 && client.levelFocus?.isolated && client.levelFocus.mode !== "manual" && ids[0] !== client.levelFocus.followTokenId) chooseFloorFocus(null, ids[0]);
             closeHexMenu(); // any new gesture supersedes the menu
           },

@@ -1319,9 +1319,19 @@ export interface GmFogSurface {
     width: number;
     height: number;
     above: boolean;
-    mode: "roof" | "fade";
+    mode: "roof" | "fade" | "radial" | "vision";
     alpha: number;
+    /** D-438 roof fields. */
+    rotation?: number;
+    radius?: number;
+    roofGroup?: { id: string; role: "source" | "follower" };
+    revealInFog?: boolean;
   }): string;
+  /** D-438: what each roof on the active scene draws (alpha, openings, group, fog reveal). */
+  roofStates(): Record<string, {
+    alpha: number; holes: "none" | "circles" | "vision"; openings: number; holeAlpha: number;
+    under: boolean; linked: boolean; reveal: boolean; art: boolean;
+  } | null>;
   /**
    * G-11 e2e (D-437): create a wall through the client op path (a door when `door` is given:
    * every axis conditional); returns its id. `everyFloor` scopes it to all floors.
@@ -1544,6 +1554,11 @@ export interface PlayerCanvasSurface {
   floorPresentation(): { levelId: string | null; mode: string | null; tileIds: string[]; lightIds: string[]; img: string | null; darkness: number | null };
   /** G-10 (D-430): IDs of the stair markers drawn on this player's floor. */
   stairMarkers(): string[];
+  /** D-438: what each roof on this player's canvas draws (the same shape as the GM readback). */
+  roofStates(): Record<string, {
+    alpha: number; holes: "none" | "circles" | "vision"; openings: number; holeAlpha: number;
+    under: boolean; linked: boolean; reveal: boolean; art: boolean;
+  } | null>;
   /** The player's fog loop after everything queued landed, plus the layer's style/visibility. */
   fogState(): Promise<{
     sceneId: string | null;

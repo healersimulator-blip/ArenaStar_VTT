@@ -668,7 +668,7 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-10 Stairs visible to players | **Done** — markers per floor, `secret` hides them | D-430 |
 | G-11 Lock stairs | **Done** — toggle, plus stairs linked to a door work only while it is open (dangling links audited) | D-430, D-437 |
 | G-14 Stairs on the canvas | **Partial** — GM labels/arrows, create from any Active Zones region; dedicated draw tool open | D-430 |
-| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (12 journeys) | D-429 |
+| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 20 Chromium tests, roofs included) | D-429 |
 | S6 / G-15 Pre-check and live audit | **Done** — blocking errors, acknowledged warnings, quick fixes, live list | D-433 |
 | G-18 Transition presentation | **Done** — arrival notice and cross-fade | D-430 |
 | S7 / G-12 GM floor view & build mode | **Done** — floor switch with ghost/only/all, build mode, PageUp/PageDown | D-434 · `src/core/gmFloorView.ts` |
@@ -676,7 +676,11 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-16 Move to floor & elevation | **Done (GM)** — token menu floors, elevation with floor offer; player elevation not added | D-435 |
 | G-17 Who is where | **Done** — roster with counts and PCs; click to jump | D-434 |
 | G-28 Level generator | **Done** — floors, basements, height, roof | D-436 |
-| G-19 to G-27, G-29 to G-33 | Open (slices D–F) | — |
+| G-26 Better roof fading | **Done** — "under" from the roof's art (then zone, then rotated rectangle); only the viewer's own vision tokens open roofs (a selection narrows them); `radial` and `vision` openings on WebGL, whole-roof fade on Canvas2D; GM-local "Peek under roofs" | D-438 · `src/core/roofs.ts` |
+| G-25 Roof groups | **Done** — `roofGroup {id, role}`: an occupied source fades the whole group, followers never trigger; order-independent | D-438 |
+| G-24 Roofs through fog | **Done** — `revealInFog`: a copy above the fog while live sight touches the outline (exact test); never explored | D-438 |
+| Roof authoring (found while doing E) | **Done** — no UI could make a tile overhead; Scenes → Tiles & roofs edits overhead, mode, opacity, radius, group, role, reveal | D-438 · `src/ui/images/RoofEditor.svelte` |
+| G-19 to G-23, G-27, G-29 to G-33 | Open (slices D and F) | — |
 
 ---
 

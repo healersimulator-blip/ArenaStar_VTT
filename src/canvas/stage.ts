@@ -607,6 +607,16 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   fogHolder.label = "fog";
   root.addChild(fogHolder);
   let fogLayer: FogLayerImpl | null = null;
+  // G-24 (D-438): roofs flagged "show through fog" are copied here while live sight touches them.
+  const roofsOverFog = new Container();
+  roofsOverFog.label = "roofsOverFog";
+  root.addChild(roofsOverFog);
+  /** The live sight the fog last drew; roofs read it for vision openings and the G-24 reveal. */
+  let liveSight: readonly Float32Array[] = [];
+  const forwardSight = (polys: readonly Float32Array[]): void => {
+    liveSight = polys;
+    tilesLayer?.setVision(polys);
+  };
   const effectsHolder = new Container();
   effectsHolder.label = "effects";
   root.addChild(effectsHolder);
@@ -834,8 +844,11 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           tilesBelowLayer,
           tilesAboveLayer,
           options ?? {},
+          // G-26: openings need inverse stencil masks, which Canvas2D lacks (it fades whole roofs).
+          { overFog: roofsOverFog, inverseMasks: rendererName !== "canvas" },
         );
         tilesLayer.setGhosts(pendingTileGhosts, ghostAlpha);
+        tilesLayer.setVision(liveSight);
       }
       return tilesLayer;
     },
@@ -1139,11 +1152,14 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         fogLayer = null;
       }
       fogLayer = new FogLayerImpl(app, sceneSize);
+      fogLayer.onVisible = forwardSight;
       fogHolder.addChild(fogLayer.container);
       return fogLayer;
     },
     hideFogLayer(): void {
       fogLayer?.setShown(false);
+      // No fog drawn → no roof copies above it and no sight-shaped openings.
+      forwardSight([]);
     },
     peekFogLayer(): FogLayer | null {
       return fogLayer;

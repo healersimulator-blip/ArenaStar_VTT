@@ -31,6 +31,7 @@
   import { createAgentManager, type AgentManager } from "./agentManager";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
+  import { roofViewerTokens } from "../core/roofs";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
   import { tokenHpBarsMap } from "../packages/pf1e/tokenHpBars";
@@ -1002,6 +1003,12 @@ const WALL_PICK_RADIUS = 12;
   }>({
     sceneId: null,
     ids: [],
+  });
+  /** G-26c (D-438): GM-local "Peek under roofs"; never saved or sent. */
+  let roofPeek = $state(false);
+  $effect(() => {
+    const on = roofPeek && !viewingAs;
+    stage?.getTilesLayer({ loadTexture: tileImages.load }).setHoverFade(on);
   });
   function clearTokenSelection(): void {
     controller?.clearSelection();
@@ -3247,13 +3254,17 @@ const WALL_PICK_RADIUS = 12;
     );
     // D-257: walls overlay follows the replica too (a door toggled anywhere redraws here).
     syncWallsOverlay();
-    // §9 tiles: roofs fade over tokens with vision (D-083)
-    const occupied = (shown?.tokens ?? [])
-      .filter((t) => t.vision)
-      .map((t) => tokenRect(t));
+    // §9 tiles: roofs fade over tokens with vision (D-083). D-438: only the viewer's own vision
+    // tokens open roofs (every token for the GM, the player's for "view as"), and a selection
+    // narrows them.
+    const occupied = shown
+      ? roofViewerTokens(shown, viewAsPlayer ?? current.gm.client.user,
+          current.gm.client.store.getAll("actors") as readonly ActorDocument[],
+          tokenSelection.sceneId === shown._id ? tokenSelection.ids : []).map((t) => tokenRect(t))
+      : [];
     view
       .getTilesLayer({ loadTexture: tileImages.load })
-      .sync(shown?.tiles ?? [], occupied, shown?.regions ?? []);
+      .sync(shown?.tiles ?? [], occupied, shown?.regions ?? [], shown ? { gridSize: shown.grid.size } : {});
     tileImages.retain([...(scene?.tiles ?? []).map((tile) => tile.img), ...(scene?.tokens ?? []).map((token) => token.img)]);
     sceneBackground.sync(shown?.img ?? null, current.gm.client.store.world.assetManifest,
       (hash, priority) => current.gm.fetcher.request(hash, priority), view, shown);
@@ -4021,6 +4032,13 @@ const WALL_PICK_RADIUS = 12;
         canvas.addEventListener("pointerdown", onTileDown);
         canvas.addEventListener("pointermove", onTileHoverMove);
         canvas.addEventListener("pointerleave", onTileHoverLeave);
+        // G-26c (D-438): "Peek under roofs" — the GM's pointer opens the roof it is over (local only).
+        const onRoofPeekMove = (e: PointerEvent) => {
+          if (roofPeek) view.getTilesLayer({ loadTexture: tileImages.load }).setHover(toWorld(e));
+        };
+        const onRoofPeekLeave = () => view.getTilesLayer({ loadTexture: tileImages.load }).setHover(null);
+        canvas.addEventListener("pointermove", onRoofPeekMove);
+        canvas.addEventListener("pointerleave", onRoofPeekLeave);
         canvas.addEventListener("click", onTileClick);
         canvas.addEventListener("dblclick", onTileDoubleClick);
         canvas.addEventListener("contextmenu", onTileContextMenu);
@@ -4056,6 +4074,8 @@ const WALL_PICK_RADIUS = 12;
           canvas.removeEventListener("pointerdown", onTileDown);
           canvas.removeEventListener("pointermove", onTileHoverMove);
           canvas.removeEventListener("pointerleave", onTileHoverLeave);
+          canvas.removeEventListener("pointermove", onRoofPeekMove);
+          canvas.removeEventListener("pointerleave", onRoofPeekLeave);
           canvas.removeEventListener("click", onTileClick);
           canvas.removeEventListener("dblclick", onTileDoubleClick);
           canvas.removeEventListener("contextmenu", onTileContextMenu);
@@ -4110,6 +4130,8 @@ const WALL_PICK_RADIUS = 12;
               sceneId: activeScene()?._id ?? null,
               ids: [...ids],
             };
+            // D-438: the selection decides which tokens open roofs (deferred: never re-enter refresh).
+            if (activeScene()?.tiles.some((tile) => tile.above)) queueMicrotask(refresh);
             closeTokenMenu(); // any new gesture supersedes the menu
             syncPF1eThreatOverlay(); // P02: one selected token shows its threat
           },
@@ -4918,6 +4940,10 @@ const WALL_PICK_RADIUS = 12;
               tiles.map((t) => [t._id, layer.alphaOf(t._id)]),
             );
           },
+          roofStates: () => {
+            const layer = view.getTilesLayer({ loadTexture: tileImages.load });
+            return Object.fromEntries((activeScene()?.tiles ?? []).map((t) => [t._id, layer.roofStateOf(t._id)]));
+          },
           // §2.2/G-10a: what the GM canvas actually drew — the mode's own gate, read back.
           tokenHpBars: () => view.tokenHpBars(),
           seedTile: (spec) => {
@@ -4942,7 +4968,10 @@ const WALL_PICK_RADIUS = 12;
                   height: spec.height,
                   img: spec.img ?? "",
                   above: spec.above,
-                  occlusion: { mode: spec.mode, alpha: spec.alpha },
+                  occlusion: { mode: spec.mode, alpha: spec.alpha, ...(spec.radius !== undefined ? { radius: spec.radius } : {}) },
+                  ...(spec.rotation !== undefined ? { rotation: spec.rotation } : {}),
+                  ...(spec.roofGroup ? { roofGroup: spec.roofGroup } : {}),
+                  ...(spec.revealInFog !== undefined ? { revealInFog: spec.revealInFog } : {}),
                 },
               },
             ]);
@@ -5147,6 +5176,11 @@ const WALL_PICK_RADIUS = 12;
         <div class="board" style="position: relative;">
           {#if gmStairOffer}<StairChooser offer={gmStairOffer} tokenName={gmStairTokenName(gmStairOffer.tokenId)} onChoose={answerGmStairs} />{/if}
           <ZoomControl {stage} onInput={() => fxPlayer?.cancelCamera()} />
+          {#if !viewingAs && levelPreviewScene?.tiles.some((tile) => tile.above)}
+            <label data-roof-peek title="Fade the roof under your pointer. Only your screen changes." style="position:absolute;left:50%;transform:translateX(-50%);top:12px;z-index:30;display:flex;gap:5px;align-items:center;background:#182331;color:#e6eef9;padding:4px 8px;font-size:11px;border:1px solid #52657a;border-radius:5px">
+              <input type="checkbox" aria-label="Peek under roofs" bind:checked={roofPeek} />Peek under roofs
+            </label>
+          {/if}
           {#if !viewingAs && (levelPreviewScene?.levels?.length ?? 0) > 0}
             <div class="level-perception-preview" data-gm-floor-view style="position:absolute;right:12px;top:58px;z-index:30;background:#182331;color:#e6eef9;padding:8px;max-width:270px;font-size:11px;border:1px solid #52657a;border-radius:5px">
               <label>GM floor

@@ -1607,3 +1607,21 @@ Drawings, templates, notes and regions accept the same optional `levelScope` as 
 The host stamps creations in isolated scenes inside the single commit path: a drawing, template or note created by a user who is viewing a floor gets `levelScope:{mode:"levels",ids:[that floor]}`; a token created without `levelId` gets a floor and matching feet elevation from, in order, its prefab parent, the creator's viewed floor, the band containing its elevation, or the lowest floor (D-431).
 
 **GM build floor (D-434).** `level.focus` from a GM/ASSISTANT accepts any existing floor of the scene. Such an explicit GM focus (never the follow default) is that user's build floor: in any scene with levels, walls, lights, regions, drawings, templates and notes they create get `levelScope:{mode:"levels",ids:[floor]}`, tokens get the floor and matching feet, and created tiles are appended to the floor's `tileIds` by a host-added level update in the same envelope (requiring `scene-level-play-v1` like any floor-art edit). Explicit fields are never overwritten; `level.focus` with `levelId:null` ends build mode.
+
+### Roof fields on tiles (D-438)
+
+`TileDocument.occlusion.mode` accepts `"roof" | "fade" | "radial" | "vision"`, and `occlusion` may carry `radius` (grid cells, 0.25–20; read only by `radial`). Tiles may also carry two fields:
+- `roofGroup: {id, role}`: `id` matches `[A-Za-z0-9_-]{1,64}`; `role` is `"source"` or `"follower"`.
+- `revealInFog: boolean`.
+
+The host validates these fields on tile create and on any update whose diff keys touch `occlusion`, `roofGroup` or `revealInFog` (with or without `-=`, dotted paths included). Validation runs on the resulting tile and fails with `invalid_schema`:
+- `occlusion` accepts only `mode`, `alpha` (0–1) and `radius`.
+- `occlusion` may not be removed.
+- Unknown modes are refused.
+
+Absent fields are never checked, and documents written before D-438 are unchanged.
+
+There are no new messages and no capability gate:
+- Clients that predate D-438 draw `radial` and `vision` as `roof` and ignore the other fields.
+- Roof state is computed per client from its own replica and live sight, and is never replicated.
+- Roofs never write explored fog.

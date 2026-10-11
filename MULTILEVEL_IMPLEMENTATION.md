@@ -1,6 +1,6 @@
 # Multilevel implementation status
 
-**2026-10-11 — native cover, wall authoring, spatial kernel, level drafts, isolated floor play, stairwells with player choice (D-430), pass-through and door-linked stairs (D-437), floor scopes for presentation objects (D-432) and the floor-play check (D-433); the complete design is not finished.**
+**2026-10-11 — native cover, wall authoring, spatial kernel, level drafts, isolated floor play, stairwells with player choice (D-430), pass-through and door-linked stairs (D-437), floor scopes for presentation objects (D-432), the floor-play check (D-433) and roofs (D-438); the complete design is not finished.**
 
 Target: [Multilevel, walls and Faux Overhead design](MULTILEVEL_WALLS_DESIGN.md).
 
@@ -22,9 +22,21 @@ Legacy scenes are not silently migrated. Legacy `{from,to}` stairs keep working;
 
 **GM side (D-434–D-436).** An empty Draft levels panel can *generate a stack of floors*. The **GM floor** control on the canvas shows one floor with the others faint (or hidden, or all), steps with PageUp/PageDown, and lists who is on which floor (click a PC to jump). *Build on this floor* keeps picking on that floor and makes everything the GM creates — walls, lights, tiles (added to the floor's art), regions, notes, drawings, templates, tokens — belong to it. The token menu moves a token (or the selection) to any floor and edits feet elevation, offering a floor change when the height belongs to another floor.
 
-**Remaining** (tracked as G-items in the [gap analysis](MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md#implementation-progress)): a dedicated stair drawing tool, cross-floor sight/light, surfaces with holes, roofs (fog reveal, linked fades, better fade modes), import/merge tools, and comprehensive snapshot/asset/sheet/FX secrecy.
+**Roofs (D-438).** In **Scenes → Tiles & roofs**, any tile can be made *Overhead (roof)*. Its fade can be:
+- *whole roof*: the roof fades while a token is under it;
+- *circle round token*: a circle opens around each token under it;
+- *token's sight*: the roof opens where the token under it can see;
+- *always faded*.
 
-Validation (D-429–D-437): **5,442 Vitest passed / 12 skipped** (391 files, 2 skipped); **`test:multilevel` 14/14 Chromium journeys passed on WebGL**, including the three-floor stairwell journey (player chooses down, "Take stairs" + Esc, keyboard choice up, locked stairs explained), the pass-through stairwell linked to a door (walked over while shut, travelled through with the route continuing once open) and the GM floor view journey (generator, ghost/only display, build-mode tile stamping, token-menu floor move and elevation offer, PageUp/PageDown); the Faux Overhead specs also pass on the Canvas2D fallback. Typecheck, lint and single-file build passed; Svelte 88 components / zero blockers / one existing advisory.
+Set the open opacity and the circle radius. Give a building's tiles one group so they open together. A *follower* tile, such as a porch, never opens the group by itself. *Show through fog* lets players see a roof from outside as soon as any part of it is in sight. This never writes explored fog.
+
+Roofs open only for the viewer's own tokens with vision, and only when a token's centre is on the roof's art. Selecting a token narrows which tokens count. Another player's token inside a building does not open the building for you.
+
+The GM can tick **Peek under roofs** on the canvas to fade the roof under the pointer, on the GM's screen only. Circle and sight openings need WebGL; the Canvas2D fallback fades the whole roof.
+
+**Remaining** (tracked as G-items in the [gap analysis](MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md#implementation-progress)): a dedicated stair drawing tool, cross-floor sight/light, surfaces with holes, import/merge tools, and comprehensive snapshot/asset/sheet/FX secrecy.
+
+Validation (D-429–D-438): **5,469 Vitest passed / 12 skipped** (393 files, 2 skipped); **`test:multilevel` 20/20 Chromium tests passed on WebGL** (14 spec files), including the three-floor stairwell journey (player chooses down, "Take stairs" + Esc, keyboard choice up, locked stairs explained), the pass-through stairwell linked to a door (walked over while shut, travelled through with the route continuing once open), the GM floor view journey (generator, ghost/only display, build-mode tile stamping, token-menu floor move and elevation offer, PageUp/PageDown) and the roof journeys (real-pixel radial/vision openings, group fade, reveal through fog, editor setup, Peek, art-shaped "under", player-only openings); the Faux Overhead and roof specs also pass on the Canvas2D fallback. Typecheck, lint and single-file build passed; Svelte 89 components / zero blockers / one existing advisory.
 
 ## Implemented and usable now
 

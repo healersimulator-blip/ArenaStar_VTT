@@ -102,6 +102,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { encumbranceOptionsOf, worldSettingsFrom } from "../core/worldSettings";
 import { sceneDifficultCells } from "../core/rules";
 import { tileTriggerElevationError, tileTriggerZoneError } from "../core/tileTriggerZone";
+import { roofOcclusionError, tileRoofError } from "../core/roofs";
 import { guardedWallEditError, type WallEditGuard } from "../core/wallEditing";
 import { SUPPORTED_WIRE_FEATURES, featureListError, requiredOpFeatures, requiredWorldFeatures } from "../core/capabilities";
 import { levelTransactionError } from "../core/levels";
@@ -3265,7 +3266,8 @@ export class HostSync {
             const tile = op.data as TileDocument;
             if (user.role !== "GM" && user.role !== "ASSISTANT" && tile.sort !== undefined)
               return { ok: false, reason: "forbidden", error: "only GMs set tile trigger priority" };
-            const shapeError = tileTriggerZoneError(tile.triggerZone) ?? tileTriggerElevationError(tile.triggerElevation);
+            const shapeError = tileTriggerZoneError(tile.triggerZone) ?? tileTriggerElevationError(tile.triggerElevation) ??
+              roofOcclusionError(tile.occlusion) ?? tileRoofError(tile);
             if (shapeError) return { ok: false, reason: "invalid_schema", error: shapeError };
           }
           // Attachment metadata is host-owned on placement. A player must not
@@ -3442,6 +3444,12 @@ export class HostSync {
           const dry = applyDiff(doc, op.diff);
           if (!dry.ok)
             return { ok: false, reason: "invalid_schema", error: dry.error };
+          // D-438: roof fields are checked on the tile they produce (dotted paths included).
+          if (op.ref.coll === "tiles" && Object.keys(op.diff).some((key) => /^(?:-=)?(?:occlusion|roofGroup|revealInFog)(?:\.|$)/.test(key))) {
+            const tile = dry.value as TileDocument;
+            const roofError = roofOcclusionError(tile.occlusion) ?? tileRoofError(tile);
+            if (roofError) return { ok: false, reason: "invalid_schema", error: roofError };
+          }
           if (op.ref.coll === "regions") {
             const regionError = regionGeometryError(dry.value);
             if (regionError) return { ok: false, reason: "invalid_schema", error: regionError };
