@@ -13084,3 +13084,29 @@ Players' previews already hold only their own floor's tokens and walls, so they 
 **Templates.** The template document gets no elevation field yet. Nothing in the product creates or resolves template documents: they come from imports and automation, and they are presentation only. Spell areas carry their own origin. When templates drive areas, they should use the origin height above.
 
 **Limits.** Players cannot aim areas at tokens on lower floors, because their clients hold no other floor's geometry; the GM can. The origin height is fixed, so there is no template elevation tool.
+
+## D-448 — Standing, falling and flying between floors (G-23) (2026-10-11)
+
+Floors now have real openings (D-444), but a token could still stand on air. A player could walk the hero into a stairwell's empty middle and stay on the upper floor. The GM's height edit (D-435) moved a token onto another floor through solid stone without a word.
+
+**Standing.** A walking token stands on its floor. Where that floor is open there is nothing to stand on, with these exceptions:
+- **Stairwells.** Inside a stairwell serving that floor, the stairs carry the token.
+- **Airborne tokens.** A token with its feet above the floor's height is airborne and crosses openings freely.
+- **Untraced floors** are solid everywhere, so nothing changes until a floor is traced.
+
+**Players.** The host refuses a player's walk that would end over an opening: "No floor there: Hero would step into an opening on Floor 2." It arrives through the usual move-refusal notice (D-429).
+- Explicit floor or height changes are not walks; the stairs make those too.
+- Prefab parts riding their parent are not checked.
+- The GM, assistants and the host's system user are not checked.
+
+**GM.** The GM can put a token over an opening. Two things then offer the fall to the solid floor beneath, which the kernel's `supportBelow` finds. Both are ordinary undoable moves.
+- **Floor-play check.** A new warning, `token-over-opening`, with the quick fix "Drop them to the floor below". Attached parts follow.
+- **Token menu.** "Fall to Ground (10 ft)".
+
+**Flying.** When the GM sets a token's height onto another floor, the offer now says whether the way is open. The token's whole footprint, its size in cells × the grid distance tall as for sight, must pass through the openings of every floor plane on the way (a kernel body sweep). The floor it stands on does not stop it rising. Otherwise the offer names the solid floor in the way and offers "Move to Floor 2 anyway".
+
+**Limits.**
+- Players still cannot set heights (G-16), so player flight waits for that.
+- Fall damage is left to the GM; there is no rule automation.
+- Tokens left standing over an opening by other edits (tracing a floor under them, a GM move) stay until the GM drops them.
+- Prefab parts and multi-cell creatures are judged at their centre, as stairs are.

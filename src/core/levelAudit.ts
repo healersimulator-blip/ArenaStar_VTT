@@ -9,8 +9,10 @@ import { inElevationBand } from "./multilevelGeometry";
 import { stairDoor, stairLandingBlocked, stairLocked, stairRegionPolygon, stairSpec, type StairBehaviorV2, type StairEdge } from "./levelPlay";
 import { wallEditLocked } from "./wallEditing";
 import { floorSolidAt, surfaceOpenings } from "./floorSurface";
+import { floorFooting } from "./floorSupport";
+import { floorMoveOps } from "./levelPlay";
 
-export type LevelAuditFix = "walls-all" | "lights-all" | "tokens-by-band" | "merge-stairs";
+export type LevelAuditFix = "walls-all" | "lights-all" | "tokens-by-band" | "merge-stairs" | "drop-tokens";
 export interface LevelAuditFinding {
   code: string;
   severity: "error" | "warning" | "info";
@@ -65,6 +67,10 @@ export function levelPlayAudit(scene: SceneDocument): LevelAuditFinding[] {
     if (voids.length) findings.push({ code: "opening-over-void", severity: "warning", ids: [level._id],
       message: `${level.name} has ${plural(voids.length, "opening")} with no floor beneath ${voids.length === 1 ? "it" : "them"}.` });
   }
+  // G-23 (D-448): tokens standing over an opening of their floor, outside any stairwell.
+  const falling = scene.tokens.filter((t) => !floorFooting(scene, t).supported);
+  if (falling.length) findings.push({ code: "token-over-opening", severity: "warning", fix: "drop-tokens", ids: falling.map((t) => t._id),
+    message: `${plural(falling.length, "token")} ${falling.length === 1 ? "stands" : "stand"} over an opening with no floor under ${falling.length === 1 ? "it" : "them"}.` });
   const assigned = new Set(levels.flatMap((l) => l.tileIds ?? []));
   const loose = scene.tiles.filter((t) => !t.hidden && !assigned.has(t._id));
   if (loose.length && assigned.size) findings.push({ code: "unassigned-tiles", severity: "info", ids: loose.map((t) => t._id),
@@ -132,6 +138,17 @@ export function levelAuditFixOps(scene: SceneDocument, fix: LevelAuditFix): Op[]
     const z = Number.isFinite(t.elevation) ? t.elevation ?? 0 : 0;
     return [{ kind: "update", ref: { coll: "tokens", id: t._id, parent }, diff: { levelId: level._id, ...(inElevationBand(level, z) ? {} : { elevation: level.floorZ }) } }];
   });
+  // drop-tokens: each token over an opening falls to the solid floor beneath it (attached parts follow).
+  if (fix === "drop-tokens") {
+    const landings = new Map<string, { z: number; ids: string[] }>();
+    for (const t of scene.tokens) {
+      const landing = floorFooting(scene, t).landing;
+      if (!landing) continue;
+      const row = landings.get(landing.levelId) ?? { z: landing.z, ids: [] };
+      row.ids.push(t._id); landings.set(landing.levelId, row);
+    }
+    return [...landings].flatMap(([levelId, { z, ids }]) => floorMoveOps(scene, ids, levelId, z));
+  }
   // merge-stairs: identical-geometry legacy regions become the first region's version-2 stairwell.
   const legacy = (scene.regions ?? []).filter((r) => r.stairs && stairSpec(r.stairs).legacy);
   const ops: Op[] = [];

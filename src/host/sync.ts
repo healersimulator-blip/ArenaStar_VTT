@@ -146,6 +146,7 @@ import { pf1eSpellEffectById, pf1eSpellEffectLanded, type PF1eSpellEffect }
   from "../packages/pf1e/spellEffects";
 import { sightBlockedBetween } from "../core/crosshair";
 import { areaFloorOf, areaFloorReach, wallsOnFloor } from "../core/areaFloors";
+import { unsupportedWalks } from "../core/floorSupport";
 import { affectedTokens, lineIntersectsTokenFootprint, pf1eAreaGridFromScene, resolveAreaCells } from "../packages/pf1e/targeting";
 import { combinedTacticalEffects, resolveTacticalEffects } from "../packages/pf1e/effectOps";
 import {
@@ -3809,6 +3810,13 @@ export class HostSync {
         ops = plan.ops; stairPrompts = plan.prompts;
       }
       catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+      // G-23 (D-448): players cannot walk out over an opening (the stairs carry them inside a
+      // stairwell). The GM can, and is offered the fall afterwards.
+      const author = this.store.get("users", by) as UserDocument | undefined;
+      if (by !== this.systemUserId && author?.role !== "GM" && author?.role !== "ASSISTANT") {
+        const [off] = unsupportedWalks(ops, (id) => this.store.get("scenes", id) as SceneDocument | undefined);
+        if (off) return { ok: false, error: `No floor there: ${off.name} would step into an opening on ${off.floor}.` };
+      }
     }
     if (audit) {
       if (!ops.length) return { ok: false, error: "Cannot audit an empty world action" };

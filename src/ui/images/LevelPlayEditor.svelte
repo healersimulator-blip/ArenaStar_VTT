@@ -25,7 +25,7 @@
   const levelName = (id: string) => scene.levels?.find((l) => l._id === id)?.name ?? id;
   const fixLabel: Record<LevelAuditFix, string> = {
     "walls-all": "Put these walls on every floor", "lights-all": "Put these lights on every floor",
-    "tokens-by-band": "Assign tokens by elevation", "merge-stairs": "Merge into one stairwell",
+    "tokens-by-band": "Assign tokens by elevation", "merge-stairs": "Merge into one stairwell", "drop-tokens": "Drop them to the floor below",
   };
   async function submit(ops: Op[], done: string): Promise<boolean> {
     busy = true; message = "";

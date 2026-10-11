@@ -6,6 +6,7 @@
   import StairChooser from "../ui/StairChooser.svelte";
   import { floorForElevation, floorLighting, floorMoveOps, stairMarkers } from "../core/levelPlay";
   import { areaFloorOf, areaFloorReach, wallsOnFloor } from "../core/areaFloors";
+  import { flightPassage, tokenFooting } from "../core/floorSupport";
   import { adjacentFloor, floorRoster, gmFloorRender, GM_GHOST_ALPHA, type GmFloorMode } from "../core/gmFloorView";
   import { unscopedToFloorOps } from "../core/levelAudit";
   import type { StairOfferMsg } from "../core/messages";
@@ -583,7 +584,7 @@ const WALL_PICK_RADIUS = 12;
     controller?.select([token._id]);
   }
   // G-16 (D-435): GM floor moves and feet elevation from the token menu.
-  let elevationOffer = $state<{ tokenId: string; levelId: string; name: string; z: number } | null>(null);
+  let elevationOffer = $state<{ tokenId: string; levelId: string; name: string; z: number; blockedBy: string | null } | null>(null);
   function floorMenuTargets(tokenId: string): string[] {
     const sceneId = activeScene()?._id ?? null;
     return tokenSelection.sceneId === sceneId && tokenSelection.ids.includes(tokenId) ? [...tokenSelection.ids] : [tokenId];
@@ -603,7 +604,9 @@ const WALL_PICK_RADIUS = 12;
     elevationOffer = null;
     const band = scene.levels?.length ? floorForElevation(scene, z) : null;
     if (scene.levels?.length && token.levelId !== undefined && band && band._id !== token.levelId) {
-      elevationOffer = { tokenId: token._id, levelId: band._id, name: band.name, z }; return;
+      // G-23 (D-448): a flight between floors is clear when the token fits through every opening on the way.
+      const passage = scene.levelMode === "isolated" ? flightPassage(scene, token, z) : { clear: true, blockedBy: null };
+      elevationOffer = { tokenId: token._id, levelId: band._id, name: band.name, z, blockedBy: passage.clear ? null : passage.blockedBy?.name ?? "A floor" }; return;
     }
     if (scene.levels?.length && token.levelId !== undefined && !band) {
       notifyLog = [...notifyLog.slice(-49), { message: "No floor covers that height; elevation unchanged.", level: "warn" }]; return;
@@ -5546,9 +5549,21 @@ const WALL_PICK_RADIUS = 12;
                   <input type="number" aria-label="Token feet elevation" style="width:64px" value={menuToken.elevation ?? 0}
                     onchange={(e) => setTokenElevation(menuToken, Number(e.currentTarget.value))} /></label>
                 {#if elevationOffer?.tokenId === menuToken._id}
-                  <span class="token-menu-static" data-token-elevation-offer>That height is on {elevationOffer.name}.</span>
-                  <button type="button" role="menuitem" onclick={() => elevationOffer && moveTokensToFloor([menuToken._id], elevationOffer.levelId, elevationOffer.z)}>Move to {elevationOffer.name}</button>
+                  <span class="token-menu-static" data-token-elevation-offer>That height is on {elevationOffer.name}{elevationOffer.blockedBy ? `; ${elevationOffer.blockedBy} is solid in the way` : ""}.</span>
+                  <button type="button" role="menuitem" onclick={() => elevationOffer && moveTokensToFloor([menuToken._id], elevationOffer.levelId, elevationOffer.z)}>{elevationOffer.blockedBy ? `Move to ${elevationOffer.name} anyway` : `Move to ${elevationOffer.name}`}</button>
                   <button type="button" role="menuitem" onclick={() => { elevationOffer = null; }}>Keep floor</button>
+                {/if}
+                <!-- G-23 (D-448): a token standing over an opening (the GM may put it there) can fall. -->
+                {#if menuScene.levelMode === "isolated" && menuToken.levelId}
+                  {@const footing = tokenFooting(menuScene, menuToken)}
+                  {@const from = menuScene.levels?.find((l) => l._id === menuToken.levelId)}
+                  {#if !footing.supported}
+                    <span class="token-menu-static" data-token-footing>No floor under {menuToken.name}.</span>
+                    {#if footing.landing}
+                      {@const landing = footing.landing}
+                      <button type="button" role="menuitem" data-token-fall={landing.levelId} onclick={() => moveTokensToFloor([menuToken._id], landing.levelId, landing.z)}>Fall to {landing.name}{from ? ` (${from.floorZ - landing.z} ${menuScene.grid.units})` : ""}</button>
+                    {/if}
+                  {/if}
                 {/if}
               </div>
             {/if}

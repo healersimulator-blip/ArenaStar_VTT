@@ -659,6 +659,14 @@ export function stairMovementOps(ops: readonly Op[], sceneById: (id: string) => 
   return stairMovementPlan(ops, sceneById).ops;
 }
 /** G-08: choices for a token already standing in stairs on its own floor (an explicit request). */
+/** G-23 (D-448): is this point inside a stairwell serving `levelId`? There the stairs, not the floor, carry a token. */
+export function inStairwell(scene: Pick<SceneDocument, "regions">, levelId: string, point: Point): boolean {
+  return (scene.regions ?? []).some((r) => {
+    if (!r.stairs || !stairSpec(r.stairs).levels.includes(levelId)) return false;
+    const polygon = regionPolygon(r);
+    return !!polygon && tileTriggerPolygonContains(polygon, point);
+  });
+}
 export function stairChoicesHere(scene: SceneDocument, token: TokenDocument, regionIds?: readonly string[]): StairPrompt {
   const source = scene.levels?.find((l) => l._id === token.levelId);
   const empty: StairPrompt = { sceneId: scene._id, tokenId: token._id, fromLevelId: token.levelId ?? "", regionIds: [], choices: [] };

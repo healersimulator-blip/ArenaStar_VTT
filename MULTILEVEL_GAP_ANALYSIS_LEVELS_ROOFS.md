@@ -584,6 +584,7 @@ P2 · L · Design §5.1 "Flying/falling"
 - **Bridge:**
   - A flying token changes floor with its elevation when the swept path is clear (needs G-21).
   - An unsupported landing is refused, or the GM is offered a fall action.
+- **Status: Done (D-448).** The host refuses a player's walk that ends over an opening (stairwells and airborne tokens excepted), with the reason. The GM may; the floor-play check (`token-over-opening`, "Drop them to the floor below") and the token menu ("Fall to …") then offer the fall to the floor beneath. A GM height change onto another floor says whether the token's body passes through the openings (a kernel sweep) or names the solid floor in the way. Player flight waits for player height editing (G-16).
 
 #### G-24: Roofs visible through fog from outside
 P2 · M · Better Roofs *Reveals Fog of War*
@@ -671,7 +672,7 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-10 Stairs visible to players | **Done** — markers per floor, `secret` hides them | D-430 |
 | G-11 Lock stairs | **Done** — toggle, plus stairs linked to a door work only while it is open (dangling links audited) | D-430, D-437 |
 | G-14 Stairs on the canvas | **Partial** — GM labels/arrows, create from any Active Zones region; dedicated draw tool open | D-430 |
-| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 29 Chromium tests in 22 specs, roofs and floor perception included) | D-429 |
+| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 30 Chromium tests in 23 specs, roofs and floor perception included) | D-429 |
 | S6 / G-15 Pre-check and live audit | **Done** — blocking errors, acknowledged warnings, quick fixes, live list | D-433 |
 | G-18 Transition presentation | **Done** — arrival notice and cross-fade | D-430 |
 | S7 / G-12 GM floor view & build mode | **Done** — floor switch with ghost/only/all, build mode, PageUp/PageDown | D-434 · `src/core/gmFloorView.ts` |
@@ -692,7 +693,8 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-20 See tokens on other floors | **Done** — per viewer, the host's 3D sight (kernel rays through D-444 openings, floor-scoped walls, ranges, light/darkvision) lists the lower-floor tokens the viewer's own vision tokens see; they are drawn dimmed beneath the floor's art, not pickable. The GM's isolated view shows all of them | D-445 · `tokensSeenBelow` |
 | G-22 Light through openings | **Done** — split ambient darkness at the floor's solid area; lower floors' lights in nested masks of the openings, shaped by their own walls; the floor above's lights through its openings; sent as `presentation.lighting` (players hold no surfaces); host sight counts it; WebGL and Canvas2D clip alike | D-446 · `floorLighting` |
 | G-27 Areas and floors | **Done** — areas resolve on the caster's floor (that floor's walls); radius areas reach other floors only through openings (sphere, kernel line of effect); lines/cones stay; host verification, GM preview and Lightning Bolt targeting share `areaFloorReach`; players' previews are floor-only already | D-447 · `src/core/areaFloors.ts` |
-| G-23, G-30 | Open (slices D and F) | — |
+| G-23 Flying and falling | **Done** — players cannot walk out over an opening (host refusal with the reason; stairwells and airborne tokens excepted); the GM may, and the check (`token-over-opening` → "Drop them to the floor below") and token menu ("Fall to …") offer the fall via `supportBelow`; GM height changes onto another floor report whether the body sweep passes through the openings | D-448 · `src/core/floorSupport.ts` |
+| G-30 | Open (slice F) | — |
 
 ---
 
