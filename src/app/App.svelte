@@ -3417,6 +3417,25 @@ const WALL_PICK_RADIUS = 12;
     };
   }
 
+  /** G-30 (D-449): an image picked for a Foundry scene import; a re-import reuses the stored file. */
+  async function importFoundryImage(file: File): Promise<{ hash: string }> {
+    const current = app;
+    if (!current) throw new Error("the world is not open");
+    assertImageByteLength(file.size);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    sniffImage(bytes);
+    const uploaded = await current.gm.client.uploadImageAsset(bytes, {
+      name: file.name,
+      displayName: normalizeImageName(file.name),
+      folder: imagePreferences.defaultUploadFolder,
+      sourceKind: "file",
+      collisionBehavior: "reuse",
+      convertToWebp: imagePreferences.webpConvert,
+      webpQuality: imagePreferences.webpQuality,
+    });
+    return { hash: uploaded.hash };
+  }
+
   /**
    * The hexcrawl wizard's map step: the same upload a New scene from an image makes (design §5.2) —
    * the scenes folder, the duplicate policy and the WebP settings of the image system — and the
@@ -5796,6 +5815,7 @@ const WALL_PICK_RADIUS = 12;
               onActivate={activateScene}
               onRequestImages={(sources, action) => openImageImport(sources, action, "file")}
               loadArtMask={floorArtMask}
+              uploadImage={importFoundryImage}
             />
           {:else if activeTab === "images"}
             <ImageHandlingPanel

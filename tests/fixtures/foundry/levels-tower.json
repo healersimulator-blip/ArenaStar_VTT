@@ -1,0 +1,43 @@
+{
+  "name": "Tower",
+  "width": 1000,
+  "height": 800,
+  "padding": 0.25,
+  "grid": { "type": 1, "size": 100, "distance": 5, "units": "ft" },
+  "background": { "src": "worlds/w/maps/Tower%20Ground.png", "offsetX": 0, "offsetY": 0 },
+  "foregroundElevation": 20,
+  "flags": { "levels": { "sceneLevels": [["0", "9", "Ground"], ["10", "19", "Upper"]], "backgroundElevation": 0 } },
+  "walls": [
+    { "c": [300, 200, 800, 200], "move": 20, "sight": 20, "sound": 20, "light": 20, "door": 0, "ds": 0, "flags": {} },
+    { "c": [300, 300, 800, 300], "move": 20, "sight": 20, "sound": 20, "light": 20, "door": 0, "flags": { "wall-height": { "bottom": 0, "top": 9 } } },
+    { "c": [300, 400, 800, 400], "move": 20, "sight": 20, "sound": 20, "light": 20, "door": 1, "ds": 2, "flags": { "wall-height": { "bottom": 10, "top": 19 } } },
+    { "c": [300, 500, 800, 500], "move": 0, "sight": 0, "sound": 0, "light": 0, "door": 0, "flags": {} },
+    { "c": [300, 600, 800, 600], "move": 20, "sight": 10, "sound": 20, "light": 20, "dir": 1, "flags": {} }
+  ],
+  "lights": [
+    { "x": 500, "y": 400, "elevation": 0, "config": { "dim": 30, "bright": 15, "color": "#FF8800", "alpha": 0.4, "angle": 360 }, "flags": { "levels": { "rangeTop": 9 } } },
+    { "x": 600, "y": 400, "elevation": 10, "config": { "dim": 20, "bright": 10, "angle": 90 }, "flags": { "levels": { "rangeTop": 19 } } },
+    { "x": 700, "y": 400, "config": { "dim": 20, "bright": 0 } },
+    { "x": 700, "y": 500, "config": { "dim": 20 }, "hidden": true },
+    { "x": 700, "y": 600, "config": { "dim": 20, "negative": true } }
+  ],
+  "tiles": [
+    { "x": 300, "y": 200, "width": 1000, "height": 800, "texture": { "src": "worlds/w/maps/tower-upper.webp" }, "overhead": true, "occlusion": { "mode": 1, "alpha": 0 }, "elevation": 10, "flags": { "levels": { "rangeTop": 19 } } },
+    { "x": 400, "y": 300, "width": 100, "height": 100, "texture": { "src": "worlds/w/props/barrel.webp" }, "overhead": false, "flags": {} },
+    { "x": 400, "y": 400, "width": 200, "height": 200, "texture": { "src": "worlds/w/roof.webp" }, "overhead": true, "roof": true, "occlusion": { "mode": 2, "alpha": 0.3 }, "elevation": 15, "flags": { "levels": { "rangeTop": null } } }
+  ],
+  "tokens": [
+    { "name": "Guard", "x": 450, "y": 350, "width": 1, "height": 1, "elevation": 10, "disposition": -1, "texture": { "src": "tokens/guard.webp" }, "sight": { "enabled": true, "range": 60, "visionMode": "darkvision" }, "actorId": "abcdefgh12345678" },
+    { "name": "Hero", "x": 650, "y": 550, "width": 1, "height": 1, "elevation": 0, "disposition": 1, "texture": { "src": "tokens/hero.webp" }, "light": { "dim": 20, "bright": 10, "color": "#ffeeaa", "alpha": 0.5 } }
+  ],
+  "drawings": [
+    { "x": 850, "y": 250, "shape": { "type": "r", "width": 100, "height": 200 }, "elevation": 0, "text": "Main stairs", "flags": { "levels": { "drawingMode": 2, "rangeTop": 10 } } },
+    { "x": 1050, "y": 250, "shape": { "type": "r", "width": 100, "height": 100 }, "elevation": 0, "flags": { "levels": { "drawingMode": 22, "rangeTop": 9 } } },
+    { "x": 1050, "y": 450, "shape": { "type": "r", "width": 100, "height": 100 }, "elevation": 0, "text": "Lift", "flags": { "levels": { "drawingMode": 3, "elevatorFloors": "0,Ground|10,Upper" } } },
+    { "x": 300, "y": 300, "shape": { "type": "r", "width": 100, "height": 100 }, "elevation": 10, "flags": { "levels": { "drawingMode": 1, "rangeTop": 19 } } },
+    { "x": 300, "y": 300, "shape": { "type": "e", "width": 100, "height": 100 }, "flags": {} }
+  ],
+  "sounds": [{ "x": 1, "y": 2, "path": "sounds/wind.ogg" }],
+  "notes": [],
+  "templates": []
+}

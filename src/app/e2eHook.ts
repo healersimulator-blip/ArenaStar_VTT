@@ -14,6 +14,7 @@ import type {
   MacroDocument,
   MessageDocument,
   RegionDocument,
+  LevelScope,
   CombatDocument,
   Json,
   JournalDocument,
@@ -400,7 +401,12 @@ export interface AppSurface {
       rotation: number; img: string; triggerZone?: TileDocument["triggerZone"];
       triggerElevation?: TileDocument["triggerElevation"] }>;
     regions: Array<{ id: string; name: string; x: number; y: number; width: number; height: number;
-      rotation: number; shape: RegionDocument["shape"]; hidden: boolean }>;
+      rotation: number; shape: RegionDocument["shape"]; hidden: boolean; stairs?: RegionDocument["stairs"] }>;
+    /** G-30 (D-449): floors (draft or playing), wall floor scopes and token floors. */
+    levelMode: string | null;
+    levels: Array<{ id: string; name: string; bottom: number | null; top: number | null; tileIds: string[]; visibleLevelIds: string[] }>;
+    wallScopes: Array<LevelScope | null>;
+    tokenLevels: Array<string | null>;
     counts: Record<string, number>;
   } | null;
   sceneCount(): number;
@@ -2744,7 +2750,11 @@ function appSurface(app: HostApp): AppSurface {
           ...(tile.triggerElevation ? { triggerElevation: tile.triggerElevation } : {}) })),
         regions: (doc.regions ?? []).map((region) => ({ id: region._id, name: region.name, x: region.x, y: region.y,
           width: region.width, height: region.height, rotation: region.rotation ?? 0, shape: region.shape,
-          hidden: region.hidden === true })),
+          hidden: region.hidden === true, ...(region.stairs ? { stairs: region.stairs } : {}) })),
+        levelMode: doc.levelMode ?? null,
+        levels: (doc.levels ?? []).map((l) => ({ id: l._id, name: l.name, bottom: l.bottom, top: l.top, tileIds: l.tileIds ?? [], visibleLevelIds: l.visibleLevelIds })),
+        wallScopes: (doc.walls ?? []).map((w) => w.levelScope ?? null),
+        tokenLevels: (doc.tokens ?? []).map((t) => t.levelId ?? null),
 
         counts: {
           cells: (doc.cells ?? []).length,

@@ -1,6 +1,7 @@
 <script lang="ts">
   import LevelDraftEditor from "./LevelDraftEditor.svelte";
   import RoofEditor from "./RoofEditor.svelte";
+  import FoundrySceneImport from "./FoundrySceneImport.svelte";
   import { onMount } from "svelte";
   import type { ClientSync, ClientEvents } from "../../client/sync";
   import type { RoofArtMask } from "../../core/roofs";
@@ -19,6 +20,7 @@
     onActivate,
     onRequestImages,
     loadArtMask,
+    uploadImage,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
@@ -27,6 +29,8 @@
     onRequestImages: (sources: ImageSource[], action: ImageAction) => void;
     /** G-21 (D-444): tile art alpha for tracing floor shapes. */
     loadArtMask?: (image: string) => Promise<RoofArtMask | null>;
+    /** G-30 (D-449): stores an image picked for a Foundry scene import. */
+    uploadImage?: (file: File) => Promise<{ hash: string }>;
   } = $props();
 
   let scenes = $state<SceneDocument[]>([]);
@@ -205,6 +209,7 @@
       <p class="fine">Trusted players can upload images when this is off. Scene, tile and journal document edits remain GM-only.</p>
       {#if saveStatus}<span role="status" class="saved">{saveStatus}</span>{/if}
     </details>
+    <FoundrySceneImport {client} {uploadImage} {onActivate} />
   {/if}
 
   <div class="scene-list" aria-label="Scenes">

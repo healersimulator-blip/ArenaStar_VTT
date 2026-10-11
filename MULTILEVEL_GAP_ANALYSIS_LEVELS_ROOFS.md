@@ -330,7 +330,7 @@ Code references point to the pinned commits. Behavior is described in my own wor
 - Tokens get their band.
 - Bands smaller than 1.5 grid units are merged into the band that contains them.
 
-Use it as the behavior spec for a Foundry importer (G-30): written clean-room, with a dry-run report (research R12).
+Use it as the behavior spec for a Foundry importer (G-30): written clean-room, with a dry-run report (research R12). Done in D-449.
 
 ---
 
@@ -672,7 +672,7 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-10 Stairs visible to players | **Done** — markers per floor, `secret` hides them | D-430 |
 | G-11 Lock stairs | **Done** — toggle, plus stairs linked to a door work only while it is open (dangling links audited) | D-430, D-437 |
 | G-14 Stairs on the canvas | **Partial** — GM labels/arrows, create from any Active Zones region; dedicated draw tool open | D-430 |
-| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 30 Chromium tests in 23 specs, roofs and floor perception included) | D-429 |
+| S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (now 31 Chromium tests in 24 specs, roofs, floor perception and the Foundry import included) | D-429 |
 | S6 / G-15 Pre-check and live audit | **Done** — blocking errors, acknowledged warnings, quick fixes, live list | D-433 |
 | G-18 Transition presentation | **Done** — arrival notice and cross-fade | D-430 |
 | S7 / G-12 GM floor view & build mode | **Done** — floor switch with ghost/only/all, build mode, PageUp/PageDown | D-434 · `src/core/gmFloorView.ts` |
@@ -694,7 +694,7 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-22 Light through openings | **Done** — split ambient darkness at the floor's solid area; lower floors' lights in nested masks of the openings, shaped by their own walls; the floor above's lights through its openings; sent as `presentation.lighting` (players hold no surfaces); host sight counts it; WebGL and Canvas2D clip alike | D-446 · `floorLighting` |
 | G-27 Areas and floors | **Done** — areas resolve on the caster's floor (that floor's walls); radius areas reach other floors only through openings (sphere, kernel line of effect); lines/cones stay; host verification, GM preview and Lightning Bolt targeting share `areaFloorReach`; players' previews are floor-only already | D-447 · `src/core/areaFloors.ts` |
 | G-23 Flying and falling | **Done** — players cannot walk out over an opening (host refusal with the reason; stairwells and airborne tokens excepted); the GM may, and the check (`token-over-opening` → "Drop them to the floor below") and token menu ("Fall to …") offer the fall via `supportBelow`; GM height changes onto another floor report whether the body sweep passes through the openings | D-448 · `src/core/floorSupport.ts` |
-| G-30 | Open (slice F) | — |
+| G-30 Foundry multilevel import | **Done** — Scenes → "Import a Foundry scene" reads a scene export from the Levels module (V10–V13), Foundry V14 levels or a flat scene. Floors: inclusive tops meet, overlaps clipped, inferred when there is no list. Wall and light scopes come from heights; floor tiles become floor art; tokens go on their floors; stairs, one-way stairs, elevators and Change Level regions become stairwells. A dry-run report shows counts, a floor table, what is skipped and why, and which images need a file; picked files supply the art. One undoable create; floors stay drafts until the check | D-449 · `src/core/foundryImport.ts` |
 
 ---
 

@@ -13110,3 +13110,45 @@ Floors now have real openings (D-444), but a token could still stand on air. A p
 - Fall damage is left to the GM; there is no rule automation.
 - Tokens left standing over an opening by other edits (tracing a floor under them, a GM move) stay until the GM drops them.
 - Prefab parts and multi-cell creatures are judged at their centre, as stairs are.
+
+## D-449 — Importing Foundry scenes with their floors (G-30) (2026-10-11)
+
+Groups moving from Foundry bring scenes built with the Levels module (Foundry V10–V13) or with Foundry V14's own scene levels. Rebuilding a three-storey keep by hand (bands, wall heights, stairs, floor art) is the slowest part of a move, and nothing read a Foundry scene before.
+
+**What it reads.** The scene JSON that Foundry's "Export Data" writes, or a world/adventure export holding exactly one scene. `src/core/foundryImport.ts` (`planFoundryImport`) recognises three shapes:
+- **Foundry V14 levels:** `levels[]` with `elevation`, `visibility.levels`, `background` and `foreground`, `levels: [ids]` on placeables, and Change Level regions.
+- **The Levels module:** `flags.levels.sceneLevels`, wall heights (`flags["wall-height"]`), `rangeTop` on tiles and lights, stair, one-way stair and elevator drawings (`drawingMode` 2, 22, 21 and 3), and the stair regions its own migration writes. A scene with no level list gets floors inferred from the tall bands (at least 1.5 grid distances) its walls and tiles use.
+- **A flat scene:** walls, lights, tiles and tokens with no floors. Foundry V9 field names are read too.
+
+It is a clean-room reading of Foundry's public data model and of the behaviour recorded in the gap analysis (T11); no module code is used.
+
+**How it maps.**
+- **Coordinates.** Foundry draws the map inside a padding margin. ArenaStar's origin is the map's corner, so every position moves by Foundry's padding offset (`ceil(width × padding / size) × size`). Tokens become centred. Light radii change from distance to pixels.
+- **Floors.**
+  - Bands are sorted, and a duplicate bottom is merged into the first floor with that bottom.
+  - Levels tops are inclusive (0–9, then 10–19), so a top at or just under the next floor's bottom meets it. A genuine gap stays; an overlap is clipped where the next floor starts. The highest floor keeps its own top.
+  - Each floor sees the floors below it, or follows V14's visibility list.
+  - The floor with the scene's map is the one at Levels' background elevation, else the lowest floor at or above 0. It shows the scene image (`useSceneBackground`). In a V14 scene, every other floor's background and foreground become full-scene floor art.
+- **Walls and lights.** Each gets a floor scope:
+  - every floor wholly inside its height range;
+  - its own floor when its range is shorter than a floor;
+  - every floor when it has no height at all (which Levels treats as every floor; unscoped walls do nothing in floor play).
+  Doors keep their state. Limited, proximity and distance senses block; one-way walls block both ways. Switched-off lights and darkness sources are skipped; cone lights shine all around.
+- **Tiles.**
+  - A Levels floor tile, an overhead tile at a floor's base, becomes that floor's art and lies under the tokens.
+  - Roofs and canopies higher in the band stay overhead.
+  - Tiles without floor data go on the floor with the map, because floor play shows only floor art.
+- **Tokens** go on the floor their elevation is in, or the V14 level they name. One standing outside its floor's band is set on the floor. Their actors are not imported, so they arrive as plain tokens.
+- **Stairs.** Levels stairs join the floor at their bottom and the next floor their range reaches; one-way stairs keep their direction. Elevators connect their listed floors. V14 Change Level regions become prompting stairwells. Polygon and ellipse shapes are kept; holes are skipped, with a pointer to tracing floor art (D-444).
+
+**The GM's side.** Scenes tab → "Import a Foundry scene":
+1. Pick the JSON. A report lists the source, counts, a floor table, what goes on every floor, what is skipped and why, and the notes above.
+2. Foundry image paths point at the Foundry server, so art arrives only through files the GM picks; they are matched by file name and stored through the normal image upload, reusing a file already stored under that name. Anything without a file stays empty, with its path kept in `flags.foundry.src`, and the report lists it.
+3. "Create scene" submits one undoable create. Floors arrive as drafts; the GM turns floor play on after the usual check (D-433). A flat Foundry map can then join another scene as one of its floors through "Import a scene as a floor" (D-441).
+
+**Limits.**
+- One scene per file.
+- Actors, sounds, notes, measured templates and drawings other than stairs are not imported.
+- Hex scenes use the square-grid padding rule; the report asks the GM to check alignment.
+- Images do not relink after import; re-import with the files.
+- Region behaviours other than level changes (teleports, damage, scripts) are skipped.
