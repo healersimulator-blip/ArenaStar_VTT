@@ -12922,3 +12922,46 @@ Nothing on the canvas showed a token's elevation: a flyer and a walker on the sa
 **Token menu.** **Feet Z** is now on every scene. On a scene with floors it still offers to move the token when the height belongs to another floor (D-435).
 
 **Not done.** Players still cannot edit their own token's elevation (D-435's choice stands). Templates do not yet take the caster's elevation (T9, G-27).
+
+## D-441 — Import a scene as a floor (G-29) (2026-10-11)
+
+Levels users build towers from one scene per floor, and Foundry V14 gives each level its own background. ArenaStar had per-floor map tiles (`tileIds`, D-431) but no way to bring an existing scene in as a floor: the GM had to re-upload the map, redraw every wall and re-place every light. `src/core/levelImport.ts` builds one plan, applied as one envelope (one undo step) after the same staged level validation as every other level transaction.
+
+**What travels.**
+- The source map (`img`) becomes a **floor map tile** at the source background's rectangle (its offset and scale, sized from the asset manifest's natural pixel size). When the size is unknown (an external URL), the tile fills the source scene rectangle and the plan says so.
+- The source's tiles, walls and lights are copied with fresh ids. Walls and lights are scoped to the floor (`levelScope: {mode: "levels", ids: [floor]}`), and every copied tile joins the floor's `tileIds`.
+- A multilevel source imports one of its floors: walls and lights whose scope includes it, the tiles it lists, and the scene map only if that floor uses the scene background. Tiles not assigned to any floor are skipped, and the plan reports them.
+- **Scale and offset.** By default everything is scaled so the source's grid cells match this scene's, light radii included (they are in pixels). The offset is entered in this scene's grid cells.
+
+**Destination.** Either an existing floor, or a new floor stacked on top. The new floor takes the band directly above the highest floor, with the height the GM chooses; the panel defaults it to the top floor's height. It is refused when the top floor has an open top.
+
+**What does not travel, and why.**
+- Tokens belong to the encounter, not the map.
+- Regions (stairs, triggers, covers) point at the source's floors and automation.
+- Notes, drawings and templates are not copied either.
+- Sounds have no floor scope yet, so they would play on every floor.
+- Flags, tags and tile trigger zones can bind automation to the source scene; trigger zones are reported when dropped.
+- A roof group name that this scene already uses is suffixed with the floor id, so imported roofs do not fade together with the existing ones.
+
+**No `LevelDocument.background`.** The gap analysis suggested an optional per-level background field. A floor map tile already is one: it is drawn only on its floor, it uses the asset access rules that already exist (assets referenced by projected tiles), and the tile editor can move, resize and lock it. A second mechanism would add a validation path, a projection rule and an editor for no new capability.
+
+**Errors.** "Save floors for this scene first, then import into one of them", "Choose another scene to import", "Choose which floor of X to import", "That floor no longer exists", "Name the new floor (up to 64 characters)", "Give the new floor a height above 0", "X has an open top, so nothing can stack above it; import into an existing floor", "X has nothing to import (no map, tiles, walls or lights)". A stale plan fails the staged check and is refused whole.
+
+**UI.** Draft levels → **Merge, reorder, rescale or import floors** → *Import a scene as a floor*: scene (and its floor), *Into* (an existing floor or *New floor* with name and height), offset in cells, *Scale so grid cells match*, a live preview, **Import as floor**. No protocol or capability change: the plan is ordinary GM creates and a level create or update.
+
+## D-442 — Other floors' data stays on player replicas for now (G-33) (2026-10-11)
+
+**Today.** A player's replica holds every token, wall, light and tile of the active scene, except GM-hidden documents and level metadata: `levels`, `levelId`, `levelScope` and `stairs` are stripped by the projection. Isolated floor play draws only the focused floor, using the per-session `level.focus.state` presentation. A modified client could still read other floors' token positions and wall layouts. Foundry V14 and Levels behave the same way, so this is beyond parity, not a regression.
+
+**Decision.** Defer, and do it after G-20 (seeing lower floors through openings). G-20 decides which tokens on other floors a player may legitimately see. Withholding them first would have to be redone.
+
+**Design for when it is built.**
+1. **The floor set.** The host keeps a per-session floor set: the floors the user's tokens stand on, those floors' `visibleLevelIds`, and later G-20's sight-through floors. It is recomputed when token membership, the levels or the focus change.
+2. **The read boundary.** The projection treats the floor set as one more read boundary, like `hidden`. A token, wall, light, tile or region whose floor membership does not meet the set is omitted from snapshots and envelopes. Unassigned and `all`-scoped documents stay visible.
+3. **Floor changes.** When a session's floor set changes, the host resends that user's projected scene, a scene-level replace. This is simpler and safer than per-document create/delete rewrites, and floor changes are rare (stairs, GM moves). Creates and updates on documents outside the set are dropped, as for hidden tokens today.
+4. **Exempt and unaffected.** GM and assistant sessions are exempt. Fog is already keyed per floor. Assets referenced only by withheld tiles become unfetchable through the existing asset access rules, which is intended.
+5. **Open questions.**
+   - A combatant whose token is withheld: the tracker shows the name without a token.
+   - Templates that cross floors.
+   - A token mid-animation between floors.
+   - Chat cards naming withheld tokens: they are text, so acceptable.

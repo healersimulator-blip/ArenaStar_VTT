@@ -1,6 +1,6 @@
 # Multilevel implementation status
 
-**2026-10-11 — native cover, wall authoring, spatial kernel, level drafts, isolated floor play, stairwells with player choice (D-430), pass-through and door-linked stairs (D-437), floor scopes for presentation objects (D-432), the floor-play check (D-433), roofs (D-438), floor merge/reorder/rescale (D-439) and token elevation cues (D-440); the complete design is not finished.**
+**2026-10-11 — native cover, wall authoring, spatial kernel, level drafts, isolated floor play, stairwells with player choice (D-430), pass-through and door-linked stairs (D-437), floor scopes for presentation objects (D-432), the floor-play check (D-433), roofs (D-438), floor merge/reorder/rescale (D-439), token elevation cues (D-440) and importing a scene as a floor (D-441); the complete design is not finished.**
 
 Target: [Multilevel, walls and Faux Overhead design](MULTILEVEL_WALLS_DESIGN.md).
 
@@ -22,7 +22,9 @@ Legacy scenes are not silently migrated. Legacy `{from,to}` stairs keep working;
 
 **GM side (D-434–D-436).** An empty Draft levels panel can *generate a stack of floors*. The **GM floor** control on the canvas shows one floor with the others faint (or hidden, or all), steps with PageUp/PageDown, and lists who is on which floor (click a PC to jump). *Build on this floor* keeps picking on that floor and makes everything the GM creates — walls, lights, tiles (added to the floor's art), regions, notes, drawings, templates, tokens — belong to it. The token menu moves a token (or the selection) to any floor and edits feet elevation, offering a floor change when the height belongs to another floor.
 
-**Fixing a stack (D-439).** Draft levels → **Merge, reorder or rescale floors**. *Merge* moves everything on one floor to another (tokens keep their height above the floor; walls, lights, stairs and map tiles follow) and deletes the emptied floor; touching bands are joined. *Move up/down* swaps a floor with its neighbour and carries its contents. *Rescale* multiplies every elevation, for example 0.3 when a 5 ft grid becomes 1.5 m. Each shows what it will do first and is one undo step.
+**Fixing a stack (D-439).** Draft levels → **Merge, reorder, rescale or import floors**. *Merge* moves everything on one floor to another (tokens keep their height above the floor; walls, lights, stairs and map tiles follow) and deletes the emptied floor; touching bands are joined. *Move up/down* swaps a floor with its neighbour and carries its contents. *Rescale* multiplies every elevation, for example 0.3 when a 5 ft grid becomes 1.5 m. Each shows what it will do first and is one undo step.
+
+**A scene as a floor (D-441).** The same panel imports another scene (or one floor of a multilevel scene) into an existing floor or a new floor on top: its map becomes a floor map tile, and its tiles, walls and lights are copied, scaled so grid cells match, and stamped with the floor. Tokens and regions stay behind. One undo step removes it all.
 
 **Elevation cues (D-440).** A token above (or below) its floor carries a small badge with its height over that floor, such as **+15 ft**; set it from the token menu's **Feet Z** field, now on every scene. *Settings → Token elevation* shows the badge to everyone (default), only the GM, or nobody, and *Shrink tokens at other heights* draws tokens higher or lower than your selected token smaller (down to half size). Neither changes movement, sight or fog.
 
@@ -38,7 +40,7 @@ Roofs open only for the viewer's own tokens with vision, and only when a token's
 
 The GM can tick **Peek under roofs** on the canvas to fade the roof under the pointer, on the GM's screen only. Circle and sight openings need WebGL; the Canvas2D fallback fades the whole roof.
 
-**Remaining** (tracked as G-items in the [gap analysis](MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md#implementation-progress)): a dedicated stair drawing tool, cross-floor sight/light, surfaces with holes, scene/Foundry import, and comprehensive snapshot/asset/sheet/FX secrecy.
+**Remaining** (tracked as G-items in the [gap analysis](MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md#implementation-progress)): a dedicated stair drawing tool, cross-floor sight/light, surfaces with holes, Foundry import, withholding other floors from player replicas (designed, D-442), and comprehensive snapshot/asset/sheet/FX secrecy.
 
 Validation (D-429–D-438): **5,469 Vitest passed / 12 skipped** (393 files, 2 skipped); **`test:multilevel` 20/20 Chromium tests passed on WebGL** (14 spec files), including the three-floor stairwell journey (player chooses down, "Take stairs" + Esc, keyboard choice up, locked stairs explained), the pass-through stairwell linked to a door (walked over while shut, travelled through with the route continuing once open), the GM floor view journey (generator, ghost/only display, build-mode tile stamping, token-menu floor move and elevation offer, PageUp/PageDown) and the roof journeys (real-pixel radial/vision openings, group fade, reveal through fog, editor setup, Peek, art-shaped "under", player-only openings); the Faux Overhead and roof specs also pass on the Canvas2D fallback. Typecheck, lint and single-file build passed; Svelte 89 components / zero blockers / one existing advisory.
 

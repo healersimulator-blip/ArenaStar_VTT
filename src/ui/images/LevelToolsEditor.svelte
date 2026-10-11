@@ -1,11 +1,13 @@
 <script lang="ts">
   /**
-   * G-31 (D-439): merge, reorder and rescale floors. Each tool is one undoable change applied at
-   * once from the live scene (never through the draft), with a preview of what it will do.
+   * G-31 (D-439): merge, reorder and rescale floors; G-29 (D-441): import another scene as a floor.
+   * Each tool is one undoable change applied at once from the live scene (never through the
+   * draft), with a preview of what it will do.
    */
   import type { SceneDocument } from "../../core/documents";
   import type { ClientSync } from "../../client/sync";
   import { defaultMergeTarget, mergeLevelPlan, moveLevelPlan, rescaleLevelsPlan, stackOrder, type LevelPlan } from "../../core/levelRestack";
+  import { importFloorPlan, type ImportFloorInput } from "../../core/levelImport";
   let { scene, client, draftDirty }: { scene: SceneDocument; client: ClientSync; draftDirty: boolean } = $props();
   let busy = $state(false), message = $state("");
   let mergeFrom = $state(""), mergeInto = $state(""), moveId = $state("");
@@ -27,6 +29,34 @@
   const upPlan = $derived(plain && moveId ? moveLevelPlan(plain, moveId, "up", preview) : null);
   const downPlan = $derived(plain && moveId ? moveLevelPlan(plain, moveId, "down", preview) : null);
   const rescalePlan = $derived(plain ? rescaleLevelsPlan(plain, Number(factor), { gridDistance: withGrid, ...preview }) : null);
+  // G-29: import another scene's map, tiles, walls and lights as a floor.
+  let importFrom = $state(""), importLevel = $state(""), importInto = $state(""), importName = $state(""), importHeight = $state(10);
+  let importX = $state(0), importY = $state(0), importMatch = $state(true);
+  const sources = $derived(open ? (client.store.getAll("scenes") as SceneDocument[]).filter((s) => s._id !== scene._id).map((s) => ({ id: s._id, name: s.name })) : []);
+  const importSource = $derived(open && importFrom ? client.store.get("scenes", importFrom) as SceneDocument | undefined : undefined);
+  $effect(() => {
+    if (!sources.some((s) => s.id === importFrom)) importFrom = sources[0]?.id ?? "";
+    const floors = importSource?.levels ?? [];
+    if (floors.length && !floors.some((l) => l._id === importLevel)) importLevel = stackOrder(floors)[0]?._id ?? "";
+    if (importInto && !stack.some((l) => l._id === importInto)) importInto = "";
+  });
+  $effect(() => { if (importSource) importName = importSource.name.slice(0, 64); });
+  $effect(() => {
+    const top = stack[0];
+    if (top && top.top !== null && top.bottom !== null) importHeight = Math.max(1, top.top - top.bottom);
+  });
+  function importInput(target: SceneDocument, source: SceneDocument, levelId: string): ImportFloorInput {
+    const asset = source.img ? client.store.world.assetManifest[source.img] : undefined;
+    const cell = target.grid.size > 0 ? target.grid.size : 100;
+    return {
+      target, source, ...(source.levels?.length ? { sourceLevelId: importLevel } : {}),
+      into: importInto ? { levelId: importInto } : { newLevel: { id: levelId, name: importName, height: Number(importHeight) } },
+      offset: { x: Number(importX) * cell, y: Number(importY) * cell }, matchGrid: importMatch,
+      backgroundSize: asset?.width && asset.height ? { width: asset.width, height: asset.height } : null,
+      nextId: (kind) => `${kind}-${crypto.randomUUID().slice(0, 12)}`,
+    };
+  }
+  const importPlan = $derived(plain && importSource ? importFloorPlan({ ...importInput(plain, importSource, "level-preview"), validate: false }) : null);
   const blocked = $derived(!gm || busy || draftDirty);
   async function run(make: (current: SceneDocument) => LevelPlan) {
     if (blocked) return;
@@ -45,7 +75,7 @@
 </script>
 
 <details class="level-tools" data-level-tools={scene._id} ontoggle={(e) => { open = e.currentTarget.open; }}>
-  <summary>Merge, reorder or rescale floors</summary>
+  <summary>Merge, reorder, rescale or import floors</summary>
   <p>Each tool is applied at once as one undoable change, carrying tokens, scopes, stairs and elevation ranges with their floor.</p>
   {#if draftDirty}<p role="alert">Apply or reload the draft levels first.</p>{/if}
   {#if stack.length >= 2}
@@ -89,6 +119,50 @@
     {/if}
     <button type="button" disabled={blocked || !rescalePlan || !!rescalePlan.error} onclick={() => run((s) => rescaleLevelsPlan(s, Number(factor), { gridDistance: withGrid }))}>Rescale elevations</button>
     <small>For example 0.3 when a 5 ft grid becomes 1.5 m.</small>
+  </section>
+  <section data-level-import>
+    <strong>Import a scene as a floor</strong>
+    {#if sources.length === 0}
+      <small>There is no other scene to import.</small>
+    {:else}
+      <div class="row">
+        <label>Scene<select aria-label="Import source scene" bind:value={importFrom} disabled={blocked}>
+          {#each sources as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
+        </select></label>
+        {#if importSource?.levels?.length}
+          <label>Its floor<select aria-label="Import source floor" bind:value={importLevel} disabled={blocked}>
+            {#each stackOrder(importSource.levels).reverse() as l (l._id)}<option value={l._id}>{l.name}</option>{/each}
+          </select></label>
+        {/if}
+      </div>
+      <div class="row">
+        <label>Into<select aria-label="Import into floor" bind:value={importInto} disabled={blocked}>
+          <option value="">New floor</option>
+          {#each stack as l (l._id)}<option value={l._id}>{l.name}</option>{/each}
+        </select></label>
+        {#if !importInto}
+          <label>Height<input aria-label="New floor height" type="number" min="0.1" step="any" bind:value={importHeight} disabled={blocked} /></label>
+        {/if}
+      </div>
+      {#if !importInto}
+        <label>New floor name<input aria-label="New floor name" maxlength="64" bind:value={importName} disabled={blocked} /></label>
+      {/if}
+      <div class="row">
+        <label>Offset x (cells)<input aria-label="Import offset x" type="number" step="any" bind:value={importX} disabled={blocked} /></label>
+        <label>Offset y (cells)<input aria-label="Import offset y" type="number" step="any" bind:value={importY} disabled={blocked} /></label>
+      </div>
+      <label class="check"><input type="checkbox" aria-label="Match the source grid" bind:checked={importMatch} disabled={blocked} />Scale so grid cells match</label>
+      {#if importPlan}
+        <ul class="plan" data-plan="import">{#each importPlan.summary as line, i (i)}<li>{line}</li>{/each}{#each importPlan.notes as line, i (i)}<li class="note">{line}</li>{/each}</ul>
+        {#if importPlan.error}<p role="alert">{importPlan.error}</p>{/if}
+      {/if}
+      <button type="button" disabled={blocked || !importPlan || !!importPlan.error} onclick={() => run((s) => {
+        const source = client.store.get("scenes", importFrom) as SceneDocument | undefined;
+        if (!source) return { ops: [], summary: [], notes: [], error: "That scene no longer exists" };
+        return importFloorPlan(importInput(s, structuredClone(source), `level-${crypto.randomUUID()}`));
+      })}>Import as floor</button>
+      <small>Copies the map (as a floor map tile), tiles, walls and lights with new ids, stamped with the floor. Tokens and regions stay behind.</small>
+    {/if}
   </section>
   {#if message}<p role="status" data-level-tools-message>{message}</p>{/if}
 </details>

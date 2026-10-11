@@ -175,7 +175,7 @@ Legend: ✅ have · ◐ partial · ❌ missing · — not applicable. Gap IDs re
 | Build mode (hide other floors while editing) | range filter for the GM | (Better Levels) | ❌ | G-12 |
 | Per-level visibility list | implicit (show-if-above, basement) | `visibility.levels` | ◐ field `visibleLevelIds` exists, but no UI and nothing uses it | G-19 |
 | Generate or auto-detect levels | "Get levels from scene" | (Better Levels Generate Levels) | ❌ manual add (default 10-unit bands) | G-28 |
-| Drop another scene in as a floor | yes | — | ❌ | G-29 |
+| Drop another scene in as a floor | yes | — | ✅ map, tiles, walls and lights, scaled to the grid (D-441) | G-29 |
 | Who is on which floor | player portraits per level | Placeables tab | ❌ audit lists IDs only | G-17 |
 | Audit | scene checker | (Better Levels: 32 rules) | ◐ band gaps, tokens outside bands, unassigned counts | G-15 |
 
@@ -682,7 +682,9 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | Roof authoring (found while doing E) | **Done** — no UI could make a tile overhead; Scenes → Tiles & roofs edits overhead, mode, opacity, radius, group, role, reveal | D-438 · `src/ui/images/RoofEditor.svelte` |
 | G-31 Merge, reorder, rescale | **Done** — merge into level (tokens keep height above the floor; scopes, stairs, visibility, art remapped; touching bands absorbed), move up/down (bands swap, contents follow), rescale (×factor, optional grid distance); each one undo with a preview | D-439 · `src/core/levelRestack.ts` |
 | G-32 Elevation cues | **Done** — a badge with the height above the token's floor (+15 ft), an optional smaller-at-other-heights cue measured from the selected token (×0.83 at two cells, half size from ten), a world setting for everyone / GM only / off (GM only hides the size cue too), and the token menu's Feet Z on every scene | D-440 · `src/core/elevationCues.ts` |
-| G-19 to G-23, G-27, G-29, G-30, G-33 | Open (slices D and F) | — |
+| G-29 Scene as a floor | **Done** — import another scene (or one floor of a multilevel scene) into an existing floor or a new floor on top: its map becomes a floor map tile, its tiles, walls and lights are copied and stamped, scaled so grid cells match, one undo step; tokens and regions stay behind. No per-level `background` field: a floor map tile already is one | D-441 · `src/core/levelImport.ts` |
+| G-33 Withhold other floors | **Deferred, design recorded** — do after G-20, which decides what other floors a player legitimately sees; the plan is a per-session floor set as a projection read boundary with a scene resend on floor change | D-442 |
+| G-19 to G-23, G-27, G-30 | Open (slices D and F) | — |
 
 ---
 
