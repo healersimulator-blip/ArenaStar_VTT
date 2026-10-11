@@ -12908,3 +12908,17 @@ A GM who generated the wrong stack had no way out except deleting floors, which 
 **Rescale** (Levels API `rescaleGridDistance`). Multiply every elevation in the scene by a factor up to 1000, rounded to 10⁻⁶ so 0.3 × 12 is 3.6. Optionally set the grid distance to match. Token sight and darkvision are authored in feet and are not touched. Results beyond ±1,000,000 are refused.
 
 **UI.** Draft levels → **Merge, reorder or rescale floors** (shown once levels are saved). Merge shows a live preview of what will happen; Move up/down explain in their tooltip, or why they are disabled. The tools are disabled while the draft has unapplied edits. Previews run only while the panel is open, from a plain snapshot and without the staged check (Svelte state proxies cannot be structured-cloned); the click recomputes and validates. No protocol or capability change: the plans are ordinary GM ops on existing fields.
+
+## D-440 — Token elevation cues (G-32) (2026-10-11)
+
+Nothing on the canvas showed a token's elevation: a flyer and a walker on the same floor looked identical, and the GM's only elevation field (the token menu's **Feet Z**, D-435) appeared only on scenes with floors. `src/core/elevationCues.ts` derives the cues; the stage only draws them.
+
+**Badge.** A token whose feet are not on its floor shows its height above that floor, signed and in the grid's units (`+15 ft`, `-5 ft`). The floor is the token's level, else the band its feet are in, else 0 on a scene without floors. Height above the floor is what matters at the table, and it reads the same on every floor of a tower (absolute elevation would read `+35 ft` for a walker on the fourth floor). Values are rounded to 0.01. Tokens on their floor draw nothing, so the common case stays clean. The badge is a tab on the artwork's top-right edge, clear of the condition chips (top centre) and the HP bar, and it is hidden with the other labels near a Faux Overhead cover.
+
+**Size cue (Levels T9).** Optional and off by default (`tokenElevationScale`): tokens at other heights than the viewer's own token are drawn at `1 / (1 + |Δz| / (10 × grid distance))`, at least half size (×0.83 at two 5 ft cells, ×0.5 from ten). Only the artwork and body scale, about the token centre; name, badges, HP bar, selection and hit-testing keep the full footprint. The viewer is the first selected token the user controls, else (players) the token their floor focus follows; with neither, nothing scales. Selecting another token re-measures.
+
+**Who sees them.** World setting `tokenElevation`: `all` (default), `gm` or `off`. `gm` hides every cue from players, the size cue included, because a shrunken token gives the height away as surely as a badge. A GM "view as" preview applies the player's rule. Both settings are validated (`tokenElevation must be all, gm, or off`, `tokenElevationScale must be a boolean`) and are presentation only: nothing here changes movement, sight, light, fog or the host.
+
+**Token menu.** **Feet Z** is now on every scene. On a scene with floors it still offers to move the token when the height belongs to another floor (D-435).
+
+**Not done.** Players still cannot edit their own token's elevation (D-435's choice stands). Templates do not yet take the caster's elevation (T9, G-27).

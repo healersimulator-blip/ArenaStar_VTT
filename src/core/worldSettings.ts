@@ -63,6 +63,13 @@ export interface CoreWorldSettings {
    * derived ones the sheet shows (`packages/pf1e/tokenHpBars`).
    */
   tokenHpBars?: TokenHpBarMode;
+  /**
+   * G-32 (D-440) — who sees token elevation cues (the height badge and, when enabled, the
+   * smaller-at-other-heights cue): `"all"` (default), `"gm"` (hidden from players) or `"off"`.
+   */
+  tokenElevation?: "all" | "gm" | "off";
+  /** G-32 (D-440) — draw tokens at other heights smaller than the viewer's own token (Levels T9). */
+  tokenElevationScale?: boolean;
   /** World-level optional image workflow gate: when true, non-GMs may preview only. */
   restrictedPlayerImageMode?: boolean;
   /** Optional byte quota (MB) for persistent image uploads by each non-GM user. */
@@ -296,6 +303,12 @@ export function validateWorldSettingsPatch(patch: Record<string, unknown>): {
           clean: {},
         };
       }
+    }
+    if (key === "tokenElevation" && value !== "all" && value !== "gm" && value !== "off") {
+      return { ok: false, error: "tokenElevation must be all, gm, or off", clean: {} };
+    }
+    if (key === "tokenElevationScale" && typeof value !== "boolean") {
+      return { ok: false, error: "tokenElevationScale must be a boolean", clean: {} };
     }
     if (key === "encumbranceCapacityStrBonus") {
       const n = typeof value === "number" ? value : NaN;

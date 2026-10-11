@@ -210,7 +210,7 @@ Legend: ✅ have · ◐ partial · ❌ missing · — not applicable. Gap IDs re
 | Roof visible through fog from outside | — | Better Roofs *Reveals Fog of War* | ❌ | G-24 |
 | Multi-tile roofs fade together | — | Better Roofs *Occlusion Link Id/Source* | ❌ | G-25 |
 | Explored fog per floor | hidden copy scenes per level (beta) | core, per level | ✅ **ahead**: per-floor storage keys, reset epochs, stale-upload fencing | — |
-| Token size shrinks with height difference | yes | — | ❌ | G-32 |
+| Token size shrinks with height difference | yes | — | ✅ optional, plus a height badge (D-440) | G-32 |
 | Other floors' data withheld from clients | no (filtered on the client) | no (filtered on the client) | ◐ drafts and scopes withheld; other floors' tokens still sent | G-33 (beyond parity) |
 
 ---
@@ -681,7 +681,8 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | G-24 Roofs through fog | **Done** — `revealInFog`: a copy above the fog while live sight touches the outline (exact test); never explored | D-438 |
 | Roof authoring (found while doing E) | **Done** — no UI could make a tile overhead; Scenes → Tiles & roofs edits overhead, mode, opacity, radius, group, role, reveal | D-438 · `src/ui/images/RoofEditor.svelte` |
 | G-31 Merge, reorder, rescale | **Done** — merge into level (tokens keep height above the floor; scopes, stairs, visibility, art remapped; touching bands absorbed), move up/down (bands swap, contents follow), rescale (×factor, optional grid distance); each one undo with a preview | D-439 · `src/core/levelRestack.ts` |
-| G-19 to G-23, G-27, G-29, G-30, G-32, G-33 | Open (slices D and F) | — |
+| G-32 Elevation cues | **Done** — a badge with the height above the token's floor (+15 ft), an optional smaller-at-other-heights cue measured from the selected token (×0.83 at two cells, half size from ten), a world setting for everyone / GM only / off (GM only hides the size cue too), and the token menu's Feet Z on every scene | D-440 · `src/core/elevationCues.ts` |
+| G-19 to G-23, G-27, G-29, G-30, G-33 | Open (slices D and F) | — |
 
 ---
 

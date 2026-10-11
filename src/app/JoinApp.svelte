@@ -13,6 +13,7 @@
   import { TileImageCache } from "../canvas/imageTexture";
   import { tokenRect } from "../canvas/tokens";
   import { roofViewerTokens } from "../core/roofs";
+  import { elevationCues, elevationViewer, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
   import { onDestroy, onMount } from "svelte";
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
   import { parseInvite } from "./hostShare";
@@ -1152,6 +1153,13 @@
         isGM: false,
       }),
     );
+    // G-32 (D-440): height badges unless the GM hid them; the optional size cue measures from the
+    // selected token, else the token this player's floor follows.
+    const cueSettings = worldSettingsFrom(client.store.getAll("settings"));
+    view.setTokenElevationCues(scene ? elevationCues(scene, tokens, {
+      mode: tokenElevationModeOf(cueSettings), scaleByHeight: tokenElevationScaleOf(cueSettings), isGm: false,
+      viewer: elevationViewer(scene, client.user, client.store.getAll("actors") as readonly ActorDocument[], selection, client.levelFocus?.followTokenId),
+    }) : new Map());
     const focus = client.levelFocus;
     const levelId = scene?.levelMode === "isolated" && focus?.sceneId === scene._id && focus.worldSeq === client.store.seq ? focus.levelId : null;
     void fog?.sync(scene?.levelMode === "isolated" && !levelId ? null : scene, { style: "opaque", ...(levelId ? { levelId } : {}) });
@@ -1322,6 +1330,7 @@
                 return Array.from(view.app.renderer.extract.pixels({ target: layer, frame, resolution: 1 }).pixels).slice(0, 4);
               },
               stairMarkers: () => view.stairMarkerIds(),
+              tokenElevationCues: () => view.tokenElevationCues(),
               roofStates: () => {
                 const layer = view.getTilesLayer({ loadTexture: tileImages.load });
                 return Object.fromEntries((activeScene()?.tiles ?? []).map((t) => [t._id, layer.roofStateOf(t._id)]));
@@ -1527,8 +1536,10 @@
         controller = new CanvasController({
           onSelectionChange: (ids) => {
             selection = [...ids];
-            // D-438: the selection decides which owned tokens open roofs (deferred: never re-enter refresh).
-            if (activeScene()?.tiles.some((tile) => tile.above)) queueMicrotask(refresh);
+            // D-438: the selection decides which owned tokens open roofs, and G-32 which height the size
+            // cue measures from (deferred: never re-enter refresh).
+            if (activeScene()?.tiles.some((tile) => tile.above) ||
+              tokenElevationScaleOf(worldSettingsFrom(client.store.getAll("settings")))) queueMicrotask(refresh);
             if (ids.length === 1 && client.levelFocus?.isolated && client.levelFocus.mode !== "manual" && ids[0] !== client.levelFocus.followTokenId) chooseFloorFocus(null, ids[0]);
             closeHexMenu(); // any new gesture supersedes the menu
           },

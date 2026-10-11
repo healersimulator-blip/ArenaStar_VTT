@@ -67,6 +67,7 @@
     setWorldClockOps,
   } from "../../packages/pf1e/worldClock";
   import { autoResolveAoosOf } from "../../packages/pf1e/aooSettings";
+  import { tokenElevationModeOf, tokenElevationScaleOf, type TokenElevationMode } from "../../core/elevationCues";
   import type { HostPackages, HostRulesBoot } from "../../app/hostBoot";
   import RulesetSection from "../packages/RulesetSection.svelte";
   import AgentsSection from "./AgentsSection.svelte";
@@ -129,6 +130,9 @@
     playerPendingRollMode: "auto" | "savesChecksAuto" | "manual";
     /** §2.2/G-10a: who draws token hit-point bars (gm / all / hover). */
     tokenHpBars: TokenHpBarMode;
+    /** G-32 (D-440): who sees token height badges, and the smaller-at-other-heights cue. */
+    tokenElevation: TokenElevationMode;
+    tokenElevationScale: boolean;
   }
   /** E05 (D-146): the replicated world clock, seconds. */
   let clockSeconds = $state(0);
@@ -144,6 +148,8 @@
     rollHighlightFadeSec: 4,
     playerPendingRollMode: "savesChecksAuto",
     tokenHpBars: "gm",
+    tokenElevation: "all",
+    tokenElevationScale: false,
   };
   // Initialize only after the defaults exist (opening the window executes this script).
   let rules = $state<RulesOptions>(DEFAULT_RULES);
@@ -226,6 +232,8 @@
       rollHighlightFadeSec: rollHighlightFadeSecOf(settings),
       playerPendingRollMode: playerPendingRollModeOf(settings),
       tokenHpBars: tokenHpBarsOf(settings),
+      tokenElevation: tokenElevationModeOf(settings),
+      tokenElevationScale: tokenElevationScaleOf(settings),
     };
   }
 
@@ -949,6 +957,39 @@
         <option value="all">Everyone (players see every bar)</option>
         <option value="hover">On hover (every replica)</option>
       </select>
+    </label>
+    <label title="A badge shows how high a token is above its floor (for example +15 ft for a flyer).">
+      Token elevation
+      <select
+        data-world-token-elevation
+        value={rules.tokenElevation}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            tokenElevation: (e.target as HTMLSelectElement).value as TokenElevationMode,
+          };
+          applyRules({ tokenElevation: rules.tokenElevation });
+        }}
+      >
+        <option value="all">Everyone (default)</option>
+        <option value="gm">GM only (hidden from players)</option>
+        <option value="off">Off</option>
+      </select>
+    </label>
+    <label title="Tokens higher or lower than the selected token are drawn smaller, down to half size. Off by default.">
+      <input
+        data-world-token-elevation-scale
+        type="checkbox"
+        checked={rules.tokenElevationScale}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            tokenElevationScale: (e.target as HTMLInputElement).checked,
+          };
+          applyRules({ tokenElevationScale: rules.tokenElevationScale });
+        }}
+      />
+      Shrink tokens at other heights
     </label>
   </div>
   <div class="row">

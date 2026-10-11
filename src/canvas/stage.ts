@@ -33,6 +33,7 @@ import {
 import { FauxOverheadLayer } from "./layers/FauxOverheadLayer";
 import { StairMarkersLayer } from "./layers/StairMarkersLayer";
 import type { StairMarker } from "../core/levelPlay";
+import type { ElevationCue } from "../core/elevationCues";
 import type { RegionDocument, TokenDocument } from "../core/documents";
 import type { Camera, Viewport } from "./camera";
 import { fitRect, screenToWorld } from "./camera";
@@ -210,6 +211,13 @@ export interface Stage {
     badges?: ReadonlyMap<string, readonly { code: string; tint: number }[]>,
     hpBars?: ReadonlyMap<string, TokenHpBarNumbers>,
   ): void;
+  /**
+   * G-32 (D-440): height badges and the smaller-at-other-heights cue, per token id (sparse; absent
+   * = no badge, full size). Kept across `syncTokens` until replaced.
+   */
+  setTokenElevationCues(cues: ReadonlyMap<string, ElevationCue>): void;
+  /** e2e readback: the badge text and artwork scale each drawn token shows right now. */
+  tokenElevationCues(): Array<{ id: string; label: string | null; scale: number }>;
   /** Cosmetic region masks only: never touches fog history or LOS. */
   setFauxOverhead(regions: readonly RegionDocument[]): void;
   /** Compiled Faux Overhead covers on this canvas (renderer-independent readback). */
@@ -562,6 +570,38 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const rendererName = String((app.renderer as { name?: unknown }).name ?? "unknown");
   const overhead = new FauxOverheadLayer(tokenLayer, rendererName !== "canvas");
   const tokenArtwork = new Map<string, { image: string | null; revision: number; sprite: Sprite | null }>();
+  /** G-32 (D-440): badge text and artwork scale per token (sparse). */
+  let elevationCueMap: ReadonlyMap<string, ElevationCue> = new Map();
+  const applyElevationCue = (id: string, view: Container, width: number, height: number): void => {
+    const cue = elevationCueMap.get(id);
+    const scale = cue?.scale ?? 1;
+    const body = view.getChildByLabel("body");
+    if (body) body.scale.set(scale);
+    const sprite = tokenArtwork.get(id)?.sprite;
+    if (sprite) { sprite.width = width * scale; sprite.height = height * scale; }
+    let badge = view.getChildByLabel("elevationBadge") as Container | null;
+    if (!cue?.label) { if (badge) { view.removeChild(badge); badge.destroy({ children: true }); } return; }
+    if (!badge) {
+      badge = new Container();
+      badge.label = "elevationBadge";
+      const bg = new Graphics(); bg.label = "bg";
+      const text = new Text({ text: "", style: { fontSize: 10, fill: 0xe8f1ff, fontFamily: "sans-serif", fontWeight: "600" } });
+      text.label = "text"; text.anchor.set(0, 0.5);
+      badge.addChild(bg, text);
+      view.addChild(badge);
+    }
+    const text = badge.getChildByLabel("text") as Text | null, bg = badge.getChildByLabel("bg") as Graphics | null;
+    if (text && bg && text.text !== cue.label) {
+      text.text = cue.label;
+      text.position.set(5, 0);
+      bg.clear().roundRect(0, -7.5, text.width + 10, 15, 5).fill({ color: 0x1b2433, alpha: 0.92 }).stroke({ width: 1, color: 0x7fb2ff });
+    }
+    // A tab on the (scaled) artwork's right edge near the top, clear of condition chips (top
+    // centre) and the HP bar.
+    const w = width * scale, h = height * scale;
+    badge.position.set((width + w) / 2 - 4, (height - h) / 2 + Math.min(12, h / 4));
+    badge.visible = !overhead.obscured(id);
+  };
   let tokenImageLoader: ((image: string) => Promise<Texture | null>) | null = null;
   /** D-251: fog's token gate (null = draw every token). */
   let tokenFilter: ReadonlySet<string> | null = null;
@@ -672,7 +712,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     for (const [id, view] of tokenViews) {
       const show = !overhead.obscured(id);
       for (const child of view.children) {
-        if (child instanceof Text || child.label === "badges") child.visible = show;
+        if (child instanceof Text || child.label === "badges" || child.label === "elevationBadge") child.visible = show;
       }
     }
     applyHpBarVisibility();
@@ -974,6 +1014,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
             currentView.addChildAt(sprite, Math.min(1, currentView.children.length));
             sprite.position.set(token.width / 2, token.height / 2);
             sprite.width = token.width; sprite.height = token.height;
+            applyElevationCue(token._id, currentView, token.width, token.height);
           }).catch(() => undefined);
         }
         let animation = tokenMovement.get(token._id);
@@ -1034,6 +1075,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           hpBar,
           hpBarSignatures,
         );
+        applyElevationCue(token._id, view, rect.width, rect.height);
       }
       for (const [id, view] of tokenViews) {
         if (!seen.has(id)) {
@@ -1057,6 +1099,20 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       applyOverheadDecorations();
     },
     fauxOverheadCoverCount(): number { return overhead.coverCount; },
+    setTokenElevationCues(cues): void {
+      elevationCueMap = new Map(cues);
+      for (const [id, view] of tokenViews) {
+        const rect = tokenRects.get(id);
+        if (rect) applyElevationCue(id, view, rect.width, rect.height);
+      }
+      app.render();
+    },
+    tokenElevationCues() {
+      return [...tokenViews].filter(([, view]) => view.visible).map(([id, view]) => {
+        const text = (view.getChildByLabel("elevationBadge") as Container | null)?.getChildByLabel("text") as Text | null;
+        return { id, label: text?.text ?? null, scale: Math.round((view.getChildByLabel("body")?.scale.x ?? 1) * 1000) / 1000 };
+      }).sort((a, b) => a.id.localeCompare(b.id));
+    },
     setStairMarkers(markers): void { stairMarkers.sync(markers); },
     setFloorGhosts(ghost, alpha = 0.25): void {
       ghostTokens = ghost?.tokens ?? new Set();

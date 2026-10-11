@@ -32,6 +32,7 @@
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
   import { roofViewerTokens } from "../core/roofs";
+  import { elevationCues, elevationViewer, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
   import { tokenHpBarsMap } from "../packages/pf1e/tokenHpBars";
@@ -3226,6 +3227,14 @@ const WALL_PICK_RADIUS = 12;
         ? "hover"
         : "all",
     );
+    // G-32 (D-440): height badges, and (when enabled) tokens at other heights drawn smaller than
+    // the selected token. A "view as" preview follows the previewed player's rule.
+    const cueSettings = worldSettingsFrom(current.gm.client.store.getAll("settings"));
+    view.setTokenElevationCues(scene ? elevationCues(scene, tokens, {
+      mode: tokenElevationModeOf(cueSettings), scaleByHeight: tokenElevationScaleOf(cueSettings), isGm: viewAsPlayer === null,
+      viewer: elevationViewer(scene, viewAsPlayer ?? current.gm.client.user, current.gm.client.store.getAll("actors") as readonly ActorDocument[],
+        tokenSelection.sceneId === scene._id ? tokenSelection.ids : []),
+    }) : new Map());
     // D-250/D-251: explored fog follows the replica — tokens moved, doors opened, scene
     // switched. The GM's cover is translucent (everything stays visible under it); god view
     // off previews the opaque cover players get — and a **view as** preview is always the
@@ -4130,8 +4139,10 @@ const WALL_PICK_RADIUS = 12;
               sceneId: activeScene()?._id ?? null,
               ids: [...ids],
             };
-            // D-438: the selection decides which tokens open roofs (deferred: never re-enter refresh).
-            if (activeScene()?.tiles.some((tile) => tile.above)) queueMicrotask(refresh);
+            // D-438: the selection decides which tokens open roofs, and G-32 which height the size cue
+            // measures from (deferred: never re-enter refresh).
+            if (activeScene()?.tiles.some((tile) => tile.above) ||
+              (app && tokenElevationScaleOf(worldSettingsFrom(app.gm.client.store.getAll("settings"))))) queueMicrotask(refresh);
             closeTokenMenu(); // any new gesture supersedes the menu
             syncPF1eThreatOverlay(); // P02: one selected token shows its threat
           },
@@ -4946,6 +4957,8 @@ const WALL_PICK_RADIUS = 12;
           },
           // §2.2/G-10a: what the GM canvas actually drew — the mode's own gate, read back.
           tokenHpBars: () => view.tokenHpBars(),
+          // G-32 (D-440): the height badge and size cue each drawn token shows.
+          tokenElevationCues: () => view.tokenElevationCues(),
           seedTile: (spec) => {
             const scene = activeScene();
             if (!scene) return "";
@@ -5489,14 +5502,16 @@ const WALL_PICK_RADIUS = 12;
                       disabled={targets.every((id) => menuScene.tokens.find((t) => t._id === id)?.levelId === level._id)}
                       onclick={() => moveTokensToFloor(targets, level._id)}>{level.name} · Z {level.floorZ}</button>
                   {/each}
-                  <label class="token-menu-static" style="display:flex;gap:4px;align-items:center">Feet Z
-                    <input type="number" aria-label="Token feet elevation" style="width:64px" value={menuToken.elevation ?? 0}
-                      onchange={(e) => setTokenElevation(menuToken, Number(e.currentTarget.value))} /></label>
-                  {#if elevationOffer?.tokenId === menuToken._id}
-                    <span class="token-menu-static" data-token-elevation-offer>That height is on {elevationOffer.name}.</span>
-                    <button type="button" role="menuitem" onclick={() => elevationOffer && moveTokensToFloor([menuToken._id], elevationOffer.levelId, elevationOffer.z)}>Move to {elevationOffer.name}</button>
-                    <button type="button" role="menuitem" onclick={() => { elevationOffer = null; }}>Keep floor</button>
-                  {/if}
+                {/if}
+                <!-- G-32 (D-440): elevation is editable on every scene (a flyer needs no floors); the
+                     token's badge shows the height above its floor. -->
+                <label class="token-menu-static" style="display:flex;gap:4px;align-items:center">Feet Z
+                  <input type="number" aria-label="Token feet elevation" style="width:64px" value={menuToken.elevation ?? 0}
+                    onchange={(e) => setTokenElevation(menuToken, Number(e.currentTarget.value))} /></label>
+                {#if elevationOffer?.tokenId === menuToken._id}
+                  <span class="token-menu-static" data-token-elevation-offer>That height is on {elevationOffer.name}.</span>
+                  <button type="button" role="menuitem" onclick={() => elevationOffer && moveTokensToFloor([menuToken._id], elevationOffer.levelId, elevationOffer.z)}>Move to {elevationOffer.name}</button>
+                  <button type="button" role="menuitem" onclick={() => { elevationOffer = null; }}>Keep floor</button>
                 {/if}
               </div>
             {/if}

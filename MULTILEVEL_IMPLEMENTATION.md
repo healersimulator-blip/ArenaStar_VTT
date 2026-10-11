@@ -1,6 +1,6 @@
 # Multilevel implementation status
 
-**2026-10-11 — native cover, wall authoring, spatial kernel, level drafts, isolated floor play, stairwells with player choice (D-430), pass-through and door-linked stairs (D-437), floor scopes for presentation objects (D-432), the floor-play check (D-433), roofs (D-438) and floor merge/reorder/rescale (D-439); the complete design is not finished.**
+**2026-10-11 — native cover, wall authoring, spatial kernel, level drafts, isolated floor play, stairwells with player choice (D-430), pass-through and door-linked stairs (D-437), floor scopes for presentation objects (D-432), the floor-play check (D-433), roofs (D-438), floor merge/reorder/rescale (D-439) and token elevation cues (D-440); the complete design is not finished.**
 
 Target: [Multilevel, walls and Faux Overhead design](MULTILEVEL_WALLS_DESIGN.md).
 
@@ -24,6 +24,8 @@ Legacy scenes are not silently migrated. Legacy `{from,to}` stairs keep working;
 
 **Fixing a stack (D-439).** Draft levels → **Merge, reorder or rescale floors**. *Merge* moves everything on one floor to another (tokens keep their height above the floor; walls, lights, stairs and map tiles follow) and deletes the emptied floor; touching bands are joined. *Move up/down* swaps a floor with its neighbour and carries its contents. *Rescale* multiplies every elevation, for example 0.3 when a 5 ft grid becomes 1.5 m. Each shows what it will do first and is one undo step.
 
+**Elevation cues (D-440).** A token above (or below) its floor carries a small badge with its height over that floor, such as **+15 ft**; set it from the token menu's **Feet Z** field, now on every scene. *Settings → Token elevation* shows the badge to everyone (default), only the GM, or nobody, and *Shrink tokens at other heights* draws tokens higher or lower than your selected token smaller (down to half size). Neither changes movement, sight or fog.
+
 **Roofs (D-438).** In **Scenes → Tiles & roofs**, any tile can be made *Overhead (roof)*. Its fade can be:
 - *whole roof*: the roof fades while a token is under it;
 - *circle round token*: a circle opens around each token under it;
@@ -36,7 +38,7 @@ Roofs open only for the viewer's own tokens with vision, and only when a token's
 
 The GM can tick **Peek under roofs** on the canvas to fade the roof under the pointer, on the GM's screen only. Circle and sight openings need WebGL; the Canvas2D fallback fades the whole roof.
 
-**Remaining** (tracked as G-items in the [gap analysis](MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md#implementation-progress)): a dedicated stair drawing tool, cross-floor sight/light, surfaces with holes, scene/Foundry import, elevation cues, and comprehensive snapshot/asset/sheet/FX secrecy.
+**Remaining** (tracked as G-items in the [gap analysis](MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md#implementation-progress)): a dedicated stair drawing tool, cross-floor sight/light, surfaces with holes, scene/Foundry import, and comprehensive snapshot/asset/sheet/FX secrecy.
 
 Validation (D-429–D-438): **5,469 Vitest passed / 12 skipped** (393 files, 2 skipped); **`test:multilevel` 20/20 Chromium tests passed on WebGL** (14 spec files), including the three-floor stairwell journey (player chooses down, "Take stairs" + Esc, keyboard choice up, locked stairs explained), the pass-through stairwell linked to a door (walked over while shut, travelled through with the route continuing once open), the GM floor view journey (generator, ghost/only display, build-mode tile stamping, token-menu floor move and elevation offer, PageUp/PageDown) and the roof journeys (real-pixel radial/vision openings, group fade, reveal through fog, editor setup, Peek, art-shaped "under", player-only openings); the Faux Overhead and roof specs also pass on the Canvas2D fallback. Typecheck, lint and single-file build passed; Svelte 89 components / zero blockers / one existing advisory.
 
