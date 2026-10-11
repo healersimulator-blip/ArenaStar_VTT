@@ -43,6 +43,13 @@ export class TilesLayer {
     this.opts = options;
   }
 
+  /** G-12 (D-434): tiles of other floors drawn faintly in the GM's "ghost" floor view. */
+  private ghosts: ReadonlySet<string> = new Set();
+  private ghostAlpha = 0.25;
+  setGhosts(ids: ReadonlySet<string>, alpha = 0.25): void {
+    this.ghosts = ids;
+    this.ghostAlpha = alpha;
+  }
   /** D-372/A41: count the live tile views and successfully decoded image sprites. */
   get count(): number { return this.views.size; }
   get renderedImageCount(): number {
@@ -181,7 +188,7 @@ export class TilesLayer {
     const { tile } = view;
     const rect: TileRect = { x: tile.x, y: tile.y, width: tile.width, height: tile.height };
     const occupiedUnder = occupied.some((o) => rectsOverlap(rect, o));
-    const alpha = tileAlpha(tile, occupiedUnder);
+    const alpha = tileAlpha(tile, occupiedUnder) * (this.ghosts.has(tile._id) ? this.ghostAlpha : 1);
     view.alpha = alpha;
     const parent = this.containerFor(tile);
     if (view.g.parent !== parent) parent.addChild(view.g);

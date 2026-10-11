@@ -8,7 +8,7 @@
   import type { ClientEvents } from "../../client/sync";
   import type { ClientSync } from "../../client/sync";
   import type { LevelDocument, SceneDocument } from "../../core/documents";
-  import { draftLevel, levelDraftAudit, levelDraftOps, MAX_LEVELS, sceneLevelsError } from "../../core/levels";
+  import { draftLevel, generateLevels, levelDraftAudit, levelDraftOps, MAX_LEVELS, sceneLevelsError } from "../../core/levels";
   let { scene, client, bus }: { scene: SceneDocument; client: ClientSync; bus: EventBus<ClientEvents> } = $props();
   let compatible = $state(false), ambientCompatible = $state(false);
   onMount(() => {
@@ -37,6 +37,14 @@
     void scene.levels;
     if (!untrack(() => dirty || busy)) untrack(reload);
   });
+  // G-28 (D-436): generate a whole stack into the (empty) draft; Apply still saves it.
+  let genFloors = $state(2), genBasements = $state(0), genHeight = $state(10), genRoof = $state(false);
+  function generate() {
+    try {
+      rows = generateLevels({ floors: genFloors, basements: genBasements, height: genHeight, roof: genRoof, id: () => `level-${crypto.randomUUID()}` });
+      dirty = true; message = "Stack generated. Assign each floor's map tiles, then Apply draft levels.";
+    } catch (error) { message = error instanceof Error ? error.message : String(error); }
+  }
   function add() {
     const highest = Math.max(0, ...rows.map((r) => r.top ?? r.floorZ));
     rows.push(draftLevel(`level-${crypto.randomUUID()}`, rows.length ? `Level ${rows.length + 1}` : "Base", highest, highest + 10, rows.length));
@@ -109,6 +117,18 @@
         <button type="button" onclick={() => remove(level._id)}>Remove draft level</button>
       </section>
     {/each}
+    {#if !rows.length}
+      <details class="generator" data-level-generator open>
+        <summary>Generate a stack of floors</summary>
+        <div class="numbers">
+          <label>Floors (incl. ground)<input aria-label="Generated floors" type="number" min="1" max="16" step="1" bind:value={genFloors} /></label>
+          <label>Basements<input aria-label="Generated basements" type="number" min="0" max="8" step="1" bind:value={genBasements} /></label>
+          <label>Floor height<input aria-label="Generated floor height" type="number" min="1" step="any" bind:value={genHeight} /></label>
+        </div>
+        <label><input type="checkbox" aria-label="Generated roof" bind:checked={genRoof} />Add a roof level</label>
+        <button type="button" onclick={generate}>Generate levels</button>
+      </details>
+    {/if}
     <button type="button" onclick={add} disabled={rows.length >= MAX_LEVELS}>Add draft level</button>
     <button type="button" onclick={save} disabled={!dirty || !!validation || stale}>{busy ? "Saving…" : "Apply draft levels"}</button>
     <button type="button" onclick={reload}>Reload draft</button>

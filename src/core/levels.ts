@@ -127,3 +127,19 @@ export function levelDraftOps(sceneId: string, before: readonly LevelDocument[],
   }
   return ops;
 }
+
+/**
+ * G-28 (D-436): a ready stack of floors. Ground starts at 0; floors above it, basements below, each
+ * `height` tall, plus an optional unbounded roof band. IDs come from the caller; nothing is saved.
+ */
+export function generateLevels(spec: { floors: number; basements: number; height: number; roof?: boolean; id: () => string }): LevelDocument[] {
+  const { floors, basements, height } = spec;
+  if (!Number.isInteger(floors) || floors < 1 || floors > 16 || !Number.isInteger(basements) || basements < 0 || basements > 8 ||
+      !Number.isFinite(height) || height <= 0 || height > 10_000 || floors + basements + (spec.roof ? 1 : 0) > MAX_LEVELS)
+    throw new Error("Choose 1–16 floors, 0–8 basements and a positive floor height");
+  const rows: LevelDocument[] = [];
+  for (let b = basements; b >= 1; b--) rows.push(draftLevel(spec.id(), basements === 1 ? "Basement" : `Basement ${b}`, -b * height, (1 - b) * height));
+  for (let f = 0; f < floors; f++) rows.push(draftLevel(spec.id(), f === 0 ? "Ground" : `Floor ${f + 1}`, f * height, (f + 1) * height));
+  if (spec.roof) rows.push(draftLevel(spec.id(), "Roof", floors * height, null));
+  return rows.map((l, sort) => ({ ...l, sort }));
+}

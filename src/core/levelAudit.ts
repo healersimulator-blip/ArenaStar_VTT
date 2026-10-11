@@ -138,3 +138,15 @@ export function levelAuditFixOps(scene: SceneDocument, fix: LevelAuditFix): Op[]
   }
   return ops;
 }
+/** G-13 (D-434): put every unassigned wall and light on one floor (locked/prefab walls excluded). */
+export function unscopedToFloorOps(scene: SceneDocument, levelId: string): Op[] {
+  if (!scene.levels?.some((l) => l._id === levelId)) return [];
+  const parent = { coll: "scenes" as const, id: scene._id };
+  const scope = { mode: "levels", ids: [levelId] };
+  return [
+    ...scene.walls.filter((w) => w.levelScope === undefined && w.flags.prefab === undefined && !wallEditLocked(w))
+      .map((w): Op => ({ kind: "update", ref: { coll: "walls", id: w._id, parent }, diff: { levelScope: scope } })),
+    ...scene.lights.filter((l) => l.levelScope === undefined && l.flags.prefab === undefined)
+      .map((l): Op => ({ kind: "update", ref: { coll: "lights", id: l._id, parent }, diff: { levelScope: scope } })),
+  ];
+}

@@ -214,6 +214,8 @@ export interface Stage {
   setFauxOverhead(regions: readonly RegionDocument[]): void;
   /** Compiled Faux Overhead covers on this canvas (renderer-independent readback). */
   fauxOverheadCoverCount(): number;
+  /** G-12: tokens/tiles of other floors drawn at reduced opacity (GM ghost view); null clears. */
+  setFloorGhosts(ghost: { tokens: ReadonlySet<string>; tiles: ReadonlySet<string> } | null, alpha?: number): void;
   /** G-10/G-14: draw these stair markers (players: host-filtered; GM: every stairwell). */
   setStairMarkers(markers: readonly StairMarker[]): void;
   stairMarkerIds(): string[];
@@ -528,6 +530,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   stairsHolder.label = "stairs";
   root.addChild(stairsHolder);
   const stairMarkers = new StairMarkersLayer(stairsHolder);
+  let ghostTokens: ReadonlySet<string> = new Set();
+  let ghostAlpha = 0.25;
+  let pendingTileGhosts: ReadonlySet<string> = new Set();
+  const tokenDocs = new Map<string, TokenDocument>();
   const wallsHolder = new Container();
   wallsHolder.label = "walls";
   root.addChild(wallsHolder);
@@ -829,6 +835,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           tilesAboveLayer,
           options ?? {},
         );
+        tilesLayer.setGhosts(pendingTileGhosts, ghostAlpha);
       }
       return tilesLayer;
     },
@@ -970,7 +977,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           height: rect.height,
         });
         if (jump) view.position.set(rect.x, rect.y); // new tokens appear in place
-        view.alpha = token.hidden ? 0.5 : 1;
+        view.alpha = (token.hidden ? 0.5 : 1) * (ghostTokens.has(token._id) ? ghostAlpha : 1);
+        tokenDocs.set(token._id, token);
         view.visible = tokenFilter === null || tokenFilter.has(token._id);
         let rotation = tokenRotation.get(token._id);
         if (!rotation) { rotation = new RotationAnimation(); tokenRotation.set(token._id, rotation); }
@@ -1017,6 +1025,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       for (const [id, view] of tokenViews) {
         if (!seen.has(id)) {
           overhead.remove(id);
+          tokenDocs.delete(id);
           tokenLayer.removeChild(view);
           view.destroy({ children: true });
           tokenViews.delete(id);
@@ -1036,6 +1045,16 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     },
     fauxOverheadCoverCount(): number { return overhead.coverCount; },
     setStairMarkers(markers): void { stairMarkers.sync(markers); },
+    setFloorGhosts(ghost, alpha = 0.25): void {
+      ghostTokens = ghost?.tokens ?? new Set();
+      ghostAlpha = alpha;
+      tilesLayer?.setGhosts(ghost?.tiles ?? new Set(), alpha);
+      pendingTileGhosts = ghost?.tiles ?? new Set();
+      for (const [id, view] of tokenViews) {
+        const token = tokenDocs.get(id);
+        if (token) view.alpha = (token.hidden ? 0.5 : 1) * (ghostTokens.has(id) ? ghostAlpha : 1);
+      }
+    },
     stairMarkerIds(): string[] { return stairMarkers.ids(); },
     setFauxOverhead(regions): void {
       overhead.setRegions(regions);

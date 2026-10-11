@@ -19,7 +19,9 @@ export function levelFocusView(scene: SceneDocument | undefined, actors: readonl
   if (!scene || !can(user, "read", scene, "scenes")) return empty;
   const owned = scene.tokens.filter((t) => !t.hidden && (can(user, "update", t, "tokens", { parent: scene }) ||
     actors.some((a) => a._id === t.actorId && can(user, "update", a, "actors"))));
-  const levels = (scene.levels ?? []).filter((l) => owned.some((t) => t.levelId === l._id))
+  // G-12 (D-434): a GM/assistant may focus any floor (their build floor), even an empty one.
+  const gm = user.role === "GM" || user.role === "ASSISTANT";
+  const levels = (scene.levels ?? []).filter((l) => gm || owned.some((t) => t.levelId === l._id))
     .sort((a, b) => a.sort - b.sort || a._id.localeCompare(b._id)).map((l) => ({ id: l._id, name: l.name }));
   const isolated = scene.levelMode === "isolated";
   const follow = owned.find((t) => t._id === followTokenId && levels.some((l) => l.id === t.levelId)) ?? [...owned].sort((a, b) => a._id.localeCompare(b._id)).find((t) => levels.some((l) => l.id === t.levelId));

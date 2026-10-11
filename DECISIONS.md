@@ -12847,3 +12847,17 @@ Isolated floors removed every template, drawing, note and cover. These kinds now
 ## D-433 — Floor-play check before activation and while editing (2026-10-11)
 
 `src/core/levelAudit.ts` is one pure audit: unassigned walls/lights (which neither show nor block in floor play), floorless tokens, floors without art, visible tiles on no floor, floors no stairs reach, one-way stairs, landings inside walls, locked stairs and overlapping stairs. Enabling floor play runs it: errors block; warnings open an inline check with quick fixes ("put these walls/lights on every floor", "assign tokens by elevation", "merge into one stairwell" for identical-geometry legacy pairs) and an explicit **Enable anyway**. The same list stays live under Draft levels → Floor play & stairs. Fixes are ordinary undoable op plans; locked and prefab walls are left to the GM. There is no per-edit approval.
+
+## D-434 — GM floor view, build mode and who-is-where (2026-10-11)
+
+The GM canvas showed every floor stacked (S7). The former "fog & lighting diagnostic" is now the **GM floor** control: choosing a floor keeps the per-floor lighting/exploration diagnostic and adds a display mode — *this floor, others faint* (default, 25 % opacity for other floors' tiles and tokens), *this floor only*, or *every floor*. `src/core/gmFloorView.ts` filters only what is drawn and picked; documents are never rewritten from the filtered view. Walls/lights without a floor and floorless tokens stay visible in every mode because the GM must assign them. PageUp/PageDown step floors. A "Who is where" roster lists token counts per floor and player characters; clicking one switches to its floor, centres and selects it (G-17).
+
+**Build mode (G-13).** With a floor chosen, *Build on this floor* limits picking to that floor and sends the GM session's explicit `level.focus` for it; the host treats a GM/assistant's explicit focus — never the follow default — as their build floor. Creations in that scene are stamped in the single commit path: walls, lights, regions, drawings, templates and notes get `levelScope:{levels:[floor]}`, tokens get the floor and matching feet, and new tiles are appended to the floor's map art in the same undoable envelope. GMs may focus any floor (even an empty one). "Put unassigned walls & lights on this floor" is the bulk fix next to the control.
+
+## D-435 — Move to floor and feet elevation from the token menu (2026-10-11)
+
+In scenes with levels the GM token menu lists every floor: one click moves the token — or the whole current selection when the token is part of it — to that floor with its Floor Z, carrying prefab-attached tokens (`floorMoveOps`). A feet-elevation field sets elevation directly when it stays in the token's band; when the height belongs to another floor it offers "Move to <floor>" (elevation kept) or "Keep floor"; a height in a gap is refused with a notice. Player elevation editing is not added.
+
+## D-436 — Generate a stack of floors (2026-10-11)
+
+An empty Draft levels panel offers *Generate a stack of floors*: floors including ground (1–16), basements (0–8), floor height and an optional unbounded roof band. Names are Ground, Floor 2…, Basement(s) and Roof; bands are contiguous from 0 and display order runs bottom-up. The result fills the draft only — the GM still assigns art and presses Apply.

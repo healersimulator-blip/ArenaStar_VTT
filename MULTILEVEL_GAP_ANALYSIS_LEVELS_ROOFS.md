@@ -671,7 +671,11 @@ Updated as slices land; decisions are in `DECISIONS.md`.
 | S5 / G-04 Stale specs | **Done** — plus `test:multilevel` (12 journeys) | D-429 |
 | S6 / G-15 Pre-check and live audit | **Done** — blocking errors, acknowledged warnings, quick fixes, live list | D-433 |
 | G-18 Transition presentation | **Done** — arrival notice and cross-fade | D-430 |
-| S7 / G-12, G-13, G-16, G-17, G-28 | Open (slice C) | — |
+| S7 / G-12 GM floor view & build mode | **Done** — floor switch with ghost/only/all, build mode, PageUp/PageDown | D-434 · `src/core/gmFloorView.ts` |
+| G-13 Stamp & bulk assign | **Done** — GM build floor stamps every kind (tiles join floor art); token menu moves the selection; unassigned walls/lights to a floor | D-434, D-435 |
+| G-16 Move to floor & elevation | **Done (GM)** — token menu floors, elevation with floor offer; player elevation not added | D-435 |
+| G-17 Who is where | **Done** — roster with counts and PCs; click to jump | D-434 |
+| G-28 Level generator | **Done** — floors, basements, height, roof | D-436 |
 | G-19 to G-27, G-29 to G-33 | Open (slices D–F) | — |
 
 ---

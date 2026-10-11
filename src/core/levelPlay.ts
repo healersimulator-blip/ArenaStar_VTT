@@ -192,33 +192,64 @@ function editedLevelScenes(ops: readonly Op[]): Set<string> {
     return c === "scenes" ? [op.kind === "create" ? op.data._id : op.ref.id] : (c === "levels" || c === "regions") && p ? [p.id] : [];
   }));
 }
-/** G-06/G-07: creation-time floor stamping. G-07 (D-431): a token created in isolated floor play always lands on a floor, in this order:
- * an explicit `levelId`; its prefab parent's floor; the creator's preferred floor (a player's
- * focused floor, or a GM's active floor sent explicitly); the band containing its feet; the
- * lowest floor. Feet elevation is kept when it already lies in the chosen band. */
-export function levelCreationOps(ops: readonly Op[], sceneById: (id: string) => SceneDocument | undefined, preferred: (sceneId: string) => string | null = () => null): Op[] {
+/**
+ * Creation-time floor stamping (G-06/G-07/G-13). `preferred` is a player's viewed floor and only
+ * applies in isolated play; `build` is a GM's explicit build floor (D-434) and applies in any scene
+ * with levels, to every kind: walls, lights, regions, drawings, templates and notes get
+ * `levelScope:{levels:[floor]}`, tiles are appended to that floor's art, tokens get the floor.
+ * G-07 (D-431): a token created in isolated play always lands on a floor — its prefab parent's,
+ * the build/viewed floor, the band containing its feet, else the lowest floor. Feet elevation is
+ * kept when it already lies in the chosen band. Explicit fields are never overwritten.
+ */
+export function levelCreationOps(ops: readonly Op[], sceneById: (id: string) => SceneDocument | undefined,
+  preferred: (sceneId: string) => string | null = () => null, build: (sceneId: string) => string | null = () => null): Op[] {
   const edited = editedLevelScenes(ops);
   const created: TokenDocument[] = [];
-  return ops.map((op) => {
-    if (op.kind === "create" && (op.coll === "drawings" || op.coll === "templates" || op.coll === "notes") && op.parent?.coll === "scenes") {
-      // G-06 (D-432): a drawing, template or note made while looking at one floor belongs to it.
-      const scene = sceneById(op.parent.id), level = scene?.levelMode === "isolated" && !edited.has(scene._id) ? preferred(scene._id) : null;
-      if (!scene || !level || Object.hasOwn(op.data, "levelScope") || !scene.levels?.some((l) => l._id === level)) return op;
-      return { ...op, data: { ...op.data, levelScope: { mode: "levels", ids: [level] } } };
+  const tiles = new Map<string, { scene: SceneDocument; levelId: string; ids: string[] }>();
+  const floorOf = (scene: SceneDocument, pick: (sceneId: string) => string | null) => {
+    const id = pick(scene._id);
+    return id && scene.levels?.some((l) => l._id === id) ? id : null;
+  };
+  const result = ops.map((op): Op => {
+    if (op.kind !== "create" || op.parent?.coll !== "scenes") return op;
+    const scene = sceneById(op.parent.id);
+    if (!scene || edited.has(scene._id) || !scene.levels?.length) { if (op.coll === "tokens") created.push(op.data as TokenDocument); return op; }
+    const builder = floorOf(scene, build);
+    const viewer = scene.levelMode === "isolated" ? floorOf(scene, preferred) : null;
+    if (op.coll === "drawings" || op.coll === "templates" || op.coll === "notes" || op.coll === "walls" || op.coll === "lights" || op.coll === "regions") {
+      // G-06 (D-432): presentation objects made while viewing a floor belong to it; G-13: so does
+      // everything a GM builds while a build floor is active.
+      const level = builder ?? (op.coll === "drawings" || op.coll === "templates" || op.coll === "notes" ? viewer : null);
+      if (!level || Object.hasOwn(op.data, "levelScope")) return op;
+      return { ...op, data: { ...op.data, levelScope: { mode: "levels", ids: [level] } } as typeof op.data };
     }
-    if (op.kind !== "create" || op.coll !== "tokens" || op.parent?.coll !== "scenes") return op;
-    const scene = sceneById(op.parent.id), data = op.data as TokenDocument;
-    if (!scene || scene.levelMode !== "isolated" || edited.has(scene._id) || !scene.levels?.length || data.levelId !== undefined) { created.push(data); return op; }
+    if (op.coll === "tiles") {
+      if (builder && !scene.levels.some((l) => l.tileIds?.includes(op.data._id))) {
+        const key = `${scene._id}\u0000${builder}`;
+        const row = tiles.get(key) ?? { scene, levelId: builder, ids: [] };
+        row.ids.push(op.data._id); tiles.set(key, row);
+      }
+      return op;
+    }
+    if (op.coll !== "tokens") return op;
+    const data = op.data as TokenDocument;
+    if (data.levelId !== undefined || (scene.levelMode !== "isolated" && !builder)) { created.push(data); return op; }
     const levels = scene.levels, elevation = Number.isFinite(data.elevation) ? data.elevation ?? 0 : 0;
     const parentId = (data.flags?.prefab as { parentId?: unknown } | undefined)?.parentId;
     const parent = typeof parentId === "string" ? [...created, ...scene.tokens].find((t) => t._id === parentId) : undefined;
-    const level = [parent?.levelId, preferred(scene._id)].map((id) => levels.find((l) => l._id === id)).find((l) => !!l) ??
+    const level = [parent?.levelId, builder ?? viewer].map((id) => levels.find((l) => l._id === id)).find((l) => !!l) ??
       levels.find((l) => inElevationBand(l, elevation)) ?? [...levels].sort((a, b) => (a.bottom ?? -Infinity) - (b.bottom ?? -Infinity) || a.sort - b.sort)[0];
     if (!level) { created.push(data); return op; }
     const stamped = { ...data, levelId: level._id, elevation: inElevationBand(level, elevation) ? elevation : level.floorZ };
     created.push(stamped);
     return { ...op, data: stamped };
   });
+  for (const { scene, levelId, ids } of tiles.values()) {
+    const level = scene.levels?.find((l) => l._id === levelId);
+    if (!level) continue;
+    result.push({ kind: "update", ref: { coll: "levels", id: levelId, parent: { coll: "scenes", id: scene._id } }, diff: { tileIds: [...(level.tileIds ?? []), ...ids] } });
+  }
+  return result;
 }
 function wallsOn(scene: SceneDocument, levelId: string) {
   return scene.walls.filter((w) => w.levelScope?.mode === "all" || (w.levelScope?.mode === "levels" && w.levelScope.ids.includes(levelId)));
@@ -416,4 +447,30 @@ export function stairLandingBlocked(scene: SceneDocument, levelId: string, at: {
   const body = { _id: "audit", type: "token", name: "", ownership: { default: 0 }, flags: {}, system: {}, x: at.x, y: at.y, width: size * 0.8, height: size * 0.8, rotation: 0,
     img: "", hidden: false, disposition: "neutral", vision: false, light: { radius: 0, color: "#ffffff", alpha: 0 } } as TokenDocument;
   return landingBlocked(scene, body, level, at);
+}
+/**
+ * G-16 (D-435): explicit "move to floor" for one or more tokens. Floor and feet elevation change
+ * together; prefab-attached tokens travel with their parent. `elevation` is kept when it lies in the
+ * destination band, otherwise the floor's Floor Z is used.
+ */
+export function floorMoveOps(scene: SceneDocument, tokenIds: readonly string[], levelId: string, elevation?: number): Op[] {
+  const level = scene.levels?.find((l) => l._id === levelId);
+  if (!level) throw new Error("That floor no longer exists");
+  const z = elevation !== undefined && inElevationBand(level, elevation) ? elevation : level.floorZ;
+  const parentOf = new Map(scene.tokens.map((t) => [t._id, (t.flags?.prefab as { parentId?: unknown } | undefined)?.parentId] as const));
+  const chosen = new Set(tokenIds.filter((id) => parentOf.has(id)));
+  for (const token of scene.tokens) {
+    let at = parentOf.get(token._id);
+    for (let depth = 0; typeof at === "string" && depth < 8; depth++) {
+      if (tokenIds.includes(at)) { chosen.add(token._id); break; }
+      at = parentOf.get(at);
+    }
+  }
+  const parent = { coll: "scenes" as const, id: scene._id };
+  return scene.tokens.filter((t) => chosen.has(t._id) && (t.levelId !== level._id || (t.elevation ?? 0) !== z))
+    .map((t): Op => ({ kind: "update", ref: { coll: "tokens", id: t._id, parent }, diff: { levelId: level._id, elevation: z } }));
+}
+/** G-16: which floor's band holds this feet elevation (null in a gap or with no levels). */
+export function floorForElevation(scene: SceneDocument, elevation: number): LevelDocument | null {
+  return scene.levels?.find((l) => inElevationBand(l, elevation)) ?? null;
 }

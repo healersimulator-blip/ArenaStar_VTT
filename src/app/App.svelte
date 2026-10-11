@@ -4,7 +4,9 @@
   import SavesPanel from "../ui/settings/SavesPanel.svelte";
   import ZoomControl from "../ui/canvas/ZoomControl.svelte";
   import StairChooser from "../ui/StairChooser.svelte";
-  import { stairMarkers } from "../core/levelPlay";
+  import { floorForElevation, floorMoveOps, stairMarkers } from "../core/levelPlay";
+  import { adjacentFloor, floorRoster, gmFloorRender, GM_GHOST_ALPHA, type GmFloorMode } from "../core/gmFloorView";
+  import { unscopedToFloorOps } from "../core/levelAudit";
   import type { StairOfferMsg } from "../core/messages";
   import { SceneLightingPlayer } from "../client/sceneLighting";
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
@@ -255,6 +257,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     SceneDocument,
     SceneGrid,
     TileDocument,
+    TokenDocument,
     UserDocument,
     WallDocument,
   } from "../core/documents";
@@ -532,8 +535,78 @@ const WALL_PICK_RADIUS = 12;
   function chooseLevelPreview(id: string) {
     const scene = activeScene();
     levelPreview = scene && id ? { sceneId: scene._id, levelId: id } : null;
+    syncBuildFocus();
     refresh();
   }
+  // G-12/G-13/G-17 (D-434): the GM floor view. Rendering/picking only — documents stay whole.
+  let floorMode = $state<GmFloorMode>("ghost");
+  let buildMode = $state(false);
+  let buildFocus: string | null = null;
+  function gmRender(scene: SceneDocument | null) {
+    const levelId = previewLevel(scene);
+    return scene ? gmFloorRender(scene, levelId ? { levelId, mode: floorMode } : null) : null;
+  }
+  /** The host stamps new objects with the GM's explicit floor focus (their build floor). */
+  function syncBuildFocus(): void {
+    const scene = activeScene(), levelId = previewLevel(scene);
+    const want = scene && buildMode && levelId ? `${scene._id}\u0000${levelId}` : null;
+    if (want === buildFocus || !scene || !app) return;
+    const previous = buildFocus;
+    buildFocus = want;
+    try { app.gm.client.requestLevelFocus(scene._id, want ? levelId ?? null : null); }
+    catch (error) { buildFocus = previous; notifyLog = [...notifyLog.slice(-49), { message: String(error), level: "warn" }]; }
+  }
+  function stepFloor(direction: 1 | -1): void {
+    const scene = activeScene();
+    if (!scene?.levels?.length) return;
+    chooseLevelPreview(adjacentFloor(scene.levels, previewLevel(scene) ?? null, direction) ?? "");
+  }
+  function isPlayerCharacter(token: TokenDocument): boolean {
+    const store = app?.gm.client.store;
+    const actor = token.actorId ? store?.get("actors", token.actorId) as ActorDocument | undefined : undefined;
+    const ownership = (actor?.ownership ?? token.ownership) as Record<string, number>;
+    return Object.entries(ownership).some(([id, level]) => id !== "default" && level >= 3 && (store?.get("users", id) as { role?: string } | undefined)?.role !== "GM");
+  }
+  function focusRosterToken(token: TokenDocument): void {
+    const view = stage, scene = activeScene();
+    if (!view || !scene) return;
+    if (token.levelId && previewLevel(scene) !== token.levelId) chooseLevelPreview(token.levelId);
+    const host = canvasHost?.getBoundingClientRect();
+    const scale = view.camera.scale;
+    fxPlayer?.cancelCamera();
+    view.setCamera({ ...view.camera, x: token.x - (host?.width ?? view.app.canvas.width) / 2 / scale, y: token.y - (host?.height ?? view.app.canvas.height) / 2 / scale });
+    controller?.select([token._id]);
+  }
+  // G-16 (D-435): GM floor moves and feet elevation from the token menu.
+  let elevationOffer = $state<{ tokenId: string; levelId: string; name: string; z: number } | null>(null);
+  function floorMenuTargets(tokenId: string): string[] {
+    const sceneId = activeScene()?._id ?? null;
+    return tokenSelection.sceneId === sceneId && tokenSelection.ids.includes(tokenId) ? [...tokenSelection.ids] : [tokenId];
+  }
+  async function moveTokensToFloor(ids: readonly string[], levelId: string, elevation?: number): Promise<void> {
+    const scene = activeScene();
+    if (!scene || !app) return;
+    try {
+      const ops = floorMoveOps(scene, ids, levelId, elevation);
+      if (ops.length) await app.gm.client.submitAndWait(ops);
+      closeTokenMenu(); elevationOffer = null;
+    } catch (error) { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; }
+  }
+  async function setTokenElevation(token: TokenDocument, z: number): Promise<void> {
+    const scene = activeScene();
+    if (!scene || !app || !Number.isFinite(z)) return;
+    elevationOffer = null;
+    const band = scene.levels?.length ? floorForElevation(scene, z) : null;
+    if (scene.levels?.length && token.levelId !== undefined && band && band._id !== token.levelId) {
+      elevationOffer = { tokenId: token._id, levelId: band._id, name: band.name, z }; return;
+    }
+    if (scene.levels?.length && token.levelId !== undefined && !band) {
+      notifyLog = [...notifyLog.slice(-49), { message: "No floor covers that height; elevation unchanged.", level: "warn" }]; return;
+    }
+    try { await app.gm.client.submitAndWait([{ kind: "update", ref: { coll: "tokens", id: token._id, parent: { coll: "scenes", id: scene._id } }, diff: { elevation: z } }]); }
+    catch (error) { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; }
+  }
+  const floorRosterRows = $derived.by(() => { void storeVersion; const scene = levelPreviewScene; return scene?.levels?.length ? floorRoster(scene, isPlayerCharacter) : []; });
   let fogResetBusy = $state(false), fogResetMessage = $state("");
   async function resetPreviewFog() {
     const scene = activeScene(), levelId = previewLevel(scene);
@@ -2736,8 +2809,10 @@ const WALL_PICK_RADIUS = 12;
     // A preview is a view of the table, not only of the pixels: under it the GM's pointer plays
     // the player's part too, so a token the player cannot see is not selectable here either.
     const gate = viewingAs ? viewAsVisible : null;
+    // G-12: in build mode, or when other floors are not drawn, only this floor's tokens are picked.
+    const floor = !viewingAs && previewLevel(scene) && (buildMode || floorMode === "only") ? gmRender(scene) : null;
     return scene.tokens
-      .filter((token) => gate === null || gate.has(token._id))
+      .filter((token) => (gate === null || gate.has(token._id)) && (!floor || floor.pickable(token)))
       .map((token) => ({ token, sceneId: scene._id }));
   }
 
@@ -3079,7 +3154,8 @@ const WALL_PICK_RADIUS = 12;
       wallGestureSceneId = scene?._id ?? null;
       if (canvasTool === "wall") toolController?.activate("wall");
     }
-    view.getWallsLayer().sync(show ? (scene?.walls ?? []) : [], view.camera, canvasTool === "wall" && toolOptions.wallEditMode === "corner");
+    const walls = viewingAs ? scene?.walls : gmRender(scene)?.scene.walls;
+    view.getWallsLayer().sync(show ? (walls ?? []) : [], view.camera, canvasTool === "wall" && toolOptions.wallEditMode === "corner");
   }
 
   function refresh(): void {
@@ -3109,12 +3185,16 @@ const WALL_PICK_RADIUS = 12;
     worldName = current.meta.name;
     seq = current.gm.client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
-    const tokens = scene?.tokens ?? [];
+    syncBuildFocus();
+    const floor = viewingAs ? null : gmRender(scene);
+    const shown = floor?.scene ?? scene;
+    view.setFloorGhosts(floor && floorMode === "ghost" && previewLevel(scene) ? floor.ghost : null, GM_GHOST_ALPHA);
+    const tokens = shown?.tokens ?? [];
     // E06 (D-147): condition/effect chips derive on read from the client replica, so apply,
     // suppress and expiry all re-render the badges with no invalidation step.
     view.setTokenImageLoader(tileImages.load);
-    view.setFauxOverhead(scene?.regions ?? []);
-    view.setStairMarkers(scene?.levels?.length ? stairMarkers(scene, null, true) : []);
+    view.setFauxOverhead(shown?.regions ?? []);
+    view.setStairMarkers(scene?.levels?.length ? stairMarkers(scene, previewLevel(scene) ?? null, true) : []);
     view.syncTokens(
       tokens,
       tokenBadgesMap(tokens, {
@@ -3151,10 +3231,10 @@ const WALL_PICK_RADIUS = 12;
     view.peekFogLayer()?.applyManualMask(mask);
     // D-256 map pins: the notes layer draws whatever this replica holds (players only ever
     // hold pins the GM made visible — the projection withholds the rest).
-    view.getNotesLayer().sync(scene?.notes ?? [], view.camera);
+    view.getNotesLayer().sync(shown?.notes ?? [], view.camera);
     // Replica-only scene geometry; both holders remain below the fog layer.
-    view.getDrawingsLayer().sync(scene?.drawings ?? [], view.camera);
-    view.getTemplatesLayer().sync(scene?.templates ?? [], view.camera);
+    view.getDrawingsLayer().sync(shown?.drawings ?? [], view.camera);
+    view.getTemplatesLayer().sync(shown?.templates ?? [], view.camera);
     // D-271: the hex overlay follows the replica — reveals, terrain, the party's ring. A scene
     // without a hexcrawl profile clears it (the feature switch), and a *view as* preview paints
     // what that player would see: the cover, not the GM's dimmed preparation view.
@@ -3168,15 +3248,15 @@ const WALL_PICK_RADIUS = 12;
     // D-257: walls overlay follows the replica too (a door toggled anywhere redraws here).
     syncWallsOverlay();
     // §9 tiles: roofs fade over tokens with vision (D-083)
-    const occupied = (scene?.tokens ?? [])
+    const occupied = (shown?.tokens ?? [])
       .filter((t) => t.vision)
       .map((t) => tokenRect(t));
     view
       .getTilesLayer({ loadTexture: tileImages.load })
-      .sync(scene?.tiles ?? [], occupied, scene?.regions ?? []);
+      .sync(shown?.tiles ?? [], occupied, shown?.regions ?? []);
     tileImages.retain([...(scene?.tiles ?? []).map((tile) => tile.img), ...(scene?.tokens ?? []).map((token) => token.img)]);
-    sceneBackground.sync(scene?.img ?? null, current.gm.client.store.world.assetManifest,
-      (hash, priority) => current.gm.fetcher.request(hash, priority), view, scene);
+    sceneBackground.sync(shown?.img ?? null, current.gm.client.store.world.assetManifest,
+      (hash, priority) => current.gm.fetcher.request(hash, priority), view, shown);
     view.setGrid(sceneGridSpec(scene?.grid));
     syncBackgroundEditor();
   }
@@ -3544,6 +3624,9 @@ const WALL_PICK_RADIUS = 12;
     const offGmStairs = current.gm.bus.on("stairOffer", onGmStairOffer);
     const onKey = (e: KeyboardEvent): void => {
       if (isTypingTarget(e.target)) return;
+      if ((e.key === "PageUp" || e.key === "PageDown") && !viewingAs && activeScene()?.levels?.length) {
+        e.preventDefault(); stepFloor(e.key === "PageUp" ? 1 : -1); return; // G-12 floor stepping
+      }
       if (e.key === "Escape") {
         controller?.clearRuler(); // §9 ruler dismiss
         closeTokenMenu(); // T01 menu dismiss (which also drops the hex menu)
@@ -5051,18 +5134,45 @@ const WALL_PICK_RADIUS = 12;
           {#if gmStairOffer}<StairChooser offer={gmStairOffer} tokenName={gmStairTokenName(gmStairOffer.tokenId)} onChoose={answerGmStairs} />{/if}
           <ZoomControl {stage} onInput={() => fxPlayer?.cancelCamera()} />
           {#if !viewingAs && (levelPreviewScene?.levels?.length ?? 0) > 0}
-            <div class="level-perception-preview" style="position:absolute;right:12px;top:58px;z-index:30;background:#182331;color:#e6eef9;padding:8px;max-width:270px;font-size:11px;border:1px solid #52657a;border-radius:5px">
-              <label>GM fog &amp; lighting diagnostic
+            <div class="level-perception-preview" data-gm-floor-view style="position:absolute;right:12px;top:58px;z-index:30;background:#182331;color:#e6eef9;padding:8px;max-width:270px;font-size:11px;border:1px solid #52657a;border-radius:5px">
+              <label>GM floor
                 <select aria-label="GM level perception preview" value={previewLevel(levelPreviewScene) ?? ""} onchange={(e) => chooseLevelPreview(e.currentTarget.value)}>
-                  <option value="">Legacy whole-scene view</option>
-                  {#each levelPreviewScene?.levels ?? [] as level (level._id)}<option value={level._id}>{level.name}</option>{/each}
+                  <option value="">All floors · authoring</option>
+                  {#each [...(levelPreviewScene?.levels ?? [])].sort((a, b) => b.floorZ - a.floorZ || a.sort - b.sort) as level (level._id)}<option value={level._id}>{level.name}</option>{/each}
                 </select>
               </label>
               {#if previewLevel(levelPreviewScene)}
+                <label>Show
+                  <select aria-label="GM floor display" bind:value={floorMode} onchange={() => refresh()}>
+                    <option value="ghost">This floor · others faint</option>
+                    <option value="only">This floor only</option>
+                    <option value="all">Every floor</option>
+                  </select>
+                </label>
+                <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" aria-label="GM build mode" bind:checked={buildMode} onchange={() => { syncBuildFocus(); refresh(); }} />Build on this floor</label>
+                {#if buildMode}<p data-gm-build-hint>New walls, lights, tiles, regions, notes, drawings, templates and tokens join this floor; picking stays on it.</p>{/if}
+                {#if levelPreviewScene && (levelPreviewScene.walls.some((w) => w.levelScope === undefined) || levelPreviewScene.lights.some((l) => l.levelScope === undefined))}
+                  <button type="button" data-gm-assign-unscoped onclick={async () => {
+                    const scene = activeScene(), levelId = previewLevel(scene);
+                    if (!scene || !levelId || !app) return;
+                    const ops = unscopedToFloorOps(scene, levelId);
+                    try { if (ops.length) await app.gm.client.submitAndWait(ops); notifyLog = [...notifyLog.slice(-49), { message: `${ops.length} unassigned wall(s)/light(s) put on this floor. Undo is available.`, level: "info" }]; }
+                    catch (error) { notifyLog = [...notifyLog.slice(-49), { message: String(error), level: "warn" }]; }
+                  }}>Put unassigned walls &amp; lights on this floor</button>
+                {/if}
                 <button type="button" data-level-fog-reset disabled={fogResetBusy || !app?.gm.client.supportsFeature(LEVEL_FOG_RESET_FEATURE)} onclick={resetPreviewFog}>Reset this level’s fog</button>
                 {#if fogResetMessage}<p role="status">{fogResetMessage}</p>{/if}
+                <p>Lighting and exploration follow this floor. Manual fog painting is off here. PageUp/PageDown change floor.</p>
               {/if}
-              {#if previewLevel(levelPreviewScene)}<p>Diagnostic only: all artwork and tokens remain visible to GM. Enable scene fog to explore this level. Lighting uses assigned sources and this level’s ambient setting (or scene inheritance); walls remain flat. Manual fog painting is disabled here.</p>{/if}
+              <details data-gm-floor-roster open>
+                <summary>Who is where</summary>
+                {#each floorRosterRows as row (row.levelId ?? "none")}
+                  <div data-floor-roster={row.levelId ?? "none"} style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;margin:3px 0">
+                    <button type="button" style="background:none;border:0;color:#cfe0f5;cursor:pointer;padding:0;text-align:left" onclick={() => chooseLevelPreview(row.levelId ?? "")}>{row.levelId ? (levelPreviewScene?.levels?.find((l) => l._id === row.levelId)?.name ?? row.levelId) : "No floor"} · {row.tokens}</button>
+                    {#each row.pcs as pc (pc._id)}<button type="button" data-roster-token={pc._id} title={pc.name} style="width:22px;height:22px;border-radius:50%;border:1px solid #8aa0bd;background:#26364a;color:#fff;font-size:9px;cursor:pointer;padding:0" onclick={() => focusRosterToken(pc)}>{pc.name.split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase()}</button>{/each}
+                  </div>
+                {/each}
+              </details>
             </div>
           {/if}
           <div class="toolrail">
@@ -5323,6 +5433,23 @@ const WALL_PICK_RADIUS = 12;
                     >
                   {/if}
                 {/each}
+                {#if (menuScene.levels?.length ?? 0) > 0}
+                  {@const targets = floorMenuTargets(menuToken._id)}
+                  <span class="token-menu-static" data-token-menu-floors>Move to floor{targets.length > 1 ? ` · ${targets.length} tokens` : ""}</span>
+                  {#each [...(menuScene.levels ?? [])].sort((a, b) => b.floorZ - a.floorZ || a.sort - b.sort) as level (level._id)}
+                    <button type="button" role="menuitem" data-token-menu-floor={level._id}
+                      disabled={targets.every((id) => menuScene.tokens.find((t) => t._id === id)?.levelId === level._id)}
+                      onclick={() => moveTokensToFloor(targets, level._id)}>{level.name} · Z {level.floorZ}</button>
+                  {/each}
+                  <label class="token-menu-static" style="display:flex;gap:4px;align-items:center">Feet Z
+                    <input type="number" aria-label="Token feet elevation" style="width:64px" value={menuToken.elevation ?? 0}
+                      onchange={(e) => setTokenElevation(menuToken, Number(e.currentTarget.value))} /></label>
+                  {#if elevationOffer?.tokenId === menuToken._id}
+                    <span class="token-menu-static" data-token-elevation-offer>That height is on {elevationOffer.name}.</span>
+                    <button type="button" role="menuitem" onclick={() => elevationOffer && moveTokensToFloor([menuToken._id], elevationOffer.levelId, elevationOffer.z)}>Move to {elevationOffer.name}</button>
+                    <button type="button" role="menuitem" onclick={() => { elevationOffer = null; }}>Keep floor</button>
+                  {/if}
+                {/if}
               </div>
             {/if}
           {/if}

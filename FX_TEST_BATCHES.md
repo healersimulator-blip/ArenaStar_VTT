@@ -80,9 +80,10 @@ to Canvas2D and pixel-level specs test the fallback (D-429).
 
 ## Multilevel batch (D-429)
 
-`corepack pnpm build && corepack pnpm test:multilevel` runs the 12 floor-play journeys (isolated floors,
-level ambient/bindings/drafts/perception, player floor focus, Faux Overhead, wall editing and the
-three-floor stairwell choice) in one Chromium worker, so wording changes cannot silently break them.
+`corepack pnpm build && corepack pnpm test:multilevel` runs the 13 floor-play journeys (isolated floors,
+level ambient/bindings/drafts/perception, player floor focus, Faux Overhead, wall editing, the
+three-floor stairwell choice and the GM floor view) in one Chromium worker, so wording changes cannot
+silently break them.
 
 ## Open failures at D-323
 

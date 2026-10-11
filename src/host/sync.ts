@@ -1373,13 +1373,22 @@ export class HostSync {
     this.offerStairs(stairChoicesHere(scene, token), user.id, session);
   }
 
-  /** G-07: the floor a user is currently looking at, used to place the tokens they create. */
+  /** G-07: the floor a player is currently looking at, used to place what they create. */
   private preferredLevelFor(userId: UserId, sceneId: string): string | null {
     for (const session of this.sessions.values()) {
       const focus = session.levelFocus;
-      if (session.user?.id !== userId || focus?.sceneId !== sceneId) continue;
+      if (session.user?.id !== userId || focus?.sceneId !== sceneId || session.user.role === "GM" || session.user.role === "ASSISTANT") continue;
       const view = levelFocusView(this.store.get("scenes", sceneId), this.store.getAll("actors"), session.user, focus.levelId, focus.followTokenId);
       if (view.levelId) return view.levelId;
+    }
+    return null;
+  }
+  /** G-13 (D-434): a GM's explicit floor focus is their build floor; never the follow default. */
+  private buildLevelFor(userId: UserId, sceneId: string): string | null {
+    for (const session of this.sessions.values()) {
+      const focus = session.levelFocus;
+      if (session.user?.id !== userId || focus?.sceneId !== sceneId || (session.user.role !== "GM" && session.user.role !== "ASSISTANT") || !focus.levelId) continue;
+      if (this.store.get("scenes", sceneId)?.levels?.some((l) => l._id === focus.levelId)) return focus.levelId;
     }
     return null;
   }
@@ -3768,7 +3777,7 @@ export class HostSync {
     let stairPrompts: StairPrompt[] = [];
     if (!restoring) {
       try {
-        ops = levelCreationOps(ops, (id) => this.store.get("scenes", id), (sceneId) => this.preferredLevelFor(by, sceneId));
+        ops = levelCreationOps(ops, (id) => this.store.get("scenes", id), (sceneId) => this.preferredLevelFor(by, sceneId), (sceneId) => this.buildLevelFor(by, sceneId));
         const plan = stairMovementPlan(ops, (id) => this.store.get("scenes", id));
         ops = plan.ops; stairPrompts = plan.prompts;
       }

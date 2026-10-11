@@ -349,6 +349,13 @@ export class CanvasController {
     return [...this.selection];
   }
 
+  /** Programmatic selection (G-17 floor roster); fires the normal selection callback. */
+  select(ids: readonly DocId[]): void {
+    this.selection.clear();
+    for (const id of ids) this.selection.add(id);
+    this.options.onSelectionChange?.(this.selected);
+  }
+
   /** Scene switches / explicit clear cancel stale selection gestures without submitting movement. */
   clearSelection(): void {
     this.selection.clear();
