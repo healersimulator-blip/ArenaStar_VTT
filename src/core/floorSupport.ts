@@ -17,6 +17,7 @@ import type { Op } from "./ops";
 import { applyDiff } from "./diff";
 import { floorSolidAt, floorSurfaces } from "./floorSurface";
 import { inStairwell } from "./levelPlay";
+import { followedElevation } from "./raisedAreas";
 import { SpatialKernel } from "./spatial/kernel";
 
 /** Feet this far above the floor count as standing on it. */
@@ -99,7 +100,7 @@ export function flightPassage(scene: Pick<SceneDocument, "levels" | "width" | "h
  * prefab parts riding their parent are not walks.
  */
 export function unsupportedWalks(ops: readonly Op[], sceneById: (id: string) => SceneDocument | undefined): Array<{ tokenId: string; name: string; floor: string }> {
-  const rows = new Map<string, { scene: SceneDocument; after: TokenDocument; explicit: boolean; walked: boolean }>();
+  const rows = new Map<string, { scene: SceneDocument; start: TokenDocument; after: TokenDocument; explicit: boolean; walked: boolean }>();
   for (const op of ops) {
     if (op.kind !== "update" || op.ref.coll !== "tokens" || op.ref.parent?.coll !== "scenes") continue;
     const scene = sceneById(op.ref.parent.id);
@@ -107,7 +108,7 @@ export function unsupportedWalks(ops: readonly Op[], sceneById: (id: string) => 
     const key = `${scene._id}\u0000${op.ref.id}`;
     const start = scene.tokens.find((t) => t._id === op.ref.id);
     if (!start) continue;
-    const row = rows.get(key) ?? { scene, after: start, explicit: false, walked: false };
+    const row = rows.get(key) ?? { scene, start, after: start, explicit: false, walked: false };
     const next = applyDiff(row.after, op.diff);
     if (!next.ok) continue;
     row.after = next.value;
@@ -117,9 +118,11 @@ export function unsupportedWalks(ops: readonly Op[], sceneById: (id: string) => 
     rows.set(key, row);
   }
   const out: Array<{ tokenId: string; name: string; floor: string }> = [];
-  for (const { scene, after, explicit, walked } of rows.values()) {
+  for (const { scene, start, after, explicit, walked } of rows.values()) {
     if (explicit || !walked || typeof (after.flags?.prefab as { parentId?: unknown } | undefined)?.parentId === "string") continue;
-    if (tokenFooting(scene, after).supported) continue;
+    // D-453: a token walking off a raised area comes down to the ground it walks onto, so it is
+    // judged at the height the host will give it, not the height it left.
+    if (tokenFooting(scene, { ...after, elevation: followedElevation(scene, start, after) }).supported) continue;
     out.push({ tokenId: after._id, name: after.name, floor: scene.levels?.find((l) => l._id === after.levelId)?.name ?? "this floor" });
   }
   return out;

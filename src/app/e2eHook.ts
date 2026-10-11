@@ -1340,6 +1340,8 @@ export interface GmFogSurface {
   tokenElevationCues(): Array<{ id: string; label: string | null; scale: number }>;
   /** G-19 (D-443): lower-floor tiles drawn beneath the floor view, and the background's depth. */
   lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> };
+  /** D-452: height labels under lower-floor tokens. */
+  lowerTokenLabels(): Array<{ id: string; label: string }>;
   /** G-22 (D-446): light crossing floors: split darkness and the other floors' light groups. */
   crossFloorLighting(): CrossFloorLightingState;
   /** D-438: what each roof on the active scene draws (alpha, openings, group, fog reveal). */
@@ -1575,6 +1577,8 @@ export interface PlayerCanvasSurface {
   stairMarkers(): string[];
   /** G-19 (D-443): lower-floor tiles drawn beneath this player's floor, and the background's depth. */
   lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> };
+  /** D-452: height labels under lower-floor tokens. */
+  lowerTokenLabels(): Array<{ id: string; label: string }>;
   /** G-22 (D-446): light crossing floors on this player's canvas (the same shape as the GM readback). */
   crossFloorLighting(): CrossFloorLightingState;
   /** G-32 (D-440): the height badge text and artwork scale of each token this player sees. */

@@ -1,6 +1,7 @@
 import type { RegionDocument, SceneDocument, TileDocument } from "./documents";
 import { fauxOverheadError } from "./fauxOverhead";
 import { tileTriggerElevationError, tileTriggerZoneError } from "./tileTriggerZone";
+import { raisedAreaError } from "./raisedAreas";
 
 /** Validate the persisted, deliberately bounded first-class scene-region shape. */
 export function regionGeometryError(value: unknown): string | null {
@@ -25,6 +26,12 @@ export function regionGeometryError(value: unknown): string | null {
     return "region sort must be a bounded integer";
   const overheadError = fauxOverheadError(region.fauxOverhead);
   if (overheadError) return overheadError;
+  // D-453: a raised area is a box on its floor; a stairwell already moves tokens between floors.
+  if (region.raised !== undefined) {
+    const raisedError = raisedAreaError(region.raised);
+    if (raisedError) return raisedError;
+    if (region.stairs !== undefined) return "A stairwell cannot also be a raised area";
+  }
   if (region.fauxOverhead !== undefined) {
     const ownership = region.ownership as Record<string, unknown> | undefined;
     if (region.hidden === true || !ownership || typeof ownership.default !== "number" || ownership.default < 1 ||

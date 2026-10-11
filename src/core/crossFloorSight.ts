@@ -19,6 +19,7 @@ import { floorSurfaces } from "./floorSurface";
 import { floorAbove, visibleFloorsBelow } from "./levelPlay";
 import type { PermissionUser } from "./ownership";
 import { can } from "./permissions";
+import { raisedBarriers } from "./raisedAreas";
 import { SpatialKernel, legacySpatialBarrier, type SpatialBarrier } from "./spatial/kernel";
 import { SpatialPerception, bodySamples, type PerceptionBody, type SpatialLight } from "./spatial/perception";
 
@@ -89,7 +90,8 @@ export function tokensSeenBelow(scene: SceneDocument, actors: readonly ActorDocu
     can(user, "read", t, "tokens", { parent: scene }));
   if (!targets.length) return [];
   try {
-    const kernel = new SpatialKernel(floorBarriers(scene), floorSurfaces(scene));
+    // D-453: solid raised areas hide what is behind them, up to their tops.
+    const kernel = new SpatialKernel([...floorBarriers(scene), ...raisedBarriers(scene)], floorSurfaces(scene));
     const perUnit = scene.grid.size / (scene.grid.distance > 0 ? scene.grid.distance : 5);
     // G-22 (D-446): light from this floor and the floor above counts too; the floor planes let it
     // through openings only. Past the perception light budget, only the targets' floors light them.

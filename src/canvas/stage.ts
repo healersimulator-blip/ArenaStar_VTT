@@ -232,6 +232,8 @@ export interface Stage {
   setLowerFloors(tiles: ReadonlyMap<string, number>, backgroundDepth: number | null, tokens?: readonly LowerToken[]): void;
   /** Readback: lower-floor tiles drawn and the background's depth. */
   lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> };
+  /** D-452 readback: height labels under the tokens seen on lower floors. */
+  lowerTokenLabels(): Array<{ id: string; label: string }>;
   /** G-10/G-14: draw these stair markers (players: host-filtered; GM: every stairwell). */
   setStairMarkers(markers: readonly StairMarker[]): void;
   stairMarkerIds(): string[];
@@ -583,7 +585,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const rendererName = String((app.renderer as { name?: unknown }).name ?? "unknown");
   const overhead = new FauxOverheadLayer(tokenLayer, rendererName !== "canvas");
   const tokenArtwork = new Map<string, { image: string | null; revision: number; sprite: Sprite | null }>();
-  /** G-32 (D-440): badge text and artwork scale per token (sparse). */
+  /** G-32 (D-440), D-452: label text and artwork scale per token (sparse). */
   let elevationCueMap: ReadonlyMap<string, ElevationCue> = new Map();
   const applyElevationCue = (id: string, view: Container, width: number, height: number): void => {
     const cue = elevationCueMap.get(id);
@@ -609,10 +611,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       text.position.set(5, 0);
       bg.clear().roundRect(0, -7.5, text.width + 10, 15, 5).fill({ color: 0x1b2433, alpha: 0.92 }).stroke({ width: 1, color: 0x7fb2ff });
     }
-    // A tab on the (scaled) artwork's right edge near the top, clear of condition chips (top
-    // centre) and the HP bar.
-    const w = width * scale, h = height * scale;
-    badge.position.set((width + w) / 2 - 4, (height - h) / 2 + Math.min(12, h / 4));
+    // D-452: centred under the (scaled) artwork, clear of condition chips (top centre), the HP bar
+    // (inside the bottom edge) and the name.
+    const h = height * scale;
+    badge.position.set(width / 2 - (text ? text.width + 10 : 0) / 2, (height + h) / 2 + 10);
     badge.visible = !overhead.obscured(id);
   };
   let tokenImageLoader: ((image: string) => Promise<Texture | null>) | null = null;
@@ -1149,6 +1151,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       applyBackgroundTint();
     },
     lowerFloors() { return { tiles: tilesLayer?.lowerFloorTiles() ?? [], backgroundDepth: bgDepth, tokens: tilesLayer?.lowerTokenIds() ?? [] }; },
+    lowerTokenLabels() { return tilesLayer?.lowerTokenLabels() ?? []; },
     setFauxOverhead(regions): void {
       overhead.setRegions(regions);
       applyOverheadDecorations();

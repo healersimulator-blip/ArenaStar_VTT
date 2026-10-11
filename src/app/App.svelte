@@ -37,7 +37,7 @@
   import { roofViewerTokens, type RoofArtMask } from "../core/roofs";
   import { roofArtMaskFromTexture } from "../canvas/roofArt";
   import { FLOOR_ART_MAX_SIDE } from "../core/floorSurface";
-  import { elevationCues, elevationViewer, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
+  import { elevationCues, elevationViewer, lowerTokenLabels, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
   import { tokenHpBarsMap } from "../packages/pf1e/tokenHpBars";
@@ -3265,14 +3265,15 @@ const WALL_PICK_RADIUS = 12;
         ? "hover"
         : "all",
     );
-    // G-32 (D-440): height badges, and (when enabled) tokens at other heights drawn smaller than
-    // the selected token. A "view as" preview follows the previewed player's rule.
+    // G-32 (D-440), D-452: height labels from the ground, and (when enabled) tokens at other heights
+    // drawn smaller than the selected token. A "view as" preview follows the previewed player's rule.
     const cueSettings = worldSettingsFrom(current.gm.client.store.getAll("settings"));
-    view.setTokenElevationCues(scene ? elevationCues(scene, tokens, {
-      mode: tokenElevationModeOf(cueSettings), scaleByHeight: tokenElevationScaleOf(cueSettings), isGm: viewAsPlayer === null,
-      viewer: elevationViewer(scene, viewAsPlayer ?? current.gm.client.user, current.gm.client.store.getAll("actors") as readonly ActorDocument[],
-        tokenSelection.sceneId === scene._id ? tokenSelection.ids : []),
-    }) : new Map());
+    const cueOptions = {
+      mode: tokenElevationModeOf(cueSettings), isGm: viewAsPlayer === null,
+      viewer: scene ? elevationViewer(scene, viewAsPlayer ?? current.gm.client.user, current.gm.client.store.getAll("actors") as readonly ActorDocument[],
+        tokenSelection.sceneId === scene._id ? tokenSelection.ids : []) : null,
+    };
+    view.setTokenElevationCues(scene ? elevationCues(scene, tokens, { ...cueOptions, scaleByHeight: tokenElevationScaleOf(cueSettings) }) : new Map());
     // D-250/D-251: explored fog follows the replica — tokens moved, doors opened, scene
     // switched. The GM's cover is translucent (everything stays visible under it); god view
     // off previews the opaque cover players get — and a **view as** preview is always the
@@ -3311,9 +3312,11 @@ const WALL_PICK_RADIUS = 12;
       : [];
     // G-19 (D-443): in the isolated floor view, the floors it sees below show through, as players see them.
     // G-20 (D-445): with the tokens on those floors, beneath this floor's art.
+    // D-452: labelled like the tokens on the viewed floor (from the ground for the GM).
+    const belowLabels = floor && scene ? lowerTokenLabels(scene, scene.tokens.filter((t) => floor.lowerTokens.has(t._id)), cueOptions) : new Map<string, string>();
     const lowerTokens = floor && scene ? scene.tokens.flatMap((t) => {
       const depth = floor.lowerTokens.get(t._id);
-      return depth === undefined ? [] : [{ id: t._id, img: t.img, x: t.x, y: t.y, width: t.width, height: t.height, rotation: t.rotation ?? 0, depth }];
+      return depth === undefined ? [] : [{ id: t._id, img: t.img, x: t.x, y: t.y, width: t.width, height: t.height, rotation: t.rotation ?? 0, depth, label: belowLabels.get(t._id) ?? null }];
     }) : [];
     view.setLowerFloors(floor?.lower ?? new Map(), floor?.backgroundDepth || null, lowerTokens);
     view
@@ -5022,6 +5025,7 @@ const WALL_PICK_RADIUS = 12;
             return Object.fromEntries((activeScene()?.tiles ?? []).map((t) => [t._id, layer.roofStateOf(t._id)]));
           },
           lowerFloors: () => view.lowerFloors(),
+          lowerTokenLabels: () => view.lowerTokenLabels(),
           crossFloorLighting: () => view.getLightingLayer().crossFloorState(),
           // §2.2/G-10a: what the GM canvas actually drew — the mode's own gate, read back.
           tokenHpBars: () => view.tokenHpBars(),

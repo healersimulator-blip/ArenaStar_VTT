@@ -159,6 +159,11 @@ export interface RegionDocument extends BaseDocument {
   shape: { kind: "polygon"; points: Array<[number, number]> };
   /** Public presentation geometry only; never changes LOS, light, movement or explored fog. */
   fauxOverhead?: FauxOverheadBehavior;
+  /**
+   * D-453: a box standing on its floor (crates, a dais, a scaffold). Walking tokens stand on its
+   * top; a solid one blocks sight for eyes below its top. Never combined with `stairs`.
+   */
+  raised?: import("./raisedAreas").RaisedArea;
   /** GM-only regions are retained in the host scene but omitted from player replicas. */
   hidden?: boolean;
   /** Inclusive active vertical band in scene grid units. */

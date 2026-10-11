@@ -13,7 +13,7 @@
   import { TileImageCache } from "../canvas/imageTexture";
   import { tokenRect } from "../canvas/tokens";
   import { roofViewerTokens } from "../core/roofs";
-  import { elevationCues, elevationViewer, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
+  import { elevationCues, elevationViewer, lowerTokenLabels, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
   import { onDestroy, onMount } from "svelte";
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
   import { parseInvite } from "./hostShare";
@@ -1160,20 +1160,19 @@
         isGM: false,
       }),
     );
-    // G-32 (D-440): height badges unless the GM hid them; the optional size cue measures from the
-    // selected token, else the token this player's floor follows.
+    // G-32 (D-440), D-452: height labels unless the GM hid them. They and the optional size cue
+    // measure from this player's own token: selected, else followed, else their first token.
     const cueSettings = worldSettingsFrom(client.store.getAll("settings"));
     const focusState = client.levelFocus;
     const presentation = scene?.levelMode === "isolated" && focusState?.isolated && focusState.sceneId === scene._id ? focusState.presentation : undefined;
-    view.setTokenElevationCues(scene ? elevationCues(scene, tokens, {
-      mode: tokenElevationModeOf(cueSettings), scaleByHeight: tokenElevationScaleOf(cueSettings), isGm: false,
-      viewer: elevationViewer(scene, client.user, client.store.getAll("actors") as readonly ActorDocument[], selection, client.levelFocus?.followTokenId),
-      // D-443: players hold no `levels`; on an isolated floor every drawn token stands on the focused floor.
-      floorZ: presentation?.floorZ ?? null,
-    }) : new Map());
+    const cueViewer = scene ? elevationViewer(scene, client.user, client.store.getAll("actors") as readonly ActorDocument[], selection, client.levelFocus?.followTokenId) : null;
+    // D-443: players hold no `levels`; on an isolated floor with none of their tokens, labels read from the focused floor.
+    const cueOptions = { mode: tokenElevationModeOf(cueSettings), isGm: false, viewer: cueViewer, floorZ: presentation?.floorZ ?? null };
+    view.setTokenElevationCues(scene ? elevationCues(scene, tokens, { ...cueOptions, scaleByHeight: tokenElevationScaleOf(cueSettings) }) : new Map());
     const focus = client.levelFocus;
     const levelId = scene?.levelMode === "isolated" && focus?.sceneId === scene._id && focus.worldSeq === client.store.seq ? focus.levelId : null;
-    void fog?.sync(scene?.levelMode === "isolated" && !levelId ? null : scene, { style: "opaque", ...(levelId ? { levelId } : {}) });
+    // D-453: raised areas on an isolated floor stand on that floor's Z (players hold no levels).
+    void fog?.sync(scene?.levelMode === "isolated" && !levelId ? null : scene, { style: "opaque", ...(levelId ? { levelId } : {}), ...(presentation?.floorZ !== undefined ? { floorZ: presentation.floorZ } : {}) });
     // D-256: the GM's manual mask + visible map pins (the projection already withheld every
     // pin the GM has not made visible, so this layer only ever draws player-visible pins).
     view.peekFogLayer()?.applyManualMask(fogMaskLog(scene));
@@ -1190,9 +1189,12 @@
     // G-19 (D-443): floors seen beneath this one show through its art, dimmed by depth (art only).
     // G-20 (D-445): tokens down there that the host says this player's tokens see through the openings.
     const replicaTokens = scene ? (client.store.get("scenes", scene._id) as SceneDocument | undefined)?.tokens ?? [] : [];
+    const belowDocs = (presentation?.belowTokens ?? []).flatMap(({ id }) => replicaTokens.filter((x) => x._id === id));
+    // D-452: labelled like the tokens on this floor, from this player's own token.
+    const belowLabels = scene ? lowerTokenLabels(scene, belowDocs, cueOptions) : new Map<string, string>();
     const lowerTokens = (presentation?.belowTokens ?? []).flatMap(({ id, depth }) => {
       const t = replicaTokens.find((x) => x._id === id);
-      return t ? [{ id, img: t.img, x: t.x, y: t.y, width: t.width, height: t.height, rotation: t.rotation ?? 0, depth }] : [];
+      return t ? [{ id, img: t.img, x: t.x, y: t.y, width: t.width, height: t.height, rotation: t.rotation ?? 0, depth, label: belowLabels.get(id) ?? null }] : [];
     });
     view.setLowerFloors(lowerFloorDepths(presentation), backgroundDepth(presentation) || null, lowerTokens);
     view.getTilesLayer({ loadTexture: tileImages.load }).sync(scene?.tiles ?? [],
@@ -1350,6 +1352,7 @@
               },
               stairMarkers: () => view.stairMarkerIds(),
               lowerFloors: () => view.lowerFloors(),
+              lowerTokenLabels: () => view.lowerTokenLabels(),
               crossFloorLighting: () => view.getLightingLayer().crossFloorState(),
               tokenElevationCues: () => view.tokenElevationCues(),
               roofStates: () => {

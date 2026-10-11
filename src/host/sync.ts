@@ -147,6 +147,7 @@ import { pf1eSpellEffectById, pf1eSpellEffectLanded, type PF1eSpellEffect }
 import { sightBlockedBetween } from "../core/crosshair";
 import { areaFloorOf, areaFloorReach, wallsOnFloor } from "../core/areaFloors";
 import { unsupportedWalks } from "../core/floorSupport";
+import { raisedGroundOps } from "../core/raisedAreas";
 import { affectedTokens, lineIntersectsTokenFootprint, pf1eAreaGridFromScene, resolveAreaCells } from "../packages/pf1e/targeting";
 import { combinedTacticalEffects, resolveTacticalEffects } from "../packages/pf1e/effectOps";
 import {
@@ -3826,6 +3827,8 @@ export class HostSync {
         const [off] = unsupportedWalks(ops, (id) => this.store.get("scenes", id) as SceneDocument | undefined);
         if (off) return { ok: false, error: `No floor there: ${off.name} would step into an opening on ${off.floor}.` };
       }
+      // D-453: walking tokens keep to the ground under them: onto a raised area's top, and down again.
+      ops = [...ops, ...raisedGroundOps(ops, (id) => this.store.get("scenes", id) as SceneDocument | undefined)];
     }
     if (audit) {
       if (!ops.length) return { ok: false, error: "Cannot audit an empty world action" };

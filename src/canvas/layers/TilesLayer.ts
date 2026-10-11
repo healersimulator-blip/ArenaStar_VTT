@@ -11,7 +11,7 @@
  *   only, so Canvas2D never gets holes);
  * - a G-24 copy in the container above the fog.
  */
-import { Container, Graphics, Sprite, Texture } from "pixi.js";
+import { Container, Graphics, Sprite, Text, Texture } from "pixi.js";
 import { RotationAnimation } from "../rotationAnimation";
 import { MovementAnimation, movementDuration } from "../movementAnimation";
 import type { RegionDocument, TileDocument } from "../../core/documents";
@@ -28,7 +28,11 @@ export interface TilesLayerOptions {
 }
 
 /** G-20 (D-445): a token on a lower floor, seen through this floor's openings. */
-export interface LowerToken { id: string; img: string; x: number; y: number; width: number; height: number; rotation: number; depth: number }
+export interface LowerToken {
+  id: string; img: string; x: number; y: number; width: number; height: number; rotation: number; depth: number;
+  /** D-452: the height label drawn under it (e.g. `-20 ft`); absent or null draws none. */
+  label?: string | null;
+}
 
 /** D-438: per-sync roof inputs that are not tiles. */
 export interface RoofSyncOptions {
@@ -117,16 +121,16 @@ export class TilesLayer {
    * their own floor's art and below nearer floors' art and this floor's art, dimmed alike. Each is
    * just its image (a disc while loading): no bars, names or picking.
    */
-  private lowerTokenViews = new Map<string, { node: Sprite | Graphics; img: string; revision: number; token: LowerToken }>();
+  private lowerTokenViews = new Map<string, { node: Sprite | Graphics; img: string; revision: number; token: LowerToken; label: Container | null }>();
   setLowerTokens(tokens: readonly LowerToken[]): void {
     const seen = new Set<string>();
     for (const token of tokens) {
       seen.add(token.id);
       let view = this.lowerTokenViews.get(token.id);
-      if (view && view.img !== token.img) { view.node.destroy(); this.lowerTokenViews.delete(token.id); view = undefined; }
+      if (view && view.img !== token.img) { view.node.destroy(); view.label?.destroy({ children: true }); this.lowerTokenViews.delete(token.id); view = undefined; }
       if (!view) {
         const disc = new Graphics().circle(0, 0, 0.5).fill({ color: 0xffffff });
-        view = { node: disc, img: token.img, revision: 0, token };
+        view = { node: disc, img: token.img, revision: 0, token, label: null };
         this.lowerTokenViews.set(token.id, view);
         this.lower.addChild(disc);
         const load = token.img ? this.opts.loadTexture?.(token.img) : undefined;
@@ -146,10 +150,14 @@ export class TilesLayer {
       view.token = token;
       this.placeLowerToken(view);
     }
-    for (const [id, view] of this.lowerTokenViews) if (!seen.has(id)) { view.node.parent?.removeChild(view.node); view.node.destroy(); this.lowerTokenViews.delete(id); }
+    for (const [id, view] of this.lowerTokenViews) if (!seen.has(id)) {
+      view.node.parent?.removeChild(view.node); view.node.destroy();
+      view.label?.parent?.removeChild(view.label); view.label?.destroy({ children: true });
+      this.lowerTokenViews.delete(id);
+    }
     this.placeLower();
   }
-  private placeLowerToken(view: { node: Sprite | Graphics; token: LowerToken }): void {
+  private placeLowerToken(view: { node: Sprite | Graphics; token: LowerToken; label: Container | null }): void {
     const { node, token } = view;
     node.position.set(token.x, token.y);
     node.rotation = (token.rotation ?? 0) * Math.PI / 180;
@@ -157,6 +165,34 @@ export class TilesLayer {
     else node.scale.set(Math.min(token.width, token.height) * 0.8);
     node.tint = lowerFloorTint(token.depth);
     node.zIndex = -token.depth + 0.5;
+    // D-452: the height label sits under the token, in the same container, so it shows exactly
+    // where the opening shows the token. It is not dimmed: it must stay readable.
+    const text = token.label ?? null;
+    if (!text) { if (view.label) { view.label.parent?.removeChild(view.label); view.label.destroy({ children: true }); view.label = null; } return; }
+    let label = view.label;
+    if (!label) {
+      label = new Container(); label.label = "lowerTokenLabel";
+      const bg = new Graphics(); bg.label = "bg";
+      const caption = new Text({ text: "", style: { fontSize: 10, fill: 0xe8f1ff, fontFamily: "sans-serif", fontWeight: "600" } });
+      caption.label = "text"; caption.anchor.set(0.5);
+      label.addChild(bg, caption);
+      this.lower.addChild(label);
+      view.label = label;
+    }
+    const caption = label.getChildByLabel("text") as Text | null, bg = label.getChildByLabel("bg") as Graphics | null;
+    if (caption && bg && caption.text !== text) {
+      caption.text = text;
+      bg.clear().roundRect(-caption.width / 2 - 5, -7.5, caption.width + 10, 15, 5).fill({ color: 0x1b2433, alpha: 0.92 }).stroke({ width: 1, color: 0x7fb2ff });
+    }
+    label.position.set(token.x, token.y + token.height / 2 + 10);
+    label.zIndex = -token.depth + 0.6;
+  }
+  /** D-452 readback: the labels under lower-floor tokens. */
+  lowerTokenLabels(): Array<{ id: string; label: string }> {
+    return [...this.lowerTokenViews.values()].flatMap((v) => {
+      const text = (v.label?.getChildByLabel("text") as Text | null)?.text;
+      return text ? [{ id: v.token.id, label: text }] : [];
+    }).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
   /** Readback: lower-floor tokens drawn, with depth. */
   lowerTokenIds(): Array<{ id: string; depth: number }> {
