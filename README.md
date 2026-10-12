@@ -27,6 +27,12 @@ pnpm content:convert # → dist/content/pf1e (manifest + packs + OGL.txt + CREDI
 For shorter FX regression runs (one batch at a time, 15-minute global cap), see
 [FX_TEST_BATCHES.md](FX_TEST_BATCHES.md).
 
+**Run no test command that takes more than 25 minutes.** The batches in `package.json` are sized for
+that (`test:fx:*` cap at 15 minutes, `test:multilevel` at 20), and `pnpm test:e2e` is the one that
+does not: it is all 138 specs with no global timeout, hours of wall clock. Take the batches, or name
+the specs you need — `pnpm exec playwright test e2e/one.spec.ts e2e/two.spec.ts --workers=1` — and run
+heavy jobs one at a time (vitest, Playwright, lint, tsc, build), because the 2-CPU sandbox dies when
+they overlap.
 
 Requires Node 20+ and pnpm 10.
 
