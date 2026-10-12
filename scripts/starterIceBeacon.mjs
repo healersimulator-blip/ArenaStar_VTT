@@ -205,7 +205,7 @@ const TESTER_SCRIPT = `# Ice Beacon — Elevation Test
 A four-floor ice tower for testing floors, stairs, openings, raised areas and height labels.
 The full design is ELEVATION_TEST_SCENE.md in the repository.
 
-## Floors (Scenes → Floors)
+## Floors (Scenes → Draft levels)
 | Floor | Band | Height |
 |---|---|---|
 | Ground Hall | 0–20 ft | 20 ft |
@@ -225,6 +225,10 @@ Text under a token shows its height difference: **+10 ft** above, **-20 ft** bel
 - GM: measured from the ground (0 ft).
 - Player: measured from your own (selected) token.
 
+## Moving as a player
+One drag is one move action: at most 30 ft (6 squares) for Hosilla. The PF1e rules refuse a walk
+through an enemy's square ("Move refused: … passes through Hobgoblin Ambusher's square") — walk around.
+
 ## Try this
 1. **GM:** labels read Lookout +15 ft, Sentry +5 ft, Archer +10 ft. Switch floors: Troll +20 ft,
    Vrock +30 ft, Axe Beak +35 ft, Oracle +45 ft.
@@ -232,14 +236,16 @@ Text under a token shows its height difference: **+10 ft** above, **-20 ft** bel
    behind the open scaffold — but **not the Ambusher** hiding behind the crates.
 3. **Climb:** step onto the 5-ft crates (Hosilla rises to 5 ft, labels re-read from her), then the
    10-ft crates — the **Ambusher appears** (-10 ft) — then the 15-ft crates. Step down to 0.
-4. **GM:** in Scenes → Floor play & stairs → Raised areas, untick Solid on Crates (15 ft) (the
-   Ambusher shows from the entrance), or tick it on the scaffold (the orc disappears). Undo.
-5. **Stairs:** the west/east spirals and the balcony stair lead to the Gallery (20 ft). Look down
+4. **GM:** in Scenes → Raised areas, untick Solid on Crates (15 ft) (the Ambusher shows from the
+   entrance), or tick it on the scaffold (the orc disappears). Undo restores both.
+5. **Stairs:** the west/east spirals and the balcony stair lead to the Gallery (20 ft). From the
+   crates, step down to the north-west (around the Ambusher), then walk into the west spiral. Look down
    through the opening: Hall tokens read -20 ft, -10 ft…; the flying Vrock reads +10 ft. The twin
    spirals (south) lead to the Crystal Ring (35 ft), where the Vrock reads -5 ft. The north stair
    climbs to the Beacon (45 ft).
-6. **GM:** change the Ground Hall's top from 20 to 25 ft in Scenes → Floors: the floors above move
-   up and the labels follow.
+6. **GM:** change the Ground Hall's top from 20 to 25 ft in Scenes → Draft levels (Apply draft
+   levels): the floors above move up and the labels follow. Note: a 5-ft step at the bottom makes
+   the Hall 25 ft tall, so the Gallery and everything above rise with it.
 
 Art: Levels 7.0.3 sample maps ("Ice Beacon"), internal testing only.
 `;

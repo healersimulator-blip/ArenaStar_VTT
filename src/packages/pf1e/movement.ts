@@ -332,21 +332,24 @@ export function pf1eMovePlan(input: {
   // Intermediate cells only: the destination cell's occupier is the ending
   // rule's own fact (an ally at the destination is passable-through but not
   // endable-in; an enemy there is refused by the ending rule's own name).
+  // A refusal names the creature as the table sees it, never its internal id.
+  const shownName = (id: string): string => others.find((t) => t._id === id)?.name?.trim() || id;
   const blockedPass = pathKeys.slice(1, -1).find((k) => occupiedBy.has(k));
   if (blockedPass !== undefined) {
-    const blocker = occupiedBy.get(blockedPass) ?? "another creature";
+    const blocker = occupiedBy.get(blockedPass);
     const isAlly =
-      input.isAlly !== undefined && input.isAlly(mover._id, blocker);
+      blocker !== undefined && input.isAlly !== undefined && input.isAlly(mover._id, blocker);
     if (!isAlly) {
       return {
         ...okResult(areaGrid, path, costFt, budgetFt, destination, defaults),
-        refusal: `the walk passes through ${blocker}'s square — you can only move through an ally's space (CRB p.193)`,
+        refusal: `the walk passes through ${blocker === undefined ? "another creature" : shownName(blocker)}'s square — you can only move through an ally's space (CRB p.193)`,
       };
     }
   }
   const endOverlap = destination.find((c) => occupiedBy.has(cellKey(c)));
   if (endOverlap !== undefined) {
-    const blocker = occupiedBy.get(cellKey(endOverlap)) ?? "another creature";
+    const occupier = occupiedBy.get(cellKey(endOverlap));
+    const blocker = occupier === undefined ? "another creature" : shownName(occupier);
     return {
       ...okResult(areaGrid, path, costFt, budgetFt, destination, defaults),
       refusal: `you can never end movement in an occupied square — the destination overlaps ${blocker}'s space (A.7)`,

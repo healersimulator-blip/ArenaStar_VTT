@@ -251,3 +251,16 @@ Assign player-controlled tokens to saved levels in the GM scene editor. Compatib
 This supersedes the token-only limitation above for explicitly enabled scenes. In **Scenes → Draft levels**, assign each floor's map tiles/background, assign wall/light scopes, then open **Floor artwork & stair travel** to create stairs and enable isolated floor play. Players see one floor's maps, lighting and remembered fog; the view follows their controlled token through stairs by default. The manual selector is a collapsed fallback.
 
 A stair trip completes when a move ends inside the source-floor region; XY is preserved and floor/elevation change in one undoable transaction. Return stairs require leaving and entering again. Unassigned artwork/global foreground and auxiliary layers are excluded rather than mixed. This is playable discrete-floor rendering, **not comprehensive network/asset/FX secrecy or cross-floor sight/light**. Detailed setup and limits: `MULTILEVEL_IMPLEMENTATION.md`.
+
+### Where the multilevel work stands (D-429 … D-454)
+
+Everything the two sections above list as pending has landed: players see lower floors' art, tokens
+and light **through the openings their own floor traces**, stairs are drawn and edited on the map rail,
+the GM has a floor view with build mode, and other floors' data now stays on the host. The 20-ft
+"three-storey building" question is answered by a scene a tester can open: the PF1e starter world
+(`pnpm build:worlds`) ships **Ice Beacon — Elevation Test** — four floors of different heights
+(20 / 15 / 10 ft and an open top), six stairwells, openings to look down through, crate stacks of
+5 / 10 / 15 ft that hide what is behind them, a 10-ft scaffold that hides nothing, and height labels
+under every token (from the ground for the GM, from their own token for a player).
+`ELEVATION_TEST_SCENE.md` is the layout and the tester script; `MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md`
+keeps the item-by-item progress table.

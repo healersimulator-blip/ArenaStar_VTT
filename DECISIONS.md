@@ -13201,3 +13201,51 @@ Regions, drawings, templates and notes go only to the player's own floors. The p
 - A combatant whose token is withheld shows in the tracker without its token, as hidden tokens do.
 - Chat cards that name withheld tokens are text and stay.
 - Pings, rulers and FX cues are ephemeral and not filtered by floor.
+
+## D-452 — Height labels under tokens, measured from whoever is looking (2026-10-12)
+
+The testers' ask: a token at another height shows its difference **underneath** the token — for a player relative to the token they control, for the GM always relative to the ground. D-440 drew the number in the token's top-right corner and measured it from the token's *own floor*, which is what a GM editing one token wants and what nobody else wants.
+
+**The rule** (`src/core/elevationCues.ts`). `elevationReference`: the GM measures from 0; a player from `elevationViewer` — their first *selected* token, else the token their floor follows, else their first token with vision, else their first token; a player with no token here falls back to the isolated floor's `floorZ`, else 0. The label is `+15 ft` / `-20 ft` with the scene's own grid units, and a difference of 0 draws nothing. `heightAboveFloor` (D-440's measure) stays for the floor-relative readouts in the editors.
+
+**Where it is drawn.** The token layer under the token (`stage.applyElevationCue`), centred, in the same container, so it moves with it. Tokens seen on a floor **below** (G-19/G-20) are labelled too: `lowerTokenLabels()` feeds `TilesLayer.setLowerTokens`, and the label is not dimmed with the token, because it must stay readable. The optional size cue is unchanged.
+
+**Cost.** The label joins the cue map the shells already rebuild on selection change, so a selection re-renders the labels of every visible token — bounded by what the fog gate shows, and the map stays sparse (tokens at the reference height have no entry).
+
+**Tests.** `tests/core/elevationCues.test.ts`; read back through the real canvas in `e2e/elevation_cues.spec.ts` and `e2e/lower_floors.spec.ts`; the shipped numbers of the D-454 scene in `tests/scripts/iceBeaconScene.test.ts`.
+
+## D-453 — Raised areas: a box standing on a floor (2026-10-12)
+
+The testers' crate stacks (5, 10 and 15 ft) and a 10-ft scaffold are *inside* one floor. Floors (G-01…G-33) model whole storeys with their own art, walls and fog; a stack of crates is not a storey, and a region was until now only a trigger or a cover. `RegionDocument.raised: { height, solid }` adds the third kind: a box from its floor's Z up to `height`, solid or open.
+
+**Geometry.** Height is relative to the floor the area stands on: its `levelScope` (unscoped = every floor), and 0 in a scene without floors. Its top is capped at the next floor up — an area that *reaches* that floor is not standable (`standable: false`), which the floor-play check reports instead of silently letting a token climb into the floor above.
+
+**Ground** (`src/core/raisedAreas.ts`). `groundAt` is the highest standable top under a point; the host's `raisedGroundOps` lift a walking token to the ground under where it ends and drop it back when it leaves, so a player never edits a height to climb. An airborne token keeps its height unless it ends below a top. An explicit `elevation`/`levelId` change is the mover's own business and is never touched, and prefab children follow their parent. `unsupportedWalks` (G-23) judges the followed height, so walking off a crate into an opening is refused like any other walk into it.
+
+**Sight.** A solid box blocks a viewer when its top is above the viewer's eyes and its bottom at or below them, where eyes = feet + 0.9 × size in cells × grid distance.
+- On the floor: `raisedEyeSegments` adds the **far sides** of the boxes (the edges the viewer stands behind) to that viewer's fog segments, so the box's own top — the crates' art, a goblin standing up there — is revealed while the ground behind stays hidden. A box the viewer stands inside is skipped, so it never blinds itself.
+- Tokens: `raisedTokenSeen` shows a token when a 3D ray reaches 10/50/90 % of its body *and* the point is inside that viewer's walls-only polygon. The gate takes both polygons, so the two rules cannot contradict each other (a token is never visible where the fog is opaque).
+- From above: `raisedBarriers` gives the cross-floor kernel each box's sides, blocking sight and light up to its top.
+Open areas never block anything. Light, movement and sound on the floor are unaffected.
+
+**Validation and authoring.** Never combined with `stairs`; at most 128 per scene. `drawnRaisedArea` turns a dragged rectangle into a 5-ft solid area on the viewed floor (with the tool's height/solid settings), `raisedEditDiff` edits it in place, `raisedFitError` refuses a rectangle that does not fit under the next floor, `raisedMarkers` label the outlines (`15 ft · solid`) for the GM only.
+
+**Tests.** `tests/core/raisedAreas.test.ts` (validation, ground, sight, authoring, the floor-play check) and `tests/host/raisedAreas.test.ts` (host ops, the player replica, the refused walk).
+
+## D-454 — The Ice Beacon: the elevation test scene in the PF1e starter world (2026-10-12)
+
+`ELEVATION_TEST_SCENE.md` is the design, the layout and the tester script; this is the record of what it took.
+
+**The scene** (`scripts/starterIceBeacon.mjs`, ~40 documents added to `testerDocuments()`, in both PF1e starter archives). A 2200² scene on a 100-px / 5-ft grid with four floors (Hall 0–20, Gallery 20–35, Ring 35–45, Beacon 45–∞), each with its own art tile, its own walls and its own traced `surface`; six stairwells with landings outside the well and on solid floor; the Hall's 5/10/15-ft crate stacks (solid) and 10-ft scaffold (open); Hosilla and nine opponents, each with its own actor; a scene note and a journal script.
+
+**Floors carry art that was never meant for us.** The gallery/ring/beacon surfaces are `traceSurface` runs over the Levels module's own sample maps, at 50 px (75 px for the ring); the results are stored as integer rings and normalized in the generator exactly as the tracer does, so `levelSurfaceError` accepts them. The Hall is deliberately untraced: its art is one ice sheet, and a traced "solid everywhere" surface would cost vertices for nothing. Tracing is visible in the art's debris — the ring's trace follows crystal shards jutting into its opening — which is why the md tells the reader to look at the drawing before shipping it.
+
+**The starter had to be able to carry it.** `assembleArchive` wrote `format: 2`; a scene with levels is format 3 with `requiredFeatures` (`src/core/capabilities.ts`), so the archive is now format 3 whenever its scenes need it, and `starterRequiredFeatures()` mirrors `requiredWorldFeatures(scenes, "GM")` in plain JS — with the parity asserted in the test, because two implementations of one rule is exactly the mistake below.
+
+**A real bug, found by the scene.** `validateWorldMeta` refused any required feature outside its own list, which omitted `STAIRS_V2_FEATURE`, while `requiredWorldFeatures` emitted it: **any world with version-2 stairwells exported and could never be imported again** (`world file: unsupported format 3 required features`). And the reader then only checked that the declared features *covered* what the scenes needed, so nothing noticed. Both are fixed: the list admits the stairwell capability, and a regression test in `tests/host/levelPersistence.test.ts` writes the archive, reads it back, and refuses a copy with the declaration removed.
+
+**A second real bug, found on the player's screen.** `FogLayer.clearManualMask()` filled the GM's manual mask texture with **opaque black** (and the mask draws over the explored cover, at full alpha for players). The texture starts opaque from `Application.init({ background: { alpha: 0 } })`, so every scene with fog and no painted strokes showed every player a black canvas — a traced floor made it permanent, because the explored map only clears where a viewer reveals. The mask is now cleared to transparent (`clear: true, clearColor: [0, 0, 0, 0]` through an empty container), a Hide stroke paints the same cover colour the explored map uses, and `manualTexture` is destroyed with the layer. The contract is pinned in `tests/canvas/fogLayer.test.ts`.
+
+**Testing.** `tests/scripts/iceBeaconScene.test.ts` builds the documents through the real builder and checks every claim of the script against the shipped code: structure and validation with a silent floor-play audit, landings on solid floor, the ground under each token, what a player's floor scene shows through the fog gate at the entrance and on each crate, the labels for GM and player on her floor and on the floor below, and who is seen from the Gallery, the Ring and the Beacon's rim. `e2e/ice_beacon_scene.spec.ts` opens the built zip in a browser as a GM plus a player and walks the same script, including the climb and the west spiral. `tests/scripts/buildStarterWorlds.test.ts` counts the documents and assets, checks the format-3 header and boots both archives.
+
+**Art.** The Levels 7.0.3 sample maps carry no licence grant (`tools/adopt/INVENTORY.md` row 15, `LEGAL.md` §3): the starter ships them for **internal testing only**, and `INVENTORY` says so at the row.

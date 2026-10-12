@@ -1574,6 +1574,8 @@ export interface VttE2eSurface {
 /** D-251: what the player's canvas shows under fog. */
 export interface PlayerCanvasSurface {
   floorMapPixel(spec: { x: number; y: number }): number[];
+  /** D-454: RGBA of the whole world stack (map, tokens and fog) at a world point — what the player sees there. */
+  scenePixel(spec: { x: number; y: number }): number[];
   floorPresentation(): { levelId: string | null; mode: string | null; tileIds: string[]; lightIds: string[]; img: string | null; darkness: number | null };
   /** G-10 (D-430): IDs of the stair markers drawn on this player's floor. */
   stairMarkers(): string[];

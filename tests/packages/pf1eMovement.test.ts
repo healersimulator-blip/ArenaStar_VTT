@@ -456,6 +456,19 @@ describe("P03 — walls and occupancy", () => {
     });
     expect(enemy.refusal).toContain("passes through goblin's square");
   });
+
+  test("a refusal names the creature as the table sees it, never its internal id", () => {
+    const tokens = [token("tok-1", 0, 0, { name: "Hosilla" }), token("tok-ib-ambusher", 2, 0, { name: "Ambusher" })];
+    expect(walk({ tokens, moverId: "tok-1", toCol: 4, toRow: 0 }).refusal).toBe(
+      "the walk passes through Ambusher's square — you can only move through an ally's space (CRB p.193)",
+    );
+    expect(walk({ tokens, moverId: "tok-1", toCol: 2, toRow: 0, isAlly: () => true }).refusal).toContain(
+      "the destination overlaps Ambusher's space",
+    );
+    // Unnamed (or blank-named) creatures still fall back to the id rather than an empty name.
+    const unnamed = [token("m", 0, 0), token("goblin", 2, 0, { name: "  " })];
+    expect(walk({ tokens: unnamed, moverId: "m", toCol: 4, toRow: 0 }).refusal).toContain("passes through goblin's square");
+  });
 });
 
 describe("P03 — named defaults and scene failures", () => {

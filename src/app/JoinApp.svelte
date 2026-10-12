@@ -1350,6 +1350,11 @@
                 frame.x = x; frame.y = y; frame.width = 1; frame.height = 1;
                 return Array.from(view.app.renderer.extract.pixels({ target: layer, frame, resolution: 1 }).pixels).slice(0, 4);
               },
+              scenePixel: ({ x, y }) => {
+                view.render(); const frame = view.root.getLocalBounds().rectangle.clone();
+                frame.x = x; frame.y = y; frame.width = 1; frame.height = 1;
+                return Array.from(view.app.renderer.extract.pixels({ target: view.root, frame, resolution: 1 }).pixels).slice(0, 4);
+              },
               stairMarkers: () => view.stairMarkerIds(),
               lowerFloors: () => view.lowerFloors(),
               lowerTokenLabels: () => view.lowerTokenLabels(),
