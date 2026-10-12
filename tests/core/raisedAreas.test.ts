@@ -10,6 +10,7 @@ import { draftLevel } from "../../src/core/levels";
 import { fogRevealKey, fogViewers, fogVisibleTokenIds } from "../../src/core/fogExploration";
 import { tokensSeenBelow } from "../../src/core/crossFloorSight";
 import { traceSurface } from "../../src/core/floorSurface";
+import { pointInPolygon, visibilityPolygon } from "../../src/canvas/vision/polygon";
 import { unsupportedWalks } from "../../src/core/floorSupport";
 import type { LevelDocument, LevelSurface, RegionDocument, SceneDocument, TokenDocument } from "../../src/core/documents";
 import type { Op } from "../../src/core/ops";
@@ -156,7 +157,8 @@ describe("D-453 raised areas: sight", () => {
   });
 
   test("a solid stack hides what is behind it from eyes below its top; an open scaffold hides nothing", () => {
-    const tokens = [hero(), token("ambusher", 800, 1050), token("lookout", 950, 1350, 15), token("orc", 1550, 1050), token("archer", 1450, 1250, 10)];
+    // the Ice Beacon scene's own positions (scripts/starterIceBeacon.mjs)
+    const tokens = [hero(), token("ambusher", 750, 1050), token("lookout", 950, 1350, 15), token("orc", 1650, 1050), token("archer", 1450, 1250, 10)];
     const s = flat(tokens);
     const viewers = fogViewers(s, player);
     const sight = raisedSight(s, viewers);
@@ -168,8 +170,17 @@ describe("D-453 raised areas: sight", () => {
     expect(seen("lookout")).toBe(true);
     expect(seen("orc")).toBe(true);
     expect(seen("archer")).toBe(true);
-    // The fog polygon gets every stack taller than the hero's eyes (4.5 ft): all three, 4 edges each.
-    expect(raisedEyeSegments(sight, 0)).toHaveLength(12);
+    // The fog polygon gets the far sides of every stack taller than the hero's eyes (4.5 ft): all
+    // three, seen corner-on from the entrance, so two sides each (west and north).
+    expect(raisedEyeSegments(sight, 0)).toHaveLength(6);
+    expect(raisedEyeSegments(sight, 0).filter((e) => e.x1 === e.x2).every((e) => e.x1 === 600 || e.x1 === 800)).toBe(true);
+    expect(raisedEyeSegments(sight, 0).filter((e) => e.y1 === e.y2).every((e) => e.y1 === 1400 || e.y1 === 1200)).toBe(true);
+    // The fog polygon from those sides: the 15-ft stack's top (where the lookout stands) is revealed
+    // — the fog must not cover a token the gate shows — while the floor behind it stays hidden.
+    const poly = visibilityPolygon(1150, 1750, raisedEyeSegments(sight, 0), 3000);
+    expect(pointInPolygon(poly, 900, 1300)).toBe(true);
+    expect(pointInPolygon(poly, 850, 1100)).toBe(false);
+    expect(pointInPolygon(poly, 1450, 1200)).toBe(true); // the open scaffold hides nothing
     // Through the token gate: the ambusher is withheld from the player.
     const visible = fogVisibleTokenIds(s, player, [wholeScene], { viewers, raised: { sight, wallPolys: [wholeScene] } });
     expect([...visible].sort()).toEqual(["archer", "hero", "lookout", "orc"]);
@@ -181,19 +192,21 @@ describe("D-453 raised areas: sight", () => {
   });
 
   test("climbing changes what is seen; the box a viewer stands in never blinds it", () => {
-    const ambusher = token("ambusher", 800, 1050);
+    const ambusher = token("ambusher", 750, 1050);
     const view = (h: TokenDocument) => {
       const s = flat([h, ambusher]);
       const sight = raisedSight(s, fogViewers(s, player));
       if (!sight) throw new Error("expected a raised sight context");
       return { seen: raisedTokenSeen(sight, 0, wholeScene, ambusher, s.grid), segments: raisedEyeSegments(sight, 0).length };
     };
-    expect(view(hero(650, 1450, 5))).toEqual({ seen: false, segments: 8 }); // on the 5 ft: the 10 ft is in the way
-    expect(view(hero(750, 1250, 10))).toEqual({ seen: true, segments: 4 }); // on the 10 ft: past the 15 ft's corner
+    // far sides only: three when the eye is level with a box's side (in its slab), two corner-on
+    expect(view(hero(650, 1450, 5))).toEqual({ seen: false, segments: 5 }); // on the 5 ft: the 10 ft is in the way
+    expect(view(hero(750, 1250, 10))).toEqual({ seen: true, segments: 3 }); // on the 10 ft's north edge: looks down past it
+    expect(view(hero(750, 1350, 10)).seen).toBe(false); // from its south half, the 10 ft's own top hides the foot of its north side
     expect(view(hero(850, 1250, 15))).toEqual({ seen: true, segments: 0 }); // on the 15 ft, north edge: looks down behind it
     expect(view(hero(950, 1350, 15)).seen).toBe(false); // the stack's own top hides its foot from its far corner
     // A token inside a stack at floor height (placed there by the GM) still sees out.
-    expect(view(hero(900, 1300, 0)).segments).toBe(8);
+    expect(view(hero(900, 1300, 0)).segments).toBe(5);
   });
 
   test("the reveal key follows the boxes and the eyes' heights", () => {

@@ -3,7 +3,8 @@
 /**
  * D-249 starter worlds: one importable world file per strategic ruleset package —
  * `dist/worlds/<id>-starter-<version>.zip`. A starter is a format-2 world archive
- * (`src/host/worldFile.ts`) with NO documents (seq 0 — the host seeds the default scene on first
+ * (`src/host/worldFile.ts`; format 3 with `requiredFeatures` once a scene uses floors, as the
+ * D-454 Ice Beacon scene does) with NO documents (seq 0 — the host seeds the default scene on first
  * boot, exactly like a brand-new world), the ruleset installed and active, and every content
  * pack it declares as a dependency installed beside it. `world.json.starter = true` makes the
  * start screen open it as a fresh copy every time, so a starter never asks "replace?".
@@ -31,11 +32,44 @@ import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "n
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { strToU8, zipSync } from "fflate";
+import { ICE_BEACON_MEDIA, iceBeaconDocuments } from "./starterIceBeacon.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Must match `WORLD_FILE_FORMAT` in src/host/worldFile.ts. */
 export const STARTER_WORLD_FORMAT = 2;
+/** A world whose scenes need floor capabilities is written as format 3 with `requiredFeatures`. */
+export const STARTER_LEVELS_FORMAT = 3;
+
+/**
+ * The capabilities a set of scenes needs, in the reader's order — a plain-JS mirror of
+ * `requiredWorldFeatures(scenes, "GM")` (src/core/capabilities.ts). The importer refuses an
+ * archive that under-declares, and tests/scripts/buildStarterWorlds.test.ts checks the parity.
+ */
+export function starterRequiredFeatures(scenes) {
+  const scopedColls = ["walls", "lights", "regions", "drawings", "templates", "notes"];
+  const has = (l, field) => l && typeof l === "object" && Object.hasOwn(l, field);
+  const stairsV2 = (value, depth = 0) => {
+    if (!value || typeof value !== "object" || depth > 6) return false;
+    if (Array.isArray(value)) return value.some((v) => stairsV2(v, depth + 1));
+    if (value.stairs && typeof value.stairs === "object" && value.stairs.version === 2) return true;
+    return Object.entries(value).some(([k, v]) => k !== "stairs" && stairsV2(v, depth + 1));
+  };
+  const scoped = (s) => scopedColls.some((c) => Array.isArray(s[c]) && s[c].some((row) => row?.levelScope !== undefined)) ||
+    (Array.isArray(s.tokens) && s.tokens.some((t) => t?.levelId !== undefined));
+  const play = scenes.some((s) => s.levelMode === "isolated" || s.levels?.some((l) => l.tileIds !== undefined || l.useSceneBackground !== undefined) ||
+    s.regions?.some((r) => r.stairs !== undefined));
+  const scopes = scenes.some(scoped);
+  return [
+    ...(play ? ["scene-level-play-v1"] : []),
+    ...(scopes || scenes.some((s) => s.levels !== undefined) ? ["scene-level-drafts-v1"] : []),
+    ...(scopes ? ["scene-level-scopes-v1"] : []),
+    ...(scenes.some((s) => s.lights?.some((l) => l.levelScope !== undefined)) ? ["scene-level-lighting-v1"] : []),
+    ...(scenes.some((s) => Array.isArray(s.levels) && s.levels.some((l) => has(l, "darkness"))) ? ["scene-level-ambient-v1"] : []),
+    ...(scenes.some((s) => s.levels?.some((l) => l.fogEpoch !== undefined)) ? ["scene-level-fog-reset-v1"] : []),
+    ...(scenes.some((s) => stairsV2({ x: s.regions })) ? ["scene-level-stairs-v2"] : []),
+  ];
+}
 
 /**
  * Starter recipes. Keyed by the strategic ruleset (`type: "system"`) package; `content` lists
@@ -88,7 +122,11 @@ function readManifest(systemsDir, id) {
   return readManifestFromDir(join(systemsDir, id), id);
 }
 
-/** Media used by the PF1e JungleEntrance2 spell demonstration. */
+/**
+ * Media of the starter's demonstration scenes: the PF1e JungleEntrance2 spell demonstration and
+ * the D-454 Ice Beacon elevation test (`scripts/starterIceBeacon.mjs`, which reuses `hosilla`,
+ * `hobgoblin` and `troll`).
+ */
 const STARTER_DEMO_MEDIA = {
   jungleMap: "Assets/Maps/JungleEntrance2.jpg",
   hosilla: "Assets/Tokens/token_Hosilla.png",
@@ -101,6 +139,7 @@ const STARTER_DEMO_MEDIA = {
   lightningEffect: "Assets/VisualEffects/Lightning_Bolt_Blue_90ft.webm",
   entangleAreaEffect: "Assets/VisualEffects/Nature_Vine_Normal_Circle_01_Physical_Green_30ft.webm",
   entangledTokenEffect: "Assets/VisualEffects/Nature_Vine_Normal_Token_01_Physical_Green.webm",
+  ...ICE_BEACON_MEDIA,
 };
 
 /** Read, hash and package the supplied demo media using the VTT's 32 KiB transfer chunks. */
@@ -112,7 +151,7 @@ function starterDemoAssets() {
     const hash = createHash("sha256").update(bytes).digest("hex");
     const ext = rel.slice(rel.lastIndexOf(".") + 1).toLowerCase();
     const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg"
-      : ext === "png" ? "image/png" : ext === "webm" ? "video/webm" : null;
+      : ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : ext === "webm" ? "video/webm" : null;
     if (mime === null) throw new Error(`unsupported starter media type: ${rel}`);
     refs[key] = hash;
     assets.push({
@@ -196,11 +235,14 @@ function assembleArchive(systemsDir, rulesetId, opts = {}) {
   const worldId = `starter-${rulesetId}${opts.worldIdSuffix ?? ""}`;
   const name = opts.nameOverride ?? recipe.name ?? `${ruleset.name} — starter`;
   const docRows = (opts.docs ?? []).map(docRow);
+  const requiredFeatures = starterRequiredFeatures(docRows.filter((row) => row.coll === "scenes").map((row) => row.doc));
   const assets = opts.assets ?? [];
   const entries = {};
   const json = (value) => strToU8(JSON.stringify(value, null, 2));
   entries["world.json"] = json({
-    format: STARTER_WORLD_FORMAT,
+    // D-454: floors (the Ice Beacon scene) need format 3 and their capabilities declared
+    format: requiredFeatures.length ? STARTER_LEVELS_FORMAT : STARTER_WORLD_FORMAT,
+    ...(requiredFeatures.length ? { requiredFeatures } : {}),
     worldId,
     name,
     system: ruleset.id,
@@ -427,8 +469,17 @@ packs** (pf1e-content — spells, feats, classes, items, rules, roll tables, …
 - roll tables → PF1e Ultimate Equipment + Roll Tables (Core).
 - actors: Goblin (basic NPC), Allosaurus (companion), deities, artifacts.
 
-## 5. Export round-trip
-Export this world to a zip and re-import it: all 17 pre-placed documents — three scenes, the armies
+## 5. Elevation — Ice Beacon (floors, stairs, raised areas, height labels)
+- Open **Ice Beacon — Elevation Test**: a four-floor ice tower (Hall 20 ft, Gallery 15 ft, Crystal
+  Ring 10 ft, open-topped Beacon) in isolated floor play, with stairs between every floor and
+  openings to look down through.
+- Hosilla (players' token) starts in the Hall facing crate stacks of 5, 10 and 15 ft (solid: they
+  hide the Ambusher) and a 10-ft scaffold (open: the orc behind it stays visible). Climb them.
+- The text under each token is its height difference: from the ground for the GM, from your own
+  token for players. The journal **Ice Beacon — Elevation Test** has the full script.
+
+## 6. Export round-trip
+Export this world to a zip and re-import it: every pre-placed document — the scenes, the armies
 and their units, the encounter tables and their hexes, the journals — the three packages, the active
 ruleset, and the explored fog must come back identical.
 `;
@@ -799,9 +850,10 @@ function jungleSpellDemoDocuments(media) {
 
 /**
  * The pre-placed documents of the tester world, in deterministic order. `contentDir` is the
- * built content package (dist/content/pf1e) — the Goblin actor is read from its pack.
+ * built content package (dist/content/pf1e) — the Goblin actor is read from its pack (null: the
+ * built-in fallback). Exported for the scene tests (tests/scripts/iceBeaconScene.test.ts).
  */
-function testerDocuments(contentDir, demoMedia = starterDemoAssets().refs) {
+export function testerDocuments(contentDir, demoMedia = starterDemoAssets().refs) {
   const goblinPf1e = goblinPf1eFromPack(contentDir);
   const heroToken = tokenDoc("tok-hero", "Ser Aldric Vane", 500, 500, "hero", "friendly");
   const goblinAToken = tokenDoc("tok-goblin-a", "Goblin", 700, 450, "goblin-a", "hostile");
@@ -870,6 +922,9 @@ function testerDocuments(contentDir, demoMedia = starterDemoAssets().refs) {
     ...hexcrawlDocuments(),
     // A ready-to-play PF1e spell scene, using the supplied JungleEntrance2 and media assets.
     ...jungleSpellDemoDocuments(demoMedia),
+    // D-454: the Ice Beacon elevation test — four floors, stairs, openings, raised areas and
+    // height labels, with Hosilla against nine opponents (ELEVATION_TEST_SCENE.md).
+    ...iceBeaconDocuments(demoMedia, { baseDoc, sceneDoc2, tokenDoc }),
   ];
 }
 

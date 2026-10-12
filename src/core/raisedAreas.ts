@@ -243,8 +243,11 @@ const onFloor = (v: RaisedVolume, eye: RaisedEye) => v.levelId === null || eye.l
 const insideBelowTop = (v: RaisedVolume, eye: RaisedEye) => eye.z < v.top && tileTriggerPolygonContains(v.polygon, eye);
 
 /**
- * Extra sight segments for one viewer's fog polygon: the edges of the solid boxes on its floor
- * that rise above its eyes. A box the viewer stands inside is skipped, so it never blinds itself.
+ * Extra sight segments for one viewer's fog polygon: the far sides of the solid boxes on its floor
+ * that rise above its eyes — the edges the viewer stands behind (inner side of the edge's line).
+ * Rays cross the box itself, so its top (the crates' art, a goblin standing up there) is revealed,
+ * and stop at its far side, so the floor behind it stays hidden. A box the viewer stands inside is
+ * skipped, so it never blinds itself.
  */
 export function raisedEyeSegments(sight: RaisedSight | null, index: number): Array<{ x1: number; y1: number; x2: number; y2: number }> {
   const eye = sight?.eyes[index];
@@ -252,9 +255,16 @@ export function raisedEyeSegments(sight: RaisedSight | null, index: number): Arr
   const out: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
   for (const v of sight.volumes) {
     if (!onFloor(v, eye) || v.top <= eye.z + EPS || v.bottom > eye.z || insideBelowTop(v, eye)) continue;
+    let area = 0;
+    v.polygon.forEach((p, i) => {
+      const q = v.polygon[(i + 1) % v.polygon.length] as { x: number; y: number };
+      area += p.x * q.y - q.x * p.y;
+    });
+    const sign = area > 0 ? 1 : -1;
     v.polygon.forEach((a, i) => {
       const b = v.polygon[(i + 1) % v.polygon.length] as { x: number; y: number };
-      out.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y });
+      // inner side of a→b (the box's side of the edge) = a far side for this eye
+      if (sign * ((b.x - a.x) * (eye.y - a.y) - (b.y - a.y) * (eye.x - a.x)) > EPS) out.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y });
     });
   }
   return out;

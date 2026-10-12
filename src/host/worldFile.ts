@@ -1,4 +1,4 @@
-import { LEVEL_PLAY_FEATURE } from "../core/levelPlay";
+import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE } from "../core/levelPlay";
 import { listFogEpochs, type FogEpochRecord } from "../storage/idb";
 import { LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE, fogLevelIdError, fogEpochError, fogNamespace } from "../core/levelFog";
 /**
@@ -264,7 +264,9 @@ function validateWorldMeta(value: unknown): WorldFileMeta {
   if (!Number.isSafeInteger(value.format) || typeof value.format !== "number")
     throw new Error("world file: world.json has an invalid format");
   if (value.format === 3) {
-    if (!Array.isArray(value.requiredFeatures) || !value.requiredFeatures.includes(DRAFT_LEVELS_FEATURE) || new Set(value.requiredFeatures).size !== value.requiredFeatures.length || value.requiredFeatures.some((f) => f !== DRAFT_LEVELS_FEATURE && f !== LEVEL_SCOPES_FEATURE && f !== LEVEL_FOG_FEATURE && f !== LEVEL_LIGHTING_FEATURE && f !== LEVEL_AMBIENT_FEATURE && f !== LEVEL_FOG_RESET_FEATURE && f !== LEVEL_PLAY_FEATURE))
+    // Every capability the exporter can declare (`requiredWorldFeatures`), stairwells included: an
+    // archive with G-01 stairs used to export fine and then fail to import (D-454).
+    if (!Array.isArray(value.requiredFeatures) || !value.requiredFeatures.includes(DRAFT_LEVELS_FEATURE) || new Set(value.requiredFeatures).size !== value.requiredFeatures.length || value.requiredFeatures.some((f) => f !== DRAFT_LEVELS_FEATURE && f !== LEVEL_SCOPES_FEATURE && f !== LEVEL_FOG_FEATURE && f !== LEVEL_LIGHTING_FEATURE && f !== LEVEL_AMBIENT_FEATURE && f !== LEVEL_FOG_RESET_FEATURE && f !== LEVEL_PLAY_FEATURE && f !== STAIRS_V2_FEATURE))
       throw new Error("world file: unsupported format 3 required features");
   } else if (value.requiredFeatures !== undefined) throw new Error("world file: required features need format 3");
   if (typeof value.worldId !== "string" || !WORLD_ID_RE.test(value.worldId))
