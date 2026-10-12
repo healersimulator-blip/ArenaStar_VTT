@@ -144,6 +144,8 @@ export interface FauxOverheadBehavior {
 }
 
 export interface RegionDocument extends BaseDocument {
+  /** G-06 floor scope for presentation (covers, markers); absent = shown on every floor. */
+  levelScope?: LevelScope;
   /** GM-authored entry transition; host changes membership and feet Z together. */
   stairs?: import("./levelPlay").StairBehavior;
   type: "region";
@@ -157,6 +159,11 @@ export interface RegionDocument extends BaseDocument {
   shape: { kind: "polygon"; points: Array<[number, number]> };
   /** Public presentation geometry only; never changes LOS, light, movement or explored fog. */
   fauxOverhead?: FauxOverheadBehavior;
+  /**
+   * D-453: a box standing on its floor (crates, a dais, a scaffold). Walking tokens stand on its
+   * top; a solid one blocks sight for eyes below its top. Never combined with `stairs`.
+   */
+  raised?: import("./raisedAreas").RaisedArea;
   /** GM-only regions are retained in the host scene but omitted from player replicas. */
   hidden?: boolean;
   /** Inclusive active vertical band in scene grid units. */
@@ -184,10 +191,27 @@ export interface TileDocument extends BaseDocument {
   /** Inclusive active vertical band in scene grid units; absent has no elevation restriction. */
   triggerElevation?: { min: number; max: number };
   above: boolean;
-  occlusion: { mode: "roof" | "fade"; alpha: number };
+  /**
+   * Roof behaviour of an overhead tile (D-438):
+   * - `roof` fades the tile while a viewer token is under its art or outline.
+   * - `fade` is always at `alpha`.
+   * - `radial` opens a circle of `radius` grid cells around each viewer under it.
+   * - `vision` opens what those viewers see.
+   * Canvas2D, or a scene without live sight, falls back to `roof`.
+   */
+  occlusion: { mode: "roof" | "fade" | "radial" | "vision"; alpha: number; radius?: number };
+  /**
+   * G-25 (D-438): tiles with the same group id fade together while a `source` member is
+   * occupied. A `follower` never opens the group by itself.
+   */
+  roofGroup?: { id: string; role: "source" | "follower" };
+  /** G-24 (D-438): drawn above the fog while current sight touches the roof's outline. Never explored. */
+  revealInFog?: boolean;
 }
 
 export interface DrawingDocument extends BaseDocument {
+  /** G-06 floor scope in isolated floor play; absent = shown on every floor (legacy). */
+  levelScope?: LevelScope;
   type: "drawing";
   /**
    * §10 tool shapes: freehand, poly (closed polygon), line (open 2-point segment),
@@ -205,6 +229,8 @@ export interface DrawingDocument extends BaseDocument {
 }
 
 export interface TemplateDocument extends BaseDocument {
+  /** G-06 floor scope in isolated floor play; absent = shown on every floor (legacy). */
+  levelScope?: LevelScope;
   type: "template";
   kind: "cone" | "circle" | "ray" | "rect";
   x: number;
@@ -215,6 +241,8 @@ export interface TemplateDocument extends BaseDocument {
 }
 
 export interface NoteDocument extends BaseDocument {
+  /** G-06 floor scope in isolated floor play; absent = shown on every floor (legacy). */
+  levelScope?: LevelScope;
   type: "note";
   x: number;
   y: number;
@@ -718,6 +746,20 @@ export interface SceneGrid {
   hexLayout: HexLayout;
 }
 
+/**
+ * G-21 (D-444): where a floor's plane is solid. The footprint is normalized to the box (scene
+ * pixels); holes are openings. Validated by `levelSurfaceError` (src/core/floorSurface.ts).
+ */
+export interface LevelSurface {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  footprint: RegionShapeV2;
+  /** How it was made (informational). */
+  source?: "art" | "drawn";
+}
+
 /** GM-only draft structure. Presence never enables multilevel physics or visibility. */
 export interface LevelDocument extends BaseDocument {
   /** Explicit floor artwork: unassigned tiles and the global foreground never bleed through. */
@@ -733,6 +775,8 @@ export interface LevelDocument extends BaseDocument {
   floorZ: number;
   sort: number;
   visibleLevelIds: string[];
+  /** G-21 (D-444): the solid part of this floor; absent means solid everywhere. */
+  surface?: LevelSurface;
 }
 
 export interface SceneDocument extends BaseDocument {

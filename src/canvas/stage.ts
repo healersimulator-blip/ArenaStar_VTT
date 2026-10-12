@@ -31,6 +31,11 @@ import {
   type NaturalSize,
 } from "../core/backgroundTransform";
 import { FauxOverheadLayer } from "./layers/FauxOverheadLayer";
+import { StairMarkersLayer } from "./layers/StairMarkersLayer";
+import { RaisedAreasLayer } from "./layers/RaisedAreasLayer";
+import type { RaisedMarker } from "../core/raisedAreas";
+import { lowerFloorTint, type StairMarker } from "../core/levelPlay";
+import type { ElevationCue } from "../core/elevationCues";
 import type { RegionDocument, TokenDocument } from "../core/documents";
 import type { Camera, Viewport } from "./camera";
 import { fitRect, screenToWorld } from "./camera";
@@ -58,7 +63,7 @@ import type { EffectsLayer } from "./layers/EffectsLayer";
 import { EffectsLayer as EffectsLayerImpl } from "./layers/EffectsLayer";
 import type { FxLayer } from "./layers/FxLayer";
 import { FxLayer as FxLayerImpl } from "./layers/FxLayer";
-import type { TilesLayer, TilesLayerOptions } from "./layers/TilesLayer";
+import type { LowerToken, TilesLayer, TilesLayerOptions } from "./layers/TilesLayer";
 import { TilesLayer as TilesLayerImpl } from "./layers/TilesLayer";
 import type { AreaPreviewLayer } from "./layers/AreaPreviewLayer";
 import { AreaPreviewLayer as AreaPreviewLayerImpl } from "./layers/AreaPreviewLayer";
@@ -125,6 +130,8 @@ export interface StageOptions {
 
 export interface Stage {
   readonly app: Application;
+  /** Pixi renderer in use: "webgl", "webgpu" or "canvas" (no inverse masks; see G-05). */
+  readonly rendererName: string;
   readonly root: Container;
   readonly camera: Camera;
   readonly viewport: Viewport;
@@ -206,8 +213,36 @@ export interface Stage {
     badges?: ReadonlyMap<string, readonly { code: string; tint: number }[]>,
     hpBars?: ReadonlyMap<string, TokenHpBarNumbers>,
   ): void;
+  /**
+   * G-32 (D-440): height badges and the smaller-at-other-heights cue, per token id (sparse; absent
+   * = no badge, full size). Kept across `syncTokens` until replaced.
+   */
+  setTokenElevationCues(cues: ReadonlyMap<string, ElevationCue>): void;
+  /** e2e readback: the badge text and artwork scale each drawn token shows right now. */
+  tokenElevationCues(): Array<{ id: string; label: string | null; scale: number }>;
   /** Cosmetic region masks only: never touches fog history or LOS. */
   setFauxOverhead(regions: readonly RegionDocument[]): void;
+  /** Compiled Faux Overhead covers on this canvas (renderer-independent readback). */
+  fauxOverheadCoverCount(): number;
+  /** G-12: tokens/tiles of other floors drawn at reduced opacity (GM ghost view); null clears. */
+  setFloorGhosts(ghost: { tokens: ReadonlySet<string>; tiles: ReadonlySet<string> } | null, alpha?: number): void;
+  /**
+   * G-19 (D-443): art of floors seen beneath the current one (tile id → depth), drawn first and
+   * dimmed; `backgroundDepth` dims the scene background when it is a lower floor's (0 or null = as is).
+   * Call before syncing tiles.
+   */
+  setLowerFloors(tiles: ReadonlyMap<string, number>, backgroundDepth: number | null, tokens?: readonly LowerToken[]): void;
+  /** Readback: lower-floor tiles drawn and the background's depth. */
+  lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> };
+  /** D-452 readback: height labels under the tokens seen on lower floors. */
+  lowerTokenLabels(): Array<{ id: string; label: string }>;
+  /** G-10/G-14: draw these stair markers (players: host-filtered; GM: every stairwell). */
+  setStairMarkers(markers: readonly StairMarker[]): void;
+  /** D-453: the GM's raised-area outlines (players never get any). */
+  setRaisedMarkers(markers: readonly RaisedMarker[]): void;
+  /** D-453 readback: the raised-area outlines drawn, with their labels. */
+  raisedMarkerLabels(): Array<{ id: string; label: string }>;
+  stairMarkerIds(): string[];
   tokenPointVisible(id: string, point: { x: number; y: number }): boolean;
   tokenMarqueeSelectable(id: string): boolean;
   /** Current locally rendered top-left; differs from document position during an animation. */
@@ -473,6 +508,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     bgVideoStop = stop;
     bgSprite = new Sprite(texture);
     applyBackgroundSprite();
+    applyBackgroundTint();
     // Above the colour fill, below the padding: the fill repaints on every presentation refresh and
     // must never cover the image.
     backgroundLayer.addChildAt(bgSprite, 1);
@@ -514,6 +550,20 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   const templatesHolder = new Container();
   templatesHolder.label = "templates";
   root.addChild(templatesHolder);
+  // G-10/G-14 (D-430): stair markers sit under walls, lighting and fog.
+  const stairsHolder = new Container();
+  stairsHolder.label = "stairs";
+  root.addChild(stairsHolder);
+  const raisedAreas = new RaisedAreasLayer(stairsHolder);
+  const stairMarkers = new StairMarkersLayer(stairsHolder);
+  let ghostTokens: ReadonlySet<string> = new Set();
+  let ghostAlpha = 0.25;
+  let pendingTileGhosts: ReadonlySet<string> = new Set();
+  let pendingLowerFloors: ReadonlyMap<string, number> = new Map();
+  let pendingLowerTokens: readonly LowerToken[] = [];
+  let bgDepth: number | null = null;
+  const applyBackgroundTint = (): void => { if (bgSprite) bgSprite.tint = bgDepth ? lowerFloorTint(bgDepth) : 0xffffff; };
+  const tokenDocs = new Map<string, TokenDocument>();
   const wallsHolder = new Container();
   wallsHolder.label = "walls";
   root.addChild(wallsHolder);
@@ -538,8 +588,42 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   tokenLayer.label = "tokens";
   root.addChild(tokenLayer);
   const tokenViews = new Map<string, Container>();
-  const overhead = new FauxOverheadLayer(tokenLayer);
+  // G-05 (D-429): Canvas2D has no inverse stencil masks; the layer then hides whole tokens.
+  const rendererName = String((app.renderer as { name?: unknown }).name ?? "unknown");
+  const overhead = new FauxOverheadLayer(tokenLayer, rendererName !== "canvas");
   const tokenArtwork = new Map<string, { image: string | null; revision: number; sprite: Sprite | null }>();
+  /** G-32 (D-440), D-452: label text and artwork scale per token (sparse). */
+  let elevationCueMap: ReadonlyMap<string, ElevationCue> = new Map();
+  const applyElevationCue = (id: string, view: Container, width: number, height: number): void => {
+    const cue = elevationCueMap.get(id);
+    const scale = cue?.scale ?? 1;
+    const body = view.getChildByLabel("body");
+    if (body) body.scale.set(scale);
+    const sprite = tokenArtwork.get(id)?.sprite;
+    if (sprite) { sprite.width = width * scale; sprite.height = height * scale; }
+    let badge = view.getChildByLabel("elevationBadge") as Container | null;
+    if (!cue?.label) { if (badge) { view.removeChild(badge); badge.destroy({ children: true }); } return; }
+    if (!badge) {
+      badge = new Container();
+      badge.label = "elevationBadge";
+      const bg = new Graphics(); bg.label = "bg";
+      const text = new Text({ text: "", style: { fontSize: 10, fill: 0xe8f1ff, fontFamily: "sans-serif", fontWeight: "600" } });
+      text.label = "text"; text.anchor.set(0, 0.5);
+      badge.addChild(bg, text);
+      view.addChild(badge);
+    }
+    const text = badge.getChildByLabel("text") as Text | null, bg = badge.getChildByLabel("bg") as Graphics | null;
+    if (text && bg && text.text !== cue.label) {
+      text.text = cue.label;
+      text.position.set(5, 0);
+      bg.clear().roundRect(0, -7.5, text.width + 10, 15, 5).fill({ color: 0x1b2433, alpha: 0.92 }).stroke({ width: 1, color: 0x7fb2ff });
+    }
+    // D-452: centred under the (scaled) artwork, clear of condition chips (top centre), the HP bar
+    // (inside the bottom edge) and the name.
+    const h = height * scale;
+    badge.position.set(width / 2 - (text ? text.width + 10 : 0) / 2, (height + h) / 2 + 10);
+    badge.visible = !overhead.obscured(id);
+  };
   let tokenImageLoader: ((image: string) => Promise<Texture | null>) | null = null;
   /** D-251: fog's token gate (null = draw every token). */
   let tokenFilter: ReadonlySet<string> | null = null;
@@ -585,6 +669,16 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   fogHolder.label = "fog";
   root.addChild(fogHolder);
   let fogLayer: FogLayerImpl | null = null;
+  // G-24 (D-438): roofs flagged "show through fog" are copied here while live sight touches them.
+  const roofsOverFog = new Container();
+  roofsOverFog.label = "roofsOverFog";
+  root.addChild(roofsOverFog);
+  /** The live sight the fog last drew; roofs read it for vision openings and the G-24 reveal. */
+  let liveSight: readonly Float32Array[] = [];
+  const forwardSight = (polys: readonly Float32Array[]): void => {
+    liveSight = polys;
+    tilesLayer?.setVision(polys);
+  };
   const effectsHolder = new Container();
   effectsHolder.label = "effects";
   root.addChild(effectsHolder);
@@ -640,7 +734,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     for (const [id, view] of tokenViews) {
       const show = !overhead.obscured(id);
       for (const child of view.children) {
-        if (child instanceof Text || child.label === "badges") child.visible = show;
+        if (child instanceof Text || child.label === "badges" || child.label === "elevationBadge") child.visible = show;
       }
     }
     applyHpBarVisibility();
@@ -668,6 +762,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
 
   const stage: Stage = {
     app,
+    rendererName,
     root,
     viewport,
     get camera(): Camera {
@@ -811,7 +906,13 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           tilesBelowLayer,
           tilesAboveLayer,
           options ?? {},
+          // G-26: openings need inverse stencil masks, which Canvas2D lacks (it fades whole roofs).
+          { overFog: roofsOverFog, inverseMasks: rendererName !== "canvas" },
         );
+        tilesLayer.setGhosts(pendingTileGhosts, ghostAlpha);
+        tilesLayer.setLowerFloors(pendingLowerFloors);
+        tilesLayer.setLowerTokens(pendingLowerTokens);
+        tilesLayer.setVision(liveSight);
       }
       return tilesLayer;
     },
@@ -937,6 +1038,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
             currentView.addChildAt(sprite, Math.min(1, currentView.children.length));
             sprite.position.set(token.width / 2, token.height / 2);
             sprite.width = token.width; sprite.height = token.height;
+            applyElevationCue(token._id, currentView, token.width, token.height);
           }).catch(() => undefined);
         }
         let animation = tokenMovement.get(token._id);
@@ -953,7 +1055,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           height: rect.height,
         });
         if (jump) view.position.set(rect.x, rect.y); // new tokens appear in place
-        view.alpha = token.hidden ? 0.5 : 1;
+        view.alpha = (token.hidden ? 0.5 : 1) * (ghostTokens.has(token._id) ? ghostAlpha : 1);
+        tokenDocs.set(token._id, token);
         view.visible = tokenFilter === null || tokenFilter.has(token._id);
         let rotation = tokenRotation.get(token._id);
         if (!rotation) { rotation = new RotationAnimation(); tokenRotation.set(token._id, rotation); }
@@ -996,10 +1099,12 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           hpBar,
           hpBarSignatures,
         );
+        applyElevationCue(token._id, view, rect.width, rect.height);
       }
       for (const [id, view] of tokenViews) {
         if (!seen.has(id)) {
           overhead.remove(id);
+          tokenDocs.delete(id);
           tokenLayer.removeChild(view);
           view.destroy({ children: true });
           tokenViews.delete(id);
@@ -1017,6 +1122,45 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
       applyOverheadDecorations();
     },
+    fauxOverheadCoverCount(): number { return overhead.coverCount; },
+    setTokenElevationCues(cues): void {
+      elevationCueMap = new Map(cues);
+      for (const [id, view] of tokenViews) {
+        const rect = tokenRects.get(id);
+        if (rect) applyElevationCue(id, view, rect.width, rect.height);
+      }
+      app.render();
+    },
+    tokenElevationCues() {
+      return [...tokenViews].filter(([, view]) => view.visible).map(([id, view]) => {
+        const text = (view.getChildByLabel("elevationBadge") as Container | null)?.getChildByLabel("text") as Text | null;
+        return { id, label: text?.text ?? null, scale: Math.round((view.getChildByLabel("body")?.scale.x ?? 1) * 1000) / 1000 };
+      }).sort((a, b) => a.id.localeCompare(b.id));
+    },
+    setStairMarkers(markers): void { stairMarkers.sync(markers); },
+    setRaisedMarkers(markers): void { raisedAreas.sync(markers); },
+    raisedMarkerLabels() { return raisedAreas.labels(); },
+    setFloorGhosts(ghost, alpha = 0.25): void {
+      ghostTokens = ghost?.tokens ?? new Set();
+      ghostAlpha = alpha;
+      tilesLayer?.setGhosts(ghost?.tiles ?? new Set(), alpha);
+      pendingTileGhosts = ghost?.tiles ?? new Set();
+      for (const [id, view] of tokenViews) {
+        const token = tokenDocs.get(id);
+        if (token) view.alpha = (token.hidden ? 0.5 : 1) * (ghostTokens.has(id) ? ghostAlpha : 1);
+      }
+    },
+    stairMarkerIds(): string[] { return stairMarkers.ids(); },
+    setLowerFloors(tiles, backgroundDepth, tokens = []): void {
+      pendingLowerFloors = tiles;
+      pendingLowerTokens = tokens;
+      tilesLayer?.setLowerFloors(tiles);
+      tilesLayer?.setLowerTokens(tokens);
+      bgDepth = backgroundDepth;
+      applyBackgroundTint();
+    },
+    lowerFloors() { return { tiles: tilesLayer?.lowerFloorTiles() ?? [], backgroundDepth: bgDepth, tokens: tilesLayer?.lowerTokenIds() ?? [] }; },
+    lowerTokenLabels() { return tilesLayer?.lowerTokenLabels() ?? []; },
     setFauxOverhead(regions): void {
       overhead.setRegions(regions);
       applyOverheadDecorations();
@@ -1100,11 +1244,14 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         fogLayer = null;
       }
       fogLayer = new FogLayerImpl(app, sceneSize);
+      fogLayer.onVisible = forwardSight;
       fogHolder.addChild(fogLayer.container);
       return fogLayer;
     },
     hideFogLayer(): void {
       fogLayer?.setShown(false);
+      // No fog drawn → no roof copies above it and no sight-shaped openings.
+      forwardSight([]);
     },
     peekFogLayer(): FogLayer | null {
       return fogLayer;
@@ -1158,6 +1305,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       }
       tokenArtwork.clear();
       overhead.destroy();
+      stairMarkers.destroy();
+      raisedAreas.destroy();
       tokenViews.clear();
       tokenMovement.clear();
       tokenRotation.clear();
@@ -1206,6 +1355,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
         );
       }
     }
+    overhead.refreshConservative();
     if (overhead.active) applyOverheadDecorations();
     const cam = state.camera;
     if (!grid) {

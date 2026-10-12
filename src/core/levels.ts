@@ -2,15 +2,16 @@ import { levelPlayError } from "./levelPlay";
 /** Draft-only level contracts. No migration, token movement or physical activation is implicit. */
 import type { BaseDocument, DocRef, LevelDocument, SceneDocument } from "./documents";
 import type { Op } from "./ops";
-import { sceneMembershipError } from "./levelMembership";
+import { sceneMembershipError, isScopedCollection } from "./levelMembership";
 import { applyDiff } from "./diff";
 import { elevationBandError, inElevationBand } from "./multilevelGeometry";
+import { levelSurfaceError } from "./floorSurface";
 export const MAX_LEVELS = 32;
 const idPattern = /^[A-Za-z0-9_-]{1,128}$/;
 
-export function sceneLevelsError(scene: { levels?: unknown; walls?: unknown; lights?: unknown; tokens?: unknown; tiles?: unknown; regions?: unknown; levelMode?: unknown }): string | null {
+export function sceneLevelsError(scene: { levels?: unknown; walls?: unknown; lights?: unknown; tokens?: unknown; tiles?: unknown; regions?: unknown; levelMode?: unknown; drawings?: unknown; templates?: unknown; notes?: unknown }): string | null {
   if (scene.levels === undefined && (scene.levelMode !== undefined || (Array.isArray(scene.regions) && scene.regions.some((r) => r?.stairs !== undefined)))) return "Floor play and stairs require levels";
-  if (scene.levels === undefined) return sceneMembershipError({ walls: scene.walls, lights: scene.lights, tokens: scene.tokens });
+  if (scene.levels === undefined) return sceneMembershipError({ walls: scene.walls, lights: scene.lights, tokens: scene.tokens, regions: scene.regions, drawings: scene.drawings, templates: scene.templates, notes: scene.notes });
   if (!Array.isArray(scene.levels) || scene.levels.length > MAX_LEVELS) return "Scene needs an array of at most 32 draft levels";
   const ids = new Set<string>();
   for (const raw of scene.levels) {
@@ -26,6 +27,7 @@ export function sceneLevelsError(scene: { levels?: unknown; walls?: unknown; lig
     if (!Number.isSafeInteger(l.sort) || Math.abs(l.sort) > 1_000_000) return "Level display order must be a bounded integer";
     if (!Array.isArray(l.visibleLevelIds) || l.visibleLevelIds.length > MAX_LEVELS ||
         new Set(l.visibleLevelIds).size !== l.visibleLevelIds.length || !Array.from(l.visibleLevelIds).every((id) => typeof id === "string" && idPattern.test(id))) return "Invalid level visibility references";
+    if (l.surface !== undefined) { const surfaceError = levelSurfaceError(l.surface); if (surfaceError) return surfaceError; }
     if (!l.ownership || typeof l.ownership !== "object" || Array.isArray(l.ownership) ||
         ![0, 1, 2, 3].includes(l.ownership.default) || !Object.values(l.ownership).every((n) => [0, 1, 2, 3].includes(n)) ||
         !l.flags || typeof l.flags !== "object" || Array.isArray(l.flags) || !l.system || typeof l.system !== "object" || Array.isArray(l.system)) return "Invalid level base fields";
@@ -65,7 +67,7 @@ export function levelTransactionError(ops: readonly Op[], resolve: (ref: DocRef)
   const scenes = new Map<string, SceneDocument>();
   for (const op of ops) {
     const coll = op.kind === "create" ? op.coll : op.ref.coll;
-    if (coll !== "scenes" && coll !== "levels" && coll !== "walls" && coll !== "lights" && coll !== "tokens" && coll !== "tiles" && coll !== "regions") continue;
+    if (coll !== "scenes" && coll !== "levels" && coll !== "tokens" && coll !== "tiles" && !isScopedCollection(coll)) continue;
     const ref: DocRef = op.kind === "create" ? { coll, id: op.data._id, ...(op.parent ? { parent: op.parent } : {}) } : op.ref;
     const parent = coll === "scenes" ? ref : ref.parent;
     if (!parent || parent.coll !== "scenes" || parent.parent) return "Levels require a direct scene parent";
@@ -73,7 +75,10 @@ export function levelTransactionError(ops: readonly Op[], resolve: (ref: DocRef)
     if (coll === "scenes" && op.kind === "create") { scenes.set(ref.id, structuredClone(op.data) as SceneDocument); continue; }
     const source = scenes.get(parent.id) ?? resolve(parent) as SceneDocument | undefined;
     if (!source) continue; // Store preflight rejects missing parents.
-    if ((coll === "walls" || coll === "lights" || coll === "tokens") && source.levels === undefined) {
+    // Presentation kinds (G-06) are validated only when their scope changes, so ordinary
+    // drawing/template/note edits cost what they did before floor scopes existed.
+    const presentation = coll === "drawings" || coll === "templates" || coll === "notes";
+    if ((coll === "tokens" || isScopedCollection(coll)) && (source.levels === undefined || presentation)) {
       const field = coll === "tokens" ? "levelId" : "levelScope";
       const touched = op.kind === "create" ? Object.hasOwn(op.data, field) : op.kind === "update" &&
         Object.keys(op.diff).some((key) => key.replace(/^-=/, "").split(".")[0] === field);
@@ -83,7 +88,7 @@ export function levelTransactionError(ops: readonly Op[], resolve: (ref: DocRef)
     if (coll === "scenes" && op.kind === "update") {
       const applied = applyDiff(scene, op.diff); if (!applied.ok) return applied.error;
       scene = applied.value;
-    } else if (coll === "levels" || coll === "walls" || coll === "lights" || coll === "tokens" || coll === "tiles" || coll === "regions") {
+    } else if (coll === "levels" || coll === "tokens" || coll === "tiles" || isScopedCollection(coll)) {
       if (scene[coll] !== undefined && !Array.isArray(scene[coll])) return "Scene embedded records must be arrays";
       const rows: BaseDocument[] = [...(scene[coll] ?? [])], index = rows.findIndex((l) => l._id === ref.id);
       if (op.kind === "create") rows.push(structuredClone(op.data));
@@ -113,8 +118,8 @@ export function levelDraftOps(sceneId: string, before: readonly LevelDocument[],
     if (!previous) { ops.push({ kind: "create", coll: "levels", parent, data: structuredClone(next) }); continue; }
     const diff: Record<string, import("./documents").Json> = {};
     for (const field of fields) if (JSON.stringify(previous[field]) !== JSON.stringify(next[field])) diff[field] = structuredClone(next[field]);
-    for (const field of ["tileIds", "useSceneBackground"] as const) if (JSON.stringify(next[field]) !== JSON.stringify(previous[field])) {
-      if (next[field] === undefined) diff[`-=${field}`] = null; else diff[field] = next[field];
+    for (const field of ["tileIds", "useSceneBackground", "surface"] as const) if (JSON.stringify(next[field]) !== JSON.stringify(previous[field])) {
+      if (next[field] === undefined) diff[`-=${field}`] = null; else diff[field] = structuredClone(next[field]) as import("./documents").Json;
     }
     if (next.darkness !== previous.darkness) {
       if (next.darkness === undefined) diff["-=darkness"] = null;
@@ -123,4 +128,39 @@ export function levelDraftOps(sceneId: string, before: readonly LevelDocument[],
     if (Object.keys(diff).length) ops.push({ kind: "update", ref: { coll: "levels", id: next._id, parent }, diff });
   }
   return ops;
+}
+
+/**
+ * G-28 (D-436): a ready stack of floors. Ground starts at 0; floors above it, basements below, each
+ * `height` tall, plus an optional unbounded roof band. IDs come from the caller; nothing is saved.
+ */
+/**
+ * G-19 (D-443): visibility presets for floors seen beneath each floor. `sealed` clears them;
+ * `aboveGround` lets every floor at or above the ground floor see the floors below it down to the
+ * ground (basements stay sealed, and are not seen from above); `open` lets every floor see every
+ * floor below it. Entries for floors *above* a floor are kept as they are. The ground floor is the
+ * one whose band holds elevation 0, else the lowest floor at or above 0, else the highest floor.
+ */
+export type LevelVisibilityPreset = "sealed" | "aboveGround" | "open";
+export function levelVisibilityPreset(levels: readonly LevelDocument[], preset: LevelVisibilityPreset): LevelDocument[] {
+  const stack = [...levels].sort((a, b) => a.floorZ - b.floorZ || a.sort - b.sort || (a._id < b._id ? -1 : a._id > b._id ? 1 : 0));
+  const ground = stack.find((l) => (l.bottom ?? -Infinity) <= 0 && 0 < (l.top ?? Infinity)) ?? stack.find((l) => l.floorZ >= 0) ?? stack[stack.length - 1];
+  const groundZ = ground?.floorZ ?? 0;
+  return levels.map((level) => {
+    const above = level.visibleLevelIds.filter((id) => { const other = levels.find((l) => l._id === id); return !!other && other.floorZ >= level.floorZ && other._id !== level._id; });
+    const below = preset === "sealed" || (preset === "aboveGround" && level.floorZ < groundZ) ? [] :
+      stack.filter((l) => l.floorZ < level.floorZ && (preset === "open" || l.floorZ >= groundZ)).map((l) => l._id);
+    return { ...level, visibleLevelIds: [...below, ...above] };
+  });
+}
+export function generateLevels(spec: { floors: number; basements: number; height: number; roof?: boolean; id: () => string }): LevelDocument[] {
+  const { floors, basements, height } = spec;
+  if (!Number.isInteger(floors) || floors < 1 || floors > 16 || !Number.isInteger(basements) || basements < 0 || basements > 8 ||
+      !Number.isFinite(height) || height <= 0 || height > 10_000 || floors + basements + (spec.roof ? 1 : 0) > MAX_LEVELS)
+    throw new Error("Choose 1–16 floors, 0–8 basements and a positive floor height");
+  const rows: LevelDocument[] = [];
+  for (let b = basements; b >= 1; b--) rows.push(draftLevel(spec.id(), basements === 1 ? "Basement" : `Basement ${b}`, -b * height, (1 - b) * height));
+  for (let f = 0; f < floors; f++) rows.push(draftLevel(spec.id(), f === 0 ? "Ground" : `Floor ${f + 1}`, f * height, (f + 1) * height));
+  if (spec.roof) rows.push(draftLevel(spec.id(), "Roof", floors * height, null));
+  return rows.map((l, sort) => ({ ...l, sort }));
 }

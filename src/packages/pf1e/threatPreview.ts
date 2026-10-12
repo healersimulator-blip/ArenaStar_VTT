@@ -51,6 +51,8 @@ import {
 /** A token's replicated footprint facts plus whatever creature facts are known. */
 export interface PF1eThreatToken {
   _id: string;
+  /** The name a refusal shows (absent: the id). */
+  name?: string;
   /** Centre in world units, matching `tokenCells`. */
   x: number;
   y: number;

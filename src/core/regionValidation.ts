@@ -7,17 +7,20 @@ import type {
 import type { Op } from "./ops";
 import { applyDiff } from "./diff";
 import { regionGeometryError } from "./regionGeometry";
+import { RAISED_MAX_AREAS } from "./raisedAreas";
 
 /** Bound native-cover work before allocating GPU masks; legacy scenes remain optional. */
 export function sceneRegionsError(scene: { regions?: unknown }): string | null {
   if (scene.regions === undefined) return null;
   if (!Array.isArray(scene.regions)) return "scene regions must be an array";
   let covers = 0,
-    vertices = 0;
+    vertices = 0,
+    raised = 0;
   for (const raw of scene.regions) {
     const error = regionGeometryError(raw);
     if (error) return error;
     const region = raw as RegionDocument;
+    if (region.raised && ++raised > RAISED_MAX_AREAS) return `scene raised-area budget is ${RAISED_MAX_AREAS} regions`;
     if (!region.fauxOverhead) continue;
     covers++;
     vertices +=

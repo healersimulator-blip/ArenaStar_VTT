@@ -3527,6 +3527,41 @@ test("region Stop Token Movement clips the host path before commit at the swept 
   expect(h.hostStore.get("automations", graph._id)?.state?.count).toBe(1);
 });
 
+test("D-438: host validates roof fields on create, whole updates and dotted updates", async () => {
+  const h = await setup();
+  const rejected: ClientEvents["rejected"][] = [];
+  h.gmBus.on("rejected", (event) => rejected.push(event));
+  const parent = { coll: "scenes" as const, id: "s1" };
+  const ref = { coll: "tiles" as const, id: "zone", parent };
+  const roof = (): TileDocument | undefined => h.hostStore.get("scenes", "s1")?.tiles.find((tile) => tile._id === "zone");
+  h.gm.submit([{ kind: "create", coll: "tiles", parent, data: { ...zoneTile(), occlusion: { mode: "glass", alpha: 0.5 } } as unknown as TileDocument }]);
+  await flushMicrotasks();
+  expect(rejected.at(-1)).toMatchObject({ reason: "invalid_schema" });
+  expect(roof()).toBeUndefined();
+  const radialRoof: TileDocument = { ...zoneTile(), above: true,
+    occlusion: { mode: "radial", alpha: 0.2, radius: 2 }, roofGroup: { id: "inn", role: "source" }, revealInFog: true };
+  h.gm.submit([{ kind: "create", coll: "tiles", parent, data: radialRoof }]);
+  await flushMicrotasks();
+  expect(roof()).toMatchObject({ occlusion: { mode: "radial", radius: 2 }, roofGroup: { id: "inn" }, revealInFog: true });
+  const count = rejected.length;
+  for (const diff of [
+    { "occlusion.mode": "sideways" },
+    { "occlusion.radius": 40 },
+    { "-=occlusion": null },
+    { roofGroup: { id: "", role: "source" } },
+    { "roofGroup.role": "boss" },
+    { revealInFog: "always" },
+  ] as Json[]) {
+    h.gm.submit([{ kind: "update", ref, diff: diff as Record<string, Json> }]);
+    await flushMicrotasks();
+  }
+  expect(rejected.slice(count).map((event) => event.reason)).toEqual(Array(6).fill("invalid_schema"));
+  h.gm.submit([{ kind: "update", ref, diff: { "occlusion.mode": "vision", "roofGroup.role": "follower", "-=revealInFog": null } }]);
+  await flushMicrotasks();
+  expect(roof()).toMatchObject({ occlusion: { mode: "vision", alpha: 0.2 }, roofGroup: { id: "inn", role: "follower" } });
+  expect(roof()?.revealInFog).toBeUndefined();
+});
+
 test("host rejects invalid authored tile trigger polygons on create and direct update", async () => {
   const h = await setup();
   const rejected: ClientEvents["rejected"][] = [];

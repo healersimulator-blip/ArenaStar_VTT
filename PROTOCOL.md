@@ -1574,6 +1574,54 @@ This is **token-floor presentation/navigation, not multilevel secrecy**: existin
 
 `level.focus.state` adds `worldSeq`, `mode:"follow"|"manual"`, optional `isolated`, `followTokenId`, and current-floor `presentation:{tileIds,wallIds,lightIds,useSceneBackground,darkness,epoch}`. No private elevation bands, stair destinations or directed visibility topology are exposed. The player applies the view only to the matching scene/replica sequence, otherwise drawing no floor content. The isolated canvas excludes unassigned auxiliary layers and the global foreground. Ordinary document/asset/sheet/FX projection is still not a secret-floor boundary.
 
-Stair traversal is host-generated from committed movement, never a client claim: outside→inside center entry on the source floor, one transition, unchanged endpoint XY, destination membership and floor Z appended atomically. Source/landing movement-wall footprint checks and overlap refusal apply. Undo/redo restore recorded state without re-entering stair triggers.
+Stair traversal is host-generated from committed movement, never a client claim: outside→inside center entry on the source floor, one transition, unchanged endpoint XY, destination membership and floor Z appended atomically. Source/landing movement-wall footprint checks apply. Undo/redo restore recorded state without re-entering stair triggers. *Superseded in part by D-430:* overlapping stairs no longer refuse the move; they combine into one choice (below).
 
 Player scoped `fog.get`/`fog.put` are now accepted in isolated scenes only for currently owned-token floors, with normal capability and epoch checks. Successful authorized reads grant bounded old-floor write-only flushing for the same session/user (128 namespaces maximum); these grants do not permit reads after ownership is lost and never permit resets. Each floor remains separate from legacy exploration. Clients capture the host-provided epoch with every restore/readback; old-generation responses/uploads cannot fill a newer floor surface. GM reset authorization is independent of ordinary fog read/write authorization.
+
+### Stairwells, choices and floor markers (D-430)
+
+`scene-level-stairs-v2` supplements floor play. `RegionDocument.stairs` keeps accepting the legacy one-way `{from,to}` and adds `{version:2, levels:string[2..8], mode:"auto"|"prompt", edges?:[{from,to}], arrivals?:[{levelId,x,y}], locked?:boolean, label?:string(1–64), secret?:boolean}`. `levels` are distinct existing floors; absent `edges` means every pair in both directions; `arrivals` are token-center landing points, at most one per connected floor. Authoring, restoring or importing a version-2 stairwell requires the feature from GM/ASSISTANT peers and from format-3 archives; players never receive stair data (projection strips it as before).
+
+Entering a stair region (outside→inside, token center, on a floor the region connects) computes the destinations of **every** entered region from the token's floor, minus locked regions and blocked landings. One destination in `auto` mode is appended atomically, as in D-428, with the arrival point when one is defined. Otherwise the move commits with the token standing in the stairwell and the host sends `stair.offer` to the moving user's compatible sessions (the GM when the GM moved it). Entering only locked stairs sends a `locked` notice; a blocked single landing refuses the move with its reason. Prefab-attached tokens follow their parent through any transition; summoned tokens use stairs like any token.
+
+`level.focus.state.presentation` adds `stairs:[{id,points,label?,up,down,locked}]`: non-secret stairs usable from the current floor, as a world-space polygon and directions only — no destination IDs, bands or other floors' data.
+
+**Pass-through and door-linked stairs (D-437).** Version 2 also accepts `trigger?:"end"|"cross"` (absent = `end`) and `door?:string` (a wall ID, shape-checked only — `[A-Za-z0-9_-]{1,128}`; a wall that is deleted or stops being a door leaves the link ignored, never a validation error). With `cross`, a move whose token-centre path enters the stairwell (outside→inside, at least 1 px inside) triggers even when it ends outside. The first stairwell along the path wins; if the move ends inside a stairwell entered first, the endpoint rule above applies unchanged. Passing through stops just inside the entry edge (nearest grid-cell centre when it is inside too): one `auto` destination changes floor there and continues to the submitted endpoint if the destination floor's walls let the body through, else stays at the stop (an arrival point wins); otherwise the host appends an XY update stopping the token — and its attached prefab parts, by the same offset — and sends `stair.offer`. A pass-through that is locked, has no clear landing, or is behind a source-floor wall is ignored silently. With `door`, the stairwell is locked unless that wall is a door in state 1 (open); this effective lock drives movement, `stair.choose`/`stair.request` revalidation and `presentation.stairs[].locked`, and any wall edit re-checks open offers (closing the door sends `ended`). Scene copies re-key `door` with the walls.
+
+### stair.offer (0x5b · host → client · ops)
+
+`{kind,offerId,sceneId,tokenId,label?,choices:[{levelId,name,direction:"up"|"down"|"level"}],ttlMs,status:"open"|"locked"|"none"|"ended",error?}`. Sent only to sessions of the user whose commit stopped the token (or who requested the choice). `open` carries 1–8 choices sorted from the highest floor; it lapses after `ttlMs` (60 s). One live offer exists per token: a newer stop withdraws the older one with `ended`. The host also sends `ended` when a commit (undo included) moves the token out, changes its floor or removes its stairs, and after every answer — with `error` when the answer could not be applied. `locked` and `none` explain why nothing is offered. Floor names in an offer are disclosed deliberately: they are the floors this token may travel to.
+
+### stair.choose (0x5c · client → host · ops)
+
+`{kind,offerId,levelId:string|null}`. Only the offered user may answer. `null` stays. The host revalidates everything — offer age, token still on the source floor and still inside one of the offering regions, the edge still allowed and unlocked, the landing clear, and the user's control of the token — then commits floor, feet elevation and any arrival point in one undoable envelope. Rate limited with intents.
+
+### stair.request (0x5d · client → host · ops)
+
+`{kind,sceneId,tokenId}`. "Take the stairs" for a controlled token already standing in a stairwell: answered with an `open` offer (even for a single destination), `locked`, or `none`. Unknown, hidden and uncontrolled tokens share the `none` answer. Rate limited with intents.
+
+### Floor scopes for presentation objects; tokens always land on a floor (D-431, D-432)
+
+Drawings, templates, notes and regions accept the same optional `levelScope` as walls and lights (`{mode:"all"}` or `{mode:"levels",ids}`), validated against the scene's levels and re-keyed by scene copy; scoping them requires `scene-level-scopes-v1`, players may not author it, and projection strips it. In isolated play an **unscoped** drawing, template, note or region is shown on every floor (legacy objects are never hidden). `presentation.offFloor:{regions,drawings,templates,notes}` lists only the readable, non-hidden objects scoped to other floors; a client that receives a presentation without `offFloor` (an older host) hides these layers as before.
+
+The host stamps creations in isolated scenes inside the single commit path: a drawing, template or note created by a user who is viewing a floor gets `levelScope:{mode:"levels",ids:[that floor]}`; a token created without `levelId` gets a floor and matching feet elevation from, in order, its prefab parent, the creator's viewed floor, the band containing its elevation, or the lowest floor (D-431).
+
+**GM build floor (D-434).** `level.focus` from a GM/ASSISTANT accepts any existing floor of the scene. Such an explicit GM focus (never the follow default) is that user's build floor: in any scene with levels, walls, lights, regions, drawings, templates and notes they create get `levelScope:{mode:"levels",ids:[floor]}`, tokens get the floor and matching feet, and created tiles are appended to the floor's `tileIds` by a host-added level update in the same envelope (requiring `scene-level-play-v1` like any floor-art edit). Explicit fields are never overwritten; `level.focus` with `levelId:null` ends build mode.
+
+### Roof fields on tiles (D-438)
+
+`TileDocument.occlusion.mode` accepts `"roof" | "fade" | "radial" | "vision"`, and `occlusion` may carry `radius` (grid cells, 0.25–20; read only by `radial`). Tiles may also carry two fields:
+- `roofGroup: {id, role}`: `id` matches `[A-Za-z0-9_-]{1,64}`; `role` is `"source"` or `"follower"`.
+- `revealInFog: boolean`.
+
+The host validates these fields on tile create and on any update whose diff keys touch `occlusion`, `roofGroup` or `revealInFog` (with or without `-=`, dotted paths included). Validation runs on the resulting tile and fails with `invalid_schema`:
+- `occlusion` accepts only `mode`, `alpha` (0–1) and `radius`.
+- `occlusion` may not be removed.
+- Unknown modes are refused.
+
+Absent fields are never checked, and documents written before D-438 are unchanged.
+
+There are no new messages and no capability gate:
+- Clients that predate D-438 draw `radial` and `vision` as `roof` and ignore the other fields.
+- Roof state is computed per client from its own replica and live sight, and is never replicated.
+- Roofs never write explored fog.

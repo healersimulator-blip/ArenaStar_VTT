@@ -18,7 +18,9 @@ import { fileURLToPath } from "node:url";
 import { strFromU8, unzipSync } from "fflate";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { bootHostApp, DEFAULT_SCENE_ID, type HostApp } from "../../src/app/hostBoot";
+import { requiredWorldFeatures } from "../../src/core/capabilities";
 import { searchCompendia } from "../../src/core/compendium";
+import type { SceneDocument } from "../../src/core/documents";
 import { buildCompendiumIndex, searchIndex } from "../../src/core/compendiumIndex";
 import {
   cellAtPoint,
@@ -85,11 +87,13 @@ describe("scripts/buildStarterWorlds.mjs", () => {
     const entries = unzipSync(new Uint8Array(readFileSync(s.zip as string)));
     const header = JSON.parse(strFromU8(entries["world.json"] as Uint8Array)) as WorldFileMeta;
     expect(header).toMatchObject({
-      format: 2,
+      // D-454: the Ice Beacon scene uses floors, stairwells and scoped walls
+      format: 3,
+      requiredFeatures: ["scene-level-play-v1", "scene-level-drafts-v1", "scene-level-scopes-v1", "scene-level-stairs-v2"],
       worldId: "starter-pf1e-mass-battles",
       system: "pf1e-mass-battles",
       version: "1.0.0",
-      seq: 28,
+      seq: 39,
       rules: { active: "pf1e-mass-battles" },
       starter: true,
     });
@@ -97,8 +101,11 @@ describe("scripts/buildStarterWorlds.mjs", () => {
       seq: number;
       docs: { coll: string; id: string; doc: Record<string, unknown> }[];
     };
-    expect(starterDocuments.seq).toBe(28);
-    expect(starterDocuments.docs).toHaveLength(28);
+    expect(starterDocuments.seq).toBe(39);
+    expect(starterDocuments.docs).toHaveLength(39);
+    // the plain-JS declaration matches the TS exporter's rule for the same scenes
+    expect(header.requiredFeatures).toEqual(requiredWorldFeatures(
+      starterDocuments.docs.filter((row) => row.coll === "scenes").map((row) => row.doc as unknown as SceneDocument), "GM"));
     const starterById = new Map(starterDocuments.docs.map((row) => [row.id, row]));
     const jungle = starterById.get("scene-jungle")?.doc as {
       name: string; active: boolean; img: string; width: number; height: number;
@@ -128,20 +135,35 @@ describe("scripts/buildStarterWorlds.mjs", () => {
         casterLevel: 6, prepared: [{ name: "Entangle", level: 1 }] } } } });
     const starterAssets = JSON.parse(strFromU8(entries["assets.json"] as Uint8Array)) as
       { hash: string; name: string; mime: string; chunks: number; visibility: string }[];
-    expect(starterAssets).toHaveLength(11);
+    expect(starterAssets).toHaveLength(23);
     expect(starterAssets.map((asset) => asset.name)).toEqual(expect.arrayContaining([
       "JungleEntrance2.jpg", "token_Hosilla.png", "token_Vacorg.png", "token_Hobgoblin1.png",
       "token_Troll6.png", "token_Tyrannosaur.png", "Crosshair_Line_Generic_01_White_90ft.webm",
       "Crosshair_Circle_Fantasy_01_White_30ft.webm", "Lightning_Bolt_Blue_90ft.webm",
       "Nature_Vine_Normal_Circle_01_Physical_Green_30ft.webm",
       "Nature_Vine_Normal_Token_01_Physical_Green.webm",
+      // D-454 Ice Beacon: four floors, four props, four more creatures
+      "hall.webp", "gallery.webp", "ring.webp", "beacon.webp",
+      "crates-5ft.png", "crates-10ft.png", "crates-15ft.png", "scaffold-10ft.png",
+      "token_FeralOrc.png", "token_Vrok1.png", "token_AxeBeak.png", "token_OracleBaphomet.png",
     ]));
+    expect(starterAssets.filter((asset) => asset.name.endsWith(".webp")).map((asset) => asset.mime))
+      .toEqual(["image/webp", "image/webp", "image/webp", "image/webp"]);
     for (const asset of starterAssets) {
       expect(asset.visibility).toBe("referenced");
       expect(asset.chunks).toBeGreaterThan(0);
       expect(entries[`assets/${asset.hash}`]).toBeDefined();
     }
     expect(jungle?.img).toBe(starterAssets.find((asset) => asset.name === "JungleEntrance2.jpg")?.hash);
+    // D-454: the Ice Beacon elevation test (its own tests: tests/scripts/iceBeaconScene.test.ts).
+    // Every image it draws ships in the archive.
+    const iceBeacon = starterById.get("scene-ice-beacon")?.doc as {
+      name: string; levelMode: string; levels: { _id: string }[]; tiles: { img: string }[]; tokens: { img: string }[];
+    } | undefined;
+    expect(iceBeacon).toMatchObject({ name: "Ice Beacon — Elevation Test", levelMode: "isolated" });
+    expect(iceBeacon?.levels.map((l) => l._id)).toEqual(["lvl-ib-hall", "lvl-ib-gallery", "lvl-ib-ring", "lvl-ib-beacon"]);
+    const shipped = new Set(starterAssets.map((asset) => asset.hash));
+    for (const img of [...(iceBeacon?.tiles ?? []), ...(iceBeacon?.tokens ?? [])].map((row) => row.img)) expect(shipped.has(img)).toBe(true);
     expect(jungle?.flags.core?.spellDemo?.macros?.lightningBolt).toBe("macro-lightning-bolt-effect");
     expect(starterById.get("macro-lightning-bolt-effect")?.doc).toMatchObject({
       name: "Lightning Bolt — 90-ft. Line", ownership: { default: 2, gm: 3 },
@@ -216,6 +238,9 @@ describe("scripts/buildStarterWorlds.mjs", () => {
       expect(scene?.flags?.core?.scale ?? "tactical").toBe("tactical");
       expect(app.gm.client.store.get("scenes", "scene-jungle")).toMatchObject({
         name: "JungleEntrance2 — PF1e Spell Demonstration", active: false });
+      // D-454: the floor-play scene passed the reader's level and region checks and is live.
+      expect(app.gm.client.store.get("scenes", "scene-ice-beacon")).toMatchObject({
+        name: "Ice Beacon — Elevation Test", active: false, levelMode: "isolated" });
       // the content pack is installed beside the ruleset and no dependency is missing
       const pkgs = await app.packages.list();
       expect(pkgs.map((p) => [p.id, p.active, p.missingDependencies.length])).toEqual(
@@ -318,9 +343,9 @@ describe("scripts/buildStarterWorlds.mjs", () => {
 
 /**
  * The tester starter bundles the mass-battles ruleset (active) + pf1e-core + the converted
- * PF1e content package, with 28 pre-placed documents (a tactical skirmish, a strategic
- * battle with two armies, an overland hexcrawl, the JungleEntrance2 spell demonstration, and
- * a tester guide). The content package here
+ * PF1e content package, with 39 pre-placed documents (a tactical skirmish, a strategic
+ * battle with two armies, an overland hexcrawl, the JungleEntrance2 spell demonstration, the
+ * Ice Beacon elevation test, and a tester guide). The content package here
  * is a SMALL fixture
  * shaped like the real `dist/content/pf1e` (the real one is 58 MB / 25 k entries — the
  * conversion itself is covered by tests/scripts/contentConverter.test.ts).
@@ -382,7 +407,7 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
     tester = built.find((b) => b.id === "pf1e-mass-battles-tester");
   }, 120_000);
 
-  test("builds the plain starter PLUS the tester with three packages and 28 documents", () => {
+  test("builds the plain starter PLUS the tester with three packages and 39 documents", () => {
     expect(tester).toBeDefined();
     if (!tester?.zip) throw new Error("tester starter not built");
     expect(tester.name).toBe("Pathfinder 1e Mass Battles — tester");
@@ -393,10 +418,10 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
     const entries = unzipSync(new Uint8Array(readFileSync(tester.zip)));
     const header = JSON.parse(strFromU8(entries["world.json"] as Uint8Array)) as WorldFileMeta;
     expect(header).toMatchObject({
-      format: 2,
+      format: 3,
       worldId: "starter-pf1e-mass-battles-tester",
       system: "pf1e-mass-battles",
-      seq: 28,
+      seq: 39,
       rules: { active: "pf1e-mass-battles" },
       starter: true,
     });
@@ -432,8 +457,8 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
       seq: number;
       docs: DocRow[];
     };
-    expect(docs.seq).toBe(28);
-    expect(docs.docs).toHaveLength(28);
+    expect(docs.seq).toBe(39);
+    expect(docs.docs).toHaveLength(39);
     const byId = new Map(docs.docs.map((d) => [d.id, d]));
     const docOf = <T>(id: string): T => {
       const row = byId.get(id);
@@ -500,7 +525,7 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
       expect(app.meta.name).toBe("Tester World");
       expect(app.rulesBoot).toMatchObject({ source: "package", packageId: "pf1e-mass-battles", error: null });
       const store = app.gm.client.store;
-      // pre-placed docs: no default seed (seq 28), the tactical scene is DEFAULT_SCENE_ID
+      // pre-placed docs: no default seed (seq 39), the tactical scene is DEFAULT_SCENE_ID
       expect(store.get("scenes", "scene-1")).toBeDefined();
       const scene2 = store.get("scenes", "scene-2") as { flags?: { core?: { scale?: string } } } | undefined;
       expect(scene2?.flags?.core?.scale).toBe("strategic");

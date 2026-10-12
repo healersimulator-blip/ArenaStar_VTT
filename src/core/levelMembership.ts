@@ -19,10 +19,17 @@ export function wallsForAuthoring(walls: readonly WallDocument[], level: string 
   return walls.filter((w) => level === null ? w.levelScope === undefined : level === "*" ? w.levelScope?.mode === "all" :
     w.levelScope?.mode === "levels" && w.levelScope.ids.includes(level));
 }
-export function sceneMembershipError(scene: { levels?: LevelDocument[]; walls?: unknown; lights?: unknown; tokens?: unknown }): string | null {
-  for (const raw of [...(Array.isArray(scene.walls) ? scene.walls : []), ...(Array.isArray(scene.lights) ? scene.lights : [])]) {
-    const w = raw as WallDocument;
-    if (w?.levelScope !== undefined && scene.levels === undefined) return "Scoped walls/lights require an explicit draft level collection";
+/** Scene collections that carry an authoring floor scope. G-06 (D-432) adds the presentation kinds. */
+export const SCOPED_COLLECTIONS = ["walls", "lights", "regions", "drawings", "templates", "notes"] as const;
+export type ScopedCollection = typeof SCOPED_COLLECTIONS[number];
+export function isScopedCollection(coll: string): coll is ScopedCollection {
+  return (SCOPED_COLLECTIONS as readonly string[]).includes(coll);
+}
+type ScopedScene = { levels?: LevelDocument[]; tokens?: unknown } & { [K in ScopedCollection]?: unknown };
+export function sceneMembershipError(scene: ScopedScene): string | null {
+  for (const coll of SCOPED_COLLECTIONS) for (const raw of Array.isArray(scene[coll]) ? scene[coll] as unknown[] : []) {
+    const w = raw as { levelScope?: unknown } | null;
+    if (w?.levelScope !== undefined && scene.levels === undefined) return "Scoped objects require an explicit draft level collection";
     const error = levelScopeError(w?.levelScope, scene.levels ?? []); if (error) return error;
   }
   for (const raw of Array.isArray(scene.tokens) ? scene.tokens : []) {
@@ -41,10 +48,16 @@ export function tokenLevelAssignment(scene: SceneDocument, tokenId: string, leve
   return { kind: "update", ref: { coll: "tokens", id: tokenId, parent: { coll: "scenes", id: scene._id } }, diff: { levelId, elevation: level.floorZ } };
 }
 /** Removing a level is explicit: callers must reassign or clear every binding first. */
-export function levelBindings(scene: SceneDocument, levelId: string): { walls: string[]; tokens: string[]; lights: string[] } {
+export function levelBindings(scene: SceneDocument, levelId: string): { tokens: string[] } & Record<ScopedCollection, string[]> {
+  const scoped = (rows: ReadonlyArray<{ _id: string; levelScope?: LevelScope }> | undefined) =>
+    (rows ?? []).filter((w) => w.levelScope?.mode === "levels" && w.levelScope.ids.includes(levelId)).map((w) => w._id);
   return {
-    lights: scene.lights.filter((w) => w.levelScope?.mode === "levels" && w.levelScope.ids.includes(levelId)).map((w) => w._id),
-    walls: scene.walls.filter((w) => w.levelScope?.mode === "levels" && w.levelScope.ids.includes(levelId)).map((w) => w._id),
+    lights: scoped(scene.lights), walls: scoped(scene.walls), regions: scoped(scene.regions),
+    drawings: scoped(scene.drawings), templates: scoped(scene.templates), notes: scoped(scene.notes),
     tokens: scene.tokens.filter((t) => t.levelId === levelId).map((t) => t._id),
   };
+}
+/** True when an object with this scope is drawn on `levelId` (absent scope = every floor). */
+export function scopeIncludes(scope: LevelScope | undefined, levelId: string): boolean {
+  return scope === undefined || scope.mode === "all" || scope.ids.includes(levelId);
 }

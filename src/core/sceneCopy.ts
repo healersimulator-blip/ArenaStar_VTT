@@ -22,6 +22,7 @@
  * updates still resolve against the pre-batch store; the host specially preflights graph creates
  * against a scene create in the same envelope so the whole clone can remain atomic.
  */
+import { remapStairLevels } from "./levelPlay";
 import type {
   AutomationDocument,
   BaseDocument,
@@ -568,12 +569,10 @@ export function planDuplicateSceneOps(input: DuplicateSceneInput): DuplicateScen
     level.visibleLevelIds = links;
     if (level.tileIds) level.tileIds = level.tileIds.map((id) => ids.get(refKey("tiles", id)) ?? id);
   }
-  for (const region of copy.regions ?? []) if (region.stairs) {
-    region.stairs = { from: ids.get(refKey("levels", region.stairs.from)) ?? region.stairs.from, to: ids.get(refKey("levels", region.stairs.to)) ?? region.stairs.to };
-  }
-  for (const wall of [...copy.walls, ...copy.lights]) if (wall.levelScope?.mode === "levels") {
-    wall.levelScope.ids = wall.levelScope.ids.map((id) => ids.get(refKey("levels", id)) ?? id);
-  }
+  for (const region of copy.regions ?? []) if (region.stairs)
+    region.stairs = remapStairLevels(region.stairs, (id) => ids.get(refKey("levels", id)) ?? id, (id) => ids.get(refKey("walls", id)) ?? id);
+  for (const scoped of [...copy.walls, ...copy.lights, ...(copy.regions ?? []), ...copy.drawings, ...copy.templates, ...copy.notes])
+    if (scoped.levelScope?.mode === "levels") scoped.levelScope.ids = scoped.levelScope.ids.map((id) => ids.get(refKey("levels", id)) ?? id);
   for (const token of copy.tokens) if (token.levelId !== undefined) {
     const mapped = ids.get(refKey("levels", token.levelId));
     if (!mapped) return fail("Token references a missing copied level");

@@ -2,6 +2,7 @@
  * Test-only hook (D-045): `?e2e` gates a window surface for Playwright to
  * drive the real bundled modules (WebRTC loopback, §14). Inert otherwise.
  */
+import type { CrossFloorLightingState } from "../canvas/layers/LightingLayer";
 import type { LoopbackResult } from "../net/webrtc";
 import { RendererType } from "pixi.js";
 import { makeToken, type HostApp } from "./hostBoot";
@@ -13,6 +14,7 @@ import type {
   MacroDocument,
   MessageDocument,
   RegionDocument,
+  LevelScope,
   CombatDocument,
   Json,
   JournalDocument,
@@ -246,6 +248,8 @@ export interface AppSurface {
   tokenPos(): { x: number; y: number } | null;
   sceneImg(): string | null;
   activeSceneId(): string | null;
+  /** G-21 (D-444): the active scene's floor surfaces as stored (null = solid everywhere). */
+  levelSurfaces(): Array<{ id: string; name: string; surface: { components: number; openings: number; vertices: number; source: string | null } | null }>;
   /** D-270: one scene's map hash by id — what "import targets the active scene" is asserted with. */
   sceneImgById(id: string): string | null;
   gridSize(): number | null;
@@ -397,7 +401,12 @@ export interface AppSurface {
       rotation: number; img: string; triggerZone?: TileDocument["triggerZone"];
       triggerElevation?: TileDocument["triggerElevation"] }>;
     regions: Array<{ id: string; name: string; x: number; y: number; width: number; height: number;
-      rotation: number; shape: RegionDocument["shape"]; hidden: boolean }>;
+      rotation: number; shape: RegionDocument["shape"]; hidden: boolean; stairs?: RegionDocument["stairs"] }>;
+    /** G-30 (D-449): floors (draft or playing), wall floor scopes and token floors. */
+    levelMode: string | null;
+    levels: Array<{ id: string; name: string; bottom: number | null; top: number | null; tileIds: string[]; visibleLevelIds: string[] }>;
+    wallScopes: Array<LevelScope | null>;
+    tokenLevels: Array<string | null>;
     counts: Record<string, number>;
   } | null;
   sceneCount(): number;
@@ -1319,9 +1328,38 @@ export interface GmFogSurface {
     width: number;
     height: number;
     above: boolean;
-    mode: "roof" | "fade";
+    mode: "roof" | "fade" | "radial" | "vision";
     alpha: number;
+    /** D-438 roof fields. */
+    rotation?: number;
+    radius?: number;
+    roofGroup?: { id: string; role: "source" | "follower" };
+    revealInFog?: boolean;
   }): string;
+  /** G-32 (D-440): the height badge text and artwork scale of each drawn token. */
+  tokenElevationCues(): Array<{ id: string; label: string | null; scale: number }>;
+  /** G-19 (D-443): lower-floor tiles drawn beneath the floor view, and the background's depth. */
+  lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> };
+  /** D-452: height labels under lower-floor tokens. */
+  lowerTokenLabels(): Array<{ id: string; label: string }>;
+  /** D-453: the GM's raised-area outlines and their labels. */
+  raisedMarkerLabels(): Array<{ id: string; label: string }>;
+  /** G-22 (D-446): light crossing floors: split darkness and the other floors' light groups. */
+  crossFloorLighting(): CrossFloorLightingState;
+  /** D-438: what each roof on the active scene draws (alpha, openings, group, fog reveal). */
+  roofStates(): Record<string, {
+    alpha: number; holes: "none" | "circles" | "vision"; openings: number; holeAlpha: number;
+    under: boolean; linked: boolean; reveal: boolean; art: boolean;
+  } | null>;
+  /**
+   * G-11 e2e (D-437): create a wall through the client op path (a door when `door` is given:
+   * every axis conditional); returns its id. `everyFloor` scopes it to all floors.
+   */
+  seedWall(spec: { c: [number, number, number, number]; door?: 0 | 1 | 2; everyFloor?: boolean }): string;
+  /** G-22 (D-446): a placed light, optionally on one floor. */
+  seedLight(spec: { x: number; y: number; dim: number; bright?: number; levelId?: string }): string;
+  /** G-11 e2e: set a door wall's state (0 closed, 1 open, 2 locked) through the client op path. */
+  setDoorState(spec: { id: string; door: 0 | 1 | 2 }): void;
   /** §12: rulesVersion of the last resolved turn's report. */
   reportRulesVersion(): string;
   /** §11 distributions byType of the last report the GM received. */
@@ -1427,6 +1465,8 @@ export interface GmFogSurface {
     originCol: number;
     originRow: number;
     radiusFt: number;
+    /** G-27 (D-447): the caster, whose floor the area happens on. */
+    casterTokenId?: string;
   }): {
     ok: boolean;
     issues: Array<{ field: string; message: string }>;
@@ -1534,7 +1574,24 @@ export interface VttE2eSurface {
 /** D-251: what the player's canvas shows under fog. */
 export interface PlayerCanvasSurface {
   floorMapPixel(spec: { x: number; y: number }): number[];
+  /** D-454: RGBA of the whole world stack (map, tokens and fog) at a world point — what the player sees there. */
+  scenePixel(spec: { x: number; y: number }): number[];
   floorPresentation(): { levelId: string | null; mode: string | null; tileIds: string[]; lightIds: string[]; img: string | null; darkness: number | null };
+  /** G-10 (D-430): IDs of the stair markers drawn on this player's floor. */
+  stairMarkers(): string[];
+  /** G-19 (D-443): lower-floor tiles drawn beneath this player's floor, and the background's depth. */
+  lowerFloors(): { tiles: Array<{ id: string; depth: number }>; backgroundDepth: number | null; tokens: Array<{ id: string; depth: number }> };
+  /** D-452: height labels under lower-floor tokens. */
+  lowerTokenLabels(): Array<{ id: string; label: string }>;
+  /** G-22 (D-446): light crossing floors on this player's canvas (the same shape as the GM readback). */
+  crossFloorLighting(): CrossFloorLightingState;
+  /** G-32 (D-440): the height badge text and artwork scale of each token this player sees. */
+  tokenElevationCues(): Array<{ id: string; label: string | null; scale: number }>;
+  /** D-438: what each roof on this player's canvas draws (the same shape as the GM readback). */
+  roofStates(): Record<string, {
+    alpha: number; holes: "none" | "circles" | "vision"; openings: number; holeAlpha: number;
+    under: boolean; linked: boolean; reveal: boolean; art: boolean;
+  } | null>;
   /** The player's fog loop after everything queued landed, plus the layer's style/visibility. */
   fogState(): Promise<{
     sceneId: string | null;
@@ -2624,6 +2681,15 @@ function appSurface(app: HostApp): AppSurface {
       const scenes = client.store.getAll("scenes");
       return (scenes.find((sc) => sc.active) ?? scenes[0])?._id ?? null;
     },
+    levelSurfaces: () => {
+      const scenes = client.store.getAll("scenes");
+      const active = scenes.find((sc) => sc.active) ?? scenes[0];
+      return (active?.levels ?? []).map((l) => ({ id: l._id, name: l.name, surface: l.surface ? {
+        components: l.surface.footprint.components.length,
+        openings: l.surface.footprint.components.reduce((n, c) => n + c.holes.length, 0),
+        vertices: l.surface.footprint.components.reduce((n, c) => n + c.outer.length + c.holes.reduce((m, h) => m + h.length, 0), 0),
+        source: l.surface.source ?? null } : null }));
+    },
     sceneCount: () => client.store.getAll("scenes").length,
     /**
      * D-272: the encounter tables as the store holds them — the wizard's readback. Entries are
@@ -2692,7 +2758,11 @@ function appSurface(app: HostApp): AppSurface {
           ...(tile.triggerElevation ? { triggerElevation: tile.triggerElevation } : {}) })),
         regions: (doc.regions ?? []).map((region) => ({ id: region._id, name: region.name, x: region.x, y: region.y,
           width: region.width, height: region.height, rotation: region.rotation ?? 0, shape: region.shape,
-          hidden: region.hidden === true })),
+          hidden: region.hidden === true, ...(region.stairs ? { stairs: region.stairs } : {}) })),
+        levelMode: doc.levelMode ?? null,
+        levels: (doc.levels ?? []).map((l) => ({ id: l._id, name: l.name, bottom: l.bottom, top: l.top, tileIds: l.tileIds ?? [], visibleLevelIds: l.visibleLevelIds })),
+        wallScopes: (doc.walls ?? []).map((w) => w.levelScope ?? null),
+        tokenLevels: (doc.tokens ?? []).map((t) => t.levelId ?? null),
 
         counts: {
           cells: (doc.cells ?? []).length,

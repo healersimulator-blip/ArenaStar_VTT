@@ -65,6 +65,9 @@ describe("channelFor (§6.1)", () => {
     const routing: Record<MsgName, "ops" | "ephemeral" | "assets" | "sim"> = {
       "level.focus": "ops",
       "level.focus.state": "ops",
+      "stair.offer": "ops",
+      "stair.choose": "ops",
+      "stair.request": "ops",
       hello: "ops",
       intent: "ops",
       roll: "ops",

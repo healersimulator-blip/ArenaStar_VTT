@@ -12817,3 +12817,435 @@ GM setup lives in Scenes → Draft levels: assign map tiles/background and ambie
 **Scope boundary:** ordinary document/asset/sheet/FX projection is not comprehensively redacted by floor; this implements a usable isolated canvas, not a secret-data guarantee. Cross-floor sight/light, conservative aperture terrain masks, floor-scoped auxiliary authoring, FX/audio and full action authority remain pending. The legacy GM diagnostic still presents the GM's all-art authoring canvas.
 
 Verified: **5,416 Vitest passed / 12 skipped**, 386 files passed / 2 skipped. **Five Chromium journeys passed**: actual player drag into stairs, GPU red→blue→red map pixels at identical XY, separate dark-floor exploration, preserved ground-floor exploration on return, collapsed fallback, plus legacy floor focus, ambient/reset/reopen and both player-fog regressions. TypeScript, targeted ESLint and self-contained build passed. Svelte: 87 components, zero blockers, one existing ReplayPanel advisory. Initial browser test fixture camera lookup/coordinate errors were corrected; final journey passes without retries.
+
+## D-429 — Refused moves are explained; Faux Overhead never inverts on Canvas2D; multilevel batch (2026-10-11)
+
+Review source: [MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md](MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md) G-02, G-04, G-05.
+
+**G-02.** Canvas drags were fire-and-forget: a host refusal snapped the token back without a word. Both shells now track the transactions their canvas controller submits (`src/client/moveRefusals.ts`, bounded, cleared on commit) and turn the host's `rejected` reason into a short message — the player's notification stack, the GM's notify log. Flows that already await their own result are not tracked, so nothing is reported twice. Host commit errors now carry the plain message (no `Error:` prefix).
+
+**G-05.** Pixi's Canvas2D renderer ignores inverse masks, so covers showed exactly the covered part of a token. The stage records `rendererName`; on `"canvas"` the Faux Overhead layer uses no masks and hides the **whole** token (and its decorations and picking) while any eligible cover overlaps its rotation-safe bounds, re-evaluated every frame while tokens animate. A covered pixel is never revealed; the GM gets one notice per session. `stage.fauxOverheadCoverCount()` is a renderer-independent readback; the pixel spec asserts the exact cut-out on WebGL and the conservative contract on Canvas2D. The sandbox recipe now places SwiftShader beside the executable so browser tests really run on WebGL.
+
+**G-04.** The two stale copy assertions were updated and `test:multilevel` runs every floor-play journey in one batch.
+
+## D-430 — Stairwells v2: one region, several floors, the mover chooses (2026-10-11)
+
+Testers could not offer "up or down" from one staircase: stairs were `{from,to}` and a second destination needed an overlapping region, which refused every move into it. `RegionDocument.stairs` now also accepts `{version:2, levels[2..8], mode:"auto"|"prompt", edges?, arrivals?, locked?, label?, secret?}`; the legacy shape remains valid; the editor now writes version 2. Overlapping stairs of either version **combine** their destinations.
+
+Entering (outside→inside, token center, on a floor the region connects) yields the union of destinations from the token's floor minus locked regions and blocked landings. One destination in `auto` mode is applied atomically as before (plus an optional arrival point). Otherwise the move commits with the token standing in the stairwell and the host privately sends `stair.offer` to the moving user (the GM for GM moves). `stair.choose` is fully revalidated (offer owner and age, still inside, still on the source floor, edge still allowed and unlocked, landing clear, token control) and commits floor + feet + arrival in one undoable envelope. `stair.request` re-opens the choice while standing on stairs. One live offer per token; commits that invalidate it (undo included) withdraw it; undo/redo never prompt. Prefab-attached tokens follow their parent through transitions; summoned tokens use stairs.
+
+UI: a non-modal chooser (number keys, Esc to stay) in both shells; "Take stairs" on the player's floor chip; a floor-arrival notice and short cross-fade (G-18); stair markers (outline, arrows, label, locked state) under fog/lighting for players — non-secret stairs of their floor only, via `presentation.stairs` — and every stairwell on the GM canvas (G-10/G-14 labels). The play editor authors stairwells (floors, both/up/down, auto/ask, label, hidden passage, a rectangle or an existing region), and toggles lock (G-11), ask and marker per stairwell; legacy regions can be converted. Feature `scene-level-stairs-v2` fences authoring/restoring v2 data for GM peers and archives; players need it only for offers. Not done here: path-crossing triggers and route continuation (G-09), door-linked locks, polygon drawing directly from the stair tool.
+
+## D-431 — Tokens created in floor play always land on a floor (2026-10-11)
+
+New, imported-by-op, prefab and summoned tokens had no floor and were invisible on every isolated floor. Inside the single commit path, a token created without `levelId` in an isolated scene gets a floor and matching feet elevation from, in order: its prefab parent, the creator's currently viewed floor, the band containing its feet, the lowest floor. Explicit `levelId` is untouched; undo removes the stamped token like any other create.
+
+## D-432 — Templates, drawings, notes and regions on floors (2026-10-11)
+
+Isolated floors removed every template, drawing, note and cover. These kinds now accept the same validated `levelScope` as walls and lights (copy re-keys it; projection strips it; players cannot author it; scoping needs `scene-level-scopes-v1`). **Unscoped objects show on every floor** so no legacy content disappears. The host sends `presentation.offFloor` — readable, non-hidden objects scoped to other floors, an exclusion list that stays small — and older hosts' presentations (without it) keep the old behaviour. Drawings, templates and notes created by a user viewing a floor are stamped with that floor. Faux Overhead covers now reach the player canvas on isolated floors. The binding audit and level-removal bindings include the new kinds.
+
+## D-433 — Floor-play check before activation and while editing (2026-10-11)
+
+`src/core/levelAudit.ts` is one pure audit: unassigned walls/lights (which neither show nor block in floor play), floorless tokens, floors without art, visible tiles on no floor, floors no stairs reach, one-way stairs, landings inside walls, locked stairs and overlapping stairs. Enabling floor play runs it: errors block; warnings open an inline check with quick fixes ("put these walls/lights on every floor", "assign tokens by elevation", "merge into one stairwell" for identical-geometry legacy pairs) and an explicit **Enable anyway**. The same list stays live under Draft levels → Floor play & stairs. Fixes are ordinary undoable op plans; locked and prefab walls are left to the GM. There is no per-edit approval.
+
+## D-434 — GM floor view, build mode and who-is-where (2026-10-11)
+
+The GM canvas showed every floor stacked (S7). The former "fog & lighting diagnostic" is now the **GM floor** control: choosing a floor keeps the per-floor lighting/exploration diagnostic and adds a display mode — *this floor, others faint* (default, 25 % opacity for other floors' tiles and tokens), *this floor only*, or *every floor*. `src/core/gmFloorView.ts` filters only what is drawn and picked; documents are never rewritten from the filtered view. Walls/lights without a floor and floorless tokens stay visible in every mode because the GM must assign them. PageUp/PageDown step floors. A "Who is where" roster lists token counts per floor and player characters; clicking one switches to its floor, centres and selects it (G-17).
+
+**Build mode (G-13).** With a floor chosen, *Build on this floor* limits picking to that floor and sends the GM session's explicit `level.focus` for it; the host treats a GM/assistant's explicit focus — never the follow default — as their build floor. Creations in that scene are stamped in the single commit path: walls, lights, regions, drawings, templates and notes get `levelScope:{levels:[floor]}`, tokens get the floor and matching feet, and new tiles are appended to the floor's map art in the same undoable envelope. GMs may focus any floor (even an empty one). "Put unassigned walls & lights on this floor" is the bulk fix next to the control.
+
+## D-435 — Move to floor and feet elevation from the token menu (2026-10-11)
+
+In scenes with levels the GM token menu lists every floor: one click moves the token — or the whole current selection when the token is part of it — to that floor with its Floor Z, carrying prefab-attached tokens (`floorMoveOps`). A feet-elevation field sets elevation directly when it stays in the token's band; when the height belongs to another floor it offers "Move to <floor>" (elevation kept) or "Keep floor"; a height in a gap is refused with a notice. Player elevation editing is not added.
+
+## D-436 — Generate a stack of floors (2026-10-11)
+
+An empty Draft levels panel offers *Generate a stack of floors*: floors including ground (1–16), basements (0–8), floor height and an optional unbounded roof band. Names are Ground, Floor 2…, Basement(s) and Roof; bands are contiguous from 0 and display order runs bottom-up. The result fills the draft only — the GM still assigns art and presses Apply.
+
+## D-437 — Pass-through stairs and door-linked stairs (2026-10-11)
+
+Stairwells fired only when a move *ended* inside (G-09), and a lock was a manual flag (G-11). Version-2 stairs gain two optional fields: `trigger:"end"|"cross"` (absent = `end`) and `door:<wall id>`.
+
+**Pass-through (`cross`).** The host clips the token-centre segment of each committed move against every stairwell on the mover's floor (convex Cyrus–Beck, `segmentPolygonSpan`); outside→inside only, and a centre running < 1 px inside is a graze, not a crossing. The first stairwell along the path wins (ties within 1e-6 combine). If the move ends inside a stairwell entered first, today's endpoint rule applies unchanged — so a `cross` stairwell that holds the endpoint behaves exactly like an `end` one. Otherwise, passing through: the stop point is just inside the entry edge (1 px, or mid-chord for a thin crossing), moved to the nearest grid-cell centre when that centre is also inside. One `auto` destination changes floor there and the route **continues** to the submitted endpoint when the destination floor's walls let the body sweep stop→endpoint; else the token stays at the stop. An arrival point still wins. Several destinations or `prompt` mode stop the token (and its attached prefab parts, same offset) at the stop and send the usual `stair.offer`. One transition per move. A pass-through that cannot be used right now — locked, door shut, every landing blocked, or a wall between the start and the stop on the source floor — is walked over like floor, silently (no refusal, no notice); a later stairwell on the same path is still considered. The PF1e walk-allowance check keeps measuring the whole submitted drag against the starting floor (conservative).
+
+**Door-linked (`door`).** The stairwell works only while that wall is an open door (`door === 1`); closed or locked doors lock it (`stairLocked`), for movement, revalidation, `Take stairs`, markers and the audit. Validation checks the ID's shape only: deleting the wall later must never fail a level transaction, so a dangling link (wall gone or no longer a door) is ignored and the audit warns `stairs-door-missing`. Any wall edit re-checks open offers, so closing the door withdraws a pending choice. Scene copies re-key the door with the walls. The play editor gets "Also when a move passes through" and a door picker in the create form, and per-row pass-through/door controls; the row and the audit say when a door keeps the stairs locked.
+
+## D-438 — Roofs: art-shaped fading, openings, groups, reveal through fog (2026-10-11)
+
+Roofs were barely usable: no UI could make a tile overhead, `roof` mode opened when any vision token's bounding box overlapped the tile's unrotated rectangle, every vision token in the replica opened every roof (a player saw inside a building because another PC stood in it), and nothing showed a roof through fog. `src/core/roofs.ts` now holds the pure rules; `TilesLayer` only draws their result. All of it is presentation: no LOS, light, movement or explored-fog change.
+
+**Under (G-26a).** A viewer is under a roof when its token centre is on the roof's opaque art: a ≤128 px alpha map read once per texture (`roofArtMaskFromTexture`, threshold 50 %). If the art cannot be read (no DOM, cross-origin, video, a placeholder), the tile's alpha or polygon trigger zone is used, then its rotated rectangle. Boundaries count as under.
+
+**Whose tokens (Levels T9).** Roofs open for the viewer's own vision tokens (`roofViewerTokens`, the same control rule as fog viewers): every token for a GM, the player's for a player or for "view as". If the selection contains any of them, only the selected ones count. Other players' tokens never open your roofs. This changes behaviour for players.
+
+**Modes (G-26b).** `occlusion.mode` gains `radial` (a circle of `occlusion.radius` grid cells, 0.25–20, default 2, round each viewer under the roof) and `vision` (the viewers' live sight polygons, forwarded from the fog layer's `setVisible`). An opening is an inverse stencil mask on the tile plus a copy clipped to the opening at the open opacity (none at 0). Canvas2D has no inverse masks, so there, and in `vision` mode without live sight or without a real token under the roof, the whole roof fades as in `roof`. A hole is never drawn where it cannot be clipped. `fade` stays "always at alpha"; floor tiles are unaffected.
+
+**Peek (G-26c).** GM-local "Peek under roofs" (a canvas toggle shown when the scene has roofs, hidden in view-as): the pointer counts as one more viewer. It opens `roof` and `radial` roofs (a circle at the pointer) but never `vision` holes. It is never saved or sent.
+
+**Groups (G-25).** `roofGroup: {id, role: "source"|"follower"}`. After every tile's direct state is known, any group with an occupied *source* fades all its other members as a whole at their own alpha (`linked`). Followers never trigger the group, but still open themselves. The result does not depend on tile order.
+
+**Reveal through fog (G-24).** `revealInFog: true` draws a copy of the roof in a new `roofsOverFog` stage container, directly above the fog, while any current sight polygon touches the roof's outline (exact test: edge crossing or containment either way) and no viewer has opened it (directly or through its group). Explored fog is never written, and hiding the fog clears the copies. The outline is the trigger polygon or the rotated rectangle, so transparent art margins count. This is native code: nothing from Better Roofs was copied.
+
+**Validation and authoring.** The host checks the roof fields on tile create and on any update touching `occlusion`, `roofGroup` or `revealInFog`, including dotted paths. It checks them on the resulting tile, so removing `occlusion` is refused. Absent fields are never checked, so old documents keep loading. Older peers draw `radial`/`vision` as `roof` and ignore the other fields, so no capability gate is needed. Scenes → each scene → **Tiles & roofs** lists the scene's tiles with *Overhead (roof)*, fade mode, open opacity, radius, group (with suggestions) and role, and *Show through fog*. Each change is one undoable update.
+
+Verified: **5,469 Vitest passed / 12 skipped** (393 files, 2 skipped), including 17 roof-rule and 9 roof-layer tests and the host roof-field validation. **`test:multilevel` 20/20 Chromium tests passed on WebGL** (real-pixel radial and vision openings, group fade, reveal through opaque fog, editor setup, Peek, art-shaped "under", player-only openings, legacy roof fade). The roof specs also pass with the Canvas2D fallback (whole-roof fade). Typecheck, full lint and single-file build passed; Svelte 89 components / zero blockers / one existing advisory.
+
+## D-439 — Merge, reorder and rescale floors (G-31) (2026-10-11)
+
+A GM who generated the wrong stack had no way out except deleting floors, which the host refuses while anything still points at them, and re-assigning every token, wall and stair by hand. `src/core/levelRestack.ts` builds three plans. Each is one envelope (one undo step), recomputed from the live scene when submitted and checked by the same staged validation the host runs (`levelTransactionError`, then `regionTransactionError`). A plan made before somebody else's change is refused as a whole, never applied in part.
+
+**Elevations move with their floor.** A plan is a piecewise map: each old band moves by its own offset, and values outside every band stay put. Token feet follow their `levelId` (floorless tokens follow the band their feet are in). Region and tile `triggerElevation`, Faux Overhead covers (`affectedElevation` and `coverZ` together, by the cover band's offset) and the scene foreground move with the band that contains them. A range that straddles bands is left alone and listed in the plan's notes. Unbounded covers belong to no floor.
+
+**Merge into level** (Levels 7). Everything on floor A moves to floor B, and A is deleted:
+- Token feet keep their height above the floor (`e − A.floorZ + B.floorZ`), clamped into B's band; a token that would not fit stands on B's floor.
+- Floor scopes, other floors' visibility lists and stairwells are remapped and deduplicated. A stairwell left with one floor (or with only self-moves) loses its `stairs`, but the region stays. B's own arrival point wins over A's.
+- B gains A's map tiles and, if A used it, the scene background.
+- When the bands touch, B grows over A's band so the stack stays contiguous. Otherwise the empty band is reported.
+- A's ambient override is dropped (noted). Explored fog stays in storage, so undo brings the floor back with its fog.
+
+**Reorder.** Move a floor up or down by swapping it with its neighbour in the stack. Each floor keeps its height, any gap between the two stays between them, everything on either floor moves with it, and the display orders swap. Stair directions are computed from floor heights, so the chooser follows the new order. Floors with an open band stay at the ends of the stack (refused with that reason).
+
+**Rescale** (Levels API `rescaleGridDistance`). Multiply every elevation in the scene by a factor up to 1000, rounded to 10⁻⁶ so 0.3 × 12 is 3.6. Optionally set the grid distance to match. Token sight and darkvision are authored in feet and are not touched. Results beyond ±1,000,000 are refused.
+
+**UI.** Draft levels → **Merge, reorder or rescale floors** (shown once levels are saved). Merge shows a live preview of what will happen; Move up/down explain in their tooltip, or why they are disabled. The tools are disabled while the draft has unapplied edits. Previews run only while the panel is open, from a plain snapshot and without the staged check (Svelte state proxies cannot be structured-cloned); the click recomputes and validates. No protocol or capability change: the plans are ordinary GM ops on existing fields.
+
+## D-440 — Token elevation cues (G-32) (2026-10-11)
+
+Nothing on the canvas showed a token's elevation: a flyer and a walker on the same floor looked identical, and the GM's only elevation field (the token menu's **Feet Z**, D-435) appeared only on scenes with floors. `src/core/elevationCues.ts` derives the cues; the stage only draws them.
+
+**Badge.** A token whose feet are not on its floor shows its height above that floor, signed and in the grid's units (`+15 ft`, `-5 ft`). The floor is the token's level, else the band its feet are in, else 0 on a scene without floors. Height above the floor is what matters at the table, and it reads the same on every floor of a tower (absolute elevation would read `+35 ft` for a walker on the fourth floor). Values are rounded to 0.01. Tokens on their floor draw nothing, so the common case stays clean. The badge is a tab on the artwork's top-right edge, clear of the condition chips (top centre) and the HP bar, and it is hidden with the other labels near a Faux Overhead cover.
+
+**Size cue (Levels T9).** Optional and off by default (`tokenElevationScale`): tokens at other heights than the viewer's own token are drawn at `1 / (1 + |Δz| / (10 × grid distance))`, at least half size (×0.83 at two 5 ft cells, ×0.5 from ten). Only the artwork and body scale, about the token centre; name, badges, HP bar, selection and hit-testing keep the full footprint. The viewer is the first selected token the user controls, else (players) the token their floor focus follows; with neither, nothing scales. Selecting another token re-measures.
+
+**Who sees them.** World setting `tokenElevation`: `all` (default), `gm` or `off`. `gm` hides every cue from players, the size cue included, because a shrunken token gives the height away as surely as a badge. A GM "view as" preview applies the player's rule. Both settings are validated (`tokenElevation must be all, gm, or off`, `tokenElevationScale must be a boolean`) and are presentation only: nothing here changes movement, sight, light, fog or the host.
+
+**Token menu.** **Feet Z** is now on every scene. On a scene with floors it still offers to move the token when the height belongs to another floor (D-435).
+
+**Not done.** Players still cannot edit their own token's elevation (D-435's choice stands). Templates do not yet take the caster's elevation (T9, G-27).
+
+## D-441 — Import a scene as a floor (G-29) (2026-10-11)
+
+Levels users build towers from one scene per floor, and Foundry V14 gives each level its own background. ArenaStar had per-floor map tiles (`tileIds`, D-431) but no way to bring an existing scene in as a floor: the GM had to re-upload the map, redraw every wall and re-place every light. `src/core/levelImport.ts` builds one plan, applied as one envelope (one undo step) after the same staged level validation as every other level transaction.
+
+**What travels.**
+- The source map (`img`) becomes a **floor map tile** at the source background's rectangle (its offset and scale, sized from the asset manifest's natural pixel size). When the size is unknown (an external URL), the tile fills the source scene rectangle and the plan says so.
+- The source's tiles, walls and lights are copied with fresh ids. Walls and lights are scoped to the floor (`levelScope: {mode: "levels", ids: [floor]}`), and every copied tile joins the floor's `tileIds`.
+- A multilevel source imports one of its floors: walls and lights whose scope includes it, the tiles it lists, and the scene map only if that floor uses the scene background. Tiles not assigned to any floor are skipped, and the plan reports them.
+- **Scale and offset.** By default everything is scaled so the source's grid cells match this scene's, light radii included (they are in pixels). The offset is entered in this scene's grid cells.
+
+**Destination.** Either an existing floor, or a new floor stacked on top. The new floor takes the band directly above the highest floor, with the height the GM chooses; the panel defaults it to the top floor's height. It is refused when the top floor has an open top.
+
+**What does not travel, and why.**
+- Tokens belong to the encounter, not the map.
+- Regions (stairs, triggers, covers) point at the source's floors and automation.
+- Notes, drawings and templates are not copied either.
+- Sounds have no floor scope yet, so they would play on every floor.
+- Flags, tags and tile trigger zones can bind automation to the source scene; trigger zones are reported when dropped.
+- A roof group name that this scene already uses is suffixed with the floor id, so imported roofs do not fade together with the existing ones.
+
+**No `LevelDocument.background`.** The gap analysis suggested an optional per-level background field. A floor map tile already is one: it is drawn only on its floor, it uses the asset access rules that already exist (assets referenced by projected tiles), and the tile editor can move, resize and lock it. A second mechanism would add a validation path, a projection rule and an editor for no new capability.
+
+**Errors.** "Save floors for this scene first, then import into one of them", "Choose another scene to import", "Choose which floor of X to import", "That floor no longer exists", "Name the new floor (up to 64 characters)", "Give the new floor a height above 0", "X has an open top, so nothing can stack above it; import into an existing floor", "X has nothing to import (no map, tiles, walls or lights)". A stale plan fails the staged check and is refused whole.
+
+**UI.** Draft levels → **Merge, reorder, rescale or import floors** → *Import a scene as a floor*: scene (and its floor), *Into* (an existing floor or *New floor* with name and height), offset in cells, *Scale so grid cells match*, a live preview, **Import as floor**. No protocol or capability change: the plan is ordinary GM creates and a level create or update.
+
+## D-442 — Other floors' data stays on player replicas for now (G-33) (2026-10-11)
+
+**Today.** A player's replica holds every token, wall, light and tile of the active scene, except GM-hidden documents and level metadata: `levels`, `levelId`, `levelScope` and `stairs` are stripped by the projection. Isolated floor play draws only the focused floor, using the per-session `level.focus.state` presentation. A modified client could still read other floors' token positions and wall layouts. Foundry V14 and Levels behave the same way, so this is beyond parity, not a regression.
+
+**Decision.** Defer, and do it after G-20 (seeing lower floors through openings). G-20 decides which tokens on other floors a player may legitimately see. Withholding them first would have to be redone.
+
+**Design for when it is built.**
+1. **The floor set.** The host keeps a per-session floor set: the floors the user's tokens stand on, those floors' `visibleLevelIds`, and later G-20's sight-through floors. It is recomputed when token membership, the levels or the focus change.
+2. **The read boundary.** The projection treats the floor set as one more read boundary, like `hidden`. A token, wall, light, tile or region whose floor membership does not meet the set is omitted from snapshots and envelopes. Unassigned and `all`-scoped documents stay visible.
+3. **Floor changes.** When a session's floor set changes, the host resends that user's projected scene, a scene-level replace. This is simpler and safer than per-document create/delete rewrites, and floor changes are rare (stairs, GM moves). Creates and updates on documents outside the set are dropped, as for hidden tokens today.
+4. **Exempt and unaffected.** GM and assistant sessions are exempt. Fog is already keyed per floor. Assets referenced only by withheld tiles become unfetchable through the existing asset access rules, which is intended.
+5. **Open questions.**
+   - A combatant whose token is withheld: the tracker shows the name without a token.
+   - Templates that cross floors.
+   - A token mid-animation between floors.
+   - Chat cards naming withheld tokens: they are text, so acceptable.
+
+## D-443 — Seeing lower floors from upper floors (G-19), and two floor-play fixes (2026-10-11)
+
+V14 lets a level list the levels it can see, and Levels shows lower floors from above. ArenaStar stored `visibleLevelIds` from the start (D-427), but had no UI for it and nothing drew from it: an isolated floor showed one floor at a time.
+
+**Authoring.** Draft levels → each floor gets **Sees floors below**, with a checkbox per lower floor. Three presets cover the usual towers:
+- *Sealed* clears every floor's list.
+- *Down to ground* lets floors at or above the ground see down to it, while basements stay sealed and unseen. The ground floor is the one whose band holds elevation 0.
+- *All below* lets every floor see every floor below it.
+
+Presets only rewrite entries for floors *below*. Entries for floors above are kept for G-20.
+
+**What is drawn.** On an isolated player floor, and in the GM's isolated floor view ("only"), the art of the floors this floor sees is drawn *beneath* its own art. It shows through the transparent parts of that art: openings, stairwells, a courtyard, the open air beside a tower top.
+- **Order and dimming.** The nearest floor is drawn above deeper ones, dimmed by depth: tints `#a6a6a6`, `#808080`, `#606060` for one, two, and three or more floors down.
+- **Plain art only.** A lower floor's roof tile is just art seen from above. It is never faded or opened, and lower tiles draw no trigger or roof outlines.
+- **Background.** The scene background is drawn when this floor or a visible lower floor uses it, dimmed at that floor's depth.
+- **Not shown.** Tokens on other floors (G-20 decides which), their walls and vision, and their lights (G-22).
+- The GM's ghost and all modes are unchanged.
+
+**Protocol.** `FloorPresentation.below` (`{levelId, depth, tileIds, useSceneBackground}[]`, nearest first) is optional and additive. Older clients ignore it; a newer client with an older host simply draws nothing below. The renderer keeps lower-floor art in a sorted `lowerFloors` container at the bottom of the tiles-below layer, so the §9 layer order is untouched.
+
+**Fix: a GM-only change blanked players' floors.** The host stamped every floor focus state with its own `seq`. An envelope projected away entirely never reaches the player (draft-level edits, for example), so the player's replica stayed at the older `seq` and treated the focus as stale. Its floor went blank until some unrelated visible change arrived. The host now records the `seq` of the last snapshot or envelope each session received (`Session.sentSeq`) and stamps focus states with that. Applying draft levels during isolated play triggered it, and a host test now covers it.
+
+**Fix: players' height badges measured from 0.** Players never receive `levels` or `levelId`, so on an isolated floor the D-440 badge showed absolute elevation ("+10 ft" for a token standing on a floor at Z 10). The presentation now carries the floor's own `floorZ`. On an isolated floor, every token a player sees stands on that floor, so badges measure from it.
+
+## D-444 — Solid floors with openings, traced from floor art (G-21) (2026-10-11)
+
+Seeing tokens on other floors (G-20), light between floors (G-22) and falling (G-23) all need to know where a floor is solid. Art transparency (G-19) only says what to *draw*.
+
+**Model.** `LevelDocument.surface?: {x, y, width, height, footprint, source?}` is the *solid* part of the floor's plane at `floorZ`. The footprint is a `RegionShapeV2` normalized to the box (scene pixels): components are solid areas, holes are openings. A floor without a surface is solid everywhere, which is how every floor behaved before.
+- **One shape per floor**, not free-floating surface regions like V14's Define Surface. A floor's plane is the natural unit, and it doubles as the ceiling of the floor below. It stays GM-only with the levels (the projection strips `levels`).
+- **Budget.** A surface is limited to 128 vertices, so 32 floors fit the spatial kernel's 4,096. It may have at most 16 areas, with at most 16 openings each.
+- **Deferred.** Surfaces at other heights inside a band, such as a bridge or a mezzanine.
+
+**Tracing.** Draft levels → each floor gets **Solid floor**: a status ("Solid everywhere" or "1 solid area · 1 opening"), a preview of the shape, **Trace from floor art** and **Solid everywhere**. *Apply draft levels* saves the shape like any other draft change (one undo step).
+- **Art.** Alpha masks of up to 256 px per side come from the GM's shared tile-texture cache. The scene background counts as opaque over the scene, and art that cannot be read counts as solid over its rectangle.
+- **Sampling.** The art is sampled at a quarter grid cell (at most 200 cells per side). Single-cell specks and pinholes are dropped, and diagonal-only contacts are closed so every ring is simple.
+- **Contours.** The rectilinear boundaries are walked and collinear vertices merged. If the shape is over budget, the grid coarsens ×1.5 and tracing retries.
+- **Limits.** Past 16 areas or 16 openings, the largest are kept and the rest reported. Every result is validated; tracing yields either a valid shape or nothing.
+
+**Kernel.** `floorSurfaces(scene)` gives one plane per floor: it blocks movement, sight, light and sound, and it supports movement. Untraced floors reach a scene-size margin past the edges. Sight through a stairwell is clear; through solid floor it is blocked; `supportBelow` falls through an opening to the next floor.
+
+**Check.** A new warning, `opening-over-void`, flags an opening with no floor anywhere beneath it: a hole in the lowest floor, or a shaft through every traced floor. Untraced floors count as solid.
+
+**Not yet.** Nothing in play reads surfaces yet; G-20, G-22 and G-23 build on them.
+
+**Fix (D-443 follow-up).** The `lowerFloors` container was attached to the tiles-below layer in every scene, which changed that layer's children everywhere. Three tile-image tests caught it in the full run. The container is now attached only while it holds lower-floor art.
+
+## D-445 — Seeing tokens on lower floors through openings (G-20) (2026-10-11)
+
+With lower floors' art showing through openings (D-443) and floors that know where they are solid (D-444), the remaining V14 parity item for perception was tokens: a player at the edge of a stairwell should see who is standing at its foot.
+
+**Who decides.** The host decides, per viewer, in the floor focus view. `presentation.belowTokens` (`{id, depth}[]`, sent only when non-empty) lists the tokens on lower floors that this viewer's *own* vision tokens on the focused floor see. Players never send geometry.
+- **Observers.** At most 8 of the viewer's own vision tokens on the focused floor.
+- **Targets.** Tokens that are not hidden, are readable and are not masked for this viewer, on floors the focused floor sees below (its visibility list, D-443).
+
+**How "seen" is decided.** This uses the existing spatial kernel and perception model (D-426).
+- **Floor planes** come from D-444 surfaces. An untraced floor is solid, so nothing is seen through it.
+- **Walls.** Floor-scoped walls become one barrier per floor band. Walls scoped to every floor have no height limit, and unscoped walls do nothing, as elsewhere in floor play.
+- **Bodies.** A body is as tall as its size in cells times the grid distance (one cell for a medium creature), with eyes at 90 %. It is capped below its own ceiling, so a large creature never peeks through the floor above.
+- **Range.** The token's sight and darkvision ranges apply.
+- **Lighting.** A target needs light: its floor's ambient darkness, or that floor's own lights, set one grid distance above its floor. Darkvision also works. Light crossing floors is G-22.
+- **Budget.** A 20,000-ray budget fails closed: nothing extra is seen.
+
+**Drawing.** Seen tokens are drawn in the lower-floors container, just above their own floor's art and below nearer floors' art and this floor's art. They are tinted by depth like the art. Each is just its image (a disc until it loads): no bars, names, badges or picking. They stay out of the token layer (`tokenIds` is unchanged), so selection and targeting never reach another floor (G-27).
+
+**GM.** The isolated ("only") floor view draws every token on the floors it sees below, beneath the art. The art decides what shows. The ghost and all modes are unchanged.
+
+**Limits.** The replica still holds every non-hidden token, so this is fair presentation, not secrecy; the read boundary is G-33 (D-442). Only floors *below* are drawn, as a top-down view implies. The kernel is rebuilt per focus update, which is cheap for ordinary scenes; cache it if large scenes need it.
+
+## D-446 — Light between floors through openings (G-22) (2026-10-11)
+
+Floors now know where they are open (D-444), and players see lower floors and their tokens (D-443, D-445). Light still stopped at hard per-floor scopes. A pitch-dark upper floor showed the lit hall below it as dark, and a lamp downstairs never glowed in the stairwell. V14 lets floors restrict light, so light spills through openings (T7).
+
+**What crosses.** Light crosses only through openings in traced floors. An untraced floor is solid, so existing scenes do not change.
+- **Below.** Through a floor's openings, the floors it sees (D-443) show under *their own* ambient darkness and lights. A deeper floor's light shows only where every nearer seen floor is also open. An untraced floor in between ends the chain.
+- **Above.** The floor directly above sends its own lights down through its openings, when it sees this floor and has openings. A lamp hanging over the stairwell lights the landing at its foot.
+- Lights that are also on this floor (scoped to it, or to every floor) already light it, so they are not repeated.
+
+**Data.** Players hold no levels or surfaces, so `FloorPresentation.lighting` carries what they need: this floor's surface, plus links `{levelId, side, depth, lightIds, wallIds, darkness, surface?}`. The focus view keeps only the light and wall IDs this viewer receives. The GM's isolated ("only") view computes the same from the scene (`floorLighting`). The client drops malformed surfaces before drawing.
+
+**Drawing.**
+- The ambient darkness splits at the floor's solid area. Solid parts take this floor's darkness, which still animates. Openings take the darkness of the nearest floor seen below.
+- Other floors' lights are drawn additively inside nested containers, each masked to one floor's openings. Their polygons come from the vision worker, using that floor's own light-blocking walls.
+- There are no CPU polygon booleans: the masks do the clipping.
+- Light from below is drawn as seen from above, with no extra falloff for the drop.
+
+**Canvas2D.** Pixi attaches a fill's cut-out holes only when it draws that fill. Masks are never drawn, so on Canvas2D a mask with openings clipped as if it had no holes, and inverted: the light below glowed on the solid floor instead of in the well. The layer now attaches the holes up front, and both renderers clip the same way. A real-pixel e2e covers each renderer; without the fix, the Canvas2D run fails.
+
+**Perception.** Seeing tokens below (D-445) now counts light from the viewer's floor and from the floor above, not just from the targets' floors. The kernel's floor planes let that light through openings only. Above the perception budget of 256 lights, only the targets' own floors light them, as before.
+
+**Limits.**
+- Ambient light inside openings uses only the nearest seen floor's darkness, so a second stairwell under the first shows that floor's ambient.
+- Token-carried lights stay on their own floor.
+- Light from above reaches only the floor directly beneath.
+- The GM's ghost and all views are unchanged.
+
+## D-447 — Area effects that know about floors (G-27) (2026-10-11)
+
+Templates already carry a floor (D-432 scopes, stamped from the floor their creator views), but nothing that resolves an area looked at floors. With isolated floor play:
+- The GM's Entangle on Floor 2 caught goblins standing at the same spot on the ground floor, and the host's area verification (D-407) accepted them.
+- A Lightning Bolt hit through the floor the same way.
+- Walls on other floors blocked lines and refused spreads.
+
+**Rule.** An area happens on its caster's floor. This applies in floor play only; draft levels change nothing.
+- **Same floor.** Tokens on the caster's floor count as before: the area's cells decide, and only that floor's walls block line of effect.
+- **Other floors.** A token on another floor counts only when a radius area (burst, spread, emanation, cylinder) reaches it through openings. The area is a sphere around its origin, set one grid distance above the caster's floor (where lights hang). Part of the token's body must be within the radius, with a clear line of effect through the kernel: floor planes from D-444 surfaces and floor-band walls, on the sight axis, the same axis line of effect uses elsewhere.
+- **Lines and cones** stay on the caster's floor. Floorless tokens never count on a floor.
+
+**Where it applies.** `areaFloorReach` (core) is used by:
+- the host's verification of Entangle and Lightning Bolt targets, which now also checks only the caster's floor's walls;
+- the GM's area preview, which proposes the targets;
+- the GM's Lightning Bolt targeting.
+
+Players' previews already hold only their own floor's tokens and walls, so they never propose other floors. The host refuses a forged claim; a host test shows the bolt hitting through the floor without the rule.
+
+**Templates.** The template document gets no elevation field yet. Nothing in the product creates or resolves template documents: they come from imports and automation, and they are presentation only. Spell areas carry their own origin. When templates drive areas, they should use the origin height above.
+
+**Limits.** Players cannot aim areas at tokens on lower floors, because their clients hold no other floor's geometry; the GM can. The origin height is fixed, so there is no template elevation tool.
+
+## D-448 — Standing, falling and flying between floors (G-23) (2026-10-11)
+
+Floors now have real openings (D-444), but a token could still stand on air. A player could walk the hero into a stairwell's empty middle and stay on the upper floor. The GM's height edit (D-435) moved a token onto another floor through solid stone without a word.
+
+**Standing.** A walking token stands on its floor. Where that floor is open there is nothing to stand on, with these exceptions:
+- **Stairwells.** Inside a stairwell serving that floor, the stairs carry the token.
+- **Airborne tokens.** A token with its feet above the floor's height is airborne and crosses openings freely.
+- **Untraced floors** are solid everywhere, so nothing changes until a floor is traced.
+
+**Players.** The host refuses a player's walk that would end over an opening: "No floor there: Hero would step into an opening on Floor 2." It arrives through the usual move-refusal notice (D-429).
+- Explicit floor or height changes are not walks; the stairs make those too.
+- Prefab parts riding their parent are not checked.
+- The GM, assistants and the host's system user are not checked.
+
+**GM.** The GM can put a token over an opening. Two things then offer the fall to the solid floor beneath, which the kernel's `supportBelow` finds. Both are ordinary undoable moves.
+- **Floor-play check.** A new warning, `token-over-opening`, with the quick fix "Drop them to the floor below". Attached parts follow.
+- **Token menu.** "Fall to Ground (10 ft)".
+
+**Flying.** When the GM sets a token's height onto another floor, the offer now says whether the way is open. The token's whole footprint, its size in cells × the grid distance tall as for sight, must pass through the openings of every floor plane on the way (a kernel body sweep). The floor it stands on does not stop it rising. Otherwise the offer names the solid floor in the way and offers "Move to Floor 2 anyway".
+
+**Limits.**
+- Players still cannot set heights (G-16), so player flight waits for that.
+- Fall damage is left to the GM; there is no rule automation.
+- Tokens left standing over an opening by other edits (tracing a floor under them, a GM move) stay until the GM drops them.
+- Prefab parts and multi-cell creatures are judged at their centre, as stairs are.
+
+## D-449 — Importing Foundry scenes with their floors (G-30) (2026-10-11)
+
+Groups moving from Foundry bring scenes built with the Levels module (Foundry V10–V13) or with Foundry V14's own scene levels. Rebuilding a three-storey keep by hand (bands, wall heights, stairs, floor art) is the slowest part of a move, and nothing read a Foundry scene before.
+
+**What it reads.** The scene JSON that Foundry's "Export Data" writes, or a world/adventure export holding exactly one scene. `src/core/foundryImport.ts` (`planFoundryImport`) recognises three shapes:
+- **Foundry V14 levels:** `levels[]` with `elevation`, `visibility.levels`, `background` and `foreground`, `levels: [ids]` on placeables, and Change Level regions.
+- **The Levels module:** `flags.levels.sceneLevels`, wall heights (`flags["wall-height"]`), `rangeTop` on tiles and lights, stair, one-way stair and elevator drawings (`drawingMode` 2, 22, 21 and 3), and the stair regions its own migration writes. A scene with no level list gets floors inferred from the tall bands (at least 1.5 grid distances) its walls and tiles use.
+- **A flat scene:** walls, lights, tiles and tokens with no floors. Foundry V9 field names are read too.
+
+It is a clean-room reading of Foundry's public data model and of the behaviour recorded in the gap analysis (T11); no module code is used.
+
+**How it maps.**
+- **Coordinates.** Foundry draws the map inside a padding margin. ArenaStar's origin is the map's corner, so every position moves by Foundry's padding offset (`ceil(width × padding / size) × size`). Tokens become centred. Light radii change from distance to pixels.
+- **Floors.**
+  - Bands are sorted, and a duplicate bottom is merged into the first floor with that bottom.
+  - Levels tops are inclusive (0–9, then 10–19), so a top at or just under the next floor's bottom meets it. A genuine gap stays; an overlap is clipped where the next floor starts. The highest floor keeps its own top.
+  - Each floor sees the floors below it, or follows V14's visibility list.
+  - The floor with the scene's map is the one at Levels' background elevation, else the lowest floor at or above 0. It shows the scene image (`useSceneBackground`). In a V14 scene, every other floor's background and foreground become full-scene floor art.
+- **Walls and lights.** Each gets a floor scope:
+  - every floor wholly inside its height range;
+  - its own floor when its range is shorter than a floor;
+  - every floor when it has no height at all (which Levels treats as every floor; unscoped walls do nothing in floor play).
+  Doors keep their state. Limited, proximity and distance senses block; one-way walls block both ways. Switched-off lights and darkness sources are skipped; cone lights shine all around.
+- **Tiles.**
+  - A Levels floor tile, an overhead tile at a floor's base, becomes that floor's art and lies under the tokens.
+  - Roofs and canopies higher in the band stay overhead.
+  - Tiles without floor data go on the floor with the map, because floor play shows only floor art.
+- **Tokens** go on the floor their elevation is in, or the V14 level they name. One standing outside its floor's band is set on the floor. Their actors are not imported, so they arrive as plain tokens.
+- **Stairs.** Levels stairs join the floor at their bottom and the next floor their range reaches; one-way stairs keep their direction. Elevators connect their listed floors. V14 Change Level regions become prompting stairwells. Polygon and ellipse shapes are kept; holes are skipped, with a pointer to tracing floor art (D-444).
+
+**The GM's side.** Scenes tab → "Import a Foundry scene":
+1. Pick the JSON. A report lists the source, counts, a floor table, what goes on every floor, what is skipped and why, and the notes above.
+2. Foundry image paths point at the Foundry server, so art arrives only through files the GM picks; they are matched by file name and stored through the normal image upload, reusing a file already stored under that name. Anything without a file stays empty, with its path kept in `flags.foundry.src`, and the report lists it.
+3. "Create scene" submits one undoable create. Floors arrive as drafts; the GM turns floor play on after the usual check (D-433). A flat Foundry map can then join another scene as one of its floors through "Import a scene as a floor" (D-441).
+
+**Limits.**
+- One scene per file.
+- Actors, sounds, notes, measured templates and drawings other than stairs are not imported.
+- Hex scenes use the square-grid padding rule; the report asks the GM to check alignment.
+- Images do not relink after import; re-import with the files.
+- Region behaviours other than level changes (teleports, damage, scripts) are skipped.
+
+## D-450 — Drawing stairs on the map, and editing them in place (G-14) (2026-10-11)
+
+Stairwells were made from typed X, Y, width and height, or by converting a region typed into Active Zones. Once made, they could be locked, hidden, linked to a door or removed, but not renamed, retargeted, re-directed or resized; any mistake meant removing them and starting again.
+
+**Drawing.** A GM-only **Stairs** tool joins the map's tool rail when the scene has at least two floors.
+- Drag over the stairs on the map. The area snaps to grid corners (gridless maps follow the pointer) and previews as a labelled dashed box. A click makes nothing, and Escape drops the drag.
+- The new stairwell joins the floor the GM is viewing (D-434) and the next floor up, or the next floor down from the top floor. With no floor in view, it starts at the lowest floor. It travels at once both ways, is named after its floors ("Stairs Ground ↔ Floor 2"), and starts hidden like any stair region. A notice says where to change it.
+- `src/core/stairAuthoring.ts` (`drawnStairwell`) builds it; the tool controller's new `stairs` gesture delivers the area.
+
+**Editing in place.** Each stairwell under Scenes → Floor play & stairs has an **Edit** form. One save (`stairEditDiff`) is one undoable update covering:
+- the name, and the label players see in the stair chooser;
+- the floors it connects;
+- its directions: both ways, up only or down only. One-way moves that no single direction describes can be kept for the floors that remain;
+- its position and size.
+Lock, mode, door link, secrecy and pass-through are kept, as are arrival points on floors that stay.
+
+**Limits.**
+- The canvas tool draws rectangles. Other shapes still come from an Active Zones region converted in the editor.
+- Resizing is typed in the editor; there are no drag handles on the map.
+
+## D-451 — Other floors' data stays on the host (G-33) (2026-10-11)
+
+D-442 left every floor's tokens, walls, lights and tiles on each player's replica, hidden only by the renderer, until G-20 settled what a player may see on other floors. G-20 (D-445) and G-22 (D-446) are done, so the projection now withholds the rest. Supersedes D-442's interim state.
+
+**What a player's replica holds** of a scene in isolated floor play (`src/core/floorDisclosure.ts`). The player's floors are the floors their own tokens stand on, counting tokens owned directly or through their actor. Each of those floors reaches:
+- **its own documents**, all kinds;
+- **the floors it sees below** (`visibleLevelIds`): their tokens and floor art. G-19 draws the art; G-20 picks which of those tokens the player's tokens actually see;
+- **the floor directly above, when that floor sees down onto it**: its walls and lights only, whose light falls through its openings (G-22).
+
+Regions, drawings, templates and notes go only to the player's own floors. The player's own tokens always arrive. Unassigned and every-floor documents arrive as before, and hidden/ownership rules still apply on top. GM and assistant sessions, scenes outside isolated floor play, and scenes without floors are unaffected.
+
+**Where it applies.**
+- **Snapshots** (`projectWorld`, through `projectScene`) leave the rest out.
+- **Live creates and updates** of withheld documents are dropped (`projectEnvelope`).
+- **Scene-level diffs** that carry whole arrays carry the filtered arrays.
+- **Assets** referenced only by withheld tiles or tokens stop being fetchable, because asset access is computed from the projected world.
+
+**Crossings.** Withholding changes when a token takes the stairs, the player's own token changes floors, a floor's visibility is edited, or floor play starts or ends.
+- A replica refuses a create for a document it holds and an update or delete for one it lacks, and one refused op drops the whole envelope. So the host keeps an exact per-session ledger of the floor-bound documents each replica holds, seeded from its snapshot.
+- Each broadcast walks that session's projected ops against the ledger and drops any op the replica could not apply.
+- Where the result differs from the scene as the player should now see it, the host appends one scene update that replaces the floor-bound parts with their projection. Whole-array replacement cannot fail on a replica. This is the scene-level resend D-442 planned, and floor changes are rare enough that its size does not matter.
+
+**Effects elsewhere.** Host checks that use the caller's projected scene, such as movement refusals and macro targets, now see only the caller's floors, which is the intended strictness.
+
+**Limits.**
+- A combatant whose token is withheld shows in the tracker without its token, as hidden tokens do.
+- Chat cards that name withheld tokens are text and stay.
+- Pings, rulers and FX cues are ephemeral and not filtered by floor.
+
+## D-452 — Height labels under tokens, measured from whoever is looking (2026-10-12)
+
+The testers' ask: a token at another height shows its difference **underneath** the token — for a player relative to the token they control, for the GM always relative to the ground. D-440 drew the number in the token's top-right corner and measured it from the token's *own floor*, which is what a GM editing one token wants and what nobody else wants.
+
+**The rule** (`src/core/elevationCues.ts`). `elevationReference`: the GM measures from 0; a player from `elevationViewer` — their first *selected* token, else the token their floor follows, else their first token with vision, else their first token; a player with no token here falls back to the isolated floor's `floorZ`, else 0. The label is `+15 ft` / `-20 ft` with the scene's own grid units, and a difference of 0 draws nothing. `heightAboveFloor` (D-440's measure) stays for the floor-relative readouts in the editors.
+
+**Where it is drawn.** The token layer under the token (`stage.applyElevationCue`), centred, in the same container, so it moves with it. Tokens seen on a floor **below** (G-19/G-20) are labelled too: `lowerTokenLabels()` feeds `TilesLayer.setLowerTokens`, and the label is not dimmed with the token, because it must stay readable. The optional size cue is unchanged.
+
+**Cost.** The label joins the cue map the shells already rebuild on selection change, so a selection re-renders the labels of every visible token — bounded by what the fog gate shows, and the map stays sparse (tokens at the reference height have no entry).
+
+**Tests.** `tests/core/elevationCues.test.ts`; read back through the real canvas in `e2e/elevation_cues.spec.ts` and `e2e/lower_floors.spec.ts`; the shipped numbers of the D-454 scene in `tests/scripts/iceBeaconScene.test.ts`.
+
+## D-453 — Raised areas: a box standing on a floor (2026-10-12)
+
+The testers' crate stacks (5, 10 and 15 ft) and a 10-ft scaffold are *inside* one floor. Floors (G-01…G-33) model whole storeys with their own art, walls and fog; a stack of crates is not a storey, and a region was until now only a trigger or a cover. `RegionDocument.raised: { height, solid }` adds the third kind: a box from its floor's Z up to `height`, solid or open.
+
+**Geometry.** Height is relative to the floor the area stands on: its `levelScope` (unscoped = every floor), and 0 in a scene without floors. Its top is capped at the next floor up — an area that *reaches* that floor is not standable (`standable: false`), which the floor-play check reports instead of silently letting a token climb into the floor above.
+
+**Ground** (`src/core/raisedAreas.ts`). `groundAt` is the highest standable top under a point; the host's `raisedGroundOps` lift a walking token to the ground under where it ends and drop it back when it leaves, so a player never edits a height to climb. An airborne token keeps its height unless it ends below a top. An explicit `elevation`/`levelId` change is the mover's own business and is never touched, and prefab children follow their parent. `unsupportedWalks` (G-23) judges the followed height, so walking off a crate into an opening is refused like any other walk into it.
+
+**Sight.** A solid box blocks a viewer when its top is above the viewer's eyes and its bottom at or below them, where eyes = feet + 0.9 × size in cells × grid distance.
+- On the floor: `raisedEyeSegments` adds the **far sides** of the boxes (the edges the viewer stands behind) to that viewer's fog segments, so the box's own top — the crates' art, a goblin standing up there — is revealed while the ground behind stays hidden. A box the viewer stands inside is skipped, so it never blinds itself.
+- Tokens: `raisedTokenSeen` shows a token when a 3D ray reaches 10/50/90 % of its body *and* the point is inside that viewer's walls-only polygon. The gate takes both polygons, so the two rules cannot contradict each other (a token is never visible where the fog is opaque).
+- From above: `raisedBarriers` gives the cross-floor kernel each box's sides, blocking sight and light up to its top.
+Open areas never block anything. Light, movement and sound on the floor are unaffected.
+
+**Validation and authoring.** Never combined with `stairs`; at most 128 per scene. `drawnRaisedArea` turns a dragged rectangle into a 5-ft solid area on the viewed floor (with the tool's height/solid settings), `raisedEditDiff` edits it in place, `raisedFitError` refuses a rectangle that does not fit under the next floor, `raisedMarkers` label the outlines (`15 ft · solid`) for the GM only.
+
+**Tests.** `tests/core/raisedAreas.test.ts` (validation, ground, sight, authoring, the floor-play check) and `tests/host/raisedAreas.test.ts` (host ops, the player replica, the refused walk).
+
+## D-454 — The Ice Beacon: the elevation test scene in the PF1e starter world (2026-10-12)
+
+`ELEVATION_TEST_SCENE.md` is the design, the layout and the tester script; this is the record of what it took.
+
+**The scene** (`scripts/starterIceBeacon.mjs`, ~40 documents added to `testerDocuments()`, in both PF1e starter archives). A 2200² scene on a 100-px / 5-ft grid with four floors (Hall 0–20, Gallery 20–35, Ring 35–45, Beacon 45–∞), each with its own art tile, its own walls and its own traced `surface`; six stairwells with landings outside the well and on solid floor; the Hall's 5/10/15-ft crate stacks (solid) and 10-ft scaffold (open); Hosilla and nine opponents, each with its own actor; a scene note and a journal script.
+
+**Floors carry art that was never meant for us.** The gallery/ring/beacon surfaces are `traceSurface` runs over the Levels module's own sample maps, at 50 px (75 px for the ring); the results are stored as integer rings and normalized in the generator exactly as the tracer does, so `levelSurfaceError` accepts them. The Hall is deliberately untraced: its art is one ice sheet, and a traced "solid everywhere" surface would cost vertices for nothing. Tracing is visible in the art's debris — the ring's trace follows crystal shards jutting into its opening — which is why the md tells the reader to look at the drawing before shipping it.
+
+**The starter had to be able to carry it.** `assembleArchive` wrote `format: 2`; a scene with levels is format 3 with `requiredFeatures` (`src/core/capabilities.ts`), so the archive is now format 3 whenever its scenes need it, and `starterRequiredFeatures()` mirrors `requiredWorldFeatures(scenes, "GM")` in plain JS — with the parity asserted in the test, because two implementations of one rule is exactly the mistake below.
+
+**A real bug, found by the scene.** `validateWorldMeta` refused any required feature outside its own list, which omitted `STAIRS_V2_FEATURE`, while `requiredWorldFeatures` emitted it: **any world with version-2 stairwells exported and could never be imported again** (`world file: unsupported format 3 required features`). And the reader then only checked that the declared features *covered* what the scenes needed, so nothing noticed. Both are fixed: the list admits the stairwell capability, and a regression test in `tests/host/levelPersistence.test.ts` writes the archive, reads it back, and refuses a copy with the declaration removed.
+
+**A second real bug, found on the player's screen.** `FogLayer.clearManualMask()` filled the GM's manual mask texture with **opaque black** (and the mask draws over the explored cover, at full alpha for players). The texture starts opaque from `Application.init({ background: { alpha: 0 } })`, so every scene with fog and no painted strokes showed every player a black canvas — a traced floor made it permanent, because the explored map only clears where a viewer reveals. The mask is now cleared to transparent (`clear: true, clearColor: [0, 0, 0, 0]` through an empty container), a Hide stroke paints the same cover colour the explored map uses, and `manualTexture` is destroyed with the layer. The contract is pinned in `tests/canvas/fogLayer.test.ts`.
+
+**Testing.** `tests/scripts/iceBeaconScene.test.ts` builds the documents through the real builder and checks every claim of the script against the shipped code: structure and validation with a silent floor-play audit, landings on solid floor, the ground under each token, what a player's floor scene shows through the fog gate at the entrance and on each crate, the labels for GM and player on her floor and on the floor below, and who is seen from the Gallery, the Ring and the Beacon's rim. `e2e/ice_beacon_scene.spec.ts` opens the built zip in a browser as a GM plus a player and walks the same script, including the climb and the west spiral. `tests/scripts/buildStarterWorlds.test.ts` counts the documents and assets, checks the format-3 header and boots both archives.
+
+**Art.** The Levels 7.0.3 sample maps carry no licence grant (`tools/adopt/INVENTORY.md` row 15, `LEGAL.md` §3): the starter ships them for **internal testing only**, and `INVENTORY` says so at the row.

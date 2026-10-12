@@ -101,3 +101,32 @@ test("ambient overrides persist and archives reject a missing ambient capability
   expect(await getWorld(db, "ambient-invalid")).toBeUndefined();
   await deleteWorldData(db, worldId); await deleteWorldData(db, copied.worldId); db.close();
 });
+
+test("stairwell archives declare their capability and import again (D-454)", async () => {
+  const { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE } = await import("../../src/core/levelPlay");
+  const db = await openVttDb(), root = new MemDirHandle(), app = await boot(root), worldId = app.worldId;
+  const parent = { coll: "scenes" as const, id: DEFAULT_SCENE_ID };
+  const stairs = { version: 2 as const, levels: ["base", "upper"], mode: "auto" as const, label: "Spiral",
+    arrivals: [{ levelId: "upper", x: 250, y: 150 }, { levelId: "base", x: 250, y: 150 }] };
+  await app.gm.client.submitAndWait([
+    { kind: "create", coll: "levels", parent, data: draftLevel("base", "Base", 0, 10) },
+    { kind: "create", coll: "levels", parent, data: draftLevel("upper", "Upper", 10, 20, 1) },
+    { kind: "create", coll: "regions", parent, data: { _id: "stair", type: "region", name: "Stairs", ownership: { default: 0 }, flags: {}, system: {},
+      hidden: true, x: 100, y: 100, width: 100, height: 100, shape: { kind: "polygon", points: [[0, 0], [1, 0], [1, 1], [0, 1]] }, stairs } as never },
+  ]);
+  const file = await exportWorldZip({ db, root, worldId, persister: app.persister });
+  const entries = unzipSync(new Uint8Array(await file.arrayBuffer()));
+  expect(json(entries, "world.json")).toMatchObject({ format: 3, requiredFeatures: [LEVEL_PLAY_FEATURE, DRAFT_LEVELS_FEATURE, STAIRS_V2_FEATURE] });
+  await app.close();
+  // The reader used to refuse the stairwell capability it had just declared.
+  const copied = await importWorldZip({ db, root, file, mode: "copy", worldId: "stairs-copy" });
+  const copy = await boot(root, copied.worldId);
+  expect(copy.store.get("scenes", DEFAULT_SCENE_ID)?.regions?.find((r) => r._id === "stair")?.stairs).toEqual(stairs);
+  await copy.close();
+  // Undeclared, the archive is refused before anything is written.
+  const meta = json(entries, "world.json"); meta.requiredFeatures = meta.requiredFeatures.filter((f: string) => f !== STAIRS_V2_FEATURE);
+  entries["world.json"] = strToU8(JSON.stringify(meta));
+  await expect(importWorldZip({ db, root, file: new Blob([new Uint8Array(zipSync(entries))]), mode: "copy", worldId: "stairs-invalid" })).rejects.toThrow("missing required scene feature");
+  expect(await getWorld(db, "stairs-invalid")).toBeUndefined();
+  await deleteWorldData(db, worldId); await deleteWorldData(db, copied.worldId); db.close();
+});

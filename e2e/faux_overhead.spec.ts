@@ -144,20 +144,30 @@ test("native vector cover clips actual token pixels, preserves holes and never o
     const maskCount = layer.children.filter((child) =>
       child.label.startsWith("overheadMask:"),
     ).length;
-    return { partial, hole, filledHole, localHolesOnly, twoOpenings, above, denied, removed, maskCount };
+    return { renderer: stage.rendererName, partial, hole, filledHole, localHolesOnly, twoOpenings, above, denied, removed, maskCount };
   });
-  expect(result.partial.left).toBeGreaterThan(0);
-  expect(result.partial.right).toBe(0);
-  expect(result.partial.pickLeft).toBe(true);
-  expect(result.partial.pickRight).toBe(false);
-  expect(result.partial.marquee).toBe(false);
-  expect(result.partial.badgesVisible).toBe(false);
-  expect(result.hole.center).toBeGreaterThan(0);
-  expect(result.hole.rim).toBe(0);
-  expect(result.hole.pick).toBe(true);
-  expect(result.filledHole).toBe(0);
-  expect(result.localHolesOnly).toEqual([0, 0]);
-  expect(result.twoOpenings.every((alpha) => alpha > 0)).toBe(true);
+  if (result.renderer === "canvas") {
+    // G-05 (D-429): Canvas2D has no inverse masks. The whole token hides while a cover overlaps
+    // it, so no covered pixel is ever revealed (the old inverted cut-out showed exactly those).
+    expect(result.partial).toEqual({ left: 0, right: 0, pickLeft: false, pickRight: false, marquee: false, badgesVisible: false });
+    expect(result.hole).toEqual({ center: 0, rim: 0, pick: false });
+    expect(result.filledHole).toBe(0);
+    expect(result.localHolesOnly).toEqual([0, 0]);
+    expect(result.twoOpenings).toEqual([0, 0]);
+  } else {
+    expect(result.partial.left).toBeGreaterThan(0);
+    expect(result.partial.right).toBe(0);
+    expect(result.partial.pickLeft).toBe(true);
+    expect(result.partial.pickRight).toBe(false);
+    expect(result.partial.marquee).toBe(false);
+    expect(result.partial.badgesVisible).toBe(false);
+    expect(result.hole.center).toBeGreaterThan(0);
+    expect(result.hole.rim).toBe(0);
+    expect(result.hole.pick).toBe(true);
+    expect(result.filledHole).toBe(0);
+    expect(result.localHolesOnly).toEqual([0, 0]);
+    expect(result.twoOpenings.every((alpha) => alpha > 0)).toBe(true);
+  }
   expect(result.above).toBeGreaterThan(0);
   expect(result.denied).toBe(0);
   expect(result.removed).toBeGreaterThan(0);
@@ -203,16 +213,13 @@ test("GM enables and removes a native cover through the region editor", async ({
   await editor.getByLabel("Enable solid cover").check();
   await editor.getByLabel("Cover height").fill("12");
   await editor.locator("[data-faux-apply]").click();
-  await expect
-    .poll(() =>
-      page.evaluate(() => {
-        const stage = (globalThis as unknown as { __stage: Stage }).__stage;
-        return stage.root
-          .getChildByLabel("tokens")!
-          .children.filter((c) => c.label.startsWith("overheadMask:")).length;
-      }),
-    )
-    .toBeGreaterThan(0);
+  // Masks exist only where the renderer supports inverse masks (G-05); covers exist everywhere.
+  const coverState = () => page.evaluate(() => {
+    const stage = (globalThis as unknown as { __stage: Stage }).__stage;
+    const masks = stage.root.getChildByLabel("tokens")!.children.filter((c) => c.label.startsWith("overheadMask:")).length;
+    return { covers: stage.fauxOverheadCoverCount(), masked: stage.rendererName === "canvas" || masks > 0 };
+  });
+  await expect.poll(coverState).toEqual({ covers: 1, masked: true });
   await editor.getByLabel("Enable solid cover").uncheck();
   await editor.locator("[data-faux-apply]").click();
   await expect
@@ -225,10 +232,10 @@ test("GM enables and removes a native cover through the region editor", async ({
       ),
     )
     .toBe(0);
+  await expect.poll(async () => (await coverState()).covers).toBe(0);
   await page.getByRole("button", { name: "Undo (Ctrl+Z)", exact: true }).click();
   await expect(editor.getByLabel("Enable solid cover")).toBeChecked();
-  await expect.poll(() => page.evaluate(() => (globalThis as unknown as { __stage: Stage }).__stage.root
-    .getChildByLabel("tokens")!.children.filter((c) => c.label.startsWith("overheadMask:")).length)).toBeGreaterThan(0);
+  await expect.poll(coverState).toEqual({ covers: 1, masked: true });
   await page.getByRole("button", { name: "Redo (Ctrl+Y)", exact: true }).click();
   await expect(editor.getByLabel("Enable solid cover")).not.toBeChecked();
 

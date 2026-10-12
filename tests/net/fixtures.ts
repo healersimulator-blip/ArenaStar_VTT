@@ -13,6 +13,9 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
   switch (kind) {
     case "level.focus": return { kind, sceneId: "s1", levelId: null, requestId: "r" };
     case "level.focus.state": return { kind, sceneId: "s1", levelId: null, requestId: "r", revision: 1, levels: [], tokenIds: null };
+    case "stair.offer": return { kind, offerId: "o1", sceneId: "s1", tokenId: "t1", choices: [{ levelId: "upper", name: "Upper", direction: "up" }], ttlMs: 60000, status: "open" };
+    case "stair.choose": return { kind, offerId: "o1", levelId: "upper" };
+    case "stair.request": return { kind, sceneId: "s1", tokenId: "t1" };
     case "audio.cmd":
       return {
         kind: "audio.cmd",

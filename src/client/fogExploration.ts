@@ -47,6 +47,7 @@ import {
   sceneFogSettings,
 } from "../core/fogExploration";
 import type { PermissionUser } from "../core/ownership";
+import { raisedEyeSegments, raisedSight, type RaisedSight } from "../core/raisedAreas";
 import type { VisionComputer } from "../workers/visionWorkerClient";
 
 /**
@@ -153,6 +154,8 @@ export class FogExploration {
   private viewerKey: string | null = null;
   /** Polygons of the last reveal pass (current sight), for the visibility gate. */
   private polys: readonly Float32Array[] = [];
+  /** D-453: the same pass from walls alone (only differs with solid raised areas), for the token gate. */
+  private wallPolys: readonly Float32Array[] = [];
   private visibleKey: string | null = null;
   private visibleIds: Set<string> | null = null;
   private readonly saveDelayMs: number;
@@ -169,8 +172,11 @@ export class FogExploration {
       ((handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>));
   }
 
-  /** Feed the current scene (null = none) and how this shell draws the cover. */
-  sync(scene: SceneDocument | null, view: { style: FogStyle; levelId?: string }): Promise<void> {
+  /**
+   * Feed the current scene (null = none) and how this shell draws the cover. `floorZ` (D-453): the
+   * floor a player's floor scene shows, where its raised areas stand (players hold no levels).
+   */
+  sync(scene: SceneDocument | null, view: { style: FogStyle; levelId?: string; floorZ?: number }): Promise<void> {
     if (view.levelId !== undefined) {
       const user = this.options.user();
       if (!scene) throw new Error("Level fog requires a scene");
@@ -193,13 +199,15 @@ export class FogExploration {
       const user = this.options.user();
       const actors = this.options.actors();
       const viewers = fogViewers(scene, user, { actors });
-      const key = fogRevealKey(scene, viewers, fogSightRadius(scene, sceneFogSettings(scene)));
+      const floorZ = view.floorZ ?? 0;
+      const key = fogRevealKey(scene, viewers, fogSightRadius(scene, sceneFogSettings(scene)), floorZ);
       const sameView = epoch === this.epoch && view.levelId === this.levelId && this.viewerKey === `${user?.id ?? "-"}:${user?.role ?? "-"}`;
-      const polys = this.sceneId === scene._id && sameView && key === this.key ? this.polys : [];
-      this.publishVisibility(fogVisibleTokenIds(scene, user, polys,
-        { actors, lighting: sceneLighting(scene), viewers }), scene);
+      const same = this.sceneId === scene._id && sameView && key === this.key;
+      const raised = raisedSight(scene, viewers, floorZ);
+      this.publishVisibility(fogVisibleTokenIds(scene, user, same ? this.polys : [],
+        { actors, lighting: sceneLighting(scene), viewers, ...(raised ? { raised: { sight: raised, wallPolys: same ? this.wallPolys : [] } } : {}) }), scene);
     } else this.publishVisibility(this.maskOnlyVisibility(scene), scene);
-    return this.enqueue("sync", () => this.syncInner(scene, view.style, revision, view.levelId, epoch));
+    return this.enqueue("sync", () => this.syncInner(scene, view.style, revision, view.levelId, epoch, view.floorZ ?? 0));
   }
 
   /** Upload now if anything changed since the last save (scene switch, close, pagehide). */
@@ -274,7 +282,7 @@ export class FogExploration {
     return this.chain;
   }
 
-  private async syncInner(scene: SceneDocument | null, style: FogStyle, revision: number, levelId?: string, epoch = ""): Promise<void> {
+  private async syncInner(scene: SceneDocument | null, style: FogStyle, revision: number, levelId?: string, epoch = "", floorZ = 0): Promise<void> {
     if (this.destroyed) return;
     const publish = (ids: Set<string> | null): void => {
       if (revision === this.requestedRevision && !this.destroyed) this.publishVisibility(ids, scene);
@@ -315,6 +323,7 @@ export class FogExploration {
       this.epoch = epoch;
       this.key = null;
       this.polys = [];
+      this.wallPolys = [];
       this.restored = false;
       this.restoredBytes = 0;
       // fail closed: until the first polygons exist only the user's own tokens are shown
@@ -337,18 +346,26 @@ export class FogExploration {
     const viewers = fogViewers(scene, user, { actors });
     const lighting = sceneLighting(scene);
     const radius = fogSightRadius(scene, settings);
-    const key = fogRevealKey(scene, viewers, radius);
+    const key = fogRevealKey(scene, viewers, radius, floorZ);
+    const raised = raisedSight(scene, viewers, floorZ);
     if (key !== this.key) {
-      const segments = flatSegments(sightSegments(scene.walls));
+      const walls = sightSegments(scene.walls);
+      const segments = flatSegments(walls);
       // §2.1: each viewer reveals within its own light-bounded radius — a token in an unlit
       // room reveals nothing while a lit one next door reveals its torch's reach.
-      const polys = await Promise.all(
-        viewers.map((v) => this.options.computer.compute(v.x, v.y, segments, v.radiusPx)),
-      );
+      // D-453: solid raised areas taller than a viewer's eyes hide the floor behind them from it.
+      // The walls-only polygon stays for the token gate, which tests heights in 3D.
+      const extra = viewers.map((_, i) => raisedEyeSegments(raised, i));
+      const [polys, wallPolys] = await Promise.all([
+        Promise.all(viewers.map((v, i) => this.options.computer.compute(v.x, v.y,
+          extra[i]?.length ? flatSegments([...walls, ...(extra[i] ?? [])]) : segments, v.radiusPx))),
+        Promise.all(viewers.map((v, i) => extra[i]?.length ? this.options.computer.compute(v.x, v.y, segments, v.radiusPx) : null)),
+      ]);
       if (this.destroyed || this.sceneId !== scene._id || this.surface !== surface || (levelId !== undefined && revision !== this.requestedRevision)) return;
       for (const poly of polys) surface.reveal(poly);
       surface.setVisible(polys);
       this.polys = polys;
+      this.wallPolys = polys.map((poly, i) => wallPolys[i] ?? poly);
       this.key = key; // never cache a failed computation/reveal as a successful pass
       this.reveals++;
       if (polys.length > 0) {
@@ -360,8 +377,13 @@ export class FogExploration {
     // — or a light may have changed, which is why the lighting state and the viewers' senses
     // ride the gate too (§2.1).
     publish(
-      fogVisibleTokenIds(scene, user, this.polys, { actors, lighting, viewers }),
+      fogVisibleTokenIds(scene, user, this.polys, { actors, lighting, viewers, ...this.raisedGate(raised) }),
     );
+  }
+
+  /** D-453: the token gate's raised-area context, from the last pass's walls-only polygons. */
+  private raisedGate(raised: RaisedSight | null): { raised?: { sight: RaisedSight; wallPolys: readonly Float32Array[] } } {
+    return raised ? { raised: { sight: raised, wallPolys: this.wallPolys } } : {};
   }
 
   /**
@@ -419,6 +441,7 @@ export class FogExploration {
     this.surface = null;
     this.key = null;
     this.polys = [];
+    this.wallPolys = [];
     this.restored = false;
   }
 

@@ -18,6 +18,8 @@ import type { Application } from "pixi.js";
 import type { Camera, Viewport } from "../camera";
 
 export const FOG_TEXTURE_WIDTH = 512;
+/** The cover's colour: never-explored ground, and what a GM's manual Hide paints. */
+export const FOG_COVER_COLOR = 0x000000;
 /** Alpha of the "remembered but not currently visible" veil. */
 export const FOG_DIM_ALPHA = 0.55;
 /** D-251: the GM's translucent cover — unexplored areas at this alpha… */
@@ -63,7 +65,7 @@ export class FogLayer {
   private readonly cover = new Sprite();
   /**
    * D-256: the GM's manual mask (Hide/Reveal brushes) as its own texture, drawn over the
-   * explored cover. White = the GM hid this area, transparent = GM reveal or untouched.
+   * explored cover. Cover-coloured = the GM hid this area, transparent = GM reveal or untouched.
    */
   readonly manualTexture: RenderTexture;
   private readonly manual = new Sprite();
@@ -78,6 +80,8 @@ export class FogLayer {
   private readonly brush = new Container();
   private currentStyle: FogLayerStyle = "opaque";
   private destroyed = false;
+  /** D-438: told about every live-sight update (the stage forwards it to the roofs). */
+  onVisible: ((polys: readonly Float32Array[]) => void) | null = null;
 
   constructor(
     private readonly app: Application,
@@ -121,7 +125,7 @@ export class FogLayer {
   /** Opaque everywhere (scene load / world import); nothing currently visible. */
   reset(): void {
     const g = new Graphics();
-    g.rect(0, 0, this.texture.width, this.texture.height).fill(0x000000);
+    g.rect(0, 0, this.texture.width, this.texture.height).fill(FOG_COVER_COLOR);
     this.app.renderer.render({ container: g, target: this.texture, clear: true });
     g.destroy();
     this.fitSprite(this.cover);
@@ -153,13 +157,14 @@ export class FogLayer {
     return this.currentStyle;
   }
 
-  private polygonPath(g: Graphics, poly: Float32Array): void {
+  /** `color` only matters for painted strokes; the erase brush removes whatever it covers. */
+  private polygonPath(g: Graphics, poly: Float32Array, color = 0xffffff): void {
     const s = this.scale();
     g.moveTo((poly[0] ?? 0) * s, (poly[1] ?? 0) * s);
     for (let i = 2; i < poly.length; i += 2) {
       g.lineTo((poly[i] ?? 0) * s, (poly[i + 1] ?? 0) * s);
     }
-    g.closePath().fill(0xffffff);
+    g.closePath().fill(color);
   }
 
   /** Erase a polygon (flat world coords) from a texture. */
@@ -176,12 +181,16 @@ export class FogLayer {
     this.erase(this.texture, poly);
   }
 
-  /** D-256: drop every manual GM stroke (scene load / "reveal all"). */
+  /**
+   * D-256: drop every manual GM stroke (scene load / "reveal all"): the mask is left
+   * **transparent** — nothing hidden by hand. (It used to be filled with opaque black, and as
+   * the manual sprite draws over the explored cover, every player saw a black scene wherever
+   * fog was on, and the GM a dimmed one; D-454.)
+   */
   clearManualMask(): void {
-    const g = new Graphics();
-    g.rect(0, 0, this.manualTexture.width, this.manualTexture.height).fill(0x000000);
-    this.app.renderer.render({ container: g, target: this.manualTexture, clear: true });
-    g.destroy();
+    const nothing = new Container();
+    this.app.renderer.render({ container: nothing, target: this.manualTexture, clear: true, clearColor: [0, 0, 0, 0] });
+    nothing.destroy();
     this.fitSprite(this.manual);
   }
 
@@ -199,7 +208,7 @@ export class FogLayer {
       if (poly.length < 6) continue;
       if (op.mode === "hide") {
         const g = new Graphics();
-        this.polygonPath(g, poly);
+        this.polygonPath(g, poly, FOG_COVER_COLOR); // the same cover a never-explored area gets
         this.brush.addChild(g);
         this.app.renderer.render({
           container: this.brush,
@@ -221,6 +230,8 @@ export class FogLayer {
    * explored area (nothing is currently seen).
    */
   setVisible(polys: readonly Float32Array[]): void {
+    // D-438: roofs read the same live sight (vision openings, G-24 reveal through fog).
+    this.onVisible?.(polys);
     const dim = new Graphics();
     dim
       .rect(0, 0, this.visibleTexture.width, this.visibleTexture.height)
@@ -300,9 +311,12 @@ export class FogLayer {
 
   destroy(): void {
     this.destroyed = true;
+    this.onVisible?.([]);
+    this.onVisible = null;
     this.container.destroy({ children: true });
     this.brush.destroy({ children: true });
     this.texture.destroy();
     this.visibleTexture.destroy();
+    this.manualTexture.destroy();
   }
 }

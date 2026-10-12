@@ -1,0 +1,31 @@
+{
+  "name": "Cabin",
+  "width": 1200,
+  "height": 1000,
+  "padding": 0,
+  "grid": { "type": 1, "size": 100, "distance": 5, "units": "ft", "diagonals": 1 },
+  "levels": [
+    { "_id": "lvlUp0000000000", "name": "Upstairs", "sort": 2, "elevation": { "bottom": 10, "top": null }, "background": { "src": "a/Up.webp" }, "visibility": { "levels": ["lvlDown00000000"] } },
+    { "_id": "lvlBasement0000", "name": "Basement", "sort": 0, "elevation": { "bottom": -10, "top": 0 }, "background": { "src": "a/Basement.webp" }, "visibility": { "levels": [] } },
+    { "_id": "lvlDown00000000", "name": "Downstairs", "sort": 1, "elevation": { "bottom": 0, "top": 10 }, "background": { "src": "a/Down.webp" }, "foreground": { "src": "a/DownFg.webp" }, "visibility": { "levels": [] } }
+  ],
+  "walls": [
+    { "c": [0, 0, 100, 0], "levels": ["lvlDown00000000", "lvlUp0000000000"] },
+    { "c": [0, 100, 100, 100] }
+  ],
+  "lights": [
+    { "x": 50, "y": 50, "config": { "dim": 10, "bright": 5 }, "levels": ["lvlUp0000000000"] }
+  ],
+  "tiles": [
+    { "x": 0, "y": 0, "width": 100, "height": 100, "texture": { "src": "a/rug.webp" }, "elevation": 0, "levels": ["lvlDown00000000", "lvlUp0000000000"] }
+  ],
+  "tokens": [
+    { "name": "Cat", "x": 100, "y": 100, "width": 1, "height": 1, "elevation": 12 },
+    { "name": "Rat", "x": 200, "y": 200, "elevation": 0, "level": "lvlBasement0000" }
+  ],
+  "regions": [
+    { "name": "Stairs", "shapes": [{ "type": "rectangle", "x": 500, "y": 500, "width": 100, "height": 200, "rotation": 0, "hole": false }], "elevation": { "bottom": 0, "top": 10 }, "levels": ["lvlDown00000000", "lvlUp0000000000"], "behaviors": [{ "type": "changeLevel", "system": {} }] },
+    { "name": "Trapdoor", "shapes": [{ "type": "polygon", "points": [700, 700, 800, 700, 750, 800], "hole": false }], "elevation": { "bottom": -10, "top": 0 }, "behaviors": [{ "type": "changeLevel", "system": {} }] },
+    { "name": "Spikes", "shapes": [{ "type": "rectangle", "x": 0, "y": 0, "width": 10, "height": 10 }], "behaviors": [{ "type": "applyDamage", "system": {} }] }
+  ]
+}

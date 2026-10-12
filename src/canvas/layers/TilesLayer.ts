@@ -1,20 +1,56 @@
 /**
  * §9 tiles (D-083): floor tiles below the grid, overhead tiles (roofs) above
- * the tokens layer. Occlusion (roof/fade) is the pure rule from ephemera.ts;
- * textures load through an injected port (asset hash → Texture) with a
+ * the tokens layer. Textures load through an injected port (asset hash → Texture) with a
  * deterministic tinted-rect placeholder until (or instead of) the image.
+ *
+ * D-438 roofs: `resolveRoofs` (core/roofs.ts) decides each overhead tile's state from the
+ * viewers' token centres, the GM's hover point and the current vision polygons. This layer only
+ * draws that state:
+ * - a whole-tile alpha;
+ * - openings: an inverse mask on the tile plus a masked copy at the occlusion alpha (WebGL
+ *   only, so Canvas2D never gets holes);
+ * - a G-24 copy in the container above the fog.
  */
-import { Container, Graphics, Sprite, Texture } from "pixi.js";
+import { Container, Graphics, Sprite, Text, Texture } from "pixi.js";
 import { RotationAnimation } from "../rotationAnimation";
 import { MovementAnimation, movementDuration } from "../movementAnimation";
 import type { RegionDocument, TileDocument } from "../../core/documents";
 import { regionGeometryError, regionTriggerTile } from "../../core/regionGeometry";
 import { tileTriggerLocalPolygon, tileTriggerZoneError } from "../../core/tileTriggerZone";
-import { rectsOverlap, tileAlpha, tileTint, type TileRect } from "../ephemera";
+import { ROOF_IDLE, resolveRoofs, roofStateKey, type RoofArtMask, type RoofHoles, type RoofPoint, type RoofState } from "../../core/roofs";
+import { tileTint, type TileRect } from "../ephemera";
+import { roofArtMaskFromTexture } from "../roofArt";
+import { lowerFloorTint } from "../../core/levelPlay";
 
 export interface TilesLayerOptions {
   /** Asset hash/URL → texture; null/undefined keeps the tinted placeholder. */
   loadTexture?: (img: string) => Promise<Texture | null>;
+}
+
+/** G-20 (D-445): a token on a lower floor, seen through this floor's openings. */
+export interface LowerToken {
+  id: string; img: string; x: number; y: number; width: number; height: number; rotation: number; depth: number;
+  /** D-452: the height label drawn under it (e.g. `-20 ft`); absent or null draws none. */
+  label?: string | null;
+}
+
+/** D-438: per-sync roof inputs that are not tiles. */
+export interface RoofSyncOptions {
+  /** Scene grid size in px: the unit of the radial opening radius. */
+  gridSize?: number;
+}
+
+/** e2e/test readback of what a roof is drawing. */
+export interface RoofReadback {
+  alpha: number;
+  holes: "none" | "circles" | "vision";
+  openings: number;
+  holeAlpha: number;
+  under: boolean;
+  linked: boolean;
+  reveal: boolean;
+  /** The "under" test used the tile's art. */
+  art: boolean;
 }
 
 interface TileView {
@@ -27,6 +63,17 @@ interface TileView {
   loadedImage: string | null;
   /** Last computed occlusion alpha (readback + sprite path). */
   alpha: number;
+  /** D-438: the roof state this view last drew. */
+  roofKey: string;
+  holeMask: Graphics | null;
+  holeTarget: Container | null;
+  /** The openings' copy at the occlusion alpha, clipped to `innerMask`. */
+  inner: Container | null;
+  innerMask: Graphics | null;
+  /** G-24: the copy drawn above the fog. */
+  fogCopy: Container | null;
+  /** Geometry/texture key the copies were built for. */
+  copyKey: string;
 }
 
 export class TilesLayer {
@@ -36,13 +83,148 @@ export class TilesLayer {
   private readonly views = new Map<string, TileView>();
   private readonly regionViews = new Map<string, Graphics>();
   private readonly movementMedia = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)");
+  /** G-24: the container above the fog; null disables reveal copies. */
+  private readonly overFog: Container | null;
+  /** G-26: the renderer has inverse stencil masks (Canvas2D does not). */
+  private readonly masks: boolean;
+  private occupied: readonly TileRect[] = [];
+  private gridSize = 100;
+  private vision: readonly Float32Array[] = [];
+  private hover: RoofPoint | null = null;
+  private hoverFade = false;
+  private roofs = new Map<string, RoofState>();
+  /** Art alpha by loaded image (null = unreadable; falls back to zone/rectangle). */
+  private readonly art = new Map<string, RoofArtMask | null>();
 
-  constructor(below: Container, above: Container, options: TilesLayerOptions = {}) {
+  constructor(below: Container, above: Container, options: TilesLayerOptions = {},
+    roof: { overFog?: Container | null; inverseMasks?: boolean } = {}) {
     this.below = below;
     this.above = above;
     this.opts = options;
+    this.overFog = roof.overFog ?? null;
+    this.masks = roof.inverseMasks ?? false;
+    this.lower = new Container();
+    this.lower.label = "lowerFloors";
+    this.lower.sortableChildren = true;
   }
 
+  /**
+   * G-19 (D-443): art of the floors seen beneath the current one (tile id → depth). These tiles
+   * are drawn first, deepest at the bottom, dimmed by depth, as plain art: never roofs, triggers
+   * or outlines. Call before `sync`.
+   */
+  private readonly lower: Container;
+  private lowerDepth: ReadonlyMap<string, number> = new Map();
+  setLowerFloors(depths: ReadonlyMap<string, number>): void { this.lowerDepth = depths; }
+  /**
+   * G-20 (D-445): tokens seen on lower floors. They are drawn in the same container, just above
+   * their own floor's art and below nearer floors' art and this floor's art, dimmed alike. Each is
+   * just its image (a disc while loading): no bars, names or picking.
+   */
+  private lowerTokenViews = new Map<string, { node: Sprite | Graphics; img: string; revision: number; token: LowerToken; label: Container | null }>();
+  setLowerTokens(tokens: readonly LowerToken[]): void {
+    const seen = new Set<string>();
+    for (const token of tokens) {
+      seen.add(token.id);
+      let view = this.lowerTokenViews.get(token.id);
+      if (view && view.img !== token.img) { view.node.destroy(); view.label?.destroy({ children: true }); this.lowerTokenViews.delete(token.id); view = undefined; }
+      if (!view) {
+        const disc = new Graphics().circle(0, 0, 0.5).fill({ color: 0xffffff });
+        view = { node: disc, img: token.img, revision: 0, token, label: null };
+        this.lowerTokenViews.set(token.id, view);
+        this.lower.addChild(disc);
+        const load = token.img ? this.opts.loadTexture?.(token.img) : undefined;
+        const live = view, revision = ++live.revision;
+        void load?.then((texture) => {
+          if (!texture || this.lowerTokenViews.get(token.id) !== live || live.revision !== revision || live.node.destroyed) return;
+          const sprite = new Sprite(texture);
+          sprite.anchor.set(0.5);
+          live.node.parent?.removeChild(live.node);
+          live.node.destroy();
+          live.node = sprite;
+          this.lower.addChild(sprite);
+          this.placeLowerToken(live);
+          this.placeLower();
+        }).catch(() => undefined);
+      }
+      view.token = token;
+      this.placeLowerToken(view);
+    }
+    for (const [id, view] of this.lowerTokenViews) if (!seen.has(id)) {
+      view.node.parent?.removeChild(view.node); view.node.destroy();
+      view.label?.parent?.removeChild(view.label); view.label?.destroy({ children: true });
+      this.lowerTokenViews.delete(id);
+    }
+    this.placeLower();
+  }
+  private placeLowerToken(view: { node: Sprite | Graphics; token: LowerToken; label: Container | null }): void {
+    const { node, token } = view;
+    node.position.set(token.x, token.y);
+    node.rotation = (token.rotation ?? 0) * Math.PI / 180;
+    if (node instanceof Sprite) { node.width = token.width; node.height = token.height; }
+    else node.scale.set(Math.min(token.width, token.height) * 0.8);
+    node.tint = lowerFloorTint(token.depth);
+    node.zIndex = -token.depth + 0.5;
+    // D-452: the height label sits under the token, in the same container, so it shows exactly
+    // where the opening shows the token. It is not dimmed: it must stay readable.
+    const text = token.label ?? null;
+    if (!text) { if (view.label) { view.label.parent?.removeChild(view.label); view.label.destroy({ children: true }); view.label = null; } return; }
+    let label = view.label;
+    if (!label) {
+      label = new Container(); label.label = "lowerTokenLabel";
+      const bg = new Graphics(); bg.label = "bg";
+      const caption = new Text({ text: "", style: { fontSize: 10, fill: 0xe8f1ff, fontFamily: "sans-serif", fontWeight: "600" } });
+      caption.label = "text"; caption.anchor.set(0.5);
+      label.addChild(bg, caption);
+      this.lower.addChild(label);
+      view.label = label;
+    }
+    const caption = label.getChildByLabel("text") as Text | null, bg = label.getChildByLabel("bg") as Graphics | null;
+    if (caption && bg && caption.text !== text) {
+      caption.text = text;
+      bg.clear().roundRect(-caption.width / 2 - 5, -7.5, caption.width + 10, 15, 5).fill({ color: 0x1b2433, alpha: 0.92 }).stroke({ width: 1, color: 0x7fb2ff });
+    }
+    label.position.set(token.x, token.y + token.height / 2 + 10);
+    label.zIndex = -token.depth + 0.6;
+  }
+  /** D-452 readback: the labels under lower-floor tokens. */
+  lowerTokenLabels(): Array<{ id: string; label: string }> {
+    return [...this.lowerTokenViews.values()].flatMap((v) => {
+      const text = (v.label?.getChildByLabel("text") as Text | null)?.text;
+      return text ? [{ id: v.token.id, label: text }] : [];
+    }).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+  /** Readback: lower-floor tokens drawn, with depth. */
+  lowerTokenIds(): Array<{ id: string; depth: number }> {
+    return [...this.lowerTokenViews.values()].map((v) => ({ id: v.token.id, depth: v.token.depth })).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+  /** The container sits at the bottom of the tiles-below layer only while it holds lower-floor art. */
+  private placeLower(): void {
+    if (this.lower.children.length && this.lower.parent !== this.below) this.below.addChildAt(this.lower, 0);
+    else if (!this.lower.children.length && this.lower.parent) this.lower.parent.removeChild(this.lower);
+  }
+  /** Readback: the lower-floor tiles currently drawn, with their depth. */
+  lowerFloorTiles(): Array<{ id: string; depth: number }> {
+    return [...this.views.keys()].filter((id) => this.lowerDepth.has(id)).sort().map((id) => ({ id, depth: this.lowerDepth.get(id) as number }));
+  }
+  /** A lower floor's roof is just art seen from above. */
+  private effective(tile: TileDocument): TileDocument {
+    return tile.above && this.lowerDepth.has(tile._id) ? { ...tile, above: false } : tile;
+  }
+  private styleLower(view: TileView): void {
+    const depth = this.lowerDepth.get(view.tile._id);
+    const tint = depth === undefined ? 0xffffff : lowerFloorTint(depth);
+    const z = depth === undefined ? 0 : -depth;
+    for (const node of [view.sprite, view.g]) if (node) { node.tint = tint; node.zIndex = z; }
+  }
+
+  /** G-12 (D-434): tiles of other floors drawn faintly in the GM's "ghost" floor view. */
+  private ghosts: ReadonlySet<string> = new Set();
+  private ghostAlpha = 0.25;
+  setGhosts(ids: ReadonlySet<string>, alpha = 0.25): void {
+    this.ghosts = ids;
+    this.ghostAlpha = alpha;
+  }
   /** D-372/A41: count the live tile views and successfully decoded image sprites. */
   get count(): number { return this.views.size; }
   get renderedImageCount(): number {
@@ -52,32 +234,39 @@ export class TilesLayer {
   }
 
   /**
-   * Reconcile tile views; `occupied` are rects of tokens with vision (roof
-   * tiles over one of them fade to their occlusion alpha).
+   * Reconcile tile views. `occupied` are the rects of the viewer's own vision tokens: a roof opens
+   * for a token whose centre is under it (D-438).
    */
-  sync(tiles: readonly TileDocument[], occupied: readonly TileRect[], regions: readonly RegionDocument[] = []): void {
+  sync(input: readonly TileDocument[], occupied: readonly TileRect[], regions: readonly RegionDocument[] = [],
+    roof: RoofSyncOptions = {}): void {
+    this.occupied = occupied;
+    if (roof.gridSize !== undefined && Number.isFinite(roof.gridSize) && roof.gridSize > 0) this.gridSize = roof.gridSize;
     const seen = new Set<string>();
+    const tiles = input.map((tile) => this.effective(tile));
     for (const tile of tiles) {
       seen.add(tile._id);
       let view = this.views.get(tile._id);
       if (!view) {
         const g = new Graphics();
-        const fresh: TileView = { tile, movement: new MovementAnimation(), rotation: new RotationAnimation(), g, sprite: null, loadRevision: 0, loadedImage: null, alpha: 1 };
+        const fresh: TileView = { tile, movement: new MovementAnimation(), rotation: new RotationAnimation(), g, sprite: null,
+          loadRevision: 0, loadedImage: null, alpha: 1, roofKey: "", holeMask: null, holeTarget: null, inner: null,
+          innerMask: null, fogCopy: null, copyKey: "" };
         this.views.set(tile._id, fresh);
         this.containerFor(tile).addChild(g);
         this.maybeLoadTexture(fresh);
         view = fresh;
       }
       const changed = view.tile.img !== tile.img;
+      if (view.tile.above !== tile.above) this.clearRoofExtras(view);
       view.tile = tile;
       if (changed) {
         view.loadRevision++;
+        this.clearRoofExtras(view);
         view.sprite?.destroy();
         view.sprite = null;
         view.loadedImage = null;
         this.maybeLoadTexture(view);
       }
-      this.draw(view, occupied);
     }
     for (const [id, view] of this.views) {
       if (!seen.has(id)) {
@@ -85,7 +274,86 @@ export class TilesLayer {
         this.views.delete(id);
       }
     }
+    this.roofs = this.resolve();
+    for (const tile of tiles) {
+      const view = this.views.get(tile._id);
+      if (view) this.draw(view);
+    }
+    this.placeLower();
+    const images = new Set([...this.views.values()].map((view) => view.loadedImage));
+    for (const image of this.art.keys()) if (!images.has(image)) this.art.delete(image);
     this.syncRegions(regions);
+  }
+
+  /** G-24/G-26: the viewer's current vision polygons (flat world coordinates); [] = no live sight. */
+  setVision(polys: readonly Float32Array[]): void {
+    if (polys.length === 0 && this.vision.length === 0) return;
+    this.vision = [...polys];
+    this.visionRevision++;
+    this.refreshRoofs();
+  }
+
+  /** G-26c: GM-local "peek under roofs": the pointer opens the roof it is over. */
+  setHoverFade(enabled: boolean): void {
+    if (this.hoverFade === enabled) return;
+    this.hoverFade = enabled;
+    this.refreshRoofs();
+  }
+
+  setHover(point: RoofPoint | null): void {
+    if (point === this.hover || (point && this.hover && point.x === this.hover.x && point.y === this.hover.y)) return;
+    this.hover = point ? { x: point.x, y: point.y } : null;
+    if (this.hoverFade) this.refreshRoofs();
+  }
+
+  /** What a roof is drawing (e2e readback); null for an unknown tile. */
+  roofStateOf(tileId: string): RoofReadback | null {
+    const view = this.views.get(tileId);
+    if (!view) return null;
+    const state = this.roofs.get(tileId) ?? ROOF_IDLE;
+    return {
+      alpha: view.alpha,
+      holes: state.holes?.kind ?? "none",
+      openings: !state.holes ? 0 : state.holes.kind === "circles" ? state.holes.circles.length : this.vision.length,
+      holeAlpha: state.holeAlpha,
+      under: state.under,
+      linked: state.linked,
+      reveal: state.reveal && !!view.fogCopy,
+      art: !!this.artFor(view.tile),
+    };
+  }
+
+  private resolve(): Map<string, RoofState> {
+    const tiles = [...this.views.values()].map((view) => view.tile);
+    if (!tiles.some((tile) => tile.above)) return new Map();
+    return resolveRoofs(tiles, {
+      viewers: this.occupied.map((rect) => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })),
+      hover: this.hoverFade ? this.hover : null,
+      vision: this.vision,
+      gridSize: this.gridSize,
+      masks: this.masks,
+      art: (tile) => this.artFor(tile),
+    });
+  }
+
+  /** Re-resolve after a non-document input changed; redraw only the roofs whose state moved. */
+  private refreshRoofs(): void {
+    const next = this.resolve();
+    this.roofs = next;
+    for (const view of this.views.values()) {
+      if (!view.tile.above && !view.roofKey) continue;
+      const state = next.get(view.tile._id) ?? ROOF_IDLE;
+      if (this.roofKeyOf(view, state) !== view.roofKey) this.applyRoof(view, state);
+    }
+  }
+
+  private artFor(tile: TileDocument): RoofArtMask | null {
+    if (!tile.above) return null;
+    const view = this.views.get(tile._id);
+    const image = view?.sprite ? view.loadedImage : null;
+    if (!view?.sprite || !image) return null;
+    if (!this.art.has(image)) this.art.set(image, roofArtMaskFromTexture(view.sprite.texture));
+    return this.art.get(image) ?? null;
   }
 
   private syncRegions(regions: readonly RegionDocument[]): void {
@@ -134,11 +402,12 @@ export class TilesLayer {
   }
 
   private containerFor(tile: TileDocument): Container {
-    return tile.above ? this.above : this.below;
+    return this.lowerDepth.has(tile._id) ? this.lower : tile.above ? this.above : this.below;
   }
 
   private detach(view: TileView): void {
     view.loadRevision++;
+    this.clearRoofExtras(view);
     if (view.sprite) {
       this.containerFor(view.tile).removeChild(view.sprite);
       view.sprite.destroy();
@@ -171,17 +440,21 @@ export class TilesLayer {
         sprite.rotation = view.rotation.sample(performance.now()) * Math.PI / 180;
         sprite.alpha = view.alpha;
         view.g.clear();
-        this.drawAdornment(view);
+        if (!this.lowerDepth.has(view.tile._id)) this.drawAdornment(view);
         this.containerFor(view.tile).addChild(view.g); // trigger outline above the loaded image
+        this.styleLower(view);
+        this.placeLower();
+        // D-438: the art now decides "under", and openings/copies move onto the sprite.
+        this.clearRoofExtras(view);
+        if (view.tile.above) this.refreshRoofs();
       })
       .catch(() => undefined);
   }
 
-  private draw(view: TileView, occupied: readonly TileRect[]): void {
+  private draw(view: TileView): void {
     const { tile } = view;
-    const rect: TileRect = { x: tile.x, y: tile.y, width: tile.width, height: tile.height };
-    const occupiedUnder = occupied.some((o) => rectsOverlap(rect, o));
-    const alpha = tileAlpha(tile, occupiedUnder);
+    const state = this.roofs.get(tile._id) ?? ROOF_IDLE;
+    const alpha = state.alpha * (this.ghosts.has(tile._id) ? this.ghostAlpha : 1);
     view.alpha = alpha;
     const parent = this.containerFor(tile);
     if (view.g.parent !== parent) parent.addChild(view.g);
@@ -207,29 +480,184 @@ export class TilesLayer {
       view.sprite.rotation = angle;
       view.sprite.alpha = alpha;
       view.g.clear();
-      // Roof and trigger outlines stay visible even with a texture.
-      this.drawAdornment(view);
-      return;
+      // Roof and trigger outlines stay visible even with a texture (not on art seen below).
+      if (!this.lowerDepth.has(tile._id)) this.drawAdornment(view);
+    } else {
+      view.g.clear();
+      this.drawPlaceholder(view.g, tile);
+      if (!this.lowerDepth.has(tile._id)) this.drawAdornment(view);
     }
-    view.g.clear();
+    this.styleLower(view);
+    this.applyRoof(view, state);
+  }
+
+  /** The imageless look: the trigger mask, the trigger polygon or the rectangle, tinted. */
+  private drawPlaceholder(g: Graphics, tile: TileDocument): void {
     const triggerPoints = tile.triggerZone ? tileTriggerLocalPolygon(tile) : null;
     const points = triggerPoints?.flatMap(({ x, y }) => [x, y]);
     const mask = tile.triggerZone?.kind === "alpha" && tileTriggerZoneError(tile.triggerZone) === null
       ? tile.triggerZone : null;
     if (mask) {
       for (let row = 0; row < mask.height; row++) for (const [start, end] of mask.rows[row] ?? []) {
-        view.g.rect(tile.x + start * tile.width / mask.width, tile.y + row * tile.height / mask.height,
+        g.rect(tile.x + start * tile.width / mask.width, tile.y + row * tile.height / mask.height,
           (end - start) * tile.width / mask.width, tile.height / mask.height)
           .fill({ color: tileTint(tile.img || tile._id), alpha: 0.85 });
       }
     } else if (points) {
-      view.g.poly(points).fill({ color: tileTint(tile.img || tile._id), alpha: 0.85 });
+      g.poly(points).fill({ color: tileTint(tile.img || tile._id), alpha: 0.85 });
     } else {
-      view.g.rect(tile.x, tile.y, tile.width, tile.height)
+      g.rect(tile.x, tile.y, tile.width, tile.height)
         .fill({ color: tileTint(tile.img || tile._id), alpha: 0.85 })
         .stroke({ width: 1, color: 0xffffff, alpha: 0.15 });
     }
-    this.drawAdornment(view);
+  }
+
+  private roofKeyOf(view: TileView, state: RoofState): string {
+    const ghost = this.ghosts.has(view.tile._id) ? this.ghostAlpha : 1;
+    const holes = state.holes?.kind === "vision" ? `:${this.vision.length}:${this.visionRevision}` : "";
+    return `${roofStateKey(state)}${holes}|${ghost}|${view.sprite ? 1 : 0}`;
+  }
+
+  private visionRevision = 0;
+
+  /** D-438: draw a roof state: alpha, openings and the copy above the fog. */
+  private applyRoof(view: TileView, state: RoofState): void {
+    const ghost = this.ghosts.has(view.tile._id) ? this.ghostAlpha : 1;
+    view.alpha = state.alpha * ghost;
+    view.g.alpha = view.alpha;
+    if (view.sprite) view.sprite.alpha = view.alpha;
+    view.roofKey = view.tile.above || state !== ROOF_IDLE ? this.roofKeyOf(view, state) : "";
+    if (!state.holes && !state.reveal && !view.holeMask && !view.inner && !view.fogCopy) return;
+    const copyKey = `${view.sprite ? `s:${view.loadedImage ?? ""}` : `g:${view.tile.x},${view.tile.y}`}:${view.tile.width}x${view.tile.height}:` +
+      `${view.tile.img}:${JSON.stringify(view.tile.triggerZone ?? null)}`;
+    if (copyKey !== view.copyKey) {
+      this.clearCopies(view);
+      view.copyKey = copyKey;
+    }
+    const parent = this.containerFor(view.tile);
+    const drawn: Container = view.sprite ?? view.g;
+    if (state.holes) {
+      if (view.holeTarget && view.holeTarget !== drawn) this.unmask(view.holeTarget);
+      const hole = view.holeMask ?? new Graphics();
+      if (!view.holeMask) {
+        hole.label = `roofHole:${view.tile._id}`;
+        parent.addChild(hole);
+        view.holeMask = hole;
+      }
+      hole.clear();
+      this.drawHoles(hole, state.holes);
+      drawn.setMask({ mask: hole, inverse: true });
+      view.holeTarget = drawn;
+      const innerAlpha = state.holeAlpha * ghost;
+      if (innerAlpha > 0) {
+        const inner = view.inner ?? this.makeCopy(view, "roofOpening");
+        const innerMask = view.innerMask ?? new Graphics();
+        if (!view.innerMask) {
+          innerMask.label = `roofOpeningMask:${view.tile._id}`;
+          parent.addChild(innerMask);
+          view.innerMask = innerMask;
+        }
+        innerMask.clear();
+        this.drawHoles(innerMask, state.holes);
+        if (inner.parent !== parent) parent.addChildAt(inner, Math.min(parent.children.length, parent.getChildIndex(drawn) + 1));
+        view.inner = inner;
+        inner.mask = innerMask;
+        inner.alpha = innerAlpha;
+        this.placeCopy(view, inner);
+      } else this.clearInner(view);
+    } else this.clearHoles(view);
+    if (state.reveal && this.overFog) {
+      const copy = view.fogCopy ?? this.makeCopy(view, "roofOverFog");
+      if (copy.parent !== this.overFog) this.overFog.addChild(copy);
+      view.fogCopy = copy;
+      copy.alpha = view.alpha;
+      this.placeCopy(view, copy);
+    } else if (view.fogCopy) {
+      view.fogCopy.parent?.removeChild(view.fogCopy);
+      view.fogCopy.destroy();
+      view.fogCopy = null;
+    }
+  }
+
+  private drawHoles(g: Graphics, holes: RoofHoles): void {
+    if (holes.kind === "circles") {
+      for (const circle of holes.circles) g.circle(circle.x, circle.y, circle.r).fill(0xffffff);
+      return;
+    }
+    for (const poly of this.vision) if (poly.length >= 6) g.poly(Array.from(poly)).fill(0xffffff);
+  }
+
+  private makeCopy(view: TileView, label: string): Container {
+    if (view.sprite) {
+      const sprite = new Sprite(view.sprite.texture);
+      sprite.anchor.set(0.5);
+      sprite.label = `${label}:${view.tile._id}`;
+      return sprite;
+    }
+    const g = new Graphics();
+    g.label = `${label}:${view.tile._id}`;
+    this.drawPlaceholder(g, view.tile);
+    return g;
+  }
+
+  private placeCopy(view: TileView, copy: Container): void {
+    if (view.sprite && copy instanceof Sprite) {
+      copy.position.set(view.sprite.x, view.sprite.y);
+      copy.width = view.tile.width;
+      copy.height = view.tile.height;
+      copy.rotation = view.sprite.rotation;
+      return;
+    }
+    copy.pivot.set(view.g.pivot.x, view.g.pivot.y);
+    copy.position.set(view.g.x, view.g.y);
+    copy.rotation = view.g.rotation;
+  }
+
+  private unmask(target: Container): void {
+    if (target.destroyed) return;
+    target.mask = null;
+    target.setMask({ inverse: false });
+  }
+
+  private clearInner(view: TileView): void {
+    if (view.inner) {
+      view.inner.mask = null;
+      view.inner.parent?.removeChild(view.inner);
+      view.inner.destroy();
+      view.inner = null;
+    }
+    if (view.innerMask) {
+      view.innerMask.parent?.removeChild(view.innerMask);
+      view.innerMask.destroy();
+      view.innerMask = null;
+    }
+  }
+
+  private clearHoles(view: TileView): void {
+    if (view.holeTarget) this.unmask(view.holeTarget);
+    view.holeTarget = null;
+    if (view.holeMask) {
+      view.holeMask.parent?.removeChild(view.holeMask);
+      view.holeMask.destroy();
+      view.holeMask = null;
+    }
+    this.clearInner(view);
+  }
+
+  private clearCopies(view: TileView): void {
+    this.clearInner(view);
+    if (view.fogCopy) {
+      view.fogCopy.parent?.removeChild(view.fogCopy);
+      view.fogCopy.destroy();
+      view.fogCopy = null;
+    }
+  }
+
+  private clearRoofExtras(view: TileView): void {
+    this.clearHoles(view);
+    this.clearCopies(view);
+    view.copyKey = "";
+    view.roofKey = "";
   }
 
   private drawAdornment(view: TileView): void {
@@ -262,17 +690,24 @@ export class TilesLayer {
         view.movement.cancel();
         const x = view.tile.x + view.tile.width / 2, y = view.tile.y + view.tile.height / 2;
         view.g.position.set(x, y); view.sprite?.position.set(x, y);
+        if (view.inner) this.placeCopy(view, view.inner);
+        if (view.fogCopy) this.placeCopy(view, view.fogCopy);
         continue;
       }
       const point = view.movement.sample(now);
-      if (!point) continue;
-      view.g.position.set(point.x, point.y); view.sprite?.position.set(point.x, point.y);
+      if (point) { view.g.position.set(point.x, point.y); view.sprite?.position.set(point.x, point.y); }
+      if (view.inner) this.placeCopy(view, view.inner);
+      if (view.fogCopy) this.placeCopy(view, view.fogCopy);
     }
   }
 
   destroy(): void {
     for (const view of this.views.values()) this.detach(view);
     this.views.clear();
+    for (const view of this.lowerTokenViews.values()) view.node.destroy();
+    this.lowerTokenViews.clear();
+    this.lower.parent?.removeChild(this.lower);
+    this.lower.destroy();
     for (const graphics of this.regionViews.values()) {
       graphics.parent?.removeChild(graphics);
       graphics.destroy();

@@ -30,6 +30,7 @@ import type { PermissionUser } from "./ownership";
 import { can } from "./permissions";
 import { fogMaskLog, pointInFogMask } from "./fogMask";
 import { pointInPolygon } from "../canvas/vision/polygon";
+import { raisedSight, raisedSightKey, raisedTokenSeen, type RaisedSight } from "./raisedAreas";
 import {
   feetToPixels,
   isLitAt,
@@ -112,6 +113,12 @@ export interface FogViewerContext {
   lighting?: PF1eLighting;
   /** Plan §2.1: the viewers *with* their senses — a dark token is visible only to darkvision. */
   viewers?: readonly FogViewer[];
+  /**
+   * D-453: solid raised areas on the scene. `wallPolys` are the viewers' polygons from walls alone
+   * (in viewer order); a token is in sight when some viewer has it inside that polygon *and* a 3D
+   * line from the eye clears every box. Absent, the gate tests the polygons as before.
+   */
+  raised?: { sight: RaisedSight; wallPolys: readonly Float32Array[] };
 }
 
 /**
@@ -141,6 +148,16 @@ export function fogViewers(
     });
   }
   return out;
+}
+
+/** The user controls the token directly, or through its linked actor (GM/ASSISTANT: every token). */
+export function userControlsToken(
+  user: PermissionUser,
+  token: TokenDocument,
+  scene: SceneDocument,
+  actors: readonly ActorDocument[],
+): boolean {
+  return controlsToken(user, token, scene, actors);
 }
 
 function controlsToken(
@@ -238,7 +255,8 @@ export function fogVisibleTokenIds(
       continue;
     }
     if (masked.has(token._id)) continue;
-    if (!tokenInSight(token, polys)) continue;
+    const raised = context.raised;
+    if (raised ? !raised.sight.eyes.some((_, i) => raisedTokenSeen(raised.sight, i, raised.wallPolys[i], token, scene.grid)) : !tokenInSight(token, polys)) continue;
     // §2.1: line of sight is not enough in the dark — a token shows when it is *lit* (ambient
     // light, a placed light, or the torch it carries) or when some eye's darkvision reaches it.
     // Without a lighting state the gate keeps its pre-2.1 meaning.
@@ -272,6 +290,8 @@ export function fogRevealKey(
   scene: SceneDocument,
   viewers: readonly FogViewer[],
   radius: number,
+  /** D-453: the floor of a scene without levels (a player's floor scene), for raised areas. */
+  floorZ = 0,
 ): string {
   const eyes = viewers
     .map(
@@ -292,7 +312,9 @@ export function fogRevealKey(
         `${l.id}:${Math.round(l.x)},${Math.round(l.y)}:${Math.round(l.bright)}:${Math.round(l.dim)}`,
     )
     .join(";");
-  return `${scene._id}|${Math.round(radius)}|${darkness}|${eyes}|${lights}|${walls}`;
+  // D-453: solid raised areas and the eyes' heights change what each eye sees past them.
+  const raised = raisedSightKey(raisedSight(scene, viewers, floorZ));
+  return `${scene._id}|${Math.round(radius)}|${darkness}|${eyes}|${lights}|${walls}${raised ? `|${raised}` : ""}`;
 }
 
 /**

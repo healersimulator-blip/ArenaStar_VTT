@@ -2,14 +2,19 @@
   import LevelPlayEditor from "./LevelPlayEditor.svelte";
   import { LEVEL_PLAY_FEATURE } from "../../core/levelPlay";
   import LevelBindingEditor from "./LevelBindingEditor.svelte";
+  import LevelToolsEditor from "./LevelToolsEditor.svelte";
   import { DRAFT_LEVELS_FEATURE, LEVEL_AMBIENT_FEATURE } from "../../core/capabilities";
   import { onMount, untrack } from "svelte";
   import type { EventBus } from "../../core/events";
   import type { ClientEvents } from "../../client/sync";
   import type { ClientSync } from "../../client/sync";
   import type { LevelDocument, SceneDocument } from "../../core/documents";
-  import { draftLevel, levelDraftAudit, levelDraftOps, MAX_LEVELS, sceneLevelsError } from "../../core/levels";
-  let { scene, client, bus }: { scene: SceneDocument; client: ClientSync; bus: EventBus<ClientEvents> } = $props();
+  import { draftLevel, generateLevels, levelDraftAudit, levelDraftOps, levelVisibilityPreset, MAX_LEVELS, sceneLevelsError, type LevelVisibilityPreset } from "../../core/levels";
+  import { surfaceSummary, surfaceSvgPath, traceLevelArt } from "../../core/floorSurface";
+  import type { RoofArtMask } from "../../core/roofs";
+  let { scene, client, bus, loadArtMask }: { scene: SceneDocument; client: ClientSync; bus: EventBus<ClientEvents>;
+    /** G-21 (D-444): a tile image's alpha, for tracing floors. Absent: tracing is unavailable. */
+    loadArtMask?: (image: string) => Promise<RoofArtMask | null> } = $props();
   let compatible = $state(false), ambientCompatible = $state(false);
   onMount(() => {
     compatible = client.supportsFeature(DRAFT_LEVELS_FEATURE);
@@ -37,9 +42,48 @@
     void scene.levels;
     if (!untrack(() => dirty || busy)) untrack(reload);
   });
+  // G-28 (D-436): generate a whole stack into the (empty) draft; Apply still saves it.
+  let genFloors = $state(2), genBasements = $state(0), genHeight = $state(10), genRoof = $state(false);
+  function generate() {
+    try {
+      rows = generateLevels({ floors: genFloors, basements: genBasements, height: genHeight, roof: genRoof, id: () => `level-${crypto.randomUUID()}` });
+      dirty = true; message = "Stack generated. Assign each floor's map tiles, then Apply draft levels.";
+    } catch (error) { message = error instanceof Error ? error.message : String(error); }
+  }
   function add() {
     const highest = Math.max(0, ...rows.map((r) => r.top ?? r.floorZ));
     rows.push(draftLevel(`level-${crypto.randomUUID()}`, rows.length ? `Level ${rows.length + 1}` : "Base", highest, highest + 10, rows.length));
+    dirty = true;
+  }
+  // G-19 (D-443): which floors each floor sees beneath it (their art shows through its openings).
+  function preset(kind: LevelVisibilityPreset) {
+    rows = ordered(levelVisibilityPreset($state.snapshot(rows) as LevelDocument[], kind));
+    dirty = true;
+  }
+  function sees(level: LevelDocument, other: string, on: boolean) {
+    level.visibleLevelIds = on ? [...level.visibleLevelIds.filter((id) => id !== other), other] : level.visibleLevelIds.filter((id) => id !== other);
+    dirty = true;
+  }
+  const lowerRows = (level: LevelDocument) => rows.filter((r) => r._id !== level._id && Number.isFinite(r.floorZ) && r.floorZ < level.floorZ)
+    .sort((a, b) => b.floorZ - a.floorZ);
+  // G-21 (D-444): where each floor is solid. Opaque art is floor; transparent parts are openings.
+  let tracing = $state<string | null>(null);
+  async function trace(level: LevelDocument) {
+    if (!loadArtMask || tracing) return;
+    tracing = level._id; message = "";
+    try {
+      const own = scene.tiles.filter((t) => level.tileIds?.includes(t._id));
+      const masks = new Map(await Promise.all(own.map(async (t) => [t._id, t.img ? await loadArtMask(t.img).catch(() => null) : null] as const)));
+      const result = traceLevelArt(scene, $state.snapshot(level) as LevelDocument, (t) => masks.get(t._id) ?? null);
+      if (!result.surface) { message = `${level.name}: ${result.notes.join(" ")}`; return; }
+      level.surface = result.surface;
+      dirty = true;
+      message = [`${level.name} traced: ${surfaceSummary(result.surface)}.`, ...result.notes, "Apply draft levels to save it."].join(" ");
+    } catch (error) { message = error instanceof Error ? error.message : String(error); }
+    finally { tracing = null; }
+  }
+  function solidEverywhere(level: LevelDocument) {
+    delete level.surface;
     dirty = true;
   }
   function remove(id: string) {
@@ -105,10 +149,56 @@
           {/each}
           <small>Place each floor map as a tile, then assign it here. No unassigned tile or global foreground appears in isolated floor play.</small>
         </fieldset>
+        <fieldset class="surface" data-level-surface={level._id}>
+          <strong>Solid floor</strong>
+          <span data-surface-status>{surfaceSummary(level.surface)}</span>
+          {#if level.surface}
+            <svg class="surface-preview" role="img" aria-label={`${level.name || level._id} floor shape`} viewBox={`0 0 ${scene.width} ${scene.height}`} preserveAspectRatio="xMidYMid meet">
+              <rect x="0" y="0" width={scene.width} height={scene.height} class="scene-box" />
+              <path d={surfaceSvgPath(level.surface)} fill-rule="evenodd" class="solid" />
+            </svg>
+          {/if}
+          <div class="surface-actions">
+            <button type="button" onclick={() => trace(level)} disabled={!loadArtMask || tracing !== null || !(level.tileIds?.length || level.useSceneBackground)}
+              title="Opaque pixels of this floor's map art become solid floor; transparent parts become openings">{tracing === level._id ? "Tracing…" : "Trace from floor art"}</button>
+            {#if level.surface}<button type="button" onclick={() => solidEverywhere(level)}>Solid everywhere</button>{/if}
+          </div>
+          <small>Opaque map art is solid floor; transparent parts (stairwells, holes, open air) are openings. Untraced floors are solid everywhere.</small>
+        </fieldset>
+        {#if lowerRows(level).length}
+          <fieldset class="sees" data-level-sees={level._id}>
+            <strong>Sees floors below</strong>
+            {#each lowerRows(level) as other (other._id)}
+              <label><input type="checkbox" aria-label={`${level.name || level._id} sees ${other.name || other._id}`} data-sees={other._id} checked={level.visibleLevelIds.includes(other._id)}
+                onchange={(e) => sees(level, other._id, e.currentTarget.checked)} />{other.name || other._id}</label>
+            {/each}
+            <small>Their map art shows, dimmed, through transparent parts of this floor's art. Their tokens, walls and lights stay hidden.</small>
+          </fieldset>
+        {/if}
         <small>Blank bottom/top = unbounded. ID: {level._id}</small>
         <button type="button" onclick={() => remove(level._id)}>Remove draft level</button>
       </section>
     {/each}
+    {#if rows.length >= 2}
+      <div class="presets" data-level-visibility-presets>
+        <span>Floors see below:</span>
+        <button type="button" onclick={() => preset("sealed")} title="No floor sees another">Sealed</button>
+        <button type="button" onclick={() => preset("aboveGround")} title="Floors at or above the ground see the floors below them down to the ground; basements stay sealed">Down to ground</button>
+        <button type="button" onclick={() => preset("open")} title="Every floor sees every floor below it">All below</button>
+      </div>
+    {/if}
+    {#if !rows.length}
+      <details class="generator" data-level-generator open>
+        <summary>Generate a stack of floors</summary>
+        <div class="numbers">
+          <label>Floors (incl. ground)<input aria-label="Generated floors" type="number" min="1" max="16" step="1" bind:value={genFloors} /></label>
+          <label>Basements<input aria-label="Generated basements" type="number" min="0" max="8" step="1" bind:value={genBasements} /></label>
+          <label>Floor height<input aria-label="Generated floor height" type="number" min="1" step="any" bind:value={genHeight} /></label>
+        </div>
+        <label><input type="checkbox" aria-label="Generated roof" bind:checked={genRoof} />Add a roof level</label>
+        <button type="button" onclick={generate}>Generate levels</button>
+      </details>
+    {/if}
     <button type="button" onclick={add} disabled={rows.length >= MAX_LEVELS}>Add draft level</button>
     <button type="button" onclick={save} disabled={!dirty || !!validation || stale}>{busy ? "Saving…" : "Apply draft levels"}</button>
     <button type="button" onclick={reload}>Reload draft</button>
@@ -116,11 +206,16 @@
   {#if stale && dirty}<p role="alert">Draft levels changed elsewhere. Reload before applying.</p>{/if}
   {#if validation}<p role="alert">{validation}</p>{:else}{#each warnings as warning, index (index)}<p class="warning">{warning}</p>{/each}{/if}
   {#if message}<p role="status">{message}</p>{/if}
+  {#if compatible && (scene.levels?.length ?? 0) > 0}<LevelToolsEditor {scene} {client} draftDirty={dirty || busy} />{/if}
   <LevelPlayEditor {scene} {client} draftDirty={dirty || busy} />
   <LevelBindingEditor {scene} {client} {bus} draftDirty={dirty || busy} />
 </details>
 
 <style>
+  .surface-preview { display:block; width:140px; height:90px; margin:4px 0; }
+  .surface-preview .scene-box { fill:#11161d; stroke:#3b4656; stroke-width:0.5%; }
+  .surface-preview .solid { fill:#6b7f99; }
+  .surface-actions { display:flex; gap:4px; flex-wrap:wrap; }
   .level-drafts { border:1px solid #3b4656; border-radius:6px; padding:8px; color:#d8dee8; font-size:11px; }
   summary { cursor:pointer; font-weight:600; } p { line-height:1.5; margin:8px 0; color:#b2bdca; }
   fieldset { border:0; padding:0; margin:0; min-width:0; }
@@ -129,6 +224,10 @@
   .numbers { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
   input { box-sizing:border-box; width:100%; min-width:0; color:#edf3fb; background:#131b25; border:1px solid #435067; border-radius:4px; padding:5px; }
   .ambient-settings { border-left:2px solid #435067; padding-left:8px; }
+  .sees { border-left:2px solid #435067; padding-left:8px; display:flex; flex-direction:column; gap:3px; }
+  .sees label { flex-direction:row; align-items:center; gap:6px; }
+  .presets { display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding:6px 0; }
+  .presets button { margin:0; }
   input[type="checkbox"] { width:auto; align-self:flex-start; }
   small { overflow-wrap:anywhere; color:#9dabbc; }
   button { padding:5px 7px; margin:4px 4px 0 0; border:1px solid #52657a; border-radius:4px; background:#253549; color:#e6eef9; cursor:pointer; }

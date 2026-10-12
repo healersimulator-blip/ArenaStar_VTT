@@ -1,6 +1,7 @@
-import { LEVEL_PLAY_FEATURE, stairMovementOps } from "../core/levelPlay";
+import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE, STAIR_OFFER_TTL_MS, levelCreationOps, stairChoiceOps, stairChoicesHere, stairMovementPlan, type StairPrompt } from "../core/levelPlay";
+import { isScopedCollection } from "../core/levelMembership";
 import { levelFocusView, LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
-import type { LevelFocusMsg } from "../core/messages";
+import type { LevelFocusMsg, StairChooseMsg, StairOfferMsg, StairRequestMsg } from "../core/messages";
 import { fogVersionKey, fogLevelIdError, fogEpochError, LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "../core/levelFog";
 import { SaveWork } from "../storage/saveCoordinator";
 import { snapshotMoveEntry } from "../core/moveDestination";
@@ -101,6 +102,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { encumbranceOptionsOf, worldSettingsFrom } from "../core/worldSettings";
 import { sceneDifficultCells } from "../core/rules";
 import { tileTriggerElevationError, tileTriggerZoneError } from "../core/tileTriggerZone";
+import { roofOcclusionError, tileRoofError } from "../core/roofs";
 import { guardedWallEditError, type WallEditGuard } from "../core/wallEditing";
 import { SUPPORTED_WIRE_FEATURES, featureListError, requiredOpFeatures, requiredWorldFeatures } from "../core/capabilities";
 import { levelTransactionError } from "../core/levels";
@@ -143,6 +145,9 @@ import { pf1eConditionDef, conditionRefusalFor } from "../packages/pf1e/conditio
 import { pf1eSpellEffectById, pf1eSpellEffectLanded, type PF1eSpellEffect }
   from "../packages/pf1e/spellEffects";
 import { sightBlockedBetween } from "../core/crosshair";
+import { areaFloorOf, areaFloorReach, wallsOnFloor } from "../core/areaFloors";
+import { unsupportedWalks } from "../core/floorSupport";
+import { raisedGroundOps } from "../core/raisedAreas";
 import { affectedTokens, lineIntersectsTokenFootprint, pf1eAreaGridFromScene, resolveAreaCells } from "../packages/pf1e/targeting";
 import { combinedTacticalEffects, resolveTacticalEffects } from "../packages/pf1e/effectOps";
 import {
@@ -237,10 +242,13 @@ import { boundedJson, scriptApprovalHash, scriptApprovalHashSync, validateScript
 import { runScriptWorker, type ScriptRunner } from "./scriptWorker";
 import {
   docVisibleTo,
+  floorPartKeys,
   projectEnvelope,
+  projectSceneFor,
   projectWorld,
   visibilityFields,
 } from "../core/projection";
+import { FLOOR_DISCLOSED_PARTS, floorDisclosure, isFloorDisclosedPart } from "../core/floorDisclosure";
 import {
   cellVisibilityChanges,
   openCellKeys,
@@ -431,6 +439,12 @@ interface ImageUploadState {
 }
 
 interface Session {
+  /**
+   * The world seq of the last snapshot/envelope this session received. Floor focus states carry
+   * it: an envelope projected away entirely never reaches the client, whose replica then stays at
+   * the older seq while being exactly as current for everything it may see.
+   */
+  sentSeq?: number;
   /** Previously authorized reads may flush their last own PNG after leaving a floor. */
   fogWriteGrants?: Set<string>;
   levelFocus?: { followTokenId?: string; sceneId: string; levelId: string | null; requestId: string; revision: number };
@@ -445,6 +459,11 @@ interface Session {
   /** Last projected metadata sent to this peer (not asset bytes). */
   manifestFingerprint: string | null;
   imageUpload: ImageUploadState | null;
+  /**
+   * G-33 (D-451): per scene in isolated floor play, the floor-bound documents (`part:id`) this
+   * replica holds. Kept exact so a floor crossing never sends an op the replica cannot apply.
+   */
+  floorKeys?: Map<string, Set<string>>;
 }
 
 /**
@@ -842,6 +861,8 @@ export class HostSync {
   /** §8/§9 fog readbacks: `${sceneId}:${userId}` → latest PNG bytes (write-through cache). */
   private readonly fogEpochs = new Map<string, string>();
   private readonly fogTasks = new Map<string, Promise<void>>();
+  /** G-01 (D-430): open stairwell choices, one per token, answered only by the user offered them. */
+  private readonly stairOffers = new Map<string, { userId: UserId; sceneId: string; tokenId: string; fromLevelId: string; regionIds: string[]; choices: string[]; expiresAt: number }>();
   readonly fogPngs = new Map<string, Uint8Array>();
   private readonly fogStore: FogStore | null;
 
@@ -1045,6 +1066,8 @@ export class HostSync {
   // ─── Frames ─────────────────────────────────────────────────────────────────
 
   private send(session: Session, msg: WireMessage): void {
+    if (msg.kind === "ops") session.sentSeq = msg.envelope.seq;
+    else if (msg.kind === "snapshot") session.sentSeq = msg.seq;
     try {
       session.transport.send(channelFor(msg.kind), frameMessage(msg));
     } catch {
@@ -1232,6 +1255,11 @@ export class HostSync {
       case "level.focus":
         this.handleLevelFocus(session, msg); return;
       case "level.focus.state": return; // host-only
+      case "stair.choose":
+        this.handleStairChoose(session, msg); return;
+      case "stair.request":
+        this.handleStairRequest(session, msg); return;
+      case "stair.offer": return; // host-only
       case "fog.get":
         this.queueFog(session, msg);
         return;
@@ -1282,7 +1310,111 @@ export class HostSync {
     const denied = focus.levelId !== null && !view.levels.some((l) => l.id === focus.levelId);
     if (denied) focus.levelId = null;
     if (view.followTokenId) focus.followTokenId = view.followTokenId;
-    this.send(session, { kind: "level.focus.state", sceneId: focus.sceneId, requestId: focus.requestId, revision: ++focus.revision, worldSeq: this.store.seq, mode: focus.levelId === null ? "follow" : "manual", ...view, ...(denied ? { error: "unavailable" as const } : {}) });
+    this.send(session, { kind: "level.focus.state", sceneId: focus.sceneId, requestId: focus.requestId, revision: ++focus.revision, worldSeq: session.sentSeq ?? this.store.seq, mode: focus.levelId === null ? "follow" : "manual", ...view, ...(denied ? { error: "unavailable" as const } : {}) });
+  }
+  // ─── G-01/G-08 stairwell choices (D-430) ────────────────────────────────────
+  private stairSessions(userId: UserId, only?: Session): Session[] {
+    return (only ? [only] : [...this.sessions.values()]).filter((s) => s.user?.id === userId && s.features.has(STAIRS_V2_FEATURE) && this.sessions.get(s.peerId) === s);
+  }
+  private sendStairNotice(targets: readonly Session[], base: Pick<StairOfferMsg, "offerId" | "sceneId" | "tokenId">, status: StairOfferMsg["status"], error?: string): void {
+    for (const target of targets) this.send(target, { kind: "stair.offer", ...base, choices: [], ttlMs: 0, status, ...(error ? { error } : {}) });
+  }
+  /** One live offer per token: a newer stop (or an explicit request) replaces the older choice. */
+  private offerStairs(prompt: StairPrompt, userId: UserId, only?: Session): void {
+    for (const [id, offer] of this.stairOffers) if (offer.tokenId === prompt.tokenId && offer.sceneId === prompt.sceneId) {
+      this.stairOffers.delete(id);
+      this.sendStairNotice(this.stairSessions(offer.userId), { offerId: id, sceneId: offer.sceneId, tokenId: offer.tokenId }, "ended");
+    }
+    const targets = this.stairSessions(userId, only);
+    if (!targets.length) return;
+    const offerId = globalThis.crypto.randomUUID();
+    const base = { offerId, sceneId: prompt.sceneId, tokenId: prompt.tokenId };
+    if (prompt.reason === "locked" || !prompt.choices.length) { this.sendStairNotice(targets, base, prompt.reason === "locked" ? "locked" : "none"); return; }
+    this.stairOffers.set(offerId, { userId, sceneId: prompt.sceneId, tokenId: prompt.tokenId, fromLevelId: prompt.fromLevelId, regionIds: [...prompt.regionIds],
+      choices: prompt.choices.map((c) => c.levelId), expiresAt: this.now() + STAIR_OFFER_TTL_MS });
+    for (const target of targets) this.send(target, { kind: "stair.offer", ...base, ...(prompt.label ? { label: prompt.label } : {}), choices: prompt.choices, ttlMs: STAIR_OFFER_TTL_MS, status: "open" });
+  }
+  /**
+   * After any commit (undo included): withdraw offers whose token left, changed floor or lost its
+   * stairs. Wall edits count too: closing a linked door locks its stairwell (G-11, D-437).
+   */
+  private refreshStairOffers(ops: readonly Op[]): void {
+    if (!this.stairOffers.size) return;
+    const touched = new Set(ops.flatMap((op) => op.kind === "create" ? [] : op.ref.coll === "tokens" ? [op.ref.id]
+      : op.ref.coll === "regions" || op.ref.coll === "levels" || op.ref.coll === "scenes" || op.ref.coll === "walls" ? ["*"] : []));
+    if (!touched.size) return;
+    const now = this.now();
+    for (const [id, offer] of this.stairOffers) {
+      if (!touched.has("*") && !touched.has(offer.tokenId) && now <= offer.expiresAt) continue;
+      const scene = this.store.get("scenes", offer.sceneId);
+      const token = scene?.tokens.find((t) => t._id === offer.tokenId);
+      const still = scene && token && now <= offer.expiresAt ? stairChoicesHere(scene, token, offer.regionIds) : null;
+      if (still && offer.choices.some((levelId) => still.choices.some((c) => c.levelId === levelId))) continue;
+      this.stairOffers.delete(id);
+      this.sendStairNotice(this.stairSessions(offer.userId), { offerId: id, sceneId: offer.sceneId, tokenId: offer.tokenId }, "ended");
+    }
+  }
+  private canMoveToken(user: SessionUser, scene: SceneDocument, token: TokenDocument): boolean {
+    return user.role === "GM" || user.role === "ASSISTANT" || can(user, "update", token, "tokens", { parent: scene }) ||
+      this.store.getAll("actors").some((a) => a._id === token.actorId && can(user, "update", a, "actors"));
+  }
+  private handleStairChoose(session: Session, msg: StairChooseMsg): void {
+    const user = session.user;
+    if (!user || !session.features.has(STAIRS_V2_FEATURE) || typeof msg.offerId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.offerId) ||
+        (msg.levelId !== null && (typeof msg.levelId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.levelId)))) return;
+    const offer = this.stairOffers.get(msg.offerId);
+    if (!offer || offer.userId !== user.id) { this.sendStairNotice([session], { offerId: msg.offerId, sceneId: offer?.sceneId ?? "", tokenId: offer?.tokenId ?? "" }, "ended", "That stair choice is no longer available"); return; }
+    const base = { offerId: msg.offerId, sceneId: offer.sceneId, tokenId: offer.tokenId };
+    if (!session.intentBucket.tryRemove()) { this.sendStairNotice([session], base, "open", "Too many requests. Try again shortly."); return; }
+    this.stairOffers.delete(msg.offerId);
+    const targets = this.stairSessions(user.id);
+    if (msg.levelId === null) { this.sendStairNotice(targets, base, "ended"); return; }
+    if (this.now() > offer.expiresAt) { this.sendStairNotice(targets, base, "ended", "The stair choice expired"); return; }
+    const scene = this.store.get("scenes", offer.sceneId) as SceneDocument | undefined;
+    const token = scene?.tokens.find((t) => t._id === offer.tokenId);
+    let error: string | undefined;
+    if (!scene || !token || !offer.choices.includes(msg.levelId) || !this.canMoveToken(user, scene, token)) error = "That stair choice is no longer available";
+    else {
+      try {
+        const ops = stairChoiceOps(scene, offer, msg.levelId);
+        const compatibility = this.draftCompatibilityError(ops);
+        const committed = compatibility ? { ok: false as const, error: compatibility } : this.commitOps(ops, user.id, `stair-${msg.offerId}`, true);
+        if (!committed.ok) error = committed.error;
+      } catch (e) { error = e instanceof Error ? e.message : String(e); }
+    }
+    this.sendStairNotice(targets, base, "ended", error);
+  }
+  private handleStairRequest(session: Session, msg: StairRequestMsg): void {
+    const user = session.user;
+    if (!user || !session.features.has(STAIRS_V2_FEATURE) || typeof msg.sceneId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.sceneId) ||
+        typeof msg.tokenId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(msg.tokenId)) return;
+    const base = { offerId: globalThis.crypto.randomUUID(), sceneId: msg.sceneId, tokenId: msg.tokenId };
+    if (!session.intentBucket.tryRemove()) { this.sendStairNotice([session], base, "none", "Too many requests. Try again shortly."); return; }
+    const scene = this.store.get("scenes", msg.sceneId) as SceneDocument | undefined;
+    const token = scene?.tokens.find((t) => t._id === msg.tokenId);
+    // Unknown, hidden-from-you and unowned tokens share one answer.
+    if (!scene || !token || !this.canMoveToken(user, scene, token)) { this.sendStairNotice([session], base, "none"); return; }
+    this.offerStairs(stairChoicesHere(scene, token), user.id, session);
+  }
+
+  /** G-07: the floor a player is currently looking at, used to place what they create. */
+  private preferredLevelFor(userId: UserId, sceneId: string): string | null {
+    for (const session of this.sessions.values()) {
+      const focus = session.levelFocus;
+      if (session.user?.id !== userId || focus?.sceneId !== sceneId || session.user.role === "GM" || session.user.role === "ASSISTANT") continue;
+      const view = levelFocusView(this.store.get("scenes", sceneId), this.store.getAll("actors"), session.user, focus.levelId, focus.followTokenId);
+      if (view.levelId) return view.levelId;
+    }
+    return null;
+  }
+  /** G-13 (D-434): a GM's explicit floor focus is their build floor; never the follow default. */
+  private buildLevelFor(userId: UserId, sceneId: string): string | null {
+    for (const session of this.sessions.values()) {
+      const focus = session.levelFocus;
+      if (session.user?.id !== userId || focus?.sceneId !== sceneId || (session.user.role !== "GM" && session.user.role !== "ASSISTANT") || !focus.levelId) continue;
+      if (this.store.get("scenes", sceneId)?.levels?.some((l) => l._id === focus.levelId)) return focus.levelId;
+    }
+    return null;
   }
   private allowsFogLevel(session: Session, sceneId: string, levelId?: string): boolean {
     if (this.sessions.get(session.peerId) !== session || !session.user || fogLevelIdError(levelId)) return false;
@@ -1552,6 +1684,7 @@ export class HostSync {
       manifest,
     });
     session.manifestFingerprint = JSON.stringify(manifest);
+    session.floorKeys = new Map([...this.floorViews(session.user as SessionUser)].map(([id, view]) => [id, view.keys]));
     return this.store.seq;
   }
 
@@ -2261,7 +2394,9 @@ export class HostSync {
         area.units === "ft" && area.width === undefined && area.direction === undefined) {
       // The spread resolver has no cell-blocker geometry. Refuse to claim a host-verified area
       // across authored blocking walls rather than treating those walls as transparent.
-      if (scene.walls.some((wall) => wall.move === 0 || wall.sight === 0)) return false;
+      // G-27 (D-447): in floor play, only the caster's floor's walls stand in the spread's way.
+      const floor = areaFloorOf(scene, casterToken);
+      if ((floor ? wallsOnFloor(scene.walls, floor) : scene.walls).some((wall) => wall.move === 0 || wall.sight === 0)) return false;
       const col = area.origin.x / built.grid.cellSize;
       const row = area.origin.y / built.grid.cellSize;
       const unitsPerFoot = scene.grid.size / scene.grid.distance;
@@ -2271,7 +2406,8 @@ export class HostSync {
           area.origin.x > scene.width || area.origin.y > scene.height) return false;
       const resolved = resolveAreaCells({ kind: "spread", origin: { col, row }, radiusFt: 40 }, built.grid);
       if (resolved.issues.length > 0) return false;
-      return affectedTokens(resolved.cells, [token], built.grid).length === 1;
+      return affectedTokens(resolved.cells, [token], built.grid).length === 1 &&
+        areaFloorReach(scene, casterToken, { origin: area.origin, radius: 40 })(token);
     }
 
     const sourceActor = action.source.actorId
@@ -2287,8 +2423,11 @@ export class HostSync {
         area.origin.x < 0 || area.origin.y < 0 || area.origin.x > scene.width || area.origin.y > scene.height)
       return false;
     const line = { origin: area.origin, direction: area.direction, lengthFt: 90, widthFt: 5 };
+    // G-27 (D-447): a line stays on its caster's floor, and only that floor's walls block it.
+    const floor = areaFloorOf(scene, casterToken);
     return lineIntersectsTokenFootprint(line, token, built.grid) &&
-      !sightBlockedBetween(scene.walls, area.origin, { x: token.x, y: token.y });
+      !sightBlockedBetween(floor ? wallsOnFloor(scene.walls, floor) : scene.walls, area.origin, { x: token.x, y: token.y }) &&
+      areaFloorReach(scene, casterToken, { origin: area.origin })(token);
   }
 
   /** Versioned PF1e adapter: rederive a normal spell target from immutable host roll facts/state. */
@@ -3015,11 +3154,11 @@ export class HostSync {
         const coll = op.kind === "create" ? op.coll : op.ref.coll;
         if (coll === "scenes" && op.kind === "delete" && (this.store.get("scenes", op.ref.id)?.levels?.length ?? 0) > 0)
           return { ok: false, reason: "forbidden", error: "only GMs remove scenes containing draft levels" };
-        if ((coll === "tokens" || coll === "walls" || coll === "lights") && (op.kind === "create"
+        if ((coll === "tokens" || isScopedCollection(coll)) && (op.kind === "create"
           ? Object.hasOwn(op.data, coll === "tokens" ? "levelId" : "levelScope")
           : op.kind === "update" && Object.keys(op.diff).some((key) => /^(?:-=)?(?:levelId|levelScope)(?:\.|$)/.test(key))))
           return { ok: false, reason: "forbidden", error: "Only GMs assign level membership and scopes" };
-        if (coll === "scenes" && op.kind === "update" && Object.keys(op.diff).some((key) => /^(?:-=)?(?:tokens|walls|lights)(?:\.|$)/.test(key)) &&
+        if (coll === "scenes" && op.kind === "update" && Object.keys(op.diff).some((key) => /^(?:-=)?(?:tokens|walls|lights|drawings|templates|notes)(?:\.|$)/.test(key)) &&
             (this.store.get("scenes", op.ref.id)?.levels !== undefined || JSON.stringify(op.diff).includes('"levelScope"') || JSON.stringify(op.diff).includes('"levelId"')))
           return { ok: false, reason: "forbidden", error: "Only GMs replace level-bound scene arrays" };
         if (coll === "levels" || (coll === "scenes" && op.kind === "update" &&
@@ -3153,7 +3292,8 @@ export class HostSync {
             const tile = op.data as TileDocument;
             if (user.role !== "GM" && user.role !== "ASSISTANT" && tile.sort !== undefined)
               return { ok: false, reason: "forbidden", error: "only GMs set tile trigger priority" };
-            const shapeError = tileTriggerZoneError(tile.triggerZone) ?? tileTriggerElevationError(tile.triggerElevation);
+            const shapeError = tileTriggerZoneError(tile.triggerZone) ?? tileTriggerElevationError(tile.triggerElevation) ??
+              roofOcclusionError(tile.occlusion) ?? tileRoofError(tile);
             if (shapeError) return { ok: false, reason: "invalid_schema", error: shapeError };
           }
           // Attachment metadata is host-owned on placement. A player must not
@@ -3330,6 +3470,12 @@ export class HostSync {
           const dry = applyDiff(doc, op.diff);
           if (!dry.ok)
             return { ok: false, reason: "invalid_schema", error: dry.error };
+          // D-438: roof fields are checked on the tile they produce (dotted paths included).
+          if (op.ref.coll === "tiles" && Object.keys(op.diff).some((key) => /^(?:-=)?(?:occlusion|roofGroup|revealInFog)(?:\.|$)/.test(key))) {
+            const tile = dry.value as TileDocument;
+            const roofError = roofOcclusionError(tile.occlusion) ?? tileRoofError(tile);
+            if (roofError) return { ok: false, reason: "invalid_schema", error: roofError };
+          }
           if (op.ref.coll === "regions") {
             const regionError = regionGeometryError(dry.value);
             if (regionError) return { ok: false, reason: "invalid_schema", error: regionError };
@@ -3666,9 +3812,23 @@ export class HostSync {
       ops = fxBindingDeletionOps(this.store.world,
         boundFxDeletionOps(this.store.world, summonDeletionOps(this.store.world, deleting.ops)));
     }
+    let stairPrompts: StairPrompt[] = [];
     if (!restoring) {
-      try { ops = stairMovementOps(ops, (id) => this.store.get("scenes", id)); }
-      catch (error) { return { ok: false, error: String(error) }; }
+      try {
+        ops = levelCreationOps(ops, (id) => this.store.get("scenes", id), (sceneId) => this.preferredLevelFor(by, sceneId), (sceneId) => this.buildLevelFor(by, sceneId));
+        const plan = stairMovementPlan(ops, (id) => this.store.get("scenes", id));
+        ops = plan.ops; stairPrompts = plan.prompts;
+      }
+      catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+      // G-23 (D-448): players cannot walk out over an opening (the stairs carry them inside a
+      // stairwell). The GM can, and is offered the fall afterwards.
+      const author = this.store.get("users", by) as UserDocument | undefined;
+      if (by !== this.systemUserId && author?.role !== "GM" && author?.role !== "ASSISTANT") {
+        const [off] = unsupportedWalks(ops, (id) => this.store.get("scenes", id) as SceneDocument | undefined);
+        if (off) return { ok: false, error: `No floor there: ${off.name} would step into an opening on ${off.floor}.` };
+      }
+      // D-453: walking tokens keep to the ground under them: onto a raised area's top, and down again.
+      ops = [...ops, ...raisedGroundOps(ops, (id) => this.store.get("scenes", id) as SceneDocument | undefined)];
     }
     if (audit) {
       if (!ops.length) return { ok: false, error: "Cannot audit an empty world action" };
@@ -3800,6 +3960,8 @@ export class HostSync {
     // multi-commit path and refuses stale/intervening edits.
     if (recordUndo) this.undoStack.push(envelope, applied.value.inverses);
     this.broadcastEnvelope(envelope, applied.value.inverses);
+    this.refreshStairOffers(ops);
+    for (const prompt of stairPrompts) this.offerStairs(prompt, by);
     for (const [messageId, priorRevision] of actionRevisionsBefore) {
       const action = actionCardOf(this.store.get("messages", messageId) as MessageDocument | undefined);
       if (action && action.revision !== priorRevision)
@@ -4021,11 +4183,12 @@ export class HostSync {
         crossings.length > 0
           ? projectWithCrossings(envelope, session.user, crossings, resolver)
           : projectEnvelope(envelope, session.user, resolver);
-      if (projected) {
+      const floored = this.withFloorDisclosure(session, envelope, projected);
+      if (floored) {
         const withCells =
           cellCrossings.length > 0
-            ? withCellReveals(projected, session.user, cellCrossings)
-            : projected;
+            ? withCellReveals(floored, session.user, cellCrossings)
+            : floored;
         this.send(session, { kind: "ops", envelope: withCells });
       }
       // A visible document may add/remove an asset reference; even a projected-away op can
@@ -4034,6 +4197,87 @@ export class HostSync {
       this.sendLevelFocus(session);
     }
     this.reconcileFxInstances();
+  }
+
+  /** G-33 (D-451): the readable scenes in isolated floor play, as this player's replica should hold them. */
+  private floorViews(user: SessionUser): Map<string, { view: SceneDocument; keys: Set<string> }> {
+    const views = new Map<string, { view: SceneDocument; keys: Set<string> }>();
+    if (user.role === "GM" || user.role === "ASSISTANT") return views;
+    const actorOf = (id: string) => this.store.get("actors", id) as ActorDocument | undefined;
+    for (const scene of this.store.getAll("scenes") as SceneDocument[]) {
+      if (getEffectiveOwnership(user, scene) < OWNERSHIP_LEVELS.LIMITED || !floorDisclosure(scene, user, actorOf)) continue;
+      const view = projectSceneFor(user, scene, actorOf);
+      views.set(scene._id, { view, keys: floorPartKeys(view) });
+    }
+    return views;
+  }
+
+  /**
+   * G-33 (D-451): floor boundary crossings for one session. Walk its projected ops against what
+   * its replica holds (dropping any create it already has, and any update or delete for something
+   * it lacks); then, where the result is not the scene as it should now see it (a token took the
+   * stairs, the player's own token changed floors, floor play started or ended), replace the
+   * scene's floor-bound parts with its projection. A whole-array replace cannot fail on a replica.
+   */
+  private withFloorDisclosure(session: Session, envelope: OpEnvelope, projected: OpEnvelope | null): OpEnvelope | null {
+    const user = session.user;
+    if (!user || user.role === "GM" || user.role === "ASSISTANT") return projected;
+    const previous = session.floorKeys ?? new Map<string, Set<string>>();
+    const now = this.floorViews(user);
+    if (!previous.size && !now.size) return projected;
+    const crossing = new Set([...previous.keys(), ...now.keys()].filter((id) => previous.has(id) !== now.has(id)));
+    const held = new Map([...previous].map(([id, keys]) => [id, new Set(keys)]));
+    const fresh = new Set<string>(); // scenes this envelope delivers whole (created, or newly readable)
+    const ops: Op[] = [];
+    let modified = false;
+    for (const op of projected?.ops ?? []) {
+      const coll = op.kind === "create" ? op.coll : op.ref.coll;
+      const parent = op.kind === "create" ? op.parent : op.ref.parent;
+      if (coll === "scenes" && !parent) {
+        const sceneId = op.kind === "create" ? op.data._id : op.ref.id;
+        const target = now.get(sceneId);
+        if (op.kind === "delete") held.delete(sceneId);
+        else if (op.kind === "create") { fresh.add(sceneId); held.set(sceneId, floorPartKeys(op.data as SceneDocument)); }
+        else {
+          // A scene update carrying floor-bound parts carries their current projection.
+          const keys = held.get(sceneId);
+          for (const key of Object.keys(op.diff)) {
+            const part = key.replace(/^-=/, "").split(".")[0] ?? "";
+            if (!keys || !target || !isFloorDisclosedPart(part)) continue;
+            for (const k of [...keys]) if (k.startsWith(`${part}:`)) keys.delete(k);
+            for (const k of target.keys) if (k.startsWith(`${part}:`)) keys.add(k);
+          }
+        }
+        ops.push(op);
+        continue;
+      }
+      if (parent?.coll !== "scenes" || !isFloorDisclosedPart(coll)) { ops.push(op); continue; }
+      if (crossing.has(parent.id) && !fresh.has(parent.id)) { modified = true; continue; } // the replace below carries it
+      const keys = held.get(parent.id);
+      if (!keys) { ops.push(op); continue; }
+      const key = `${coll}:${op.kind === "create" ? op.data._id : op.ref.id}`;
+      if (op.kind === "create" ? keys.has(key) : !keys.has(key)) { modified = true; continue; }
+      if (op.kind === "create") keys.add(key);
+      if (op.kind === "delete") keys.delete(key);
+      ops.push(op);
+    }
+    const actorOf = (id: string) => this.store.get("actors", id) as ActorDocument | undefined;
+    for (const sceneId of new Set([...crossing, ...now.keys()])) {
+      const scene = this.store.get("scenes", sceneId) as SceneDocument | undefined;
+      if (!scene || getEffectiveOwnership(user, scene) < OWNERSHIP_LEVELS.LIMITED) continue;
+      const target = now.get(sceneId);
+      const keys = held.get(sceneId);
+      if (target && keys && keys.size === target.keys.size && [...keys].every((k) => target.keys.has(k))) continue; // already exact
+      if (!target && (!previous.has(sceneId) || fresh.has(sceneId))) continue; // not floor-bounded, and delivered whole
+      const view = target?.view ?? projectSceneFor(user, scene, actorOf);
+      const diff: Record<string, Json> = {};
+      for (const part of FLOOR_DISCLOSED_PARTS) if (view[part] !== undefined) diff[part] = view[part] as unknown as Json;
+      ops.push({ kind: "update", ref: { coll: "scenes", id: sceneId }, diff });
+      modified = true;
+    }
+    session.floorKeys = new Map([...now].map(([id, value]) => [id, value.keys]));
+    if (!ops.length) return null;
+    return modified || !projected || ops.length !== projected.ops.length ? { ...envelope, ops } : projected;
   }
 
   // ─── GM Tagger rules: live scene-wide allocation, not client-computed ops ───

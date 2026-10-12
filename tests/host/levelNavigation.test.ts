@@ -41,3 +41,25 @@ test("real join: owned floors only, host switching, invalid selection, live revo
     tb.hidden = true; expect(levelFocusView(copy, [actor], client.user, "b").levelId).toBeNull();
   } finally { pump.stop(); playerApp.close(); share.close(); await hostApp.close(); const db = await openVttDb(); await deleteWorldData(db, hostApp.worldId); db.close(); }
 });
+
+test("D-443: a GM-only change projected away from a player keeps the player's floor focus usable", async () => {
+  const { hostApp, playerApp, share, pump } = await joinHostPlayer();
+  try {
+    const client = playerApp.client; if (!client?.user) throw new Error("join failed");
+    const gm = hostApp.gm.client, parent = { coll: "scenes" as const, id: DEFAULT_SCENE_ID };
+    await gm.submitAndWait([...["a", "b"].map((id, i) => ({ kind: "create" as const, coll: "levels" as const, parent, data: draftLevel(id, id, i * 10, i * 10 + 10) })),
+      { kind: "create", coll: "tokens", parent, data: token("tb", "b", 10, client.user.id) }]);
+    await gm.submitAndWait([{ kind: "update", ref: { coll: "scenes", id: DEFAULT_SCENE_ID }, diff: { levelMode: "isolated" } }]);
+    client.requestLevelFocus(DEFAULT_SCENE_ID, null); await settle(6);
+    expect(client.levelFocus).toMatchObject({ levelId: "b", isolated: true });
+    expect(client.levelFocus?.worldSeq).toBe(client.store.seq);
+    // Draft levels never reach players, so this envelope is projected away entirely: the player's
+    // replica stays at the older seq, and the focus state must say so rather than the host's seq.
+    const before = client.store.seq;
+    await gm.submitAndWait([{ kind: "update", ref: { coll: "levels", id: "b", parent }, diff: { visibleLevelIds: ["a"] } }]); await settle(6);
+    expect(gm.store.seq).toBeGreaterThan(before);
+    expect(client.store.seq).toBe(before);
+    expect(client.levelFocus?.presentation?.below).toEqual([{ levelId: "a", depth: 1, tileIds: [], useSceneBackground: false }]);
+    expect(client.levelFocus?.worldSeq).toBe(client.store.seq);
+  } finally { pump.stop(); playerApp.close(); share.close(); await hostApp.close(); const db = await openVttDb(); await deleteWorldData(db, hostApp.worldId); db.close(); }
+});

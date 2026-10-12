@@ -54,6 +54,16 @@ a conformance fixture that keeps the behaviour honest. Defaults while a case is 
 third-party code committed; clean-room re-implementation for GPL-derived logic; MIT code adopted
 with attribution; **no** assets from projects without a licence.
 
+**Known open item — the PF1e starter world's test map art (D-454).** `Assets/Maps/IceBeacon/{hall,
+gallery,ring,beacon}.webp` are 50 % downscales of the sample maps inside `Examples/RipperLevels-7.0.3.zip`
+(the Levels module by theripper93), whose README credits them as "using assets from Forgotten Adventures";
+no licence grant for either the module or those maps could be located (`tools/adopt/INVENTORY.md` rows
+14–15). They exist only so human testers have a real multi-floor map to exercise floors, stairs, openings
+and raised areas with, and they are **internal testing only**: they are not licensed for redistribution, so
+a public build of the starter world must swap them for owned or licensed art (the scene takes any square
+2150-px art per floor; see `ELEVATION_TEST_SCENE.md` §6). The crate and scaffold props in the same folder
+are original work drawn for this scene, and so is every document the scene ships.
+
 ## 4. Reporting a problem
 
 If you hold rights to something in this repository and believe it is used incorrectly, open an

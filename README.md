@@ -27,6 +27,12 @@ pnpm content:convert # → dist/content/pf1e (manifest + packs + OGL.txt + CREDI
 For shorter FX regression runs (one batch at a time, 15-minute global cap), see
 [FX_TEST_BATCHES.md](FX_TEST_BATCHES.md).
 
+**Run no test command that takes more than 25 minutes.** The batches in `package.json` are sized for
+that (`test:fx:*` cap at 15 minutes, `test:multilevel` at 20), and `pnpm test:e2e` is the one that
+does not: it is all 138 specs with no global timeout, hours of wall clock. Take the batches, or name
+the specs you need — `pnpm exec playwright test e2e/one.spec.ts e2e/two.spec.ts --workers=1` — and run
+heavy jobs one at a time (vitest, Playwright, lint, tsc, build), because the 2-CPU sandbox dies when
+they overlap.
 
 Requires Node 20+ and pnpm 10.
 
@@ -183,6 +189,13 @@ point `LD_LIBRARY_PATH` at the library directory and pass its `executablePath()`
 variable above. That is how the acceptance runs in this repository's own sandbox were made
 (repeatedly, after the CDN turned out to be unreachable).
 
+**Unpack `swiftshader.tar.br` into the same directory as the `chromium` executable** (so
+`libEGL.so`, `libGLESv2.so`, `libvk_swiftshader.so` and `vk_swiftshader_icd.json` sit beside it).
+Chromium looks for them there; `LD_LIBRARY_PATH` or ANGLE flags alone are not enough. Without them
+WebGL is unavailable and Pixi silently falls back to its Canvas2D renderer, so pixel tests then
+exercise the fallback rather than the normal path (D-429: Faux Overhead covers hide whole tokens
+there, and `e2e/faux_overhead.spec.ts` asserts that contract when it detects Canvas2D).
+
 Containers without user namespaces cannot start the Chromium sandbox; there,
 `PLAYWRIGHT_CHROMIUM_NO_SANDBOX=1` is the explicit opt-in that relaxes it. It is the only
 case in which the config passes a browser-security flag, it applies only alongside the
@@ -244,3 +257,16 @@ Assign player-controlled tokens to saved levels in the GM scene editor. Compatib
 This supersedes the token-only limitation above for explicitly enabled scenes. In **Scenes → Draft levels**, assign each floor's map tiles/background, assign wall/light scopes, then open **Floor artwork & stair travel** to create stairs and enable isolated floor play. Players see one floor's maps, lighting and remembered fog; the view follows their controlled token through stairs by default. The manual selector is a collapsed fallback.
 
 A stair trip completes when a move ends inside the source-floor region; XY is preserved and floor/elevation change in one undoable transaction. Return stairs require leaving and entering again. Unassigned artwork/global foreground and auxiliary layers are excluded rather than mixed. This is playable discrete-floor rendering, **not comprehensive network/asset/FX secrecy or cross-floor sight/light**. Detailed setup and limits: `MULTILEVEL_IMPLEMENTATION.md`.
+
+### Where the multilevel work stands (D-429 … D-454)
+
+Everything the two sections above list as pending has landed: players see lower floors' art, tokens
+and light **through the openings their own floor traces**, stairs are drawn and edited on the map rail,
+the GM has a floor view with build mode, and other floors' data now stays on the host. The 20-ft
+"three-storey building" question is answered by a scene a tester can open: the PF1e starter world
+(`pnpm build:worlds`) ships **Ice Beacon — Elevation Test** — four floors of different heights
+(20 / 15 / 10 ft and an open top), six stairwells, openings to look down through, crate stacks of
+5 / 10 / 15 ft that hide what is behind them, a 10-ft scaffold that hides nothing, and height labels
+under every token (from the ground for the GM, from their own token for a player).
+`ELEVATION_TEST_SCENE.md` is the layout and the tester script; `MULTILEVEL_GAP_ANALYSIS_LEVELS_ROOFS.md`
+keeps the item-by-item progress table.

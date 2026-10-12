@@ -84,6 +84,10 @@ export const MsgKind = {
   "codex.claim": 0x58,
   "level.focus": 0x59,
   "level.focus.state": 0x5a,
+  // G-01/G-08 (D-430) — stairwell choice: host offer to the mover, client answer or explicit request.
+  "stair.offer": 0x5b,
+  "stair.choose": 0x5c,
+  "stair.request": 0x5d,
   // D-394 — permitted personal macro authoring in the GM world (not execution).
   "macros.save": 0x51,
   // SQ-02 — private acknowledgement naming the exact host-approved run a requester may cancel.
@@ -1041,9 +1045,30 @@ export interface LevelFocusStateMsg extends LevelFocusView {
   error?: "unavailable" | "rate_limited";
 }
 
+/** G-01 (D-430): host → the moving user. A move stopped in a stairwell offers floors. */
+export interface StairOfferMsg {
+  kind: "stair.offer";
+  offerId: string;
+  sceneId: string;
+  tokenId: string;
+  label?: string;
+  choices: Array<{ levelId: string; name: string; direction: "up" | "down" | "level" }>;
+  ttlMs: number;
+  /** open: choose now · locked: entering did nothing · none: nothing to choose here · ended: withdrawn or answered. */
+  status: "open" | "locked" | "none" | "ended";
+  error?: string;
+}
+/** Client → host answer; `levelId:null` stays on the current floor. */
+export interface StairChooseMsg { kind: "stair.choose"; offerId: string; levelId: string | null }
+/** G-08: client → host "take the stairs" for a token already standing in a stairwell. */
+export interface StairRequestMsg { kind: "stair.request"; sceneId: string; tokenId: string }
+
 export type WireMessage =
   | LevelFocusMsg
   | LevelFocusStateMsg
+  | StairOfferMsg
+  | StairChooseMsg
+  | StairRequestMsg
   | HelloMsg
   | IntentMsg
   | RollMsg

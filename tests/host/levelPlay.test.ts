@@ -58,7 +58,7 @@ test("isolated canvas excludes every other map; entry changes floor atomically, 
     const live = hostApp.store.get("scenes", DEFAULT_SCENE_ID); if (!live) throw new Error("scene");
     const plan = planDuplicateSceneOps({ scene: live, id: "copied-floors" }); if (!plan.ok) throw new Error(plan.error);
     expect(sceneLevelsError(plan.copy)).toBeNull(); expect(plan.copy.levels?.[0]?.tileIds?.[0]).not.toBe("ground-map");
-    expect(plan.copy.regions?.[0]?.stairs?.from).toBe(plan.copy.levels?.[0]?._id);
+    expect((plan.copy.regions?.[0]?.stairs as { from?: string } | undefined)?.from).toBe(plan.copy.levels?.[0]?._id);
     const db = await openVttDb();
     const file = await exportWorldZip({ db, root: null, worldId: hostApp.worldId, persister: hostApp.persister });
     const copy = await importWorldZip({ db, root: null, file, mode: "copy", worldId: "floor-play-copy" }); copies.push(copy.worldId);
@@ -77,7 +77,8 @@ test("stair bounds, ambiguity, body clearance, draft activation and explicit rel
     expect(stairMovementOps([move(300)], () => scene)).toHaveLength(1); // crossing without ending inside
     expect(stairMovementOps([move(150)], () => ({ ...scene, levelMode: undefined } as unknown as SceneDocument))).toHaveLength(1);
     expect(stairMovementOps([move(150), { kind: "update", ref: { coll: "tokens", id: "hero", parent }, diff: { elevation: 1 } }], () => scene)).toHaveLength(2);
-    expect(() => stairMovementOps([move(150)], () => ({ ...scene, regions: [...(scene.regions ?? []), stairs("ambiguous", "base", "upper")] }))).toThrow("Overlapping");
+    // G-01 (D-430): overlapping stairs combine their destinations instead of refusing the move.
+    expect(stairMovementOps([move(150)], () => ({ ...scene, regions: [...(scene.regions ?? []), stairs("ambiguous", "base", "upper")] }))).toHaveLength(2);
     const wall: WallDocument = { _id: "blocking", type: "wall", name: "W", ownership: { default: 2 }, flags: {}, system: {}, c: [155, 0, 155, 100], levelScope: { mode: "levels", ids: ["upper"] }, door: 0, oneWay: false, move: 0, sight: 0, light: 0, sound: 0 };
     expect(() => stairMovementOps([move(150)], () => ({ ...scene, walls: [wall] }))).toThrow("landing");
     wall.levelScope = { mode: "levels", ids: ["base"] }; wall.c = [100, 0, 100, 100];

@@ -3,7 +3,16 @@
   import { LEVEL_LIGHTING_FEATURE } from "../core/capabilities";
   import SavesPanel from "../ui/settings/SavesPanel.svelte";
   import ZoomControl from "../ui/canvas/ZoomControl.svelte";
-  import { SceneLightingPlayer } from "../client/sceneLighting";
+  import StairChooser from "../ui/StairChooser.svelte";
+  import { floorForElevation, floorLighting, floorMoveOps, stairMarkers, STAIRS_V2_FEATURE } from "../core/levelPlay";
+  import { drawnStairwell, type StairArea } from "../core/stairAuthoring";
+  import { drawnRaisedArea, raisedMarkers } from "../core/raisedAreas";
+  import { areaFloorOf, areaFloorReach, wallsOnFloor } from "../core/areaFloors";
+  import { flightPassage, tokenFooting } from "../core/floorSupport";
+  import { adjacentFloor, floorRoster, gmFloorRender, GM_GHOST_ALPHA, type GmFloorMode } from "../core/gmFloorView";
+  import { unscopedToFloorOps } from "../core/levelAudit";
+  import type { StairOfferMsg } from "../core/messages";
+  import { SceneLightingPlayer, crossFloorLightingInput } from "../client/sceneLighting";
   import { SceneBackgroundPlayer } from "../client/sceneBackground";
   import { detectMapGridFromBytes } from "../client/gridDetection";
   import BackgroundPanel from "../ui/canvas/BackgroundPanel.svelte";
@@ -26,6 +35,10 @@
   import { createAgentManager, type AgentManager } from "./agentManager";
   import { createStage, type Stage } from "../canvas/stage";
   import { tokenRect } from "../canvas/tokens";
+  import { roofViewerTokens, type RoofArtMask } from "../core/roofs";
+  import { roofArtMaskFromTexture } from "../canvas/roofArt";
+  import { FLOOR_ART_MAX_SIDE } from "../core/floorSurface";
+  import { elevationCues, elevationViewer, lowerTokenLabels, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
   import { tokenHpBarsMap } from "../packages/pf1e/tokenHpBars";
@@ -79,6 +92,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { gmState } from "../ui/armies/gmState.svelte";
   import { buildStrategicFog, sceneIsStrategic } from "../core/strategicFog";
   import { FogExploration } from "../client/fogExploration";
+  import { refusalNotifier, type RefusalNotifier } from "../client/moveRefusals";
   import { createVisionComputer } from "../workers/visionComputer";
   import { ModuleIframe } from "../packages/moduleIframe";
   import { dice3dStats, diceInfoFromRecord, showDice3D } from "../dice/dice3d";
@@ -251,6 +265,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     SceneDocument,
     SceneGrid,
     TileDocument,
+    TokenDocument,
     UserDocument,
     WallDocument,
   } from "../core/documents";
@@ -528,8 +543,80 @@ const WALL_PICK_RADIUS = 12;
   function chooseLevelPreview(id: string) {
     const scene = activeScene();
     levelPreview = scene && id ? { sceneId: scene._id, levelId: id } : null;
+    syncBuildFocus();
     refresh();
   }
+  // G-12/G-13/G-17 (D-434): the GM floor view. Rendering/picking only — documents stay whole.
+  let floorMode = $state<GmFloorMode>("ghost");
+  let buildMode = $state(false);
+  let buildFocus: string | null = null;
+  function gmRender(scene: SceneDocument | null) {
+    const levelId = previewLevel(scene);
+    return scene ? gmFloorRender(scene, levelId ? { levelId, mode: floorMode } : null) : null;
+  }
+  /** The host stamps new objects with the GM's explicit floor focus (their build floor). */
+  function syncBuildFocus(): void {
+    const scene = activeScene(), levelId = previewLevel(scene);
+    const want = scene && buildMode && levelId ? `${scene._id}\u0000${levelId}` : null;
+    if (want === buildFocus || !scene || !app) return;
+    const previous = buildFocus;
+    buildFocus = want;
+    try { app.gm.client.requestLevelFocus(scene._id, want ? levelId ?? null : null); }
+    catch (error) { buildFocus = previous; notifyLog = [...notifyLog.slice(-49), { message: String(error), level: "warn" }]; }
+  }
+  function stepFloor(direction: 1 | -1): void {
+    const scene = activeScene();
+    if (!scene?.levels?.length) return;
+    chooseLevelPreview(adjacentFloor(scene.levels, previewLevel(scene) ?? null, direction) ?? "");
+  }
+  function isPlayerCharacter(token: TokenDocument): boolean {
+    const store = app?.gm.client.store;
+    const actor = token.actorId ? store?.get("actors", token.actorId) as ActorDocument | undefined : undefined;
+    const ownership = (actor?.ownership ?? token.ownership) as Record<string, number>;
+    return Object.entries(ownership).some(([id, level]) => id !== "default" && level >= 3 && (store?.get("users", id) as { role?: string } | undefined)?.role !== "GM");
+  }
+  function focusRosterToken(token: TokenDocument): void {
+    const view = stage, scene = activeScene();
+    if (!view || !scene) return;
+    if (token.levelId && previewLevel(scene) !== token.levelId) chooseLevelPreview(token.levelId);
+    const host = canvasHost?.getBoundingClientRect();
+    const scale = view.camera.scale;
+    fxPlayer?.cancelCamera();
+    view.setCamera({ ...view.camera, x: token.x - (host?.width ?? view.app.canvas.width) / 2 / scale, y: token.y - (host?.height ?? view.app.canvas.height) / 2 / scale });
+    controller?.select([token._id]);
+  }
+  // G-16 (D-435): GM floor moves and feet elevation from the token menu.
+  let elevationOffer = $state<{ tokenId: string; levelId: string; name: string; z: number; blockedBy: string | null } | null>(null);
+  function floorMenuTargets(tokenId: string): string[] {
+    const sceneId = activeScene()?._id ?? null;
+    return tokenSelection.sceneId === sceneId && tokenSelection.ids.includes(tokenId) ? [...tokenSelection.ids] : [tokenId];
+  }
+  async function moveTokensToFloor(ids: readonly string[], levelId: string, elevation?: number): Promise<void> {
+    const scene = activeScene();
+    if (!scene || !app) return;
+    try {
+      const ops = floorMoveOps(scene, ids, levelId, elevation);
+      if (ops.length) await app.gm.client.submitAndWait(ops);
+      closeTokenMenu(); elevationOffer = null;
+    } catch (error) { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; }
+  }
+  async function setTokenElevation(token: TokenDocument, z: number): Promise<void> {
+    const scene = activeScene();
+    if (!scene || !app || !Number.isFinite(z)) return;
+    elevationOffer = null;
+    const band = scene.levels?.length ? floorForElevation(scene, z) : null;
+    if (scene.levels?.length && token.levelId !== undefined && band && band._id !== token.levelId) {
+      // G-23 (D-448): a flight between floors is clear when the token fits through every opening on the way.
+      const passage = scene.levelMode === "isolated" ? flightPassage(scene, token, z) : { clear: true, blockedBy: null };
+      elevationOffer = { tokenId: token._id, levelId: band._id, name: band.name, z, blockedBy: passage.clear ? null : passage.blockedBy?.name ?? "A floor" }; return;
+    }
+    if (scene.levels?.length && token.levelId !== undefined && !band) {
+      notifyLog = [...notifyLog.slice(-49), { message: "No floor covers that height; elevation unchanged.", level: "warn" }]; return;
+    }
+    try { await app.gm.client.submitAndWait([{ kind: "update", ref: { coll: "tokens", id: token._id, parent: { coll: "scenes", id: scene._id } }, diff: { elevation: z } }]); }
+    catch (error) { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; }
+  }
+  const floorRosterRows = $derived.by(() => { void storeVersion; const scene = levelPreviewScene; return scene?.levels?.length ? floorRoster(scene, isPlayerCharacter) : []; });
   let fogResetBusy = $state(false), fogResetMessage = $state("");
   async function resetPreviewFog() {
     const scene = activeScene(), levelId = previewLevel(scene);
@@ -564,6 +651,8 @@ const WALL_PICK_RADIUS = 12;
     "wall",
     "light",
     "pin",
+    "stairs",
+    "raised",
   ]);
   const currentGrid = () => {
     const sc = activeScene();
@@ -639,6 +728,27 @@ const WALL_PICK_RADIUS = 12;
     lastPlacement = { kind: "light", id };
   }
   /** D-256 map pin: hidden by default (Roll20), visible = `ownership.default = LIMITED`. */
+  /** G-14 (D-450): the Stairs tool's rectangle becomes a stairwell joining the viewed floor and the next one. */
+  function createStairs(area: StairArea): void {
+    const scene = activeScene(), current = app;
+    if (!scene || !current) return;
+    const region = drawnStairwell(scene, area, { id: `stairs-${crypto.randomUUID()}`, levelId: previewLevel(scene) ?? null });
+    if (typeof region === "string") { notifyLog = [...notifyLog.slice(-49), { message: region, level: "warn" }]; return; }
+    void current.gm.client.submitAndWait([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: scene._id }, data: region }])
+      .then(() => { notifyLog = [...notifyLog.slice(-49), { message: `${region.name} added. Change its floors, directions or name under Scenes → Floor play & stairs.`, level: "info" }]; })
+      .catch((error: unknown) => { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; });
+  }
+  /** D-453: the Raised area tool's rectangle becomes a raised area on the viewed floor (height and solidity from the tool options). */
+  function createRaisedArea(area: StairArea): void {
+    const scene = activeScene(), current = app;
+    if (!scene || !current) return;
+    const region = drawnRaisedArea(scene, area, { id: `raised-${crypto.randomUUID()}`, levelId: previewLevel(scene) ?? null,
+      height: toolOptions.raisedHeight, solid: toolOptions.raisedSolid });
+    if (typeof region === "string") { notifyLog = [...notifyLog.slice(-49), { message: region, level: "warn" }]; return; }
+    void current.gm.client.submitAndWait([{ kind: "create", coll: "regions", parent: { coll: "scenes", id: scene._id }, data: region }])
+      .then(() => { notifyLog = [...notifyLog.slice(-49), { message: `${region.name} added. Change its height, solidity or name under Scenes → Raised areas.`, level: "info" }]; })
+      .catch((error: unknown) => { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; });
+  }
   function createPin(at: { x: number; y: number }) {
     const scene = activeScene();
     if (!scene) return;
@@ -926,6 +1036,12 @@ const WALL_PICK_RADIUS = 12;
     sceneId: null,
     ids: [],
   });
+  /** G-26c (D-438): GM-local "Peek under roofs"; never saved or sent. */
+  let roofPeek = $state(false);
+  $effect(() => {
+    const on = roofPeek && !viewingAs;
+    stage?.getTilesLayer({ loadTexture: tileImages.load }).setHoverFade(on);
+  });
   function clearTokenSelection(): void {
     controller?.clearSelection();
     tokenSelection = { sceneId: activeScene()?._id ?? null, ids: [] };
@@ -941,6 +1057,11 @@ const WALL_PICK_RADIUS = 12;
     return { bytes: await owner.gm.fetcher.request(hash, "scene"),
       mime: owner.gm.client.store.world.assetManifest[hash]?.mime ?? "image/png" };
   });
+  /** G-21 (D-444): floor tracing reads tile art alpha through the shared texture cache. */
+  async function floorArtMask(image: string): Promise<RoofArtMask | null> {
+    const texture = await tileImages.load(image);
+    return texture && !texture.destroyed ? roofArtMaskFromTexture(texture, FLOOR_ART_MAX_SIDE) : null;
+  }
   let share = $state<HostShare | null>(null);
   let shareError = $state<string | null>(null);
   let peerCode = $state("");
@@ -963,6 +1084,29 @@ const WALL_PICK_RADIUS = 12;
   let lastRulesVersion = "";
   let lastByType: Record<string, number> = {};
   let notifyLog = $state<{ message: string; level: string }[]>([]);
+  let gmMoveRefusals: RefusalNotifier | null = null;
+  // G-01 (D-430): a stairwell choice for a token the GM moved (NPCs included).
+  let gmStairOffer = $state<StairOfferMsg | null>(null);
+  let gmStairTimer: ReturnType<typeof setTimeout> | undefined;
+  function gmStairNotice(message: string): void { notifyLog = [...notifyLog.slice(-49), { message, level: "warn" }]; }
+  function onGmStairOffer(offer: StairOfferMsg): void {
+    if (offer.status === "open") {
+      gmStairOffer = offer; clearTimeout(gmStairTimer);
+      gmStairTimer = setTimeout(() => { if (gmStairOffer?.offerId === offer.offerId) gmStairOffer = null; }, Math.max(1000, offer.ttlMs));
+    } else if (offer.status === "ended" && gmStairOffer?.offerId === offer.offerId) { gmStairOffer = null; clearTimeout(gmStairTimer); }
+    if (offer.status === "locked") gmStairNotice("Those stairs are locked. Unlock them in Draft levels → Floor play & stairs.");
+    else if (offer.status === "none") gmStairNotice(offer.error ?? "There are no stairs to take there.");
+    else if (offer.error) gmStairNotice(offer.error);
+  }
+  function answerGmStairs(levelId: string | null): void {
+    const offer = gmStairOffer;
+    if (!offer) return;
+    gmStairOffer = null; clearTimeout(gmStairTimer);
+    try { app?.gm.client.chooseStair(offer.offerId, levelId); } catch (error) { gmStairNotice(String(error)); }
+  }
+  function gmStairTokenName(tokenId: string): string {
+    return (app?.gm.client.store.get("scenes", gmStairOffer?.sceneId ?? "") as SceneDocument | undefined)?.tokens.find((t) => t._id === tokenId)?.name ?? "";
+  }
   /**
    * D-187: the held move whose attacks of opportunity are the table's to take. While this
    * is set the token has *not* moved (the controller restored the render on `"cancel"`),
@@ -1662,6 +1806,17 @@ const WALL_PICK_RADIUS = 12;
     void storeVersion;
     return isHexcrawlScene(activeScene());
   });
+  /** D-453: raised areas belong on tactical maps (not strategic or hexcrawl scenes). */
+  const raisedToolAvailable = $derived.by(() => {
+    void storeVersion;
+    const scene = activeScene();
+    return !!scene && scene.flags?.core?.scale !== "strategic" && !isHexcrawlScene(scene);
+  });
+  /** G-14 (D-450): stairwells can be drawn once the scene has two floors. */
+  const stairsToolAvailable = $derived.by(() => {
+    void storeVersion;
+    return (activeScene()?.levels?.length ?? 0) >= 2 && app?.gm.client.supportsFeature(STAIRS_V2_FEATURE) === true;
+  });
 
   /** The travel panel's own model: one row per step, priced by terrain, plus the total. */
   interface TravelRow {
@@ -2354,9 +2509,12 @@ const WALL_PICK_RADIUS = 12;
       const radians = placement.angleDeg * Math.PI / 180;
       const direction = { x: Math.cos(radians), y: Math.sin(radians) };
       const line = { origin: { x: caster.x, y: caster.y }, direction, lengthFt: 90, widthFt: 5 };
+      // G-27 (D-447): the bolt stays on the caster's floor, blocked only by that floor's walls.
+      const floor = areaFloorOf(scene, caster), onFloor = areaFloorReach(scene, caster, { origin: line.origin });
+      const walls = floor ? wallsOnFloor(scene.walls, floor) : scene.walls;
       const targets = scene.tokens.flatMap((token) => {
-        if (token._id === caster._id || !lineIntersectsTokenFootprint(line, token, built.grid) ||
-            sightBlockedBetween(scene.walls, line.origin, { x: token.x, y: token.y })) return [];
+        if (token._id === caster._id || !onFloor(token) || !lineIntersectsTokenFootprint(line, token, built.grid) ||
+            sightBlockedBetween(walls, line.origin, { x: token.x, y: token.y })) return [];
         const targetActor = token.actorId
           ? current.gm.client.store.get("actors", token.actorId) as ActorDocument | undefined : undefined;
         return targetActor ? [{ tokenId: token._id, actor: targetActor }] : [];
@@ -2387,7 +2545,7 @@ const WALL_PICK_RADIUS = 12;
     }
     const preview = showPF1eAreaPreview({ kind: "spread",
       origin: { col: placement.point.x / scene.grid.size, row: placement.point.y / scene.grid.size },
-      radiusFt: 40 });
+      radiusFt: 40 }, caster);
     if (!preview.ok) {
       settleSpellAim({ ok: false, error: `Entangle area could not be resolved: ${preview.issues.map((issue) => issue.message).join("; ")}. No slot was spent.` });
       return;
@@ -2709,8 +2867,10 @@ const WALL_PICK_RADIUS = 12;
     // A preview is a view of the table, not only of the pixels: under it the GM's pointer plays
     // the player's part too, so a token the player cannot see is not selectable here either.
     const gate = viewingAs ? viewAsVisible : null;
+    // G-12: in build mode, or when other floors are not drawn, only this floor's tokens are picked.
+    const floor = !viewingAs && previewLevel(scene) && (buildMode || floorMode === "only") ? gmRender(scene) : null;
     return scene.tokens
-      .filter((token) => gate === null || gate.has(token._id))
+      .filter((token) => (gate === null || gate.has(token._id)) && (!floor || floor.pickable(token)))
       .map((token) => ({ token, sceneId: scene._id }));
   }
 
@@ -3000,7 +3160,7 @@ const WALL_PICK_RADIUS = 12;
    * callers can surface the named issues. The casting flow (C02 UI) is the
    * in-product consumer; every refusal is an issue, never a guess.
    */
-  function showPF1eAreaPreview(spec: PF1eAreaSpec): PF1eAreaPreviewModel {
+  function showPF1eAreaPreview(spec: PF1eAreaSpec, caster?: TokenDocument): PF1eAreaPreviewModel {
     const scene = activeScene();
     if (!scene) {
       pf1ePreview = null;
@@ -3016,11 +3176,15 @@ const WALL_PICK_RADIUS = 12;
         label: "",
       };
     }
+    // G-27 (D-447): an area happens on its caster's floor (with that floor's walls); tokens on
+    // other floors only where it reaches them through openings.
+    const floor = areaFloorOf(scene, caster);
+    const reach = areaFloorReach(scene, caster, { origin: { x: spec.origin.col * scene.grid.size, y: spec.origin.row * scene.grid.size }, radius: spec.radiusFt });
     pf1ePreview = pf1eAreaPreviewModel(
       {
         grid: scene.grid,
-        tokens: scene.tokens,
-        segments: sightSegments(scene.walls),
+        tokens: scene.tokens.filter(reach),
+        segments: sightSegments(floor ? wallsOnFloor(scene.walls, floor) : scene.walls),
       },
       spec,
     );
@@ -3052,7 +3216,8 @@ const WALL_PICK_RADIUS = 12;
       wallGestureSceneId = scene?._id ?? null;
       if (canvasTool === "wall") toolController?.activate("wall");
     }
-    view.getWallsLayer().sync(show ? (scene?.walls ?? []) : [], view.camera, canvasTool === "wall" && toolOptions.wallEditMode === "corner");
+    const walls = viewingAs ? scene?.walls : gmRender(scene)?.scene.walls;
+    view.getWallsLayer().sync(show ? (walls ?? []) : [], view.camera, canvasTool === "wall" && toolOptions.wallEditMode === "corner");
   }
 
   function refresh(): void {
@@ -3066,7 +3231,10 @@ const WALL_PICK_RADIUS = 12;
         !scene?.tokens.some((token) => token._id === pendingSpellAim?.casterTokenId)))
       settleSpellAim({ ok: false, error: "The caster or aiming scene changed; no slot was spent." });
     fxPlayer?.syncScene();
-    sceneLighting.sync(scene, view, previewLevel(scene));
+    // G-22 (D-446): the isolated floor view lights what players on that floor see through its openings.
+    const lightingLevel = previewLevel(scene);
+    const lightingFloor = lightingLevel && floorMode === "only" ? scene?.levels?.find((l) => l._id === lightingLevel) : undefined;
+    sceneLighting.sync(scene, view, lightingLevel, undefined, scene && lightingFloor ? crossFloorLightingInput(floorLighting(scene, lightingFloor), scene) : null);
     if (tokenSelection.sceneId !== (scene?._id ?? null)) clearTokenSelection();
     // A preview belongs to the scene it was resolved against; switching scenes
     // clears it rather than repainting stale cells.
@@ -3082,11 +3250,18 @@ const WALL_PICK_RADIUS = 12;
     worldName = current.meta.name;
     seq = current.gm.client.store.seq;
     tokenCount = scene?.tokens.length ?? 0;
-    const tokens = scene?.tokens ?? [];
+    syncBuildFocus();
+    const floor = viewingAs ? null : gmRender(scene);
+    const shown = floor?.scene ?? scene;
+    view.setFloorGhosts(floor && floorMode === "ghost" && previewLevel(scene) ? floor.ghost : null, GM_GHOST_ALPHA);
+    const tokens = shown?.tokens ?? [];
     // E06 (D-147): condition/effect chips derive on read from the client replica, so apply,
     // suppress and expiry all re-render the badges with no invalidation step.
     view.setTokenImageLoader(tileImages.load);
-    view.setFauxOverhead(scene?.regions ?? []);
+    view.setFauxOverhead(shown?.regions ?? []);
+    view.setStairMarkers(scene?.levels?.length ? stairMarkers(scene, previewLevel(scene) ?? null, true) : []);
+    // D-453: raised areas outlined with their height for the GM (a "view as" preview shows what the player sees: none).
+    view.setRaisedMarkers(scene && viewAsPlayer === null ? raisedMarkers(scene, previewLevel(scene) ?? null) : []);
     view.syncTokens(
       tokens,
       tokenBadgesMap(tokens, {
@@ -3111,6 +3286,15 @@ const WALL_PICK_RADIUS = 12;
         ? "hover"
         : "all",
     );
+    // G-32 (D-440), D-452: height labels from the ground, and (when enabled) tokens at other heights
+    // drawn smaller than the selected token. A "view as" preview follows the previewed player's rule.
+    const cueSettings = worldSettingsFrom(current.gm.client.store.getAll("settings"));
+    const cueOptions = {
+      mode: tokenElevationModeOf(cueSettings), isGm: viewAsPlayer === null,
+      viewer: scene ? elevationViewer(scene, viewAsPlayer ?? current.gm.client.user, current.gm.client.store.getAll("actors") as readonly ActorDocument[],
+        tokenSelection.sceneId === scene._id ? tokenSelection.ids : []) : null,
+    };
+    view.setTokenElevationCues(scene ? elevationCues(scene, tokens, { ...cueOptions, scaleByHeight: tokenElevationScaleOf(cueSettings) }) : new Map());
     // D-250/D-251: explored fog follows the replica — tokens moved, doors opened, scene
     // switched. The GM's cover is translucent (everything stays visible under it); god view
     // off previews the opaque cover players get — and a **view as** preview is always the
@@ -3123,10 +3307,10 @@ const WALL_PICK_RADIUS = 12;
     view.peekFogLayer()?.applyManualMask(mask);
     // D-256 map pins: the notes layer draws whatever this replica holds (players only ever
     // hold pins the GM made visible — the projection withholds the rest).
-    view.getNotesLayer().sync(scene?.notes ?? [], view.camera);
+    view.getNotesLayer().sync(shown?.notes ?? [], view.camera);
     // Replica-only scene geometry; both holders remain below the fog layer.
-    view.getDrawingsLayer().sync(scene?.drawings ?? [], view.camera);
-    view.getTemplatesLayer().sync(scene?.templates ?? [], view.camera);
+    view.getDrawingsLayer().sync(shown?.drawings ?? [], view.camera);
+    view.getTemplatesLayer().sync(shown?.templates ?? [], view.camera);
     // D-271: the hex overlay follows the replica — reveals, terrain, the party's ring. A scene
     // without a hexcrawl profile clears it (the feature switch), and a *view as* preview paints
     // what that player would see: the cover, not the GM's dimmed preparation view.
@@ -3139,16 +3323,29 @@ const WALL_PICK_RADIUS = 12;
     );
     // D-257: walls overlay follows the replica too (a door toggled anywhere redraws here).
     syncWallsOverlay();
-    // §9 tiles: roofs fade over tokens with vision (D-083)
-    const occupied = (scene?.tokens ?? [])
-      .filter((t) => t.vision)
-      .map((t) => tokenRect(t));
+    // §9 tiles: roofs fade over tokens with vision (D-083). D-438: only the viewer's own vision
+    // tokens open roofs (every token for the GM, the player's for "view as"), and a selection
+    // narrows them.
+    const occupied = shown
+      ? roofViewerTokens(shown, viewAsPlayer ?? current.gm.client.user,
+          current.gm.client.store.getAll("actors") as readonly ActorDocument[],
+          tokenSelection.sceneId === shown._id ? tokenSelection.ids : []).map((t) => tokenRect(t))
+      : [];
+    // G-19 (D-443): in the isolated floor view, the floors it sees below show through, as players see them.
+    // G-20 (D-445): with the tokens on those floors, beneath this floor's art.
+    // D-452: labelled like the tokens on the viewed floor (from the ground for the GM).
+    const belowLabels = floor && scene ? lowerTokenLabels(scene, scene.tokens.filter((t) => floor.lowerTokens.has(t._id)), cueOptions) : new Map<string, string>();
+    const lowerTokens = floor && scene ? scene.tokens.flatMap((t) => {
+      const depth = floor.lowerTokens.get(t._id);
+      return depth === undefined ? [] : [{ id: t._id, img: t.img, x: t.x, y: t.y, width: t.width, height: t.height, rotation: t.rotation ?? 0, depth, label: belowLabels.get(t._id) ?? null }];
+    }) : [];
+    view.setLowerFloors(floor?.lower ?? new Map(), floor?.backgroundDepth || null, lowerTokens);
     view
       .getTilesLayer({ loadTexture: tileImages.load })
-      .sync(scene?.tiles ?? [], occupied, scene?.regions ?? []);
+      .sync(shown?.tiles ?? [], occupied, shown?.regions ?? [], shown ? { gridSize: shown.grid.size } : {});
     tileImages.retain([...(scene?.tiles ?? []).map((tile) => tile.img), ...(scene?.tokens ?? []).map((token) => token.img)]);
-    sceneBackground.sync(scene?.img ?? null, current.gm.client.store.world.assetManifest,
-      (hash, priority) => current.gm.fetcher.request(hash, priority), view, scene);
+    sceneBackground.sync(shown?.img ?? null, current.gm.client.store.world.assetManifest,
+      (hash, priority) => current.gm.fetcher.request(hash, priority), view, shown);
     view.setGrid(sceneGridSpec(scene?.grid));
     syncBackgroundEditor();
   }
@@ -3259,6 +3456,25 @@ const WALL_PICK_RADIUS = 12;
       ...(uploaded.width !== undefined ? { width: uploaded.width } : {}),
       ...(uploaded.height !== undefined ? { height: uploaded.height } : {}),
     };
+  }
+
+  /** G-30 (D-449): an image picked for a Foundry scene import; a re-import reuses the stored file. */
+  async function importFoundryImage(file: File): Promise<{ hash: string }> {
+    const current = app;
+    if (!current) throw new Error("the world is not open");
+    assertImageByteLength(file.size);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    sniffImage(bytes);
+    const uploaded = await current.gm.client.uploadImageAsset(bytes, {
+      name: file.name,
+      displayName: normalizeImageName(file.name),
+      folder: imagePreferences.defaultUploadFolder,
+      sourceKind: "file",
+      collisionBehavior: "reuse",
+      convertToWebp: imagePreferences.webpConvert,
+      webpQuality: imagePreferences.webpQuality,
+    });
+    return { hash: uploaded.hash };
   }
 
   /**
@@ -3509,8 +3725,16 @@ const WALL_PICK_RADIUS = 12;
         `${r.reason}: ${r.detail}`,
       );
     });
+    // G-02 (D-429): a refused canvas move (a GM drag included) is explained, not silently undone.
+    gmMoveRefusals = refusalNotifier(current.gm.bus, (message) => {
+      notifyLog = [...notifyLog.slice(-49), { message, level: "warn" }];
+    });
+    const offGmStairs = current.gm.bus.on("stairOffer", onGmStairOffer);
     const onKey = (e: KeyboardEvent): void => {
       if (isTypingTarget(e.target)) return;
+      if ((e.key === "PageUp" || e.key === "PageDown") && !viewingAs && activeScene()?.levels?.length) {
+        e.preventDefault(); stepFloor(e.key === "PageUp" ? 1 : -1); return; // G-12 floor stepping
+      }
       if (e.key === "Escape") {
         controller?.clearRuler(); // §9 ruler dismiss
         closeTokenMenu(); // T01 menu dismiss (which also drops the hex menu)
@@ -3560,6 +3784,10 @@ const WALL_PICK_RADIUS = 12;
       offFxDelivery?.();
       offFxDelivery = null;
       offRejected();
+      gmMoveRefusals?.dispose();
+      gmMoveRefusals = null;
+      offGmStairs();
+      clearTimeout(gmStairTimer);
       offWm();
       globalThis.removeEventListener("keydown", onKey);
       globalThis.removeEventListener("keydown", onBackgroundKey);
@@ -3578,6 +3806,11 @@ const WALL_PICK_RADIUS = 12;
           hostElement,
         });
         stage = view;
+        if (view.rendererName === "canvas") {
+          // G-05 (D-429): one notice per session; the canvas stays correct, only less precise.
+          notifyLog = [...notifyLog.slice(-49), { level: "warn", message:
+            "Graphics acceleration is unavailable, so the map uses the slower Canvas2D renderer. Faux Overhead covers hide a whole token while it is under them instead of cutting the cover out." }];
+        }
         view.onBackgroundNaturalSize((size) => {
           backgroundNatural = size;
           syncBackgroundEditor();
@@ -3670,6 +3903,8 @@ const WALL_PICK_RADIUS = 12;
             current.gm.client.sendEphemeral("ruler", { points: points.map((p) => ({ x: p.x, y: p.y })) });
           },
           fogPaint: ({ mode, poly }) => paintFog(mode, poly),
+          createStairs: (area) => createStairs(area),
+          createRaised: (area) => createRaisedArea(area),
         });
         toolReady++;
         // D-256: every gesture tool (draw/text/measure/fog/wall/light/pin) sees the pointer
@@ -3896,6 +4131,13 @@ const WALL_PICK_RADIUS = 12;
         canvas.addEventListener("pointerdown", onTileDown);
         canvas.addEventListener("pointermove", onTileHoverMove);
         canvas.addEventListener("pointerleave", onTileHoverLeave);
+        // G-26c (D-438): "Peek under roofs" — the GM's pointer opens the roof it is over (local only).
+        const onRoofPeekMove = (e: PointerEvent) => {
+          if (roofPeek) view.getTilesLayer({ loadTexture: tileImages.load }).setHover(toWorld(e));
+        };
+        const onRoofPeekLeave = () => view.getTilesLayer({ loadTexture: tileImages.load }).setHover(null);
+        canvas.addEventListener("pointermove", onRoofPeekMove);
+        canvas.addEventListener("pointerleave", onRoofPeekLeave);
         canvas.addEventListener("click", onTileClick);
         canvas.addEventListener("dblclick", onTileDoubleClick);
         canvas.addEventListener("contextmenu", onTileContextMenu);
@@ -3931,6 +4173,8 @@ const WALL_PICK_RADIUS = 12;
           canvas.removeEventListener("pointerdown", onTileDown);
           canvas.removeEventListener("pointermove", onTileHoverMove);
           canvas.removeEventListener("pointerleave", onTileHoverLeave);
+          canvas.removeEventListener("pointermove", onRoofPeekMove);
+          canvas.removeEventListener("pointerleave", onRoofPeekLeave);
           canvas.removeEventListener("click", onTileClick);
           canvas.removeEventListener("dblclick", onTileDoubleClick);
           canvas.removeEventListener("contextmenu", onTileContextMenu);
@@ -3985,6 +4229,10 @@ const WALL_PICK_RADIUS = 12;
               sceneId: activeScene()?._id ?? null,
               ids: [...ids],
             };
+            // D-438: the selection decides which tokens open roofs, and G-32 which height the size cue
+            // measures from (deferred: never re-enter refresh).
+            if (activeScene()?.tiles.some((tile) => tile.above) ||
+              (app && tokenElevationScaleOf(worldSettingsFrom(app.gm.client.store.getAll("settings"))))) queueMicrotask(refresh);
             closeTokenMenu(); // any new gesture supersedes the menu
             syncPF1eThreatOverlay(); // P02: one selected token shows its threat
           },
@@ -4240,7 +4488,7 @@ const WALL_PICK_RADIUS = 12;
           stage: view,
           source: domPointerSource(view.app.canvas as HTMLCanvasElement),
           client: {
-            submit: (ops: Op[]) => current.gm.client.submit(ops),
+            submit: (ops: Op[]) => gmMoveRefusals ? gmMoveRefusals.track(current.gm.client.submit(ops)) : current.gm.client.submit(ops),
           },
           getTokens: tokenViews,
           getGrid: () => sceneGridSpec(activeScene()?.grid),
@@ -4566,11 +4814,12 @@ const WALL_PICK_RADIUS = 12;
             }
           },
           pf1eAreaPreviewShow: (spec) => {
+            const caster = spec.casterTokenId ? activeScene()?.tokens.find((t) => t._id === spec.casterTokenId) : undefined;
             const model = showPF1eAreaPreview({
               kind: spec.kind as PF1eAreaKind,
               origin: { col: spec.originCol, row: spec.originRow },
               radiusFt: spec.radiusFt,
-            });
+            }, caster);
             return {
               ok: model.ok,
               issues: model.issues.map((i) => ({ ...i })),
@@ -4793,8 +5042,18 @@ const WALL_PICK_RADIUS = 12;
               tiles.map((t) => [t._id, layer.alphaOf(t._id)]),
             );
           },
+          roofStates: () => {
+            const layer = view.getTilesLayer({ loadTexture: tileImages.load });
+            return Object.fromEntries((activeScene()?.tiles ?? []).map((t) => [t._id, layer.roofStateOf(t._id)]));
+          },
+          lowerFloors: () => view.lowerFloors(),
+          lowerTokenLabels: () => view.lowerTokenLabels(),
+          raisedMarkerLabels: () => view.raisedMarkerLabels(),
+          crossFloorLighting: () => view.getLightingLayer().crossFloorState(),
           // §2.2/G-10a: what the GM canvas actually drew — the mode's own gate, read back.
           tokenHpBars: () => view.tokenHpBars(),
+          // G-32 (D-440): the height badge and size cue each drawn token shows.
+          tokenElevationCues: () => view.tokenElevationCues(),
           seedTile: (spec) => {
             const scene = activeScene();
             if (!scene) return "";
@@ -4817,11 +5076,37 @@ const WALL_PICK_RADIUS = 12;
                   height: spec.height,
                   img: spec.img ?? "",
                   above: spec.above,
-                  occlusion: { mode: spec.mode, alpha: spec.alpha },
+                  occlusion: { mode: spec.mode, alpha: spec.alpha, ...(spec.radius !== undefined ? { radius: spec.radius } : {}) },
+                  ...(spec.rotation !== undefined ? { rotation: spec.rotation } : {}),
+                  ...(spec.roofGroup ? { roofGroup: spec.roofGroup } : {}),
+                  ...(spec.revealInFog !== undefined ? { revealInFog: spec.revealInFog } : {}),
                 },
               },
             ]);
             return id;
+          },
+          seedWall: (spec) => {
+            const scene = activeScene();
+            if (!scene) return "";
+            const id = `wall-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+            const axis = spec.door === undefined ? 0 : 1;
+            current.gm.client.submit([{ kind: "create", coll: "walls", parent: { coll: "scenes", id: scene._id },
+              data: { _id: id, type: "wall" as const, name: spec.door === undefined ? "Wall" : "Door", ownership: { default: 0 }, flags: {}, system: {}, c: spec.c,
+                door: spec.door ?? 0, oneWay: false, move: axis, sight: axis, sound: axis, light: axis, ...(spec.everyFloor ? { levelScope: { mode: "all" as const } } : {}) } }]);
+            return id;
+          },
+          seedLight: (spec) => {
+            const scene = activeScene();
+            if (!scene) return "";
+            const id = `light-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+            current.gm.client.submit([{ kind: "create", coll: "lights", parent: { coll: "scenes", id: scene._id },
+              data: { _id: id, type: "light" as const, name: "Lamp", ownership: { default: 0 }, flags: {}, system: {}, x: spec.x, y: spec.y,
+                dim: spec.dim, bright: spec.bright ?? spec.dim, color: "#ffffff", alpha: 1, ...(spec.levelId ? { levelScope: { mode: "levels" as const, ids: [spec.levelId] } } : {}) } }]);
+            return id;
+          },
+          setDoorState: ({ id, door }) => {
+            const scene = activeScene();
+            if (scene) current.gm.client.submit([{ kind: "update", ref: { coll: "walls", id, parent: { coll: "scenes", id: scene._id } }, diff: { door } }]);
           },
           factionOwnership: () => {
             const factions = current.gm.client.store.getAll(
@@ -5006,20 +5291,53 @@ const WALL_PICK_RADIUS = 12;
         </div>
         <div class="dice3d-host" bind:this={dice3dHost}></div>
         <div class="board" style="position: relative;">
+          {#if gmStairOffer}<StairChooser offer={gmStairOffer} tokenName={gmStairTokenName(gmStairOffer.tokenId)} onChoose={answerGmStairs} />{/if}
           <ZoomControl {stage} onInput={() => fxPlayer?.cancelCamera()} />
+          {#if !viewingAs && levelPreviewScene?.tiles.some((tile) => tile.above)}
+            <label data-roof-peek title="Fade the roof under your pointer. Only your screen changes." style="position:absolute;left:50%;transform:translateX(-50%);top:12px;z-index:30;display:flex;gap:5px;align-items:center;background:#182331;color:#e6eef9;padding:4px 8px;font-size:11px;border:1px solid #52657a;border-radius:5px">
+              <input type="checkbox" aria-label="Peek under roofs" bind:checked={roofPeek} />Peek under roofs
+            </label>
+          {/if}
           {#if !viewingAs && (levelPreviewScene?.levels?.length ?? 0) > 0}
-            <div class="level-perception-preview" style="position:absolute;right:12px;top:58px;z-index:30;background:#182331;color:#e6eef9;padding:8px;max-width:270px;font-size:11px;border:1px solid #52657a;border-radius:5px">
-              <label>GM fog &amp; lighting diagnostic
+            <div class="level-perception-preview" data-gm-floor-view style="position:absolute;right:12px;top:58px;z-index:30;background:#182331;color:#e6eef9;padding:8px;max-width:270px;font-size:11px;border:1px solid #52657a;border-radius:5px">
+              <label>GM floor
                 <select aria-label="GM level perception preview" value={previewLevel(levelPreviewScene) ?? ""} onchange={(e) => chooseLevelPreview(e.currentTarget.value)}>
-                  <option value="">Legacy whole-scene view</option>
-                  {#each levelPreviewScene?.levels ?? [] as level (level._id)}<option value={level._id}>{level.name}</option>{/each}
+                  <option value="">All floors · authoring</option>
+                  {#each [...(levelPreviewScene?.levels ?? [])].sort((a, b) => b.floorZ - a.floorZ || a.sort - b.sort) as level (level._id)}<option value={level._id}>{level.name}</option>{/each}
                 </select>
               </label>
               {#if previewLevel(levelPreviewScene)}
+                <label>Show
+                  <select aria-label="GM floor display" bind:value={floorMode} onchange={() => refresh()}>
+                    <option value="ghost">This floor · others faint</option>
+                    <option value="only">This floor only</option>
+                    <option value="all">Every floor</option>
+                  </select>
+                </label>
+                <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" aria-label="GM build mode" bind:checked={buildMode} onchange={() => { syncBuildFocus(); refresh(); }} />Build on this floor</label>
+                {#if buildMode}<p data-gm-build-hint>New walls, lights, tiles, regions, notes, drawings, templates and tokens join this floor; picking stays on it.</p>{/if}
+                {#if levelPreviewScene && (levelPreviewScene.walls.some((w) => w.levelScope === undefined) || levelPreviewScene.lights.some((l) => l.levelScope === undefined))}
+                  <button type="button" data-gm-assign-unscoped onclick={async () => {
+                    const scene = activeScene(), levelId = previewLevel(scene);
+                    if (!scene || !levelId || !app) return;
+                    const ops = unscopedToFloorOps(scene, levelId);
+                    try { if (ops.length) await app.gm.client.submitAndWait(ops); notifyLog = [...notifyLog.slice(-49), { message: `${ops.length} unassigned wall(s)/light(s) put on this floor. Undo is available.`, level: "info" }]; }
+                    catch (error) { notifyLog = [...notifyLog.slice(-49), { message: String(error), level: "warn" }]; }
+                  }}>Put unassigned walls &amp; lights on this floor</button>
+                {/if}
                 <button type="button" data-level-fog-reset disabled={fogResetBusy || !app?.gm.client.supportsFeature(LEVEL_FOG_RESET_FEATURE)} onclick={resetPreviewFog}>Reset this level’s fog</button>
                 {#if fogResetMessage}<p role="status">{fogResetMessage}</p>{/if}
+                <p>Lighting and exploration follow this floor. Manual fog painting is off here. PageUp/PageDown change floor.</p>
               {/if}
-              {#if previewLevel(levelPreviewScene)}<p>Diagnostic only: all artwork and tokens remain visible to GM. Enable scene fog to explore this level. Lighting uses assigned sources and this level’s ambient setting (or scene inheritance); walls remain flat. Manual fog painting is disabled here.</p>{/if}
+              <details data-gm-floor-roster open>
+                <summary>Who is where</summary>
+                {#each floorRosterRows as row (row.levelId ?? "none")}
+                  <div data-floor-roster={row.levelId ?? "none"} style="display:flex;flex-wrap:wrap;gap:3px;align-items:center;margin:3px 0">
+                    <button type="button" style="background:none;border:0;color:#cfe0f5;cursor:pointer;padding:0;text-align:left" onclick={() => chooseLevelPreview(row.levelId ?? "")}>{row.levelId ? (levelPreviewScene?.levels?.find((l) => l._id === row.levelId)?.name ?? row.levelId) : "No floor"} · {row.tokens}</button>
+                    {#each row.pcs as pc (pc._id)}<button type="button" data-roster-token={pc._id} title={pc.name} style="width:22px;height:22px;border-radius:50%;border:1px solid #8aa0bd;background:#26364a;color:#fff;font-size:9px;cursor:pointer;padding:0" onclick={() => focusRosterToken(pc)}>{pc.name.split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase()}</button>{/each}
+                  </div>
+                {/each}
+              </details>
             </div>
           {/if}
           <div class="toolrail">
@@ -5036,6 +5354,8 @@ const WALL_PICK_RADIUS = 12;
               onAction={runCanvasAction}
               onChooseTool={() => { sessionOpen = false; }}
               pathTool={pathToolAvailable}
+              stairsTool={stairsToolAvailable}
+              raisedTool={raisedToolAvailable}
             />
           </div>
           <div
@@ -5169,6 +5489,16 @@ const WALL_PICK_RADIUS = 12;
                 {:else}
                   <polyline points={preview.points.map((p) => { const q = measurePoint(p); return `${q.x},${q.y}`; }).join(" ")} fill={preview.brush === "hide" ? "#0a0f1599" : "#ffd47933"} stroke={preview.brush === "hide" ? "#8892a6" : "#ffd479"} stroke-width="2" stroke-dasharray="6 4" />
                 {/if}
+              {:else if preview.kind === "stairs"}
+                {@const a = measurePoint(preview.from)}
+                {@const b = measurePoint(preview.to)}
+                <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} fill="#8ad9ff22" stroke="#8ad9ff" stroke-width="2" stroke-dasharray="8 4" />
+                <text x={Math.min(a.x, b.x) + 6} y={Math.min(a.y, b.y) + 16} fill="#e8f7ff" stroke="#0b1520" stroke-width="3" paint-order="stroke" font-size="12">Stairs</text>
+              {:else if preview.kind === "raised"}
+                {@const a = measurePoint(preview.from)}
+                {@const b = measurePoint(preview.to)}
+                <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} fill="#ff9a5c22" stroke="#ff9a5c" stroke-width="2" stroke-dasharray="8 4" />
+                <text x={Math.min(a.x, b.x) + 6} y={Math.min(a.y, b.y) + 16} fill="#fff3e6" stroke="#1b1408" stroke-width="3" paint-order="stroke" font-size="12">Raised area · {toolOptions.raisedHeight} {activeScene()?.grid.units ?? "ft"} · {toolOptions.raisedSolid ? "solid" : "open"}</text>
               {:else if preview.kind === "wallEdit"}
                 {#each preview.walls as wall (wall._id)}
                   {@const a = measurePoint({ x: wall.c[0], y: wall.c[1] })}
@@ -5280,6 +5610,37 @@ const WALL_PICK_RADIUS = 12;
                     >
                   {/if}
                 {/each}
+                {#if (menuScene.levels?.length ?? 0) > 0}
+                  {@const targets = floorMenuTargets(menuToken._id)}
+                  <span class="token-menu-static" data-token-menu-floors>Move to floor{targets.length > 1 ? ` · ${targets.length} tokens` : ""}</span>
+                  {#each [...(menuScene.levels ?? [])].sort((a, b) => b.floorZ - a.floorZ || a.sort - b.sort) as level (level._id)}
+                    <button type="button" role="menuitem" data-token-menu-floor={level._id}
+                      disabled={targets.every((id) => menuScene.tokens.find((t) => t._id === id)?.levelId === level._id)}
+                      onclick={() => moveTokensToFloor(targets, level._id)}>{level.name} · Z {level.floorZ}</button>
+                  {/each}
+                {/if}
+                <!-- G-32 (D-440): elevation is editable on every scene (a flyer needs no floors); the
+                     token's badge shows the height above its floor. -->
+                <label class="token-menu-static" style="display:flex;gap:4px;align-items:center">Feet Z
+                  <input type="number" aria-label="Token feet elevation" style="width:64px" value={menuToken.elevation ?? 0}
+                    onchange={(e) => setTokenElevation(menuToken, Number(e.currentTarget.value))} /></label>
+                {#if elevationOffer?.tokenId === menuToken._id}
+                  <span class="token-menu-static" data-token-elevation-offer>That height is on {elevationOffer.name}{elevationOffer.blockedBy ? `; ${elevationOffer.blockedBy} is solid in the way` : ""}.</span>
+                  <button type="button" role="menuitem" onclick={() => elevationOffer && moveTokensToFloor([menuToken._id], elevationOffer.levelId, elevationOffer.z)}>{elevationOffer.blockedBy ? `Move to ${elevationOffer.name} anyway` : `Move to ${elevationOffer.name}`}</button>
+                  <button type="button" role="menuitem" onclick={() => { elevationOffer = null; }}>Keep floor</button>
+                {/if}
+                <!-- G-23 (D-448): a token standing over an opening (the GM may put it there) can fall. -->
+                {#if menuScene.levelMode === "isolated" && menuToken.levelId}
+                  {@const footing = tokenFooting(menuScene, menuToken)}
+                  {@const from = menuScene.levels?.find((l) => l._id === menuToken.levelId)}
+                  {#if !footing.supported}
+                    <span class="token-menu-static" data-token-footing>No floor under {menuToken.name}.</span>
+                    {#if footing.landing}
+                      {@const landing = footing.landing}
+                      <button type="button" role="menuitem" data-token-fall={landing.levelId} onclick={() => moveTokensToFloor([menuToken._id], landing.levelId, landing.z)}>Fall to {landing.name}{from ? ` (${from.floorZ - landing.z} ${menuScene.grid.units})` : ""}</button>
+                    {/if}
+                  {/if}
+                {/if}
               </div>
             {/if}
           {/if}
@@ -5510,6 +5871,8 @@ const WALL_PICK_RADIUS = 12;
               {resolveAsset}
               onActivate={activateScene}
               onRequestImages={(sources, action) => openImageImport(sources, action, "file")}
+              loadArtMask={floorArtMask}
+              uploadImage={importFoundryImage}
             />
           {:else if activeTab === "images"}
             <ImageHandlingPanel

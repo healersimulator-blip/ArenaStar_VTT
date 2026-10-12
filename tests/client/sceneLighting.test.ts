@@ -1,7 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { SceneLightingPlayer } from "../../src/client/sceneLighting";
 import type { SceneDocument } from "../../src/core/documents";
-import type { LightView } from "../../src/canvas/layers/LightingLayer";
+import type { CrossFloorLightingView, LightView } from "../../src/canvas/layers/LightingLayer";
 import type { AmbientLighting } from "../../src/canvas/vision/lights";
 import { InlineVisionWorker } from "../../src/workers/visionWorkerClient";
 import { pointInPolygon } from "../../src/canvas/vision/polygon";
@@ -11,7 +11,7 @@ const scene=():SceneDocument=>({_id:"s",type:"scene",name:"s",ownership:{default
   tokens:[],tiles:[],walls:[],sounds:[],drawings:[],templates:[],notes:[],
   lights:[{_id:"l",type:"light",name:"l",ownership:{default:2},flags:{},system:{},x:100,y:100,bright:50,dim:100,color:"#ffffff",alpha:0.8}]});
 function surface() {
-  const sync=vi.fn<(views:readonly LightView[],ambient:AmbientLighting)=>void>();
+  const sync=vi.fn<(views:readonly LightView[],ambient:AmbientLighting,camera?:unknown,viewport?:unknown,cross?:CrossFloorLightingView|null)=>void>();
   let frame: ((deltaMs:number)=>void)|undefined;const unframe=vi.fn();
   const view={camera:{x:0,y:0,scale:1},viewport:{width:800,height:600},getLightingLayer:()=>({sync}),
     onFrame:(fn:(deltaMs:number)=>void)=>{frame=fn;return unframe;}};
@@ -101,4 +101,59 @@ test("ambient overrides are shared by fog and rendering, preserve source scene, 
   p.sync(s, f.view, "b");
   p.sync({ ...s, darkness: 1 }, f.view, "c"); expect(f.sync.mock.calls.at(-1)?.[1].darkness).toBe(1);
   expect(s).toEqual(before); p.destroy();
+});
+
+test("G-22: other floors' lights resolve from the replica, shine through every nearer opening, and are shaped by their own walls", async () => {
+  const { crossFloorLightingInput } = await import("../../src/client/sceneLighting");
+  const { traceSurface } = await import("../../src/core/floorSurface");
+  const box = { x: 0, y: 0, width: 1000, height: 1000 };
+  const well = traceSurface((x, y) => !(x >= 400 && x < 600 && y >= 400 && y < 600), box, { cell: 50 }).surface;
+  const hole = traceSurface((x, y) => !(x >= 100 && x < 200 && y >= 100 && y < 200), box, { cell: 50 }).surface;
+  if (!well || !hole) throw new Error("surfaces");
+  const s = scene(), lamp = s.lights[0]; if (!lamp) throw new Error("light");
+  s.lights = [{ ...lamp, _id: "groundLamp", x: 500, y: 500 }, { ...lamp, _id: "cellarLamp" }, { ...lamp, _id: "upLamp" }];
+  // A wall on the ground floor, right of its lamp.
+  s.walls = [{ _id: "groundWall", type: "wall", name: "w", ownership: { default: 0 }, flags: {}, system: {}, c: [550, 0, 550, 1000], sight: 1, move: 1, sound: 1, light: 1, oneWay: false, door: 0 }];
+  const lighting = { surface: well, links: [
+    { levelId: "cellar", side: "below" as const, depth: 2, lightIds: ["cellarLamp"], wallIds: [], darkness: 1 },
+    { levelId: "ground", side: "below" as const, depth: 1, lightIds: ["groundLamp", "gone"], wallIds: ["groundWall"], darkness: 0.4, surface: hole },
+    { levelId: "attic", side: "above" as const, depth: 1, lightIds: ["upLamp"], wallIds: [], darkness: 0, surface: hole },
+  ] };
+  const input = crossFloorLightingInput(lighting, s);
+  expect(input?.solid).toBe(well);
+  expect(input?.belowDarkness).toBe(0.4); // the nearest floor below
+  expect(input?.groups.map((g) => [g.key, g.masks.length, g.lights.map((l) => l._id), g.walls.map((w) => w._id)])).toEqual([
+    ["below:ground", 1, ["groundLamp"], ["groundWall"]],
+    ["below:cellar", 2, ["cellarLamp"], []],
+    ["above:attic", 1, ["upLamp"], []],
+  ]);
+  // A solid (untraced) floor between ends the chain; a floor with no openings shows nothing below.
+  const solidGround = { ...lighting, links: lighting.links.map(({ surface: around, ...l }) => l.levelId === "ground" || !around ? l : { ...l, surface: around }) };
+  expect(crossFloorLightingInput(solidGround, s)?.groups.map((g) => g.key)).toEqual(["below:ground", "above:attic"]);
+  expect(crossFloorLightingInput({ links: lighting.links }, s)?.groups.map((g) => g.key)).toEqual(["above:attic"]);
+  expect(crossFloorLightingInput({ links: lighting.links }, s)?.belowDarkness).toBeNull();
+  expect(crossFloorLightingInput({ links: [] }, s)).toBeNull();
+  expect(crossFloorLightingInput(undefined, s)).toBeNull();
+
+  // The player draws them: polygons from the vision worker, using that floor's walls, never this one's.
+  const f = surface(), p = new SceneLightingPlayer(new InlineVisionWorker());
+  const flat = { ...s, walls: [], lights: [] };
+  p.sync(flat, f.view, undefined, "upper", input);
+  expect(f.sync.mock.calls.at(-1)?.[4]).toBeNull(); // fail closed while computing
+  await flush();
+  const cross = f.sync.mock.calls.at(-1)?.[4];
+  if (!cross) throw new Error("cross-floor lighting");
+  expect(cross.solid).toBe(well);
+  expect(cross.belowDarkness).toBe(0.4);
+  const ground = cross.groups.find((g) => g.key === "below:ground")?.views[0]?.poly;
+  if (!ground) throw new Error("ground light polygon");
+  expect([pointInPolygon(ground, 520, 500), pointInPolygon(ground, 600, 500)]).toEqual([true, false]);
+  // Unchanged input: nothing recomputed; no input: the cross-floor light goes.
+  const calls = f.sync.mock.calls.length;
+  p.sync(flat, f.view, undefined, "upper", input); await flush();
+  expect(f.sync.mock.calls.at(-1)?.[4]).toBe(cross);
+  expect(f.sync.mock.calls.length).toBe(calls + 1);
+  p.sync(flat, f.view, undefined, "upper", null); await flush();
+  expect(f.sync.mock.calls.at(-1)?.[4]).toBeNull();
+  p.destroy();
 });
