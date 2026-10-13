@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * §12 "Strategic ruleset & content" — the in-world view of a world's packages (D-248/D-249).
+   * §12 the packages view (AIS v1 lands modules next to the ruleset/content view; D-248/D-249).
    * Lives in the Settings window: "which rules does this world run" is a settings question,
    * not an Extras one. The primary way to choose a ruleset is the New-world wizard; this
    * section is for the status line, adding content packs mid-campaign (they never touch the

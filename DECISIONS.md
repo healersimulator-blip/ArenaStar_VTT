@@ -13362,3 +13362,46 @@ markup, moved, not rewritten — rendered by both the ledger branch and the acti
 
 **Verification.** `e2e/sheets.spec.ts`'s A06b test (written before D-405, asserting the hp line in
 the card's text) passes **unchanged** — 1 passed / 8.3 s; `test:e2e:core` 48 passed / 9.5 min.
+
+## D-460 — Patch 131026 lands: the AIS v1 slice, applied verbatim, and the three things that were scuffed (2026-10-13)
+
+**What landed.** `patches/01a12f54-fbf7-7ad2-a4fd-0c5ccf1f0eb1_131026.patch` (2026-10-12) — the
+Automation Interconnect System v1 slice: `AUTOMATION_INTERCONNECT_DESIGN.md`, the module package kind
+and its manifest/interconnect contract, the sandboxed module iframe and its host-authoritative RPC
+families (`src/packages/aisModule*`, `src/core/automationInterconnect.ts`,
+`src/core/packageManifest.ts`), exact package hashing/locks, world ZIP format 4, the Settings →
+Packages manager, the `pf1e-torch` reference module, plus the vision/fog/lighting/level work the
+patch carries (openings, light animation, opening-sight policy, cross-floor proximity LOS,
+`floorSurface`, `idb` storage) and its unit tests. 72 files touched: 51 modified, 21 added.
+
+**How it was applied.** Verbatim: `git apply patches/01a12f54-…_131026.patch` onto the verification
+commit — `git apply --check` was clean both against the pristine tree and against this branch's
+uncommitted work, and the patch file is tracked in the repository. No hunk was edited, reordered or
+dropped. The one commit that follows carries only the working-shape adjustments below.
+
+**The scuffs (three, all outside the patch's own files).** The patch renames the Settings section
+that `e2e/worldfile.spec.ts` asserts (`Strategic ruleset & content (§12)` →
+`Packages & automation (§12 · AIS v1)`), so that assertion now matches the section rather than the
+AIS version label. The AIS rows make the Settings window long enough that
+`e2e/fog.spec.ts`'s 30 s default ceiling can expire while the scene-fog switch is scrolled into
+view and toggled (it passes in ~20 s with headroom, and carries a 90 s ceiling now). And
+`visionSmoke` in `src/app/e2eHook.ts` still read its fog round-trip out of a hand-built
+`"scene-1:gm"` key; the host has stored fog under the level-aware `fogVersionKey(sceneId, levelId,
+user, epoch)` since the level-fog work, so the hook now reads the key with the same helper the host
+writes it with. A stale doc comment in `RulesetSection.svelte` was corrected with them.
+
+**Verification on the patched tree.** Unit: **5659 passed / 12 skipped** across 424 files (+64 tests
+over the verification commit). `pnpm lint`, `pnpm typecheck` (tsc + `checkSvelte`: 92 components,
+0 blocking), `pnpm size` **5.05 MB raw / 1.44 MB gzip** (6 MB gate) — all green. Browser, one batch
+at a time: `test:e2e:core` **48 passed**, `test:e2e:table` **39 passed**, `test:e2e:hexcrawl`
+**16 passed**, `test:e2e:images` **30 passed / 1 skipped**, `test:e2e:net` **4 passed**,
+`test:fx:canvas` **25 passed**, `test:multilevel` **32 passed**; `test:e2e:pf1e-combat` **64 passed /
+6 pre-existing failures** and `test:e2e:pf1e-sheets` **23 passed / 5 pre-existing failures**,
+identical to their measurements before the patch (see `E2E_BATCHES.md` for the two groups and the
+evidence that they predate both this patch and the batch work).
+
+**Named limits.** The patch's own design doc records what AIS v1 does not yet do (no general
+workflow/mechanics pipeline, no theme/UI slot system, no player hydration; exact-version
+requirements only). It adds no `DECISIONS.md` entries of its own — the design doc carries its
+rationale — so the landing is recorded here. The six PF1e failures are untouched by this patch and
+still need their own repair pass (the manual-AoO prompt and the pre-area-flow Entangle spec).

@@ -4898,6 +4898,7 @@ async function runVisionSmoke(): Promise<VisionSmokeResult> {
     type ClientEvents = import("../client/sync").ClientEvents;
     const { HostSync, gmSessionUser } = await import("../host/sync");
     const { ClientSync } = await import("../client/sync");
+    const { fogVersionKey } = await import("../core/levelFog");
     const { createTransportPair, flushMicrotasks } =
       await import("../net/memory");
 
@@ -5027,8 +5028,11 @@ async function runVisionSmoke(): Promise<VisionSmokeResult> {
     await flushMicrotasks();
     client.sendFogPng("scene-1", png);
     await flushMicrotasks();
+    // The stored key is the level-aware one (scene, level, user, epoch) — read it with the same
+    // helper the host writes it with instead of a hand-built string.
     const fogPutLanded =
-      (hostSync.fogPngs.get("scene-1:gm")?.length ?? 0) === png.length;
+      (hostSync.fogPngs.get(fogVersionKey("scene-1", undefined, "gm"))?.length ?? 0) ===
+      png.length;
 
     const ok =
       poly.length > 16 &&

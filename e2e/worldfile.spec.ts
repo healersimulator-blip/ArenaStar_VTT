@@ -1095,8 +1095,10 @@ test.describe("world.zip export/import (§8)", () => {
       await expect(page.locator("#import-world")).toHaveCount(0);
       await page.click("#gm-settings");
       const extras = page.locator('[data-window="settings"]');
+      // The section is the packages view; its title carries the AIS version label, so the
+      // assertion matches the section, not the label.
       await expect(extras.locator("[data-pkg-section] h4")).toHaveText(
-        "Strategic ruleset & content (§12)",
+        /Packages & automation \(§12/,
       );
       await expect(extras.locator("[data-pkg-status-ruleset]")).toContainText(
         "built-in",

@@ -23,6 +23,10 @@ test.describe("explored fog of war (§9, D-250)", () => {
   test("Settings switch → tokens uncover → god view only restyles → the map survives a reload", async ({
     page,
   }) => {
+    // The Settings window is long (packages, rules, automation) and scrolling the switch into view
+    // plus the toggle can exceed the default 30 s ceiling on this sandbox; the assertions are the
+    // subject, not the clock.
+    test.setTimeout(90_000);
     await page.goto(entry + "?e2e=1");
     await waitForSurface(page, "gm");
 
