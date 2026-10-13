@@ -92,6 +92,16 @@ describe("visibilityPolygon (§9 angular sweep)", () => {
     expect(b.maxY - b.minY).toBeCloseTo(60, 0);
   });
 
+  test("a directional cone reveals only its forward wedge", () => {
+    const cone = { directionDeg: 0, widthDeg: 90 };
+    const poly = visibilityPolygon(0, 0, [], 100, [], cone);
+    expect(pointInPolygon(poly, 50, 0)).toBe(true); // east / forward
+    expect(pointInPolygon(poly, 50, 40)).toBe(true); // within the south-east half
+    expect(pointInPolygon(poly, 0, 50)).toBe(false); // north/south side, outside the beam
+    expect(pointInPolygon(poly, -50, 0)).toBe(false); // behind the source
+    expect(pointInPolygon(poly, 110, 0)).toBe(false); // outside the radial cap
+  });
+
   test("single wall casts a shadow behind it", () => {
     const poly = visibilityPolygon(50, 50, [{ x1: 40, y1: 40, x2: 60, y2: 40 }], 100);
     // the viewer's own side of the wall is visible
@@ -176,11 +186,14 @@ describe("wall restriction semantics (§9 / D-009)", () => {
 });
 
 describe("vision worker (§9)", () => {
-  test("InlineVisionWorker computes the same polygon as the pure module", async () => {
+  test("InlineVisionWorker forwards a directional cone unchanged", async () => {
     const flat = new Float32Array([0, 0, 100, 0, 100, 0, 100, 100, 100, 100, 0, 100, 0, 100, 0, 0]);
     const inline = new InlineVisionWorker();
-    const poly = await inline.compute(50, 50, flat, null);
-    expect(poly).toEqual(visibilityPolygon(50, 50, room(), null));
+    const cone = { directionDeg: 0, widthDeg: 90 };
+    const poly = await inline.compute(50, 50, flat, null, [], cone);
+    expect(poly).toEqual(visibilityPolygon(50, 50, room(), null, [], cone));
+    expect(pointInPolygon(poly, 75, 50)).toBe(true);
+    expect(pointInPolygon(poly, 50, 75)).toBe(false);
   });
 
   test("WorkerVisionComputer: real worker handler via a stub Worker scope", async () => {
@@ -219,10 +232,11 @@ describe("vision worker (§9)", () => {
 
     const computer = new WorkerVisionComputer(FakeWorker as unknown as new () => Worker);
     const flat = new Float32Array([0, 0, 100, 0, 100, 0, 100, 100, 100, 100, 0, 100, 0, 100, 0, 0]);
-    const poly = await computer.compute(50, 50, flat, 40);
-    expect(poly.length).toBeGreaterThan(8);
-    const b = polygonBounds(poly);
-    expect(b.maxX - b.minX).toBeCloseTo(80, 0); // radius 40 cap inside the room
+    const cone = { directionDeg: 0, widthDeg: 90 };
+    const poly = await computer.compute(50, 50, flat, 40, [], cone);
+    expect(poly).toEqual(visibilityPolygon(50, 50, room(), 40, [], cone));
+    expect(pointInPolygon(poly, 80, 50)).toBe(true);
+    expect(pointInPolygon(poly, 50, 80)).toBe(false);
     computer.terminate();
   });
 });

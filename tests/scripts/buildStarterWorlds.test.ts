@@ -83,13 +83,13 @@ describe("scripts/buildStarterWorlds.mjs", () => {
     const s = starterOf("pf1e-mass-battles");
     expect(s.zip).toMatch(/worlds\/pf1e-mass-battles-starter-1\.0\.0\.zip$/);
     expect(s.worldId).toBe("starter-pf1e-mass-battles");
-    expect(s.packages).toEqual(["pf1e-mass-battles", "pf1e-core"]);
+    expect(s.packages).toEqual(["pf1e-mass-battles", "pf1e-core", "pf1e-torch"]);
     const entries = unzipSync(new Uint8Array(readFileSync(s.zip as string)));
     const header = JSON.parse(strFromU8(entries["world.json"] as Uint8Array)) as WorldFileMeta;
     expect(header).toMatchObject({
-      // D-454: the Ice Beacon scene uses floors, stairwells and scoped walls
-      format: 3,
-      requiredFeatures: ["scene-level-play-v1", "scene-level-drafts-v1", "scene-level-scopes-v1", "scene-level-stairs-v2"],
+      // D-454 and AIS: the Ice Beacon scene uses floor features; the starter carries Torch.
+      format: 4,
+      requiredFeatures: expect.arrayContaining(["scene-level-play-v1", "scene-level-drafts-v1", "scene-level-scopes-v1", "scene-level-stairs-v2", "arena.ais/1"]),
       worldId: "starter-pf1e-mass-battles",
       system: "pf1e-mass-battles",
       version: "1.0.0",
@@ -103,9 +103,14 @@ describe("scripts/buildStarterWorlds.mjs", () => {
     };
     expect(starterDocuments.seq).toBe(39);
     expect(starterDocuments.docs).toHaveLength(39);
-    // the plain-JS declaration matches the TS exporter's rule for the same scenes
-    expect(header.requiredFeatures).toEqual(requiredWorldFeatures(
+    // The scene feature declaration matches the TS exporter; AIS adds its independent marker.
+    expect(header.requiredFeatures?.filter((feature) => feature !== "arena.ais/1")).toEqual(requiredWorldFeatures(
       starterDocuments.docs.filter((row) => row.coll === "scenes").map((row) => row.doc as unknown as SceneDocument), "GM"));
+    expect(header.automation).toMatchObject({
+      api: "arena.ais/1",
+      modules: [{ id: "pf1e-torch", version: "1.0.0", hash: expect.stringMatching(/^[a-f0-9]{64}$/) }],
+      providers: { "scene.token.light.action": "pf1e-torch/scene.token.light.action" },
+    });
     const starterById = new Map(starterDocuments.docs.map((row) => [row.id, row]));
     const jungle = starterById.get("scene-jungle")?.doc as {
       name: string; active: boolean; img: string; width: number; height: number;
@@ -178,6 +183,8 @@ describe("scripts/buildStarterWorlds.mjs", () => {
       "packages/pf1e-mass-battles/rules.js",
       "packages/pf1e-core/manifest.json",
       "packages/pf1e-core/packs/bestiary.json",
+      "packages/pf1e-torch/manifest.json",
+      "packages/pf1e-torch/automation/entry.js",
     ]));
   });
 
@@ -202,7 +209,7 @@ describe("scripts/buildStarterWorlds.mjs", () => {
     });
     if (info.kind === "world") {
       expect(describeWorldContents(info)).toBe(
-        "strategic ruleset Pathfinder 1e Mass Battles Engine v1.0.0 · content pack Pathfinder 1e Core",
+        "strategic ruleset Pathfinder 1e Mass Battles Engine v1.0.0 · content pack Pathfinder 1e Core · automation module PF1e Torch and Light Sources",
       );
     }
   });
@@ -214,8 +221,16 @@ describe("scripts/buildStarterWorlds.mjs", () => {
 
     const first = await importWorldZip({ db, file: bytes, root, mode: "copy", name: "Kingmaker" });
     expect(first.mode).toBe("copy");
-    expect(first.packages.sort()).toEqual(["pf1e-core", "pf1e-mass-battles"]);
+    expect(first.packages.sort()).toEqual(["pf1e-core", "pf1e-mass-battles", "pf1e-torch"]);
     expect(first.activeRulesPackage).toBe("pf1e-mass-battles");
+    const importedWorld = await getWorld(db, first.worldId);
+    expect(importedWorld?.automationProfile).toMatchObject({
+      api: "arena.ais/1",
+      modules: [{ id: "pf1e-torch", version: "1.0.0", hash: expect.stringMatching(/^[a-f0-9]{64}$/) }],
+      providers: { "scene.token.light.action": "pf1e-torch/scene.token.light.action" },
+    });
+    // The archive carries enablement, never the importing host's local code/capability consent.
+    expect(importedWorld?.automationGrants).toBeUndefined();
     expect(await getWorld(db, "starter-pf1e-mass-battles" as HostApp["worldId"])).toBeUndefined();
 
     const app = await bootHostApp({
@@ -228,6 +243,11 @@ describe("scripts/buildStarterWorlds.mjs", () => {
     try {
       expect(app.meta.name).toBe("Kingmaker");
       expect(app.rulesBoot).toMatchObject({ source: "package", packageId: "pf1e-mass-battles", error: null });
+      expect(app.automationBoot.profile.modules.map((module) => module.id)).toEqual(["pf1e-torch"]);
+      expect(app.automationBoot.profile.providers["scene.token.light.action"]).toBe("pf1e-torch/scene.token.light.action");
+      expect(app.automationBoot.modules).toEqual([]); // no local human approval/grants imported
+      const torchState = await app.packages.automation();
+      expect(torchState.modules).toMatchObject([{ id: "pf1e-torch", enabled: true, approved: false, grantedCapabilities: [] }]);
       // The starter includes the demonstration documents, while preserving the ordinary default
       // scene (`scene-1`) as active so existing starter behavior does not change.
       const scene = app.gm.client.store.get("scenes", DEFAULT_SCENE_ID) as
@@ -247,9 +267,10 @@ describe("scripts/buildStarterWorlds.mjs", () => {
         expect.arrayContaining([
           ["pf1e-mass-battles", true, 0],
           ["pf1e-core", false, 0],
+          ["pf1e-torch", false, 0],
         ]),
       );
-      expect((await listPackages(db, first.worldId)).length).toBe(2);
+      expect((await listPackages(db, first.worldId)).length).toBe(3);
 
       // ── G-45: the starter world's own compendium, through the reader's index ──────
       // The starter ships `pf1e-core` alone (6 packs, 166 hand-authored entries). Its shapes are
@@ -407,18 +428,20 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
     tester = built.find((b) => b.id === "pf1e-mass-battles-tester");
   }, 120_000);
 
-  test("builds the plain starter PLUS the tester with three packages and 39 documents", () => {
+  test("builds the plain starter PLUS the tester with four packages and 39 documents", () => {
     expect(tester).toBeDefined();
     if (!tester?.zip) throw new Error("tester starter not built");
     expect(tester.name).toBe("Pathfinder 1e Mass Battles — tester");
     expect(tester.worldId).toBe("starter-pf1e-mass-battles-tester");
-    expect(tester.packages).toEqual(["pf1e-mass-battles", "pf1e-core", "pf1e-content"]);
+    expect(tester.packages).toEqual(["pf1e-mass-battles", "pf1e-core", "pf1e-content", "pf1e-torch"]);
     expect(tester.zip).toMatch(/tester-worlds\/pf1e-mass-battles-tester-1\.0\.0\.zip$/);
 
     const entries = unzipSync(new Uint8Array(readFileSync(tester.zip)));
     const header = JSON.parse(strFromU8(entries["world.json"] as Uint8Array)) as WorldFileMeta;
     expect(header).toMatchObject({
-      format: 3,
+      format: 4,
+      requiredFeatures: expect.arrayContaining(["arena.ais/1"]),
+      automation: { modules: [{ id: "pf1e-torch", version: "1.0.0" }] },
       worldId: "starter-pf1e-mass-battles-tester",
       system: "pf1e-mass-battles",
       seq: 39,
@@ -499,9 +522,11 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
       "packages/pf1e-content/manifest.json",
       "packages/pf1e-content/packs/basic-npcs.json",
       "packages/pf1e-content/OGL.txt",
+      "packages/pf1e-torch/manifest.json",
+      "packages/pf1e-torch/automation/entry.js",
     ]));
     const pkgs = JSON.parse(strFromU8(entries["packages.json"] as Uint8Array)) as { id: string }[];
-    expect(pkgs.map((p) => p.id)).toEqual(["pf1e-mass-battles", "pf1e-core", "pf1e-content"]);
+    expect(pkgs.map((p) => p.id)).toEqual(["pf1e-mass-battles", "pf1e-core", "pf1e-content", "pf1e-torch"]);
   });
 
   test("imports as a copy and boots: strategic scene, armies and pack-derived goblin are live", async () => {
@@ -511,7 +536,7 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
     const root = new MemDirHandle();
 
     const imported = await importWorldZip({ db, file: bytes, root, mode: "copy", name: "Tester World" });
-    expect(imported.packages.sort()).toEqual(["pf1e-content", "pf1e-core", "pf1e-mass-battles"]);
+    expect(imported.packages.sort()).toEqual(["pf1e-content", "pf1e-core", "pf1e-mass-battles", "pf1e-torch"]);
     expect(imported.activeRulesPackage).toBe("pf1e-mass-battles");
 
     const app = await bootHostApp({
@@ -540,9 +565,11 @@ describe("tester starter (buildStarterWorlds with contentDir)", () => {
       expect(army?.units).toHaveLength(4);
       const journal = store.get("journals", "journal-welcome") as { pages?: { text: string }[] } | undefined;
       expect(journal?.pages?.[0]?.text).toContain("compendium searches");
-      // all three packages installed; the content pack's compendium is resolvable
+      // all four packages installed; the content pack's compendium is resolvable
       const pkgs = await app.packages.list();
-      expect(pkgs.map((p) => p.id).sort()).toEqual(["pf1e-content", "pf1e-core", "pf1e-mass-battles"]);
+      expect(pkgs.map((p) => p.id).sort()).toEqual(["pf1e-content", "pf1e-core", "pf1e-mass-battles", "pf1e-torch"]);
+      expect(app.automationBoot.profile.modules.map((module) => module.id)).toEqual(["pf1e-torch"]);
+      expect(app.automationBoot.modules).toEqual([]);
       await app.persister.flush();
     } finally {
       await app.close();

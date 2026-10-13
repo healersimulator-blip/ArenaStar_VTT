@@ -49,6 +49,15 @@ import { LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE, fogLevelIdError, fogEpochEr
  * archives keep source/policy for inspection but must be re-approved on this host.
  */
 import { DRAFT_LEVELS_FEATURE, LEVEL_SCOPES_FEATURE, LEVEL_LIGHTING_FEATURE, LEVEL_AMBIENT_FEATURE, requiredWorldFeatures } from "../core/capabilities";
+import { OPENING_SIGHT_FEATURE, openingSightWorldDataError } from "../core/openingSightPolicy";
+import {
+  AIS_WORLD_FEATURE,
+  emptyAisProfile,
+  resolveAisProfile,
+  validateAisActivationProfile,
+  type AisActivationProfile,
+} from "../core/automationInterconnect";
+import { packageContentHash } from "../packages/packageHash";
 import { sceneLevelsError } from "../core/levels";
 import { sceneRegionsError } from "../core/regionValidation";
 import { strFromU8, strToU8, Zip, ZipDeflate } from "fflate";
@@ -97,10 +106,10 @@ import type { AssetId, DocId, WorldId } from "../core/ids";
 import type { HostPersister } from "../storage/persistence";
 import { buildPackageFromFiles } from "../packages/packageLoader";
 
-/** Base export format. Private level drafts require format 3 and an explicit feature marker. */
+/** Base export format. AIS package profiles use format 4 and an explicit feature marker. */
 export const WORLD_FILE_FORMAT = 2;
 /** Formats `importWorldZip` accepts (older exports keep importing). */
-export const WORLD_FILE_FORMATS_READ: readonly number[] = [1, 2, 3];
+export const WORLD_FILE_FORMATS_READ: readonly number[] = [1, 2, 3, 4];
 export { DRAFT_LEVELS_FEATURE } from "../core/capabilities";
 
 /** Id of the built-in strategic ruleset — mirrors `BUILTIN_SYSTEM_ID` in hostBoot. */
@@ -126,6 +135,8 @@ export interface WorldFileMeta {
   exportedAt: number;
   /** Format ≥ 2. */
   rules?: WorldFileRules;
+  /** Format 4: portable AIS enabled-module locks and explicit provider selections. */
+  automation?: AisActivationProfile;
   /**
    * A template rather than someone's campaign (D-249): the start screen always imports it as
    * a copy under a fresh id, so opening it twice yields two worlds and never a "replace?".
@@ -263,12 +274,19 @@ function validateWorldMeta(value: unknown): WorldFileMeta {
     throw new Error("world file: world.json must be an object");
   if (!Number.isSafeInteger(value.format) || typeof value.format !== "number")
     throw new Error("world file: world.json has an invalid format");
-  if (value.format === 3) {
-    // Every capability the exporter can declare (`requiredWorldFeatures`), stairwells included: an
-    // archive with G-01 stairs used to export fine and then fail to import (D-454).
-    if (!Array.isArray(value.requiredFeatures) || !value.requiredFeatures.includes(DRAFT_LEVELS_FEATURE) || new Set(value.requiredFeatures).size !== value.requiredFeatures.length || value.requiredFeatures.some((f) => f !== DRAFT_LEVELS_FEATURE && f !== LEVEL_SCOPES_FEATURE && f !== LEVEL_FOG_FEATURE && f !== LEVEL_LIGHTING_FEATURE && f !== LEVEL_AMBIENT_FEATURE && f !== LEVEL_FOG_RESET_FEATURE && f !== LEVEL_PLAY_FEATURE && f !== STAIRS_V2_FEATURE))
-      throw new Error("world file: unsupported format 3 required features");
-  } else if (value.requiredFeatures !== undefined) throw new Error("world file: required features need format 3");
+  if (value.format === 3 || value.format === 4) {
+    // Every capability the exporter can declare (`requiredWorldFeatures`), stairwells,
+    // opening sight and AIS included: archives must not silently shed a declared policy.
+    const supported = [DRAFT_LEVELS_FEATURE, LEVEL_SCOPES_FEATURE, LEVEL_FOG_FEATURE, LEVEL_LIGHTING_FEATURE,
+      LEVEL_AMBIENT_FEATURE, LEVEL_FOG_RESET_FEATURE, LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE,
+      OPENING_SIGHT_FEATURE, AIS_WORLD_FEATURE];
+    if (!Array.isArray(value.requiredFeatures) || !value.requiredFeatures.includes(DRAFT_LEVELS_FEATURE) ||
+        new Set(value.requiredFeatures).size !== value.requiredFeatures.length ||
+        value.requiredFeatures.some((f) => typeof f !== "string" || !supported.includes(f)) ||
+        (value.format === 4 && !value.requiredFeatures.includes(AIS_WORLD_FEATURE)) ||
+        (value.format === 3 && value.requiredFeatures.includes(AIS_WORLD_FEATURE)))
+      throw new Error(`world file: unsupported format ${value.format} required features`);
+  } else if (value.requiredFeatures !== undefined) throw new Error("world file: required features need format 3 or 4");
   if (typeof value.worldId !== "string" || !WORLD_ID_RE.test(value.worldId))
     throw new Error("world file: world.json has an invalid worldId");
   if (typeof value.name !== "string" || value.name.length > 256)
@@ -304,6 +322,12 @@ function validateWorldMeta(value: unknown): WorldFileMeta {
       throw new Error(
         "world file: world.json rules.active must be a package id or null",
       );
+  }
+  if (value.automation !== undefined) {
+    if (value.format !== 4 || !value.requiredFeatures?.includes(AIS_WORLD_FEATURE))
+      throw new Error("world file: AIS automation profile requires format 4 and its feature marker");
+    const profile = validateAisActivationProfile(value.automation);
+    if (!profile.ok) throw new Error(`world file: invalid AIS profile — ${profile.error}`);
   }
   return value as unknown as WorldFileMeta;
 }
@@ -366,6 +390,8 @@ function validateWorldDocuments(
         `world file: document ${raw.id} has type ${doc.type} in collection ${raw.coll}; expected ${expectedType}`,
       );
     if (raw.coll === "scenes") {
+      const openingSightError = openingSightWorldDataError(doc);
+      if (openingSightError) throw new Error(`world file: scene ${raw.id}: ${openingSightError}`);
       const levelsError = sceneLevelsError(doc);
       if (levelsError) throw new Error(`world file: scene ${raw.id}: ${levelsError}`);
       const regionError = sceneRegionsError(doc);
@@ -629,13 +655,33 @@ export async function collectWorldArchive(
     docs.some((d) => d.coll === "scenes" && d.id === row.sceneId && (d.doc as import("../core/documents").SceneDocument).levels?.some((l) => l._id === row.levelId && (l.fogEpoch ?? "") === (row.epoch ?? ""))));
   const requiredFeatures = requiredWorldFeatures(docs.filter((row) => row.coll === "scenes").map((row) => row.doc as import("../core/documents").SceneDocument), "GM");
   if (fogRows.some((r) => r.levelId !== undefined)) {
-    if (!requiredFeatures.includes(DRAFT_LEVELS_FEATURE)) requiredFeatures.push(DRAFT_LEVELS_FEATURE);
     requiredFeatures.push(LEVEL_FOG_FEATURE);
   }
-  const hasLevelDrafts = requiredFeatures.length > 0;
+  const hasAisPackages = packages.some((pkg) => pkg.type === "module");
+  const automation = world.automationProfile ?? emptyAisProfile();
+  if (hasAisPackages || automation.modules.length > 0 || Object.keys(automation.providers).length > 0) {
+    requiredFeatures.push(AIS_WORLD_FEATURE);
+    const candidates = packages.map((pkg) => ({
+      id: pkg.id,
+      version: pkg.version,
+      hash: packageContentHash(pkg.files),
+      type: pkg.type,
+      ...(pkg.manifest.interconnect ? { interconnect: pkg.manifest.interconnect } : {}),
+    }));
+    const resolution = resolveAisProfile(candidates, automation, active ?? BUILTIN_SYSTEM);
+    const blockers = resolution.issues.filter((issue) => issue.blocking);
+    if (blockers.length > 0)
+      throw new Error(`world file: invalid AIS profile — ${blockers.map((issue) => issue.message).join("; ")}`);
+  }
+  // Format 3/4 retain the draft-level marker for forward-compatible scene/profile checks.
+  if (requiredFeatures.length && !requiredFeatures.includes(DRAFT_LEVELS_FEATURE))
+    requiredFeatures.push(DRAFT_LEVELS_FEATURE);
+  const hasSceneFeatures = requiredFeatures.some((feature) => feature !== AIS_WORLD_FEATURE);
+  const hasAisFeature = requiredFeatures.includes(AIS_WORLD_FEATURE);
+  const format = hasAisFeature ? 4 : hasSceneFeatures ? 3 : WORLD_FILE_FORMAT;
   const meta: WorldFileMeta = {
-    format: hasLevelDrafts ? 3 : WORLD_FILE_FORMAT,
-    ...(hasLevelDrafts ? { requiredFeatures } : {}),
+    format,
+    ...(requiredFeatures.length ? { requiredFeatures } : {}),
     worldId: world.worldId,
     name: world.name,
     system: active ?? BUILTIN_SYSTEM,
@@ -643,6 +689,7 @@ export async function collectWorldArchive(
     seq: world.flushedSeq,
     exportedAt: (options.now ?? Date.now)(),
     rules: { active },
+    ...(hasAisFeature ? { automation } : {}),
   };
 
   const assetEntries: WorldFileAsset[] = [];
@@ -819,9 +866,9 @@ function requireFile(files: Map<string, Uint8Array>, name: string): Uint8Array {
 }
 
 /**
- * Rebuild the §12 package records an archive carries. Each folder goes through the SAME
- * validation as a package zip (`buildPackageFromFiles`): packages.json is an index, never
- * trusted for content, and a folder that would not import as a zip does not import here.
+ * Rebuild the §12 system/data/AIS package records an archive carries. Each folder goes through
+ * the SAME validation as a package zip (`buildPackageFromFiles`): packages.json is an index,
+ * never trusted for content, and a folder that would not import as a zip does not import here.
  */
 function readArchivePackages(
   files: Map<string, Uint8Array>,
@@ -1197,15 +1244,50 @@ export async function importWorldZip(
     archiveActive = active;
   }
 
+  const hasAisPackages = packageRecords.some((pkg) => pkg.type === "module");
+  if (hasAisPackages && (meta.format !== 4 || !meta.requiredFeatures?.includes(AIS_WORLD_FEATURE)))
+    throw new Error("world file: AIS modules require format 4 and its feature marker");
+  const archiveAutomationProfile = meta.format === 4 ? (meta.automation ?? emptyAisProfile()) : emptyAisProfile();
+  let resolvedAutomationModuleIds = new Set<string>();
+  if (meta.format === 4) {
+    const candidates = packageRecords.map((pkg) => ({
+      id: pkg.id,
+      version: pkg.version,
+      hash: packageContentHash(pkg.files),
+      type: pkg.type,
+      ...(pkg.manifest.interconnect ? { interconnect: pkg.manifest.interconnect } : {}),
+    }));
+    const resolution = resolveAisProfile(candidates, archiveAutomationProfile, archiveActive ?? BUILTIN_SYSTEM);
+    resolvedAutomationModuleIds = new Set(resolution.modules.map((module) => module.id));
+    const blockers = resolution.issues.filter((issue) => issue.blocking);
+    if (blockers.length > 0)
+      throw new Error(`world file: invalid AIS profile — ${blockers.map((issue) => issue.message).join("; ")}`);
+  }
+
   // What this browser already knows about the world (nothing, for a copy — it is a new id).
-  // Trust is local consent and always carried; the activation is carried only when the
-  // archive has no say (format 1).
+  // World activation travels in the archive; local trusted-package consent and AIS grants do not.
   const existing =
     mode === "copy" ? undefined : await getWorld(options.db, worldId);
   const activeRulesPackage = carriesPackages
     ? archiveActive
     : (existing?.activeRulesPackage ?? null);
+  const automationProfile = meta.format === 4
+    ? archiveAutomationProfile
+    : carriesPackages
+      ? emptyAisProfile()
+      : existing?.automationProfile ?? emptyAisProfile();
   const trustedPackages = existing?.trustedPackages ?? [];
+  const previousAisGrants = existing?.automationGrants ?? {};
+  const packageHashes = new Map(packageRecords.map((pkg) => [pkg.id, packageContentHash(pkg.files)]));
+  const importedLocks = new Map(archiveAutomationProfile.modules.map((lock) => [lock.id, lock]));
+  const automationGrants: NonNullable<WorldsRecord["automationGrants"]> = {};
+  for (const [id, grant] of Object.entries(previousAisGrants)) {
+    const samePackage = packageHashes.get(id);
+    const importedLock = importedLocks.get(id);
+    if (!carriesPackages || (
+      samePackage && samePackage === grant.hash && importedLock?.hash === samePackage && resolvedAutomationModuleIds.has(id)
+    )) automationGrants[id] = structuredClone(grant);
+  }
   const checkpointRecords = readArchiveCheckpoints(
     files,
     meta.worldId,
@@ -1349,6 +1431,8 @@ export async function importWorldZip(
   if (activeRulesPackage !== null)
     world.activeRulesPackage = activeRulesPackage;
   if (trustedPackages.length > 0) world.trustedPackages = trustedPackages;
+  world.automationProfile = automationProfile;
+  if (Object.keys(automationGrants).length > 0) world.automationGrants = automationGrants;
   void tx.objectStore(STORES.worlds).put(world);
   await tx.done;
 

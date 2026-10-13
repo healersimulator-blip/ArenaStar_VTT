@@ -189,6 +189,11 @@ describe("sight radius + reveal key", () => {
     expect(fogRevealKey(s, [viewer("t", 100.2, 100.1)], 2500)).toBe(k0); // sub-pixel jitter
     const opened = scene({ ...s, walls: [s.walls[0] as WallDocument, { ...door, door: 1 }] });
     expect(fogRevealKey(opened, viewers, 2500)).not.toBe(k0);
+    const window = wall("window", [0, 200, 200, 200], { sight: 2, move: 0, light: 2 });
+    const withWindow = scene({ ...s, walls: [...s.walls, window] });
+    const windowKey = fogRevealKey(withWindow, viewers, 2500);
+    expect(fogRevealKey(scene({ ...withWindow, walls: [...withWindow.walls.slice(0, -1), { ...window, move: 2 }] }), viewers, 2500)).not.toBe(windowKey);
+    expect(fogRevealKey(scene({ ...withWindow, grid: { ...withWindow.grid, distance: 10 } }), viewers, 2500)).not.toBe(windowKey);
     // the order of the eyes does not matter
     const two = [viewer("a", 1, 1), viewer("b", 2, 2)];
     expect(fogRevealKey(s, two, 2500)).toBe(fogRevealKey(s, [...two].reverse(), 2500));

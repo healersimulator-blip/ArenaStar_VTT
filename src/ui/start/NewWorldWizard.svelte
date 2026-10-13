@@ -56,11 +56,13 @@
     if (pkg.manifest.type === "system") {
       ruleset = pkg;
       rulesetChoice = "package";
-    } else {
+    } else if (pkg.manifest.type === "data") {
       content = [
         ...content.filter((p) => p.manifest.id !== pkg.manifest.id),
         pkg,
       ];
+    } else {
+      error = `${pkg.manifest.name} is an automation module. Create the world first, then manage modules in Settings → Packages.`;
     }
   }
 

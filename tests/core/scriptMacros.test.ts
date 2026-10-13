@@ -77,6 +77,16 @@ describe("reviewed script macro schema and inputs", () => {
     expect(validateScriptMacro(m).ok).toBe(true); // normal published-preset rules still apply at the host
   });
 
+  test("AIS module commands require the separately reviewed GM-run-as grant", async () => {
+    const m = base();
+    const elevated: Omit<ScriptPolicy, "approvedHash"> = { ...policy(), grants: ["ais.invoke"], runAs: "gm" };
+    m.script = { ...elevated, approvedHash: await scriptApprovalHash(m.command, elevated) };
+    expect(validateScriptMacro(m).ok).toBe(true);
+    const callerRun: Omit<ScriptPolicy, "approvedHash"> = { ...elevated, runAs: "caller" };
+    m.script = { ...callerRun, approvedHash: await scriptApprovalHash(m.command, callerRun) };
+    expect(validateScriptMacro(m)).toMatchObject({ ok: false, error: "AIS module commands need explicitly reviewed GM elevation" });
+  });
+
   test("only declared typed values and live visible token IDs are accepted", async () => {
     const m = base();
     const p = policy();

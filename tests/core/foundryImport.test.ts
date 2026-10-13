@@ -52,6 +52,7 @@ describe("Levels module scene (Foundry V10–V13)", () => {
       [400, 200, 400, 0, { mode: "all" }],
     ]);
     expect(scene.lights[0]).toMatchObject({ color: "#ff8800", alpha: 0.4 });
+    expect(scene.lights[1]).toMatchObject({ angle: 90, rotation: 45 });
     expect(report.skipped).toEqual(expect.arrayContaining([{ what: "switched-off lights", count: 1 }, { what: "darkness sources", count: 1 }]));
     expect(report.notes.join(" ")).toContain("1 cone light(s)");
     expect(report.everyFloor).toEqual({ walls: 3, lights: 1 });
@@ -70,7 +71,7 @@ describe("Levels module scene (Foundry V10–V13)", () => {
   test("tokens: centred, on the floor their elevation is in, with vision and light", () => {
     const [guard, hero] = scene.tokens;
     expect(guard).toMatchObject({ name: "Guard", x: 200, y: 200, width: 100, height: 100, elevation: 10, levelId: upper._id, disposition: "hostile", vision: true, darkvision: 60 });
-    expect(hero).toMatchObject({ name: "Hero", x: 400, y: 400, levelId: ground._id, disposition: "friendly", light: { radius: 400, bright: 200, color: "#ffeeaa", alpha: 0.5 } });
+    expect(hero).toMatchObject({ name: "Hero", x: 400, y: 400, levelId: ground._id, disposition: "friendly", rotation: 90, light: { radius: 400, bright: 200, angle: 45, color: "#ffeeaa", alpha: 0.5 } });
     expect(guard?.actorId).toBeUndefined();
     expect(report.notes.join(" ")).toContain("1 token(s) came from actors");
   });
@@ -135,8 +136,9 @@ describe("other shapes", () => {
     const { scene, report } = ok(plan({
       name: "Old", width: 500, height: 500, padding: 0, grid: 50, gridType: 1, gridDistance: 5, gridUnits: "ft", img: "maps/old.jpg", shiftX: 10, shiftY: 0, darkness: 0.4,
       walls: [{ c: [0, 0, 50, 0], move: 1, sense: 2, sound: 1, door: 1, ds: 1 }],
-      lights: [{ x: 10, y: 10, dim: 10, bright: 5, tintColor: "#00ff00", tintAlpha: 0.3 }],
-      tokens: [{ name: "Orc", x: 0, y: 0, width: 2, height: 2, img: "tokens/orc.png", vision: true, dimSight: 30 }],
+      lights: [{ x: 10, y: 10, dim: 10, bright: 5, tintColor: "#00ff00", tintAlpha: 0.3, animation: { type: "pulse", speed: 1, intensity: 0.6 } }],
+      tokens: [{ name: "Orc", x: 0, y: 0, width: 2, height: 2, img: "tokens/orc.png", vision: true, dimSight: 30,
+        light: { dim: 20, bright: 10, color: "#ffaa00", alpha: 0.7, animation: { type: "torch", speed: 3, intensity: 0.2 } } }],
       drawings: [{ x: 0, y: 0, type: "r", width: 10, height: 10, flags: { levels: { drawingMode: 2, rangeTop: 10 } } }],
     }));
     expect(report.source).toBe("flat");
@@ -144,8 +146,9 @@ describe("other shapes", () => {
     expect(scene).toMatchObject({ darkness: 0.4, img: null, background: { offset: { x: 10, y: 0 } }, grid: { size: 50 } });
     expect(scene.walls[0]).toMatchObject({ door: 1, move: 1, sight: 1, sound: 1, light: 1 });
     expect(scene.walls[0]?.levelScope).toBeUndefined();
-    expect(scene.lights[0]).toMatchObject({ dim: 100, bright: 50, color: "#00ff00", alpha: 0.3 });
-    expect(scene.tokens[0]).toMatchObject({ x: 50, y: 50, width: 100, height: 100, vision: true, darkvision: 30 });
+    expect(scene.lights[0]).toMatchObject({ dim: 100, bright: 50, color: "#00ff00", alpha: 0.3, animation: { type: "pulse", speed: 1, intensity: 0.6 } });
+    expect(scene.tokens[0]).toMatchObject({ x: 50, y: 50, width: 100, height: 100, vision: true, darkvision: 30,
+      light: { radius: 200, bright: 100, color: "#ffaa00", alpha: 0.7, animation: { type: "torch", speed: 3, intensity: 0.2 } } });
     expect(scene.tokens[0]?.levelId).toBeUndefined();
     expect(report.skipped).toEqual([{ what: "stairs on a scene without floors", count: 1 }]);
   });

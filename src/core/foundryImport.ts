@@ -16,6 +16,7 @@
  * Foundry image paths are server paths, so images arrive only through files the GM picks; every
  * other image stays empty and is listed (the path is kept in `flags.foundry.src`).
  */
+import { parseLightAnimation } from "./lightAnimation";
 import type {
   LevelDocument,
   LevelScope,
@@ -85,6 +86,17 @@ const num = (v: unknown): number | undefined => {
 };
 const text = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+function importedLightAnimation(value: unknown): import("./documents").LightAnimation | undefined {
+  const raw = rec(value);
+  if (!raw) return undefined;
+  const parsed = parseLightAnimation({
+    type: raw.type,
+    speed: num(raw.speed) ?? 3,
+    intensity: num(raw.intensity) ?? 0.5,
+    ...(typeof raw.reverse === "boolean" ? { reverse: raw.reverse } : {}),
+  });
+  return parsed.ok ? parsed.value ?? undefined : undefined;
+}
 const levelsFlags = (doc: Rec) => rec(rec(doc.flags)?.levels);
 const printable = (s: string, max: number) => [...s].filter((ch) => ch.charCodeAt(0) >= 32 && ch.charCodeAt(0) !== 127).join("").trim().slice(0, max);
 
@@ -396,11 +408,15 @@ export function planFoundryImport(raw: unknown, options: FoundryImportOptions): 
     const dimU = num(cfg.dim) ?? 0, brightU = num(cfg.bright) ?? 0;
     const dim = Math.max(dimU, brightU) * pxPerUnit, bright = Math.min(brightU, Math.max(dimU, brightU)) * pxPerUnit;
     if (x === undefined || y === undefined || dim <= 0) { skip("lights without a position or radius"); continue; }
-    if ((num(cfg.angle) ?? 360) < 360) cones++;
+    const angle = clamp(num(cfg.angle) ?? 360, 1, 360);
+    if (angle < 360) cones++;
     const color = text(cfg.color) ?? text(cfg.tintColor);
+    const animation = importedLightAnimation(cfg.animation);
     const doc: LightDocument = {
       _id: options.nextId(), type: "light", name: "", ownership: { default: 0 }, flags: {}, system: {},
       x: x - ox, y: y - oy, dim, bright,
+      ...(angle < 360 ? { angle, rotation: num(l.rotation) ?? 0 } : {}),
+      ...(animation ? { animation } : {}),
       color: color && /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : "#ffffff",
       alpha: clamp(num(cfg.alpha) ?? num(cfg.tintAlpha) ?? 0.5, 0, 1),
     };
@@ -412,7 +428,7 @@ export function planFoundryImport(raw: unknown, options: FoundryImportOptions): 
     }
     lights.push(doc);
   }
-  if (cones) notes.push(`${cones} cone light(s) now shine all around.`);
+  if (cones) notes.push(`${cones} cone light(s) keep their imported direction and beam width.`);
 
   // ── Tiles (floor art) ─────────────────────────────────────────────────────────────────────
   const tiles: TileDocument[] = [];
@@ -474,7 +490,7 @@ export function planFoundryImport(raw: unknown, options: FoundryImportOptions): 
 
   // ── Tokens ────────────────────────────────────────────────────────────────────────────────
   const tokens: TokenDocument[] = [];
-  let withActors = 0, lifted = 0;
+  let withActors = 0, lifted = 0, tokenCones = 0;
   const feet = /^(ft|feet|foot|')$/i.test(grid.units.trim());
   for (const k of recs(source.tokens)) {
     const x = num(k.x), y = num(k.y);
@@ -488,6 +504,9 @@ export function planFoundryImport(raw: unknown, options: FoundryImportOptions): 
     const lightDim = Math.max(num(light?.dim) ?? num(k.dimLight) ?? 0, num(light?.bright) ?? num(k.brightLight) ?? 0) * pxPerUnit;
     const lightBright = (num(light?.bright) ?? num(k.brightLight) ?? 0) * pxPerUnit;
     const lightColor = text(light?.color) ?? text(k.lightColor);
+    const lightAngle = clamp(num(light?.angle) ?? 360, 1, 360);
+    const lightAnimation = importedLightAnimation(light?.animation);
+    if (lightDim > 0 && lightAngle < 360) tokenCones++;
     const darkvision = feet ? (sight?.visionMode === "darkvision" ? num(sight.range) : num(k.dimSight)) : undefined;
     const disposition = num(k.disposition);
     const elevation = num(k.elevation) ?? 0;
@@ -500,7 +519,9 @@ export function planFoundryImport(raw: unknown, options: FoundryImportOptions): 
       disposition: disposition === 1 ? "friendly" : disposition === -1 ? "hostile" : "neutral",
       vision: typeof sight?.enabled === "boolean" ? sight.enabled : k.vision === true,
       light: lightDim > 0
-        ? { radius: lightDim, bright: Math.min(lightBright, lightDim), color: lightColor && /^#[0-9a-f]{6}$/i.test(lightColor) ? lightColor.toLowerCase() : "#ffffff", alpha: clamp(num(light?.alpha) ?? num(k.lightAlpha) ?? 0.5, 0, 1) }
+        ? { radius: lightDim, bright: Math.min(lightBright, lightDim), ...(lightAngle < 360 ? { angle: lightAngle } : {}),
+            ...(lightAnimation ? { animation: lightAnimation } : {}),
+            color: lightColor && /^#[0-9a-f]{6}$/i.test(lightColor) ? lightColor.toLowerCase() : "#ffffff", alpha: clamp(num(light?.alpha) ?? num(k.lightAlpha) ?? 0.5, 0, 1) }
         : { radius: 0, color: "#ffffff", alpha: 0 },
       ...(darkvision && darkvision > 0 ? { darkvision } : {}),
     };
@@ -519,6 +540,7 @@ export function planFoundryImport(raw: unknown, options: FoundryImportOptions): 
     tokens.push(doc);
   }
   if (lifted) notes.push(`${lifted} token(s) stood outside their floor's height band and were set on the floor.`);
+  if (tokenCones) notes.push(`${tokenCones} token-carried cone light(s) keep their direction and beam width.`);
   if (withActors) notes.push(`${withActors} token(s) came from actors that are not imported; they are plain tokens now.`);
 
   // ── Stairs ────────────────────────────────────────────────────────────────────────────────

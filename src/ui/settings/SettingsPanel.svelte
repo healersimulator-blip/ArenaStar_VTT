@@ -14,6 +14,13 @@
   import type { EventBus } from "../../core/events";
   import type { SceneDocument, SceneGrid, UserDocument } from "../../core/documents";
   import {
+    defaultOpeningSightPolicy,
+    openingSightPolicyError,
+    openingSightPolicyOf,
+    sceneOpeningSightPolicyOp,
+    type SceneOpeningSightPolicy,
+  } from "../../core/openingSightPolicy";
+  import {
     fogSettingsOps,
     sceneDarknessOp,
     sceneFogSettings,
@@ -158,6 +165,9 @@
   let fog = $state<FogSettings>({ enabled: false, rangeSquares: null });
   /** §2.1: the active scene's ambient darkness (0 = bright, 1 = pitch dark). */
   let darkness = $state(0);
+  /** Scene-level defaults for sight through windows, open doors and floor apertures. */
+  let openingSight = $state<SceneOpeningSightPolicy>(defaultOpeningSightPolicy());
+  let openingSightError = $state("");
   /**
    * D-270: the active scene's hexcrawl profile (null when this is not a hexcrawl scene), the
    * census the overlay and the wizard both quote, and the world's terrain ladder.
@@ -199,6 +209,8 @@
     grid = active ? { ...active.grid } : null;
     fog = sceneFogSettings(active);
     darkness = clampDarkness(active?.darkness);
+    openingSight = openingSightPolicyOf(active);
+    openingSightError = "";
     scale =
       (active?.flags as { core?: { scale?: unknown } } | undefined)?.core
         ?.scale === "strategic"
@@ -313,6 +325,17 @@
     if (!scene) return;
     fog = next;
     client.submit(fogSettingsOps(scene, next));
+  }
+
+  /** The scene's own policy is opt-in; a missing setting continues to read as Off. */
+  function applyOpeningSight(next: SceneOpeningSightPolicy): void {
+    openingSight = next;
+    const error = openingSightPolicyError(next);
+    openingSightError = error ?? "";
+    if (error || !sceneId) return;
+    const scene = (client.store.getAll("scenes") as readonly SceneDocument[]).find((sc) => sc._id === sceneId);
+    if (!scene) return;
+    client.submit([sceneOpeningSightPolicyOp(scene, next)]);
   }
 
   /**
@@ -560,6 +583,82 @@
           {/each}
         </select>
       </label>
+    </div>
+    <h4>Window and opening line of sight</h4>
+    <div class="opening-sight" data-scene-opening-sight>
+      <label class="check">
+        <input
+          data-opening-sight-enabled
+          type="checkbox"
+          checked={openingSight.enabled}
+          onchange={(e) => applyOpeningSight({ ...openingSight, enabled: (e.target as HTMLInputElement).checked })}
+        />
+        Use proximity cones for eligible openings
+      </label>
+      <p class="hint">
+        Off keeps legacy behavior: windows and open doors pass full LOS, and actual floor holes remain open.
+        Closed or locked doors always block. A wall/opening can override this from its right-click menu.
+      </p>
+      <div class="row opening-sight-categories">
+        <label class="check">
+          <input data-opening-sight-windows type="checkbox" checked={openingSight.applyTo.windows}
+            onchange={(e) => applyOpeningSight({ ...openingSight, applyTo: { ...openingSight.applyTo, windows: (e.target as HTMLInputElement).checked } })} />
+          Windows
+        </label>
+        <label class="check">
+          <input data-opening-sight-doors type="checkbox" checked={openingSight.applyTo.doors}
+            onchange={(e) => applyOpeningSight({ ...openingSight, applyTo: { ...openingSight.applyTo, doors: (e.target as HTMLInputElement).checked } })} />
+          Doors (only while open)
+        </label>
+        <label class="check">
+          <input data-opening-sight-apertures type="checkbox" checked={openingSight.applyTo.apertures}
+            onchange={(e) => applyOpeningSight({ ...openingSight, applyTo: { ...openingSight.applyTo, apertures: (e.target as HTMLInputElement).checked } })} />
+          Floor/ceiling apertures
+        </label>
+      </div>
+      <div class="row opening-sight-values">
+        <fieldset>
+          <legend>Partial cone</legend>
+          <label>
+            Applies at distance ({grid?.units || "units"})
+            <input data-opening-sight-partial-at type="number" min="0" step="0.1" value={openingSight.partialAt}
+              onchange={(e) => applyOpeningSight({ ...openingSight, partialAt: Number((e.target as HTMLInputElement).value) })} />
+          </label>
+          <label>
+            Depth beyond opening ({grid?.units || "units"})
+            <input data-opening-sight-partial-depth type="number" min="0" step="0.1" value={openingSight.partial.depth}
+              onchange={(e) => applyOpeningSight({ ...openingSight, partial: { ...openingSight.partial, depth: Number((e.target as HTMLInputElement).value) } })} />
+          </label>
+          <label>
+            Width (degrees)
+            <input data-opening-sight-partial-width type="number" min="1" max="360" step="1" value={openingSight.partial.widthDeg}
+              onchange={(e) => applyOpeningSight({ ...openingSight, partial: { ...openingSight.partial, widthDeg: Number((e.target as HTMLInputElement).value) } })} />
+          </label>
+        </fieldset>
+        <fieldset>
+          <legend>Closer full cone</legend>
+          <label>
+            Applies at distance ({grid?.units || "units"})
+            <input data-opening-sight-full-at type="number" min="0" step="0.1" value={openingSight.fullAt}
+              onchange={(e) => applyOpeningSight({ ...openingSight, fullAt: Number((e.target as HTMLInputElement).value) })} />
+          </label>
+          <label>
+            Depth beyond opening ({grid?.units || "units"})
+            <input data-opening-sight-full-depth type="number" min="0" step="0.1" value={openingSight.full.depth}
+              onchange={(e) => applyOpeningSight({ ...openingSight, full: { ...openingSight.full, depth: Number((e.target as HTMLInputElement).value) } })} />
+          </label>
+          <label>
+            Width (degrees)
+            <input data-opening-sight-full-width type="number" min="1" max="360" step="1" value={openingSight.full.widthDeg}
+              onchange={(e) => applyOpeningSight({ ...openingSight, full: { ...openingSight.full, widthDeg: Number((e.target as HTMLInputElement).value) } })} />
+          </label>
+        </fieldset>
+      </div>
+      {#if openingSightError}<p class="error" data-opening-sight-error>{openingSightError}</p>{/if}
+      <p class="hint">
+        Beyond the partial distance the opening blocks sight; at that distance the partial cone applies. Between the two distances, depth and width are linearly interpolated.
+        This is ArenaStar's policy curve—Foundry's public docs do not specify an exact attenuation formula.
+      </p>
     </div>
     <!-- D-250: explored fog — per scene, remembered per player, saved with the world -->
     <div class="row fog">
@@ -1145,6 +1244,33 @@
     gap: 2px;
     font-size: 0.8125rem;
   }
+  .opening-sight {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid #303c4e;
+    border-radius: 6px;
+    background: #111923;
+  }
+  .opening-sight .check {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+  }
+  .opening-sight .check input { width: auto; }
+  .opening-sight-values { align-items: stretch; }
+  .opening-sight fieldset {
+    display: flex;
+    flex: 1 1 220px;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+    padding: 6px;
+    border: 1px solid #303c4e;
+    border-radius: 4px;
+  }
+  .opening-sight fieldset input { width: 8em; }
   .fog {
     margin-top: 8px;
   }

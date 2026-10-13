@@ -37,7 +37,17 @@
   import { tokenRect } from "../canvas/tokens";
   import { roofViewerTokens, type RoofArtMask } from "../core/roofs";
   import { roofArtMaskFromTexture } from "../canvas/roofArt";
-  import { FLOOR_ART_MAX_SIDE } from "../core/floorSurface";
+  import { FLOOR_ART_MAX_SIDE, surfaceApertureAt } from "../core/floorSurface";
+  import {
+    openingSightCurveError,
+    openingSightOverrideOf,
+    openingSightOverrideError,
+    openingSightPolicyOf,
+    levelApertureSightOverrideOp,
+    wallOpeningSightOverrideOp,
+    type OpeningSightCurve,
+    type OpeningSightOverride,
+  } from "../core/openingSightPolicy";
   import { elevationCues, elevationViewer, lowerTokenLabels, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
   import { tokenBadgesMap } from "../packages/pf1e/tokenBadges";
@@ -95,6 +105,10 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { refusalNotifier, type RefusalNotifier } from "../client/moveRefusals";
   import { createVisionComputer } from "../workers/visionComputer";
   import { ModuleIframe } from "../packages/moduleIframe";
+  import { AisModuleIframe } from "../packages/aisModuleIframe";
+  import { createAisModuleHandlers, projectAisTokenLight, type AisModuleSelectRequest } from "../packages/aisModuleHandlers";
+  import { aisTokenLightChanges } from "../core/automationInterconnect";
+  import type { AisCapability, AisEventName, AisEventPayloads } from "../core/automationInterconnect";
   import { dice3dStats, diceInfoFromRecord, showDice3D } from "../dice/dice3d";
   import { verifyCommitRoll } from "../dice/commitReveal";
   import { PoolInterpolator } from "../sim/interpolate";
@@ -118,6 +132,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     doorToggleDiff,
     wallFieldsFor,
     wallKindName,
+    wallKindOf,
     wallPickAt,
   } from "../canvas/vision/wallKinds";
   import { displayDistance } from "../canvas/grid/measure";
@@ -131,7 +146,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     type ModuleHost,
   } from "../packages/moduleHandlers";
   import type { ModuleHookName } from "../core/moduleApi";
-  import { getFog, getSetting } from "../storage/idb";
+  import { getFog, getSetting, getWorld } from "../storage/idb";
   import { viewAsOptions, viewAsUser, withoutHiddenTokens } from "../core/viewAs";
   import { can } from "../core/permissions";
   import { tileContainsPoint } from "../core/automation";
@@ -349,6 +364,21 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   let tokenMenu = $state<{ x: number; y: number; tokenId: string } | null>(
     null,
   );
+  type OpeningMenuTarget =
+    | { kind: "wall"; wallId: string }
+    | { kind: "aperture"; levelId: string; apertureId: string };
+  type OpeningMenuState = {
+    x: number;
+    y: number;
+    sceneId: string;
+    title: string;
+    target: OpeningMenuTarget;
+    current: OpeningSightOverride | null;
+    curve: OpeningSightCurve;
+    editingCustom: boolean;
+    error: string;
+  };
+  let openingMenu = $state<OpeningMenuState | null>(null);
 
   /**
    * D-271 (plan §5.2): the empty-ground menu — the same gesture as the token menu, on a hex.
@@ -1135,6 +1165,42 @@ const WALL_PICK_RADIUS = 12;
   /** SQ-13: the host's partial-audience report for a cue this tab requested. */
   let offFxDelivery: (() => void) | null = null;
   let moduleHost: ModuleHost | null = null;
+  interface PendingAisChoice extends AisModuleSelectRequest {
+    packageId: string;
+    resolve: (value: string | null) => void;
+  }
+  let pendingAisChoice = $state.raw<PendingAisChoice | null>(null);
+  let aisChoiceTimer: ReturnType<typeof setTimeout> | null = null;
+  function requestAisChoice(packageId: string, request: AisModuleSelectRequest): Promise<string | null> {
+    if (pendingAisChoice) {
+      notifyLog = [...notifyLog.slice(-49), { message: "Another module choice is already open.", level: "warn" }];
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      pendingAisChoice = { ...request, packageId, resolve };
+      aisChoiceTimer = globalThis.setTimeout(() => finishAisChoice(null), 5 * 60 * 1000);
+    });
+  }
+  function finishAisChoice(value: string | null): void {
+    const request = pendingAisChoice;
+    if (!request) return;
+    pendingAisChoice = null;
+    if (aisChoiceTimer !== null) globalThis.clearTimeout(aisChoiceTimer);
+    aisChoiceTimer = null;
+    request.resolve(value);
+  }
+
+  const aisModuleHosts = new SvelteMap<string, AisModuleIframe>();
+  const aisModuleChecks = new SvelteMap<string, () => Promise<void>>();
+  function emitAisEvent<K extends AisEventName>(event: K, payload: AisEventPayloads[K]): void {
+    for (const host of aisModuleHosts.values()) host.emit(event, payload);
+  }
+  function emitAisModuleEvent(packageId: string, eventId: string, payload: import("../core/documents").Json): void {
+    const event: AisEventPayloads["module.event"] = { packageId, eventId, payload };
+    for (const [recipientId, host] of aisModuleHosts.entries()) {
+      if (recipientId !== packageId) host.emit("module.event", event);
+    }
+  }
 
   /** The active encounter of the active scene (null before any is activated). */
   function activeCombat(): CombatDocument | null {
@@ -1152,11 +1218,52 @@ const WALL_PICK_RADIUS = 12;
 
   function closeTokenMenu(): void {
     tokenMenu = null;
+    openingMenu = null;
     closeHexMenu(); // one click cannot leave two menus on the canvas
   }
 
   function closeHexMenu(): void {
     hexMenu = null;
+  }
+
+  function patchOpeningSightCurve(patch: Partial<OpeningSightCurve>): void {
+    if (!openingMenu) return;
+    openingMenu = { ...openingMenu, curve: { ...openingMenu.curve, ...patch }, error: "" };
+  }
+
+  function patchOpeningSightCone(which: "partial" | "full", patch: Partial<OpeningSightCurve["partial"]>): void {
+    if (!openingMenu) return;
+    openingMenu = { ...openingMenu, curve: { ...openingMenu.curve, [which]: { ...openingMenu.curve[which], ...patch } }, error: "" };
+  }
+
+  function commitOpeningSightOverride(override: OpeningSightOverride | null): void {
+    const menu = openingMenu;
+    const scene = activeScene();
+    if (!menu || !app || !scene || scene._id !== menu.sceneId) return;
+    if (override !== null) {
+      const error = openingSightOverrideError(override);
+      if (error) { openingMenu = { ...menu, error }; return; }
+    }
+    try {
+      const op = menu.target.kind === "wall"
+        ? wallOpeningSightOverrideOp(scene._id, menu.target.wallId, override)
+        : (() => {
+            const level = scene.levels?.find((row) => row._id === menu.target.levelId);
+            if (!level) throw new Error("This floor no longer exists.");
+            return levelApertureSightOverrideOp(scene._id, level, menu.target.apertureId, override);
+          })();
+      app.gm.client.submit([op]);
+      openingMenu = null;
+    } catch (error) {
+      openingMenu = { ...menu, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  function saveCustomOpeningSight(): void {
+    if (!openingMenu) return;
+    const error = openingSightCurveError(openingMenu.curve);
+    if (error) { openingMenu = { ...openingMenu, error }; return; }
+    commitOpeningSightOverride({ mode: "custom", curve: structuredClone(openingMenu.curve) });
   }
 
   /** D-271: the `hex` window, one per cell — the key is the window's identity. */
@@ -2311,6 +2418,47 @@ const WALL_PICK_RADIUS = 12;
     pushLog(["the move was cancelled — the token stays put"], "info");
     pendingReaction = null;
     pendingCommit = null;
+  }
+
+  function tokenLightActionsFor(token: TokenDocument) {
+    const provider = app?.automationBoot.resolution.providers.find((row) => row.slotId === "scene.token.light.action");
+    if (!provider) return undefined;
+    const selectedId = provider.selected?.split("/", 1)[0] ?? null;
+    const ais = token.flags.ais as Record<string, unknown> | undefined;
+    const state = selectedId && ais ? ais[selectedId] as Record<string, unknown> | undefined : undefined;
+    let reason: string | null = null;
+    if (!selectedId) reason = "Select one token-light provider in Settings → Packages.";
+    else if (!aisModuleHosts.has(selectedId)) reason = "Enable the module and approve its exact code and capabilities in Settings → Packages.";
+    return {
+      enabled: reason === null,
+      reason,
+      active: state?.active === true,
+      sourceName: typeof state?.sourceName === "string" ? state.sourceName : null,
+    };
+  }
+
+  /** Send a UI intent only to the explicitly selected AIS provider for token lighting. */
+  function runTokenLightMenuEntry(entryId: string): void {
+    if (!tokenMenu || !app) return;
+    const scene = activeScene();
+    const token = scene?.tokens.find((row) => row._id === tokenMenu?.tokenId);
+    const provider = app.automationBoot.resolution.providers.find((row) => row.slotId === "scene.token.light.action");
+    const packageId = provider?.selected?.split("/", 1)[0];
+    const host = packageId ? aisModuleHosts.get(packageId) : undefined;
+    if (!scene || !token || !packageId || !host) {
+      notifyLog = [...notifyLog.slice(-49), {
+        message: "Token lighting is not ready. Enable the PF1e Torch module and approve its requested capabilities in Settings → Packages.",
+        level: "warn",
+      }];
+      closeTokenMenu();
+      return;
+    }
+    const action = entryId === "token-light-toggle" ? "toggle"
+      : entryId === "token-light-next" ? "next"
+        : entryId === "token-light-select" ? "select"
+          : entryId === "token-light-off" ? "off" : "settings";
+    host.emit("ui.token.action", { sceneId: scene._id, tokenId: token._id, action });
+    closeTokenMenu();
   }
 
   /** Apply one T01/E02 menu entry: roster transitions go through the combat update
@@ -3769,11 +3917,16 @@ const WALL_PICK_RADIUS = 12;
     };
     globalThis.addEventListener("keydown", onBackgroundKey);
     onDestroy(() => {
+      finishAisChoice(null);
       settleSummonPick(null);
       settleSpellAim({ ok: false, error: "The session closed before aiming completed; no slot was spent." });
       agents?.dispose();
       agents = null;
       moduleHost?.dispose();
+      app?.host.setAisMacroModuleInvoker(null);
+      for (const host of aisModuleHosts.values()) host.dispose();
+      aisModuleHosts.clear();
+      aisModuleChecks.clear();
       if (rtSampleTimer !== null) globalThis.clearInterval(rtSampleTimer);
       offSimBus?.();
       if (fogTimer !== null) globalThis.clearInterval(fogTimer);
@@ -4021,6 +4174,52 @@ const WALL_PICK_RADIUS = 12;
         };
         canvas.addEventListener("pointerdown", onWallDown);
         canvas.addEventListener("click", onWallClick);
+        const onOpeningContextMenu = (e: MouseEvent) => {
+          if (!app || viewingAs || app.gm.client.user?.role !== "GM" || canvasLayer !== "gm" ||
+              (canvasTool !== "select" && canvasTool !== "wall") || e.button !== 2) return;
+          const scene = activeScene();
+          if (!scene) return;
+          const world = toWorld({ clientX: e.clientX, clientY: e.clientY } as PointerEvent);
+          const rect = canvas.getBoundingClientRect();
+          let target: OpeningMenuTarget | null = null;
+          let title = "";
+          let rawOverride: unknown;
+          const pick = wallPickAt(scene.walls, world, WALL_PICK_RADIUS / (view.camera.scale || 1));
+          if (pick) {
+            const kind = wallKindOf(pick.wall);
+            if (kind === "window" || kind === "door") {
+              target = { kind: "wall", wallId: pick.wall._id };
+              title = `${wallKindName(kind)} · ${pick.wall.name || pick.wall._id}`;
+              rawOverride = pick.wall.openingSightOverride;
+            }
+          }
+          if (!target) {
+            const floors = [...(scene.levels ?? [])].sort((a, b) => b.floorZ - a.floorZ || b.sort - a.sort || a._id.localeCompare(b._id));
+            for (const level of floors) {
+              const apertureId = surfaceApertureAt(level, world);
+              if (!apertureId) continue;
+              target = { kind: "aperture", levelId: level._id, apertureId };
+              title = `Floor opening · ${level.name}`;
+              rawOverride = level.apertureSightOverrides?.[apertureId];
+              break;
+            }
+          }
+          if (!target) return;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          closeTokenMenu();
+          const current = openingSightOverrideOf(rawOverride) ?? null;
+          const policy = openingSightPolicyOf(scene);
+          const curve: OpeningSightCurve = current?.mode === "custom" ? structuredClone(current.curve) : {
+            partialAt: policy.partialAt, partial: { ...policy.partial },
+            fullAt: policy.fullAt, full: { ...policy.full },
+          };
+          openingMenu = {
+            x: e.clientX - rect.left, y: e.clientY - rect.top,
+            sceneId: scene._id, title, target, current, curve, editingCustom: false, error: "",
+          };
+        };
+        canvas.addEventListener("contextmenu", onOpeningContextMenu);
         let tileDown: { x: number; y: number; tokenId?: string } | null = null;
         let tileClickForDouble: { sceneId: string; tileId: string; x: number; y: number;
           point: { x: number; y: number }; tokenId?: string } | null = null;
@@ -4170,6 +4369,7 @@ const WALL_PICK_RADIUS = 12;
           canvas.removeEventListener("dblclick", onPinOpen);
           canvas.removeEventListener("pointerdown", onWallDown);
           canvas.removeEventListener("click", onWallClick);
+          canvas.removeEventListener("contextmenu", onOpeningContextMenu);
           canvas.removeEventListener("pointerdown", onTileDown);
           canvas.removeEventListener("pointermove", onTileHoverMove);
           canvas.removeEventListener("pointerleave", onTileHoverLeave);
@@ -4753,6 +4953,114 @@ const WALL_PICK_RADIUS = 12;
             }),
           );
         }
+        for (const module of current.automationBoot.modules) {
+          const checkModuleConsent = async (capability?: AisCapability): Promise<void> => {
+            const world = await getWorld(current.db, current.worldId);
+            const lock = world?.automationProfile?.modules.find((entry) =>
+              entry.id === module.packageId && entry.version === module.version && entry.hash === module.hash,
+            );
+            const grant = world?.automationGrants?.[module.packageId];
+            if (!lock || grant?.hash !== module.hash || !Array.isArray(grant.capabilities))
+              throw new Error(`AIS code approval is not currently active for ${module.packageId}`);
+            if (capability && !grant.capabilities.includes(capability))
+              throw new Error(`AIS capability ${capability} is not currently approved for ${module.packageId}`);
+          };
+          const assertModuleActive = (): Promise<void> => checkModuleConsent();
+          const assertCapability = (capability: AisCapability): Promise<void> => checkModuleConsent(capability);
+          aisModuleChecks.set(module.packageId, assertModuleActive);
+          const handlers = createAisModuleHandlers({
+            worldId: current.worldId,
+            packageId: module.packageId,
+            emittedEvents: module.emittedEvents,
+            db: current.db,
+            user: () => ({
+              id: current.gm.client.user?.id ?? "gm",
+              name: current.gm.client.user?.name ?? "GM",
+            }),
+            activeScene: () => activeScene(),
+            actorById: (id) => current.gm.client.store.get("actors", id) as ActorDocument | undefined,
+            select: (request) => requestAisChoice(module.packageId, request),
+            submit: (ops) => current.gm.client.submit(ops),
+            notify: (message, level) => {
+              notifyLog = [...notifyLog.slice(-49), { message, level }];
+            },
+            emitModuleEvent: (eventId, payload) => emitAisModuleEvent(module.packageId, eventId, payload),
+            newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID().slice(0, 8)}`,
+            assertCapability,
+          });
+          const frame = new AisModuleIframe({
+            packageId: module.packageId,
+            source: module.source,
+            grantedCapabilities: module.capabilities,
+            handlers,
+            commands: module.commands,
+            isModuleCurrentlyActive: assertModuleActive,
+            isCapabilityCurrentlyGranted: async (capability) => {
+              try {
+                await assertCapability(capability);
+                return true;
+              } catch {
+                return false;
+              }
+            },
+          });
+          aisModuleHosts.set(module.packageId, frame);
+        }
+        current.host.setAisMacroModuleInvoker(async (invocation) => {
+          if (!invocation.isActive()) throw new Error("Script action was cancelled");
+          const moduleBoot = current.automationBoot.modules.find((candidate) => candidate.packageId === invocation.moduleId);
+          const moduleHost = aisModuleHosts.get(invocation.moduleId);
+          const checkModuleActive = aisModuleChecks.get(invocation.moduleId);
+          if (!moduleBoot || !moduleHost || !checkModuleActive)
+            throw new Error(`AIS module ${invocation.moduleId} is not enabled and locally approved on this host`);
+          await checkModuleActive();
+          if (!invocation.isActive()) throw new Error("Script action was cancelled");
+          return moduleHost.invokeCommand(invocation.commandId, invocation.input, {
+            sceneId: invocation.sceneId,
+            callerId: invocation.callerId,
+            requestId: invocation.requestId,
+            runAs: invocation.runAs,
+            isActive: invocation.isActive,
+          });
+        });
+        current.gm.bus.on("snapshot", (message) => {
+          emitAisEvent("world.snapshot", { seq: message.seq });
+        });
+        current.gm.bus.on("ops", (message) => {
+          emitAisEvent("world.ops.committed", {
+            seq: message.envelope.seq,
+            operationCount: message.envelope.ops.length,
+          });
+          const scene = activeScene();
+          if (!scene) return;
+          for (const change of aisTokenLightChanges(message.envelope.ops)) {
+            if (change.sceneId !== scene._id) continue;
+            const token = scene.tokens.find((candidate) => candidate._id === change.tokenId && !candidate.hidden);
+            if (!token) continue;
+            emitAisEvent("scene.token.light.changed", {
+              sceneId: scene._id,
+              tokenId: token._id,
+              light: projectAisTokenLight(token),
+            });
+          }
+        });
+        current.gm.bus.on("turnPhase", (message) => {
+          emitAisEvent("turn.phase.changed", {
+            turnId: message.turnId,
+            phase: message.phase,
+            ...(message.mode === "stepwise" || message.mode === "realtime" || message.mode === "simultaneous"
+              ? { mode: message.mode }
+              : {}),
+            ...(message.paused === undefined ? {} : { paused: message.paused }),
+          });
+        });
+        current.gm.bus.on("turnReport", (message) => {
+          emitAisEvent("turn.report.committed", {
+            turnId: message.turnId,
+            turn: message.report.turn,
+            rulesVersion: message.report.rulesVersion,
+          });
+        });
         const offSim = current.gm.bus.on("sim", () => {
           const pool = current.gm.client.simReplica;
           if (pool) rtInterp.push(pool, performance.now());
@@ -5574,6 +5882,7 @@ const WALL_PICK_RADIUS = 12;
                 user: app?.gm.client.user ?? null,
                 actors: (app?.gm.client.store.getAll("actors") ??
                   []) as readonly ActorDocument[],
+                lightActions: tokenLightActionsFor(menuToken),
               })}
               <div
                 class="token-menu"
@@ -5599,14 +5908,14 @@ const WALL_PICK_RADIUS = 12;
                       data-token-menu-action={entry.id}
                       disabled={entry.disabled}
                       title={entry.reason ?? ""}
-                      onclick={() =>
-                        runTokenMenuEntry(
-                          entry.id as
-                            | "add-combatant"
-                            | "remove-combatant"
-                            | "toggle-hidden"
-                            | "apply-effect",
-                        )}>{entry.label}</button
+                      onclick={() => {
+                        if (entry.id.startsWith("token-light-")) runTokenLightMenuEntry(entry.id);
+                        else runTokenMenuEntry(entry.id as
+                          | "add-combatant"
+                          | "remove-combatant"
+                          | "toggle-hidden"
+                          | "apply-effect");
+                      }}>{entry.label}</button
                     >
                   {/if}
                 {/each}
@@ -5643,6 +5952,77 @@ const WALL_PICK_RADIUS = 12;
                 {/if}
               </div>
             {/if}
+          {/if}
+          {#if openingMenu && activeScene()?._id === openingMenu.sceneId}
+            {@const menuScene = activeScene()}
+            {@const currentPolicy = openingSightPolicyOf(menuScene)}
+            <div
+              class="opening-menu"
+              data-opening-menu={openingMenu.target.kind}
+              data-opening-current={openingMenu.current?.mode ?? "inherit"}
+              onpointerdown={(event) => event.stopPropagation()}
+              style={`left:${Math.round(openingMenu.x)}px;top:${Math.round(openingMenu.y)}px;`}
+              role="dialog"
+              tabindex="-1"
+              aria-label={`${openingMenu.title} opening LOS settings`}
+            >
+              <strong>{openingMenu.title}</strong>
+              <span class="token-menu-static">Current: {openingMenu.current?.mode ?? "inherit scene"}</span>
+              {#if openingMenu.target.kind === "wall"}
+                {@const selectedWall = menuScene?.walls.find((wall) => wall._id === openingMenu?.target.wallId)}
+                {#if selectedWall && wallKindOf(selectedWall) === "door" && selectedWall.door !== 1}
+                  <p class="opening-menu-note">This door is closed or locked. Physical blocking remains in force; its sight rule applies only after it is opened.</p>
+                {/if}
+              {/if}
+              <button type="button" data-opening-override="inherit" onclick={() => commitOpeningSightOverride(null)}>Inherit scene rule</button>
+              <button type="button" data-opening-override="full" onclick={() => commitOpeningSightOverride({ mode: "full" })}>Full LOS (bypass proximity)</button>
+              <button type="button" data-opening-custom-toggle onclick={() => {
+                if (openingMenu) openingMenu = { ...openingMenu, editingCustom: true, error: "" };
+              }}>{openingMenu.current?.mode === "custom" ? "Edit custom proximity…" : "Custom proximity…"}</button>
+              {#if openingMenu.editingCustom}
+                <div class="opening-menu-fields">
+                  <fieldset>
+                    <legend>Partial cone</legend>
+                    <label>Applies at ({menuScene?.grid.units || "units"})
+                      <input type="number" min="0" step="0.1" data-opening-custom-partial-at value={openingMenu.curve.partialAt}
+                        onchange={(event) => patchOpeningSightCurve({ partialAt: Number(event.currentTarget.value) })} />
+                    </label>
+                    <label>Depth beyond opening ({menuScene?.grid.units || "units"})
+                      <input type="number" min="0" step="0.1" value={openingMenu.curve.partial.depth}
+                        onchange={(event) => patchOpeningSightCone("partial", { depth: Number(event.currentTarget.value) })} />
+                    </label>
+                    <label>Width (degrees)
+                      <input type="number" min="1" max="360" step="1" value={openingMenu.curve.partial.widthDeg}
+                        onchange={(event) => patchOpeningSightCone("partial", { widthDeg: Number(event.currentTarget.value) })} />
+                    </label>
+                  </fieldset>
+                  <fieldset>
+                    <legend>Closer full cone</legend>
+                    <label>Applies at ({menuScene?.grid.units || "units"})
+                      <input type="number" min="0" step="0.1" value={openingMenu.curve.fullAt}
+                        onchange={(event) => patchOpeningSightCurve({ fullAt: Number(event.currentTarget.value) })} />
+                    </label>
+                    <label>Depth beyond opening ({menuScene?.grid.units || "units"})
+                      <input type="number" min="0" step="0.1" value={openingMenu.curve.full.depth}
+                        onchange={(event) => patchOpeningSightCone("full", { depth: Number(event.currentTarget.value) })} />
+                    </label>
+                    <label>Width (degrees)
+                      <input type="number" min="1" max="360" step="1" value={openingMenu.curve.full.widthDeg}
+                        onchange={(event) => patchOpeningSightCone("full", { widthDeg: Number(event.currentTarget.value) })} />
+                    </label>
+                  </fieldset>
+                  <p class="opening-menu-note">A custom rule overrides the scene category and also works when the scene rule is Off. Door state and solid floor geometry still block.</p>
+                  {#if openingMenu.error}<p class="error" data-opening-custom-error>{openingMenu.error}</p>{/if}
+                  <button type="button" data-opening-custom-save onclick={saveCustomOpeningSight}>Save custom rule</button>
+                  <button type="button" onclick={() => {
+                    if (openingMenu) openingMenu = { ...openingMenu, editingCustom: false, error: "" };
+                  }}>Cancel custom edit</button>
+                </div>
+              {/if}
+              {#if !openingMenu.editingCustom && openingMenu.error}<p class="error">{openingMenu.error}</p>{/if}
+              <p class="opening-menu-note">Scene rule: {currentPolicy.enabled ? "On" : "Off"}; this opening inherits it unless overridden.</p>
+              <button type="button" data-opening-menu-close onclick={() => (openingMenu = null)}>Close</button>
+            </div>
           {/if}
         {#if pendingSpellAim}
           {@const aimScene = activeScene()}
@@ -6047,6 +6427,24 @@ const WALL_PICK_RADIUS = 12;
       </div>
     {/if}
   {/if}
+  {#if pendingAisChoice}
+    <div class="ais-choice-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) finishAisChoice(null); }}>
+      <dialog open class="ais-choice-dialog" aria-modal="true" aria-labelledby="ais-choice-title" onkeydown={(event) => { if (event.key === "Escape") finishAisChoice(null); }}>
+        <h2 id="ais-choice-title">{pendingAisChoice.title}</h2>
+        {#if pendingAisChoice.description}<p>{pendingAisChoice.description}</p>{/if}
+        <p class="ais-choice-origin">Requested by {pendingAisChoice.packageId}</p>
+        <div class="ais-choice-options">
+          {#each pendingAisChoice.options as option (option.value)}
+            <button type="button" data-ais-choice={option.value} onclick={() => finishAisChoice(option.value)}>
+              <span>{option.label}</span>
+              {#if option.description}<small>{option.description}</small>{/if}
+            </button>
+          {/each}
+        </div>
+        <button class="ais-choice-cancel" type="button" onclick={() => finishAisChoice(null)}>Cancel</button>
+      </dialog>
+    </div>
+  {/if}
 </main>
 {#if imageDragActive}
   <div class="image-drop-hint" aria-live="polite">Drop image files or a browser-readable HTTPS image link to preview and import</div>
@@ -6082,6 +6480,16 @@ const WALL_PICK_RADIUS = 12;
   />
 {/if}
 <style>
+  .ais-choice-backdrop { position: fixed; inset: 0; z-index: 6000; display: grid; place-items: center; padding: 20px; background: #050810bb; backdrop-filter: blur(3px); }
+  .ais-choice-dialog { position: static; margin: 0; width: min(480px, 100%); max-height: min(80vh, 720px); overflow: auto; display: grid; gap: 12px; padding: 20px; border: 1px solid #7893b4; border-radius: 14px; background: #141b26; color: #e8edf6; box-shadow: 0 18px 70px #000b; }
+  .ais-choice-dialog h2 { margin: 0; font-size: 19px; }
+  .ais-choice-dialog p { margin: 0; color: #b9c5d7; }
+  .ais-choice-dialog .ais-choice-origin { color: #8193aa; font-size: 12px; }
+  .ais-choice-options { display: grid; gap: 8px; }
+  .ais-choice-options button { display: grid; gap: 3px; text-align: left; padding: 11px 13px; border: 1px solid #46566e; border-radius: 9px; background: #202b3a; color: inherit; cursor: pointer; }
+  .ais-choice-options button:hover, .ais-choice-options button:focus-visible { border-color: #7bd7c9; background: #283d48; }
+  .ais-choice-options small { color: #acb9c9; }
+  .ais-choice-dialog .ais-choice-cancel { justify-self: end; padding: 7px 12px; }
   .save-warning { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; background: #482823; color: #ffddd1; }
   .save-warning button { flex-shrink: 0; padding: 8px 12px; }
   .image-drop-hint { position:fixed; inset:18px; z-index:4999; display:grid; place-items:center; border:3px dashed #78dccc; border-radius:18px; background:#10201edb; color:#e5fff9; font-size:clamp(18px,3vw,30px); font-weight:700; text-align:center; pointer-events:none; box-shadow:inset 0 0 0 1px #ffffff22; }
@@ -6700,6 +7108,47 @@ const WALL_PICK_RADIUS = 12;
     opacity: 0.45;
     cursor: not-allowed;
   }
+  .opening-menu {
+    position: absolute;
+    z-index: 45;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    width: min(330px, calc(100% - 16px));
+    max-height: min(75vh, 620px);
+    overflow-y: auto;
+    padding: 9px;
+    color: #dbe3f0;
+    background: #151f2cfa;
+    border: 1px solid #6b8bab;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px #000b;
+    font-size: 12px;
+  }
+  .opening-menu > button,
+  .opening-menu-fields > button {
+    text-align: left;
+    padding: 6px 8px;
+    color: inherit;
+    background: #243346;
+    border: 1px solid #3b5169;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .opening-menu-fields { display: flex; flex-direction: column; gap: 5px; }
+  .opening-menu fieldset {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    padding: 6px;
+    border: 1px solid #35495d;
+    border-radius: 4px;
+  }
+  .opening-menu legend { color: #a9c4dc; }
+  .opening-menu label { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .opening-menu input { width: 78px; color: #fff; background: #0c111b; border: 1px solid #3a455e; border-radius: 3px; }
+  .opening-menu-note { margin: 0; color: #9eb0c2; line-height: 1.35; }
   .board {
     display: flex;
     flex: 1;

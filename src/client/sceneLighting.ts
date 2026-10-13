@@ -97,8 +97,13 @@ export class SceneLightingPlayer {
       this.cross = null;
       const views = (list: typeof sources, flat: Float32Array) => Promise.all(list.map(async (source): Promise<LightView> => ({
         light: {_id:source.id, x:source.x, y:source.y, bright:source.bright, dim:source.dim,
+          ...(source.angle !== undefined ? { angle: source.angle, rotation: source.rotation ?? 0 } : {}),
+          ...(source.animation ? { animation: source.animation } : {}),
           color:source.color ?? "#ffe9b8", alpha: Math.max(0,Math.min(1,source.alpha ?? 0.8))},
-        poly: await this.computer.compute(source.x,source.y,flat,source.dim),
+        poly: await this.computer.compute(source.x,source.y,flat,source.dim, [],
+          source.angle !== undefined && source.angle < 360
+            ? { directionDeg: source.rotation ?? 0, widthDeg: source.angle }
+            : null),
       })));
       void Promise.all([views(sources, flatSegments(segments)),
         Promise.all(crossSources.map(async (group) => ({ key: group.key, masks: group.masks, views: (await views(group.sources, flatSegments(group.segments))).filter(validPoly) })))]).then(([lights, groups]) => {
@@ -114,8 +119,10 @@ export class SceneLightingPlayer {
   private draw(): void {
     const view = this.view;
     if (!view) return;
+    const now = performance.now();
+    const reducedMotion = this.media?.matches === true;
     view.getLightingLayer().sync(this.lights,
-      {darkness:this.animation.sample(performance.now(),this.media?.matches === true),color:"#0a0e1a"},view.camera,view.viewport,this.cross);
+      {darkness:this.animation.sample(now,reducedMotion),color:"#0a0e1a"},view.camera,view.viewport,this.cross,now / 1000,reducedMotion);
   }
   destroy(): void {
     this.destroyed = true; this.revision++; this.unframe?.(); this.unframe = undefined;

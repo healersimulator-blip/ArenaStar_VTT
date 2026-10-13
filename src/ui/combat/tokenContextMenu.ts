@@ -27,7 +27,12 @@ export type TokenMenuEntryId =
   | "add-combatant"
   | "remove-combatant"
   | "toggle-hidden"
-  | "apply-effect";
+  | "apply-effect"
+  | "token-light-toggle"
+  | "token-light-next"
+  | "token-light-select"
+  | "token-light-off"
+  | "token-light-settings";
 
 export interface TokenMenuEntry {
   id: TokenMenuEntryId;
@@ -71,8 +76,10 @@ export function tokenContextMenuModel(input: {
   token: TokenDocument;
   user: PermissionUser | null;
   actors: readonly ActorDocument[];
+  /** The selected AIS provider for the token-light UI slot, when one is installed. */
+  lightActions?: { enabled: boolean; reason: string | null; active: boolean; sourceName?: string | null };
 }): TokenMenuModel {
-  const { combat, scene, token, user, actors } = input;
+  const { combat, scene, token, user, actors, lightActions } = input;
   const member = tokenCombatant(combat, token);
   const canUpdateEncounter =
     combat !== null && user !== null && can(user, "update", combat, "combats");
@@ -156,6 +163,19 @@ export function tokenContextMenuModel(input: {
       disabled: !canEditActor,
       reason: canEditActor ? null : "You cannot update this actor.",
     });
+  }
+
+  if (lightActions) {
+    const disabled = !lightActions.enabled;
+    const reason = lightActions.enabled ? null : lightActions.reason ?? "Enable and approve the token-light module in Settings → Packages.";
+    const current = lightActions.sourceName ? ` · ${lightActions.sourceName}` : "";
+    entries.push(
+      { id: "token-light-toggle", label: `${lightActions.active ? "Turn carried light off" : "Turn carried light on"}${current}`, disabled, reason },
+      { id: "token-light-next", label: "Next carried light source", disabled, reason },
+      { id: "token-light-select", label: "Choose carried light source…", disabled, reason },
+      { id: "token-light-off", label: "Extinguish carried light", disabled, reason },
+      { id: "token-light-settings", label: "Torch settings…", disabled, reason },
+    );
   }
 
   return { title: token.name, entries };

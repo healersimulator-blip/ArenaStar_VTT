@@ -159,6 +159,8 @@ const api = Object.freeze({
     rpc("automation.fire", { automationId, method,
       ...(tokenId !== undefined ? { tokenId } : {}) }) }),
   macros: Object.freeze({ call: (macroId, args = {}) => rpc("macros.call", { macroId, args }) }),
+  ais: Object.freeze({ invoke: (moduleId, commandId, input = {}) =>
+    rpc("ais.invoke", { moduleId, commandId, input }) }),
   prefabs: Object.freeze({ place: (prefabId, x, y, rotation = 0, scale = 1) =>
     rpc("prefabs.place", { prefabId, at: { x, y }, rotation, scale }) }),
   summons: Object.freeze({

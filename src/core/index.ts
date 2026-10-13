@@ -4,6 +4,7 @@
  */
 export * from "./ids";
 export * from "./documents";
+export * from "./lightAnimation";
 export * from "./ops";
 export * from "./ownership";
 export * from "./projection";

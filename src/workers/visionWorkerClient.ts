@@ -4,7 +4,7 @@
  * the vite `?worker&inline` import). `InlineVisionWorker` runs the same pure
  * module in-context (Node tests, same-thread fallback).
  */
-import { visibilityPolygon, type Segment } from "../canvas/vision/polygon";
+import { visibilityPolygon, type ProximityOpeningSegment, type Segment, type VisionCone } from "../canvas/vision/polygon";
 
 export interface VisionComputer {
   /** Flat polygon [x0,y0,…] for a viewer origin (transferable-friendly). */
@@ -13,6 +13,8 @@ export interface VisionComputer {
     oy: number,
     segments: Float32Array,
     radius: number | null,
+    proximityOpenings?: readonly ProximityOpeningSegment[],
+    visionCone?: VisionCone | null,
   ): Promise<Float32Array>;
   terminate(): void;
 }
@@ -23,6 +25,8 @@ export class InlineVisionWorker implements VisionComputer {
     oy: number,
     segments: Float32Array,
     radius: number | null,
+    proximityOpenings: readonly ProximityOpeningSegment[] = [],
+    visionCone?: VisionCone | null,
   ): Promise<Float32Array> {
     const segs: Segment[] = [];
     for (let i = 0; i + 3 < segments.length; i += 4) {
@@ -33,7 +37,7 @@ export class InlineVisionWorker implements VisionComputer {
         y2: segments[i + 3] ?? 0,
       });
     }
-    return Promise.resolve(visibilityPolygon(ox, oy, segs, radius));
+    return Promise.resolve(visibilityPolygon(ox, oy, segs, radius, proximityOpenings, visionCone));
   }
 
   terminate(): void {}
@@ -74,15 +78,17 @@ export class WorkerVisionComputer implements VisionComputer {
     oy: number,
     segments: Float32Array,
     radius: number | null,
+    proximityOpenings: readonly ProximityOpeningSegment[] = [],
+    visionCone?: VisionCone | null,
   ): Promise<Float32Array> {
     const worker = this.ensure();
     const id = this.nextId++;
     const copy = segments.slice(); // caller keeps its array; transfer the copy
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      worker.postMessage({ id, type: "poly" as const, ox, oy, segments: copy, radius }, [
-        copy.buffer,
-      ]);
+      worker.postMessage({ id, type: "poly" as const, ox, oy, segments: copy, radius,
+        ...(proximityOpenings.length ? { proximityOpenings } : {}),
+        ...(visionCone ? { visionCone } : {}) }, [copy.buffer]);
     });
   }
 

@@ -7,7 +7,8 @@
 import { Container, FillGradient, Graphics } from "pixi.js";
 import type { RadialGradientOptions } from "pixi.js";
 import type { Camera, Viewport } from "../camera";
-import type { LevelSurface, LightDocument } from "../../core/documents";
+import type { LevelSurface, LightAnimation, LightDocument } from "../../core/documents";
+import { lightAnimationAlpha } from "../../core/lightAnimation";
 import { surfaceRings } from "../../core/floorSurface";
 
 import type { AmbientLighting } from "../vision/lights";
@@ -16,7 +17,7 @@ import { lightAffectsViewport, parseLightColor, rgba } from "../vision/lights";
 export type { AmbientLighting as Ambient } from "../vision/lights";
 
 export interface LightView {
-  light: LightDocument | Pick<LightDocument, "_id" | "x" | "y" | "dim" | "bright" | "color" | "alpha">;
+  light: LightDocument | Pick<LightDocument, "_id" | "x" | "y" | "dim" | "bright" | "color" | "alpha" | "angle" | "rotation" | "animation">;
   /** Visibility polygon (flat [x,y,…]) from the vision worker, or null. */
   poly: Float32Array | null;
 }
@@ -159,6 +160,7 @@ export class LightingLayer {
   /** G-22: other floors' lights, clipped to the openings they shine through. */
   private readonly crossLights = new Container();
   private readonly views = new Map<string, Graphics>();
+  private readonly crossViews = new Map<string, { graphics: Graphics; animation: LightAnimation | null | undefined }>();
   private key = "";
   private ambientKey = "";
   private lastViews: readonly LightView[] | undefined;
@@ -185,6 +187,8 @@ export class LightingLayer {
     camera: Camera,
     viewport: Viewport,
     cross: CrossFloorLightingView | null = null,
+    timeSeconds = 0,
+    reducedMotion = false,
   ): void {
     const view = {
       x: camera.x,
@@ -212,9 +216,13 @@ export class LightingLayer {
     }
     if (cross !== this.cross) this.drawCross(cross);
     this.crossState = { ...this.crossState, split: split !== null, belowDarkness: split ? split.below : null };
-    // Interpolation changes only alpha, not geometry or light gradients. New light-view
-    // arrays invalidate polygons even when their vertex count is unchanged.
-    if (viewportKey === this.key && views === this.lastViews) return;
+    // Interpolation and declarative animation change alpha only, not polygons or gradients.
+    // Apply it every frame even when the view array and viewport are unchanged.
+    if (viewportKey === this.key && views === this.lastViews) {
+      this.updateViewAlpha(views, timeSeconds, reducedMotion);
+      this.updateCrossViewAlpha(timeSeconds, reducedMotion);
+      return;
+    }
     this.key = viewportKey;
     this.lastViews = views;
 
@@ -237,6 +245,20 @@ export class LightingLayer {
         g.destroy();
       }
     }
+    this.updateViewAlpha(views, timeSeconds, reducedMotion);
+    this.updateCrossViewAlpha(timeSeconds, reducedMotion);
+  }
+
+  private updateViewAlpha(views: readonly LightView[], timeSeconds: number, reducedMotion: boolean): void {
+    for (const { light } of views) {
+      const graphics = this.views.get(light._id);
+      if (graphics) graphics.alpha = lightAnimationAlpha(light.animation, timeSeconds, reducedMotion);
+    }
+  }
+
+  private updateCrossViewAlpha(timeSeconds: number, reducedMotion: boolean): void {
+    for (const { graphics, animation } of this.crossViews.values())
+      graphics.alpha = lightAnimationAlpha(animation, timeSeconds, reducedMotion);
   }
 
   /** G-22 (D-446): what crosses floors right now. */
@@ -251,6 +273,7 @@ export class LightingLayer {
   private drawCross(cross: CrossFloorLightingView | null): void {
     this.cross = cross;
     for (const child of this.crossLights.removeChildren()) child.destroy({ children: true });
+    this.crossViews.clear();
     const groups: CrossFloorLightingState["groups"] = [];
     for (const group of cross?.groups ?? []) {
       if (!group.views.length || !group.masks.length) continue;
@@ -268,6 +291,7 @@ export class LightingLayer {
         const g = new Graphics();
         g.blendMode = "add";
         drawLight(g, light, poly);
+        this.crossViews.set(`${group.key}:${light._id}`, { graphics: g, animation: light.animation });
         parent.addChild(g);
       }
       groups.push({ key: group.key, masks: group.masks.length, lights: group.views.map((v) => v.light._id) });
@@ -278,5 +302,6 @@ export class LightingLayer {
   destroy(): void {
     this.container.destroy({ children: true });
     this.views.clear();
+    this.crossViews.clear();
   }
 }

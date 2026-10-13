@@ -5,7 +5,7 @@
  * responses carry the flat polygon (transferable back). Same sandbox rules
  * as sim.worker (no fetch/WS/XHR/importScripts/IDB).
  */
-import { visibilityPolygon } from "../canvas/vision/polygon";
+import { visibilityPolygon, type ProximityOpeningSegment, type VisionCone } from "../canvas/vision/polygon";
 
 export interface VisionWorkerRequest {
   id: number;
@@ -17,6 +17,10 @@ export interface VisionWorkerRequest {
   segments: Float32Array;
   /** Sight radius cap (world units). */
   radius: number | null;
+  /** Optional observer-dependent wall apertures; omitted on the legacy/static path. */
+  proximityOpenings?: readonly ProximityOpeningSegment[];
+  /** Optional directional light/vision field; absent = a full circle. */
+  visionCone?: VisionCone;
 }
 
 export interface VisionWorkerResponse {
@@ -75,7 +79,7 @@ function onMessage(ev: MessageEvent<VisionWorkerRequest>): void {
         y2: req.segments[i + 3] ?? 0,
       });
     }
-    const poly = visibilityPolygon(req.ox, req.oy, segs, req.radius);
+    const poly = visibilityPolygon(req.ox, req.oy, segs, req.radius, req.proximityOpenings ?? [], req.visionCone);
     respond({ id: req.id, ok: true, poly });
   } catch (err) {
     respond({ id: req.id, ok: false, error: err instanceof Error ? err.message : String(err) });

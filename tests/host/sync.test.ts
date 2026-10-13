@@ -1,4 +1,4 @@
-import { DRAFT_LEVELS_FEATURE } from "../../src/core/capabilities";
+import { DRAFT_LEVELS_FEATURE, OPENING_SIGHT_FEATURE } from "../../src/core/capabilities";
 import { draftLevel } from "../../src/core/levels";
 import { planWallSplit, wallEditGuard } from "../../src/core/wallEditing";
 import { environmentPlaceables } from "../fixtures/automationPlaceables";
@@ -7225,6 +7225,59 @@ function awaitMacroResult(bus: EventBus<ClientEvents>, requestId: string): Promi
 }
 
 describe("GM-reviewed scripted macros: authority, projection, persistence", () => {
+  test("AIS macro grant dispatches only an approved module command under reviewed GM authority", async () => {
+    const h = await setup({}, async (_source, _args, context, action) => {
+      expect(context.runAs).toBe("gm");
+      return action("ais.invoke", {
+        moduleId: "pf1e-torch",
+        commandId: "toggle",
+        input: { tokenId: "t-pl" },
+      }, () => true);
+    });
+    const script = await reviewedScript({ runAs: "gm", playerCallable: false, grants: ["ais.invoke"], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: script }]);
+    await flushMicrotasks();
+    const invoked: unknown[] = [];
+    h.host.setAisMacroModuleInvoker(async (request) => {
+      expect(request.isActive()).toBe(true);
+      invoked.push({
+        moduleId: request.moduleId,
+        commandId: request.commandId,
+        input: request.input,
+        sceneId: request.sceneId,
+        callerId: request.callerId,
+        runAs: request.runAs,
+      });
+      return { sourceId: "torch", stateIndex: 1, active: true };
+    });
+
+    const requestId = h.gm.requestMacro(script._id, {});
+    const result = await awaitMacroResult(h.gmBus, requestId);
+    expect(result.ok).toBe(true);
+    expect(result.result).toEqual({ sourceId: "torch", stateIndex: 1, active: true });
+    expect(invoked).toEqual([{
+      moduleId: "pf1e-torch",
+      commandId: "toggle",
+      input: { tokenId: "t-pl" },
+      sceneId: "s1",
+      callerId: GM_ID,
+      runAs: "gm",
+    }]);
+  });
+
+  test("AIS module macro calls fail closed when the browser has no approved bridge", async () => {
+    const h = await setup({}, async (_source, _args, _context, action) => action("ais.invoke", {
+      moduleId: "pf1e-torch", commandId: "toggle", input: { tokenId: "t-pl" },
+    }, () => true));
+    const script = await reviewedScript({ runAs: "gm", playerCallable: false, grants: ["ais.invoke"], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: script }]);
+    await flushMicrotasks();
+    const requestId = h.gm.requestMacro(script._id, {});
+    const result = await awaitMacroResult(h.gmBus, requestId);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("bridge is not active");
+  });
+
   test("Tagger cross-scene reads and elevated bulk writes are scoped and reprojected for the actual caller", async () => {
     const remoteRef = { coll: "tokens", id: "same", parent: { coll: "scenes", id: "s2" } };
     const hiddenRef = { coll: "tiles", id: "secret", parent: { coll: "scenes", id: "s2" } };
@@ -11950,6 +12003,29 @@ async function capabilityPeer(h: Harness, peer: string, hello: HelloMsg) {
   return { pair, frames };
 }
 
+test("opening sight capability is negotiated before settings reach players and gates mixed-version writes", async () => {
+  const h = await setup();
+  const hello: HelloMsg = { kind: "hello", pubkey: PLAYER_ID, displayName: "Rex", ts: 1, sig: "valid" };
+  const legacy = await capabilityPeer(h, "legacy-opening-live", hello);
+  expect(legacy.frames[0]).toMatchObject({ kind: "welcome", requiredFeatures: [] });
+  const policy = {
+    enabled: true, applyTo: { windows: true, doors: true, apertures: true },
+    partialAt: 20, partial: { depth: 2, widthDeg: 30 }, fullAt: 5, full: { depth: 20, widthDeg: 120 },
+  } as unknown as Json;
+  const rejected: ClientEvents["rejected"][] = []; h.gmBus.on("rejected", (message) => rejected.push(message));
+  const scene = { coll: "scenes" as const, id: "s1" }, seq = h.hostStore.seq;
+  const update: Op = { kind: "update", ref: scene, diff: { flags: { core: { openingSight: policy } } } };
+  h.gm.submit([update]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq); expect(rejected.at(-1)?.detail).toContain("Upgrade or disconnect");
+  h.host.removeSession("legacy-opening-live", "upgrade");
+  h.gm.submit([update]); await flushMicrotasks();
+
+  const lateLegacy = await capabilityPeer(h, "legacy-opening-late", { ...hello, pubkey: OTHER_ID, displayName: "Ivy" });
+  expect(lateLegacy.frames[0]).toMatchObject({ kind: "kick", reason: expect.stringContaining("Upgrade required") });
+  const modern = await capabilityPeer(h, "modern-opening", { ...hello, pubkey: OTHER_ID, displayName: "Ivy", features: [OPENING_SIGHT_FEATURE] });
+  expect(modern.frames[0]).toMatchObject({ kind: "welcome", requiredFeatures: [OPENING_SIGHT_FEATURE] });
+});
+
 test("draft-capability negotiation precedes all GM data; legacy players remain projected", async () => {
   const h = await setup();
   h.gm.submit([{ kind: "create", coll: "levels", parent: { coll: "scenes", id: "s1" }, data: draftLevel("private-level", "Hidden plan") }]);
@@ -11966,6 +12042,28 @@ test("draft-capability negotiation precedes all GM data; legacy players remain p
   const oldPlayer = await capabilityPeer(h, "old-player", { ...hello, pubkey: PLAYER_ID, displayName: "Rex" });
   expect(oldPlayer.frames[0]).toMatchObject({ kind: "welcome", requiredFeatures: [] });
   expect(JSON.stringify(oldPlayer.frames)).not.toContain("Hidden plan");
+});
+
+test("opening sight policy and per-opening data remain GM-authored even on a player-owned scene", async () => {
+  const h = await setup();
+  const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const rejected: ClientEvents["rejected"][] = []; bus.on("rejected", (message) => rejected.push(message));
+  const ref = { coll: "scenes" as const, id: "s1" };
+  h.gm.submit([{ kind: "update", ref, diff: { ownership: { default: 3 } } }]); await flushMicrotasks();
+  const policy = {
+    enabled: true, applyTo: { windows: true, doors: true, apertures: true },
+    partialAt: 20, partial: { depth: 2, widthDeg: 30 }, fullAt: 5, full: { depth: 20, widthDeg: 120 },
+  } as unknown as Json;
+  const seq = h.hostStore.seq;
+  player.submit([{ kind: "update", ref, diff: { flags: { core: { openingSight: policy } } } }]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq); expect(rejected.at(-1)?.reason).toBe("forbidden");
+  expect(rejected.at(-1)?.detail).toContain("only GMs author scene opening LOS rules");
+
+  h.gm.submit([{ kind: "update", ref, diff: { flags: { core: { openingSight: policy } } } }]); await flushMicrotasks();
+  const withPolicy = h.hostStore.seq;
+  // Replacing the whole flags object with one that omits the policy must not bypass the guard.
+  player.submit([{ kind: "update", ref, diff: { flags: {} } }]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(withPolicy); expect(rejected.at(-1)?.reason).toBe("forbidden");
 });
 
 test("an incompatible live GM blocks draft commits atomically but not ordinary edits", async () => {

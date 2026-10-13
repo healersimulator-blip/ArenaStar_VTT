@@ -13,7 +13,7 @@
  * result is always a valid `RegionShapeV2`, or nothing.
  */
 import type { LevelDocument, LevelSurface, SceneDocument, TileDocument } from "./documents";
-import { regionShapeV2Error, shapeContains, type RegionShapeV2, type SpatialPoint } from "./multilevelGeometry";
+import { classifyRing, regionShapeV2Error, shapeContains, type RegionShapeV2, type SpatialPoint } from "./multilevelGeometry";
 import type { RoofArtMask } from "./roofs";
 import type { SpatialSurface } from "./spatial/kernel";
 
@@ -111,6 +111,52 @@ export function surfaceOpenings(surface: LevelSurface): SpatialPoint[] {
     const p = { x: (a.x + b.x) / 2 - side * (b.y - a.y) / len * eps, y: (a.y + b.y) / 2 + side * (b.x - a.x) / len * eps };
     return { x: surface.x + p.x * surface.width, y: surface.y + p.y * surface.height };
   });
+}
+
+/**
+ * Geometry-derived aperture identity. It is independent of ring winding and its starting vertex,
+ * unlike a component/hole array index; changing the actual hole geometry intentionally creates a
+ * new identity so an old local override cannot silently attach to a different opening.
+ */
+export function apertureIdForRing(ring: readonly SpatialPoint[]): string {
+  const number = (n: number) => Object.is(n, -0) || n === 0 ? "0" : n.toString();
+  const points = ring.map((point) => `${number(point.x)},${number(point.y)}`);
+  const rotations = (sequence: readonly string[]) => sequence.map((_, start) =>
+    [...sequence.slice(start), ...sequence.slice(0, start)].join(";"));
+  const forward = rotations(points);
+  const reverse = rotations([...points].reverse());
+  const canonical = [...forward, ...reverse].sort()[0] ?? "";
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < canonical.length; i++) {
+    hash ^= BigInt(canonical.charCodeAt(i));
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return `ap-${hash.toString(16).padStart(16, "0")}`;
+}
+
+/** Openings in scene pixels, retaining a stable identity for each traced surface hole. */
+export function surfaceApertures(level: Pick<LevelDocument, "surface">): Array<{ id: string; points: SpatialPoint[] }> {
+  const surface = level.surface;
+  if (!surface || levelSurfaceError(surface)) return [];
+  return surface.footprint.components.flatMap((component) => component.holes.map((hole) => ({
+    id: apertureIdForRing(hole),
+    points: hole.map((point) => ({ x: surface.x + point.x * surface.width, y: surface.y + point.y * surface.height })),
+  })));
+}
+
+/** Stable aperture ID at a scene point; the floor's solid boundary and hole rim stay solid. */
+export function surfaceApertureAt(
+  level: Pick<LevelDocument, "surface">,
+  point: SpatialPoint,
+): string | null {
+  const surface = level.surface;
+  if (!surface || levelSurfaceError(surface) || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
+  const local = { x: (point.x - surface.x) / surface.width, y: (point.y - surface.y) / surface.height };
+  for (const component of surface.footprint.components) {
+    if (classifyRing(component.outer, local) < 0) continue;
+    for (const hole of component.holes) if (classifyRing(hole, local) === 1) return apertureIdForRing(hole);
+  }
+  return null;
 }
 
 /** G-22 (D-446): a surface's solid areas in scene pixels, as flat [x, y, …] rings for drawing and masks. */

@@ -10,7 +10,7 @@
   import type { ClientSync } from "../../client/sync";
   import type { LevelDocument, SceneDocument } from "../../core/documents";
   import { draftLevel, generateLevels, levelDraftAudit, levelDraftOps, levelVisibilityPreset, MAX_LEVELS, sceneLevelsError, type LevelVisibilityPreset } from "../../core/levels";
-  import { surfaceSummary, surfaceSvgPath, traceLevelArt } from "../../core/floorSurface";
+  import { surfaceApertures, surfaceSummary, surfaceSvgPath, traceLevelArt } from "../../core/floorSurface";
   import type { RoofArtMask } from "../../core/roofs";
   let { scene, client, bus, loadArtMask }: { scene: SceneDocument; client: ClientSync; bus: EventBus<ClientEvents>;
     /** G-21 (D-444): a tile image's alpha, for tracing floors. Absent: tracing is unavailable. */
@@ -77,13 +77,21 @@
       const result = traceLevelArt(scene, $state.snapshot(level) as LevelDocument, (t) => masks.get(t._id) ?? null);
       if (!result.surface) { message = `${level.name}: ${result.notes.join(" ")}`; return; }
       level.surface = result.surface;
+      const apertureIds = new Set(surfaceApertures(level).map((aperture) => aperture.id));
+      const overrides = Object.entries(level.apertureSightOverrides ?? {}).filter(([id]) => apertureIds.has(id));
+      const removedOverrides = Object.keys(level.apertureSightOverrides ?? {}).length - overrides.length;
+      if (overrides.length) level.apertureSightOverrides = Object.fromEntries(overrides);
+      else delete level.apertureSightOverrides;
       dirty = true;
-      message = [`${level.name} traced: ${surfaceSummary(result.surface)}.`, ...result.notes, "Apply draft levels to save it."].join(" ");
+      message = [`${level.name} traced: ${surfaceSummary(result.surface)}.`,
+        ...(removedOverrides ? [`${removedOverrides} aperture LOS override(s) were removed because their hole geometry changed.`] : []),
+        ...result.notes, "Apply draft levels to save it."].join(" ");
     } catch (error) { message = error instanceof Error ? error.message : String(error); }
     finally { tracing = null; }
   }
   function solidEverywhere(level: LevelDocument) {
     delete level.surface;
+    delete level.apertureSightOverrides;
     dirty = true;
   }
   function remove(id: string) {

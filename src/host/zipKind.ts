@@ -244,7 +244,7 @@ function readPackagesIndex(bytes: Uint8Array | undefined): WorldZipPackage[] {
       id: entry.id,
       name: typeof entry.name === "string" ? entry.name : entry.id,
       version: typeof entry.version === "string" ? entry.version : "",
-      type: entry.type === "system" ? "system" : "data",
+      type: entry.type === "system" ? "system" : entry.type === "module" ? "module" : "data",
       packCount: typeof entry.packCount === "number" ? entry.packCount : 0,
     });
   }
@@ -317,9 +317,9 @@ export async function classifyZip(bytes: Uint8Array): Promise<ZipKind> {
   };
 }
 
-/** Human label for a package kind — the words the UI uses everywhere (never `system`/`data`). */
+/** Human label for a package kind — the words the UI uses everywhere (never raw role IDs). */
 export function packageKindLabel(type: PackageManifest["type"]): string {
-  return type === "system" ? "strategic ruleset" : "content pack";
+  return type === "system" ? "strategic ruleset" : type === "module" ? "automation module" : "content pack";
 }
 
 /** One line naming a sniffed package, for import messages. */
@@ -336,6 +336,7 @@ export function describeWorldContents(info: WorldZipInfo): string {
     (p) => p.id === info.activeRules && p.type === "system",
   );
   const content = info.packages.filter((p) => p.type === "data");
+  const modules = info.packages.filter((p) => p.type === "module");
   const parts: string[] = [];
   parts.push(
     ruleset
@@ -347,6 +348,13 @@ export function describeWorldContents(info: WorldZipInfo): string {
       content.length === 1
         ? `content pack ${content[0]?.name ?? ""}`.trim()
         : `${content.length} content packs`,
+    );
+  }
+  if (modules.length > 0) {
+    parts.push(
+      modules.length === 1
+        ? `automation module ${modules[0]?.name ?? ""}`.trim()
+        : `${modules.length} automation modules`,
     );
   }
   return parts.join(" · ");

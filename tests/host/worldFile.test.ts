@@ -18,6 +18,7 @@ import {
   type WorldFileMeta,
 } from "../../src/host/worldFile";
 import { WORLD_ZIP_LIMITS } from "../../src/host/worldZip";
+import { DRAFT_LEVELS_FEATURE, OPENING_SIGHT_FEATURE } from "../../src/core/capabilities";
 import { DEFAULT_SCENE_ID, type HostApp } from "../../src/app/hostBoot";
 import { boot, settle } from "../app/fakes";
 import { HostPersister } from "../../src/storage/persistence";
@@ -33,7 +34,9 @@ import type {
   ActorDocument,
   AutomationDocument,
   JournalDocument,
+  Json,
   MacroDocument,
+  SceneDocument,
   TokenDocument,
   UserDocument,
 } from "../../src/core/documents";
@@ -93,6 +96,48 @@ describe("world.zip export/import (§8)", () => {
 
   beforeEach(async () => {
     db = await openVttDb();
+  });
+
+  test("opening-sight archives declare the feature and round-trip the scene policy", async () => {
+    const root = new MemDirHandle();
+    const worldId = "w-opening-sight-archive";
+    await deleteWorldData(db, worldId);
+    await HostPersister.createWorld(db, {
+      worldId,
+      name: "Opening sight archive fixture",
+      system: "mass-battle-basic",
+      systemVersion: "1.0.0",
+    });
+    const app = await boot(root, worldId);
+    const policy: Json = {
+      enabled: true,
+      applyTo: { windows: true, doors: true, apertures: true },
+      partialAt: 20,
+      partial: { depth: 2, widthDeg: 30 },
+      fullAt: 5,
+      full: { depth: 20, widthDeg: 120 },
+    };
+    app.gm.client.submit([{
+      kind: "update",
+      ref: { coll: "scenes", id: DEFAULT_SCENE_ID },
+      diff: { flags: { core: { openingSight: policy } } },
+    }]);
+    await settle();
+    await app.persister.flush();
+    const archive = await exportWorldZip({ db, worldId, root, persister: app.persister });
+    const files = parseZip(new Uint8Array(await archive.arrayBuffer()));
+    const meta = JSON.parse(strFromU8(files.get("world.json") as Uint8Array)) as WorldFileMeta;
+    expect(meta.format).toBe(3);
+    expect(meta.requiredFeatures).toEqual(expect.arrayContaining([DRAFT_LEVELS_FEATURE, OPENING_SIGHT_FEATURE]));
+    await app.close();
+
+    const imported = await importWorldZip({ db, file: archive, root: new MemDirHandle(), mode: "replace" });
+    expect(imported.worldId).toBe(worldId);
+    const scene = (await getAllDocumentRecords(db, worldId)).find(
+      (row) => row.coll === "scenes" && row.id === DEFAULT_SCENE_ID,
+    )?.doc as SceneDocument | undefined;
+    expect(scene?.flags.core?.openingSight).toEqual(policy);
+    await deleteWorldData(db, worldId);
   });
 
   test("D-394 authenticated player saves reach the actual world ZIP and restore/copy with GM opt-in and original drafts", async () => {

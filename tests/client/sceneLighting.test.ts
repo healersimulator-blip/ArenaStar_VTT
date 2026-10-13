@@ -11,7 +11,7 @@ const scene=():SceneDocument=>({_id:"s",type:"scene",name:"s",ownership:{default
   tokens:[],tiles:[],walls:[],sounds:[],drawings:[],templates:[],notes:[],
   lights:[{_id:"l",type:"light",name:"l",ownership:{default:2},flags:{},system:{},x:100,y:100,bright:50,dim:100,color:"#ffffff",alpha:0.8}]});
 function surface() {
-  const sync=vi.fn<(views:readonly LightView[],ambient:AmbientLighting,camera?:unknown,viewport?:unknown,cross?:CrossFloorLightingView|null)=>void>();
+  const sync=vi.fn<(views:readonly LightView[],ambient:AmbientLighting,camera?:unknown,viewport?:unknown,cross?:CrossFloorLightingView|null,timeSeconds?:number,reducedMotion?:boolean)=>void>();
   let frame: ((deltaMs:number)=>void)|undefined;const unframe=vi.fn();
   const view={camera:{x:0,y:0,scale:1},viewport:{width:800,height:600},getLightingLayer:()=>({sync}),
     onFrame:(fn:(deltaMs:number)=>void)=>{frame=fn;return unframe;}};
@@ -44,6 +44,43 @@ test("late polygons cannot light a different scene, failed polygons stay absent,
   p.destroy();expect(computer.terminate).toHaveBeenCalledOnce();
   const count=f.sync.mock.calls.length;p.sync(s,f.view);expect(f.sync.mock.calls).toHaveLength(count);
 });
+test("directional scene lights carry their axis through polygon computation and drawing", async () => {
+  const s = scene();
+  const light = s.lights[0];
+  if (!light) throw new Error("missing test light");
+  light.angle = 90;
+  light.rotation = 45;
+  const f = surface();
+  const computer = new InlineVisionWorker();
+  const compute = vi.spyOn(computer, "compute");
+  const player = new SceneLightingPlayer(computer);
+  player.sync(s, f.view);
+  await flush();
+  expect(compute).toHaveBeenCalledWith(
+    100,
+    100,
+    expect.any(Float32Array),
+    100,
+    [],
+    { directionDeg: 45, widthDeg: 90 },
+  );
+  const rendered = f.sync.mock.calls.at(-1)?.[0][0];
+  expect(rendered?.light).toMatchObject({ angle: 90, rotation: 45 });
+  expect(rendered?.poly && pointInPolygon(rendered.poly, 150, 150)).toBe(true);
+  expect(rendered?.poly && pointInPolygon(rendered.poly, 50, 150)).toBe(false);
+  player.destroy();
+});
+test("declarative light animations reach rendering while the frame clock stays presentation-only", async()=>{
+  const s=scene(),light=s.lights[0];if(!light)throw new Error("missing light");
+  light.animation={type:"pulse",speed:1,intensity:0.6};
+  const f=surface(),p=new SceneLightingPlayer(new InlineVisionWorker());
+  p.sync(s,f.view);await flush();f.tick();
+  const [views,, , , ,timeSeconds,reducedMotion]=f.sync.mock.calls.at(-1) ?? [];
+  expect(views?.[0]?.light.animation).toEqual({type:"pulse",speed:1,intensity:0.6});
+  expect(timeSeconds).toBeGreaterThan(0);expect(reducedMotion).toBe(false);
+  p.destroy();
+});
+
 test("hidden token lights are not drawn; visible carried lights use the replica position", async()=>{
   const s=scene();s.lights=[];
   s.tokens.push({_id:"t",type:"token",name:"t",ownership:{default:2},flags:{},system:{},x:300,y:400,width:100,height:100,

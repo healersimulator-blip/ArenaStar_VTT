@@ -1,0 +1,40 @@
+{
+  "id": "pf1e-torch",
+  "name": "PF1e Torch and Light Sources",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Portable light-source selection, token lighting, directional beams, and consumable tracking for Pathfinder 1e.",
+  "interconnect": {
+    "api": "arena.ais/1",
+    "entry": "automation/entry.js",
+    "requires": [
+      { "id": "pf1e-mass-battles", "version": "1.0.0" }
+    ],
+    "provides": [
+      { "id": "scene.token.light.action", "mode": "exclusive", "contract": 1 }
+    ],
+    "commands": [
+      { "id": "toggle", "contract": 1 },
+      { "id": "extinguish", "contract": 1 },
+      { "id": "current-source", "contract": 1 },
+      { "id": "current-state", "contract": 1 },
+      { "id": "equipped-sources", "contract": 1 },
+      { "id": "select-source", "contract": 1 },
+      { "id": "inventory", "contract": 1 },
+      { "id": "source-exhausted", "contract": 1 }
+    ],
+    "emits": ["torch.changed", "torch.selected"],
+    "capabilities": [
+      "action.observe",
+      "event.emit",
+      "scene.read.visible",
+      "actor.inventory.read",
+      "actor.inventory.consume",
+      "scene.token.light.manage",
+      "module.storage.read",
+      "module.storage.write",
+      "ui.interaction",
+      "ui.notify"
+    ]
+  }
+}

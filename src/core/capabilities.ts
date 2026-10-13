@@ -1,15 +1,18 @@
 import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE, containsStairsV2 } from "./levelPlay";
 import { LEVEL_NAVIGATION_FEATURE } from "./levelNavigation";
 import { LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "./levelFog";
+import { OPENING_SIGHT_FEATURE } from "./openingSightPolicy";
+export { OPENING_SIGHT_FEATURE };
 /** Wire compatibility declarations, never permission grants. Missing lists mean legacy. */
 import type { Role, SceneDocument } from "./documents";
 import type { Op } from "./ops";
 import { SCOPED_COLLECTIONS, isScopedCollection } from "./levelMembership";
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 export const DRAFT_LEVELS_FEATURE = "scene-level-drafts-v1";
 export const LEVEL_AMBIENT_FEATURE = "scene-level-ambient-v1";
 export const LEVEL_LIGHTING_FEATURE = "scene-level-lighting-v1";
 export const LEVEL_SCOPES_FEATURE = "scene-level-scopes-v1";
-export const SUPPORTED_WIRE_FEATURES: readonly string[] = Object.freeze([LEVEL_PLAY_FEATURE, LEVEL_NAVIGATION_FEATURE, DRAFT_LEVELS_FEATURE, LEVEL_SCOPES_FEATURE, LEVEL_FOG_FEATURE, LEVEL_LIGHTING_FEATURE, LEVEL_AMBIENT_FEATURE, LEVEL_FOG_RESET_FEATURE, STAIRS_V2_FEATURE]);
+export const SUPPORTED_WIRE_FEATURES: readonly string[] = Object.freeze([LEVEL_PLAY_FEATURE, LEVEL_NAVIGATION_FEATURE, DRAFT_LEVELS_FEATURE, LEVEL_SCOPES_FEATURE, LEVEL_FOG_FEATURE, LEVEL_LIGHTING_FEATURE, LEVEL_AMBIENT_FEATURE, LEVEL_FOG_RESET_FEATURE, STAIRS_V2_FEATURE, OPENING_SIGHT_FEATURE]);
 
 export function featureListError(value: unknown): string | null {
   if (value === undefined) return null;
@@ -64,7 +67,54 @@ export function opsNeedStairsV2(ops: readonly Op[]): boolean {
       return /^(?:regions(?:\.\d+)?|(?:regions\.\d+\.)?stairs)$/.test(path) && containsStairsV2(path.endsWith("stairs") ? { stairs: v } : { x: v });
     })));
 }
+function sceneHasOpeningSight(scene: Partial<SceneDocument>): boolean {
+  const core = scene.flags?.["core"];
+  const policy = core && typeof core === "object" && !Array.isArray(core)
+    ? (core as Record<string, unknown>)["openingSight"] : undefined;
+  return policy !== undefined ||
+    (Array.isArray(scene.walls) && scene.walls.some((wall) => wall?.openingSightOverride !== undefined)) ||
+    (Array.isArray(scene.levels) && scene.levels.some((level) => level?.apertureSightOverrides !== undefined));
+}
+
+export function opsNeedOpeningSight(ops: readonly Op[]): boolean {
+  return ops.some((op) => {
+    if (!op) return false;
+    if (op.kind === "create") {
+      if (op.coll === "scenes") return sceneHasOpeningSight(op.data as SceneDocument);
+      if (op.coll === "walls") return hasLevelField(op.data, "openingSightOverride");
+      if (op.coll === "levels") return hasLevelField(op.data, "apertureSightOverrides");
+      return false;
+    }
+    if (op.kind !== "update") return false;
+    const keys = Object.keys(op.diff ?? {});
+    if (op.ref.coll === "walls") return keys.some((key) => /^(?:-=)?openingSightOverride(?:\.|$)/.test(key));
+    if (op.ref.coll === "levels") return keys.some((key) => /^(?:-=)?apertureSightOverrides(?:\.|$)/.test(key));
+    if (op.ref.coll !== "scenes") return false;
+    return keys.some((key) => {
+      const path = key.replace(/^-=/, "");
+      const value = op.diff[key];
+      if (path === "flags.core.openingSight" || path.startsWith("flags.core.openingSight.")) return true;
+      if (path === "flags.core") return isRecord(value) && value["openingSight"] !== undefined;
+      if (path === "flags") {
+        const core = isRecord(value) ? value["core"] : undefined;
+        return isRecord(core) && core["openingSight"] !== undefined;
+      }
+      if (path === "walls" || /^walls\.\d+$/.test(path)) {
+        const rows = Array.isArray(value) ? value : [value];
+        return rows.some((row) => isRecord(row) && row["openingSightOverride"] !== undefined);
+      }
+      if (path === "levels" || /^levels\.\d+$/.test(path)) {
+        const rows = Array.isArray(value) ? value : [value];
+        return rows.some((row) => isRecord(row) && row["apertureSightOverrides"] !== undefined);
+      }
+      return /^walls(?:\.\d+)?\.openingSightOverride(?:\.|$)/.test(path) ||
+        /^levels(?:\.\d+)?\.apertureSightOverrides(?:\.|$)/.test(path);
+    });
+  });
+}
+
 export function requiredOpFeatures(ops: readonly Op[]): string[] {
+  const openingSight = opsNeedOpeningSight(ops);
   const play = opsNeedLevelPlay(ops);
   const stairsV2 = opsNeedStairsV2(ops);
   const reset = opsNeedLevelField(ops, "fogEpoch");
@@ -85,13 +135,14 @@ export function requiredOpFeatures(ops: readonly Op[]): string[] {
     (op.coll === "scenes" && (Array.isArray((op.data as SceneDocument)?.lights) && (op.data as SceneDocument).lights.some((l) => l?.levelScope !== undefined))) :
     op.kind === "update" && ((op.ref?.coll === "lights" && Object.keys(op.diff ?? {}).some((k) => /^(?:-=)?levelScope(?:\.|$)/.test(k))) ||
     (op.ref?.coll === "scenes" && Object.keys(op.diff ?? {}).some((k) => /^(?:-=)?lights(?:\.|$)/.test(k)) && scoped))));
-  return [...(play ? [LEVEL_PLAY_FEATURE] : []), ...(opsNeedLevelDrafts(ops) || scoped || ambient || reset ? [DRAFT_LEVELS_FEATURE] : []), ...(scoped ? [LEVEL_SCOPES_FEATURE] : []), ...(lighting ? [LEVEL_LIGHTING_FEATURE] : []), ...(ambient ? [LEVEL_AMBIENT_FEATURE] : []), ...(reset ? [LEVEL_FOG_RESET_FEATURE] : []), ...(stairsV2 ? [STAIRS_V2_FEATURE] : [])];
+  return [...(openingSight ? [OPENING_SIGHT_FEATURE] : []), ...(play ? [LEVEL_PLAY_FEATURE] : []), ...(opsNeedLevelDrafts(ops) || scoped || ambient || reset ? [DRAFT_LEVELS_FEATURE] : []), ...(scoped ? [LEVEL_SCOPES_FEATURE] : []), ...(lighting ? [LEVEL_LIGHTING_FEATURE] : []), ...(ambient ? [LEVEL_AMBIENT_FEATURE] : []), ...(reset ? [LEVEL_FOG_RESET_FEATURE] : []), ...(stairsV2 ? [STAIRS_V2_FEATURE] : [])];
 }
 export function requiredWorldFeatures(scenes: readonly SceneDocument[], role: Role): string[] {
+  const openingSight = scenes.some(sceneHasOpeningSight);
   const play = scenes.some((s) => s.levelMode === "isolated" || s.levels?.some((l) => l.tileIds !== undefined || l.useSceneBackground !== undefined) || s.regions?.some((r) => r.stairs !== undefined));
-  if (role !== "GM" && role !== "ASSISTANT") return scenes.some((s) => s.levelMode === "isolated") ? [LEVEL_PLAY_FEATURE] : [];
+  if (role !== "GM" && role !== "ASSISTANT") return [...(scenes.some((s) => s.levelMode === "isolated") ? [LEVEL_PLAY_FEATURE] : []), ...(openingSight ? [OPENING_SIGHT_FEATURE] : [])];
   const scopes = scenes.some(sceneHasLevelScopes);
-  return [...(play ? [LEVEL_PLAY_FEATURE] : []), ...(scopes || scenes.some((s) => s.levels !== undefined) ? [DRAFT_LEVELS_FEATURE] : []), ...(scopes ? [LEVEL_SCOPES_FEATURE] : []), ...(scenes.some((s) => s.lights?.some((l) => l.levelScope !== undefined)) ? [LEVEL_LIGHTING_FEATURE] : []), ...(scenes.some(sceneHasAmbient) ? [LEVEL_AMBIENT_FEATURE] : []), ...(scenes.some((s) => s.levels?.some((l) => l.fogEpoch !== undefined)) ? [LEVEL_FOG_RESET_FEATURE] : []), ...(scenes.some((s) => containsStairsV2({ x: s.regions })) ? [STAIRS_V2_FEATURE] : [])];
+  return [...(openingSight ? [OPENING_SIGHT_FEATURE] : []), ...(play ? [LEVEL_PLAY_FEATURE] : []), ...(scopes || scenes.some((s) => s.levels !== undefined) ? [DRAFT_LEVELS_FEATURE] : []), ...(scopes ? [LEVEL_SCOPES_FEATURE] : []), ...(scenes.some((s) => s.lights?.some((l) => l.levelScope !== undefined)) ? [LEVEL_LIGHTING_FEATURE] : []), ...(scenes.some(sceneHasAmbient) ? [LEVEL_AMBIENT_FEATURE] : []), ...(scenes.some((s) => s.levels?.some((l) => l.fogEpoch !== undefined)) ? [LEVEL_FOG_RESET_FEATURE] : []), ...(scenes.some((s) => containsStairsV2({ x: s.regions })) ? [STAIRS_V2_FEATURE] : [])];
 }
 
 export function opsNeedLevelPlay(ops: readonly Op[]): boolean {

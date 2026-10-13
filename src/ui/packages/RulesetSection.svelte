@@ -9,8 +9,9 @@
    * Scope, said on screen too: the ruleset drives strategic-scale scenes (heroes + units);
    * tactical scenes (heroes only) are unaffected, so one world mixes both.
    */
-  import { onMount } from "svelte";
-  import type { HostPackages, HostRulesBoot, PackageSummary } from "../../app/hostBoot";
+  import { onDestroy, onMount } from "svelte";
+  import type { HostAutomationState, HostPackages, HostRulesBoot, PackageSummary } from "../../app/hostBoot";
+  import type { AisCapability } from "../../core/automationInterconnect";
   import { classifyZip, packageKindLabel } from "../../host/zipKind";
 
   let {
@@ -22,6 +23,13 @@
   } = $props();
 
   let pkgList = $state<PackageSummary[]>([]);
+  let aisState = $state<HostAutomationState | null>(null);
+  let selectedCapabilities = $state<Record<string, AisCapability[]>>({});
+  let aisApprovalConfirmId = $state("");
+  let aisApprovalTimer: ReturnType<typeof setTimeout> | null = null;
+  let aisCodePreviews = $state<Record<string, { entry: string; source: string; truncated: boolean }>>({});
+  let aisPreviewLoadingId = $state("");
+  let aisPendingReload = $state(false);
   let pkgBusy = $state(false);
   let pkgError = $state("");
   /** Name of the ruleset activated this session — it runs after the next world reload. */
@@ -34,6 +42,7 @@
 
   const active = $derived(pkgList.find((p) => p.active) ?? null);
   const contentPacks = $derived(pkgList.filter((p) => p.type === "data"));
+  const automationModules = $derived(pkgList.filter((p) => p.type === "module"));
   const packTotal = $derived(contentPacks.reduce((n, p) => n + p.packCount, 0));
 
   const refresh = (): void => {
@@ -43,6 +52,7 @@
         pkgList = list;
       })
       .catch(() => {});
+    void packages.automation().then((state) => { aisState = state; }).catch(() => {});
     void packages
       .campaignStarted()
       .then((started) => {
@@ -69,6 +79,7 @@
       }
       const res = await packages.importZip(bytes);
       if (!res.ok) pkgError = res.error;
+      else if (res.summary.type === "module" || res.summary.type === "system") aisPendingReload = true;
       refresh();
     } finally {
       // let the same file be picked again after a fix
@@ -88,6 +99,111 @@
         pkgWarnings = res.warnings ?? [];
         pkgPendingReload = pkgList.find((p) => p.id === id)?.name ?? id;
       }
+      refresh();
+    } finally {
+      pkgBusy = false;
+    }
+  }
+
+  async function enableAutomationModule(id: string): Promise<void> {
+    pkgBusy = true;
+    pkgError = "";
+    try {
+      const result = await packages.enableAutomationModule(id);
+      if (!result.ok) pkgError = result.error;
+      else aisPendingReload = true;
+      refresh();
+    } finally {
+      pkgBusy = false;
+    }
+  }
+
+  async function disableAutomationModule(id: string): Promise<void> {
+    pkgBusy = true;
+    pkgError = "";
+    try {
+      const result = await packages.disableAutomationModule(id);
+      if (!result.ok) pkgError = result.error;
+      else aisPendingReload = true;
+      refresh();
+    } finally {
+      pkgBusy = false;
+    }
+  }
+
+  async function selectAutomationProvider(slotId: string, providerRef: string): Promise<void> {
+    if (!providerRef) return;
+    pkgBusy = true;
+    pkgError = "";
+    try {
+      const result = await packages.selectAutomationProvider(slotId, providerRef);
+      if (!result.ok) pkgError = result.error;
+      else aisPendingReload = true;
+      refresh();
+    } finally {
+      pkgBusy = false;
+    }
+  }
+
+  function capabilitiesFor(id: string, summary: PackageSummary): AisCapability[] {
+    return selectedCapabilities[id] ?? summary.grantedCapabilities;
+  }
+
+  function toggleCapability(id: string, summary: PackageSummary, capability: AisCapability, checked: boolean): void {
+    const current = capabilitiesFor(id, summary);
+    const selected = checked
+      ? current.includes(capability) ? current : [...current, capability]
+      : current.filter((entry) => entry !== capability);
+    selectedCapabilities = { ...selectedCapabilities, [id]: selected };
+  }
+
+  async function loadAisCodePreview(id: string): Promise<void> {
+    if (aisCodePreviews[id] || aisPreviewLoadingId) return;
+    aisPreviewLoadingId = id;
+    pkgError = "";
+    try {
+      const result = await packages.previewAutomationModule(id);
+      if (!result.ok) pkgError = result.error;
+      else aisCodePreviews = { ...aisCodePreviews, [id]: result };
+    } finally {
+      aisPreviewLoadingId = "";
+    }
+  }
+
+  function requestAisApproval(id: string, summary: PackageSummary): void {
+    if (aisApprovalConfirmId !== id) {
+      aisApprovalConfirmId = id;
+      if (aisApprovalTimer !== null) clearTimeout(aisApprovalTimer);
+      aisApprovalTimer = setTimeout(() => { aisApprovalConfirmId = ""; }, 4_000);
+      if (!aisCodePreviews[id]) void loadAisCodePreview(id);
+      return;
+    }
+    if (!aisCodePreviews[id]) return;
+    aisApprovalConfirmId = "";
+    if (aisApprovalTimer !== null) clearTimeout(aisApprovalTimer);
+    void approveAisModule(id, capabilitiesFor(id, summary));
+  }
+
+  async function approveAisModule(id: string, capabilities: AisCapability[]): Promise<void> {
+    pkgBusy = true;
+    pkgError = "";
+    try {
+      const result = await packages.grantAutomationCapabilities(id, capabilities);
+      if (!result.ok) pkgError = result.error;
+      else aisPendingReload = true;
+      refresh();
+    } finally {
+      pkgBusy = false;
+    }
+  }
+
+  async function revokeAisApproval(id: string): Promise<void> {
+    pkgBusy = true;
+    pkgError = "";
+    try {
+      const result = await packages.revokeAutomationApproval(id);
+      if (!result.ok) pkgError = result.error;
+      else aisPendingReload = true;
       refresh();
     } finally {
       pkgBusy = false;
@@ -119,6 +235,7 @@
     try {
       const res = await packages.grantTrust(id);
       if (!res.ok) pkgError = res.error;
+      else aisPendingReload = true;
       refresh();
     } finally {
       pkgBusy = false;
@@ -130,16 +247,18 @@
     try {
       const res = await packages.revokeTrust(id);
       if (!res.ok) pkgError = res.error;
+      else aisPendingReload = true;
       refresh();
     } finally {
       pkgBusy = false;
     }
   }
   onMount(refresh);
+  onDestroy(() => { if (aisApprovalTimer !== null) clearTimeout(aisApprovalTimer); });
 </script>
 
 <div class="section" data-pkg-section>
-  <h4>Strategic ruleset &amp; content (§12)</h4>
+  <h4>Packages &amp; automation (§12 · AIS v1)</h4>
   <p class="status" data-pkg-status>
     <span
       >Strategic ruleset: <b data-pkg-status-ruleset
@@ -155,6 +274,7 @@
           : `${contentPacks.map((p) => `${p.name} v${p.version}`).join(", ")} (${packTotal} pack${packTotal === 1 ? "" : "s"})`}</b
       ></span
     >
+    <span data-ais-status>Automation: {automationModules.filter((module) => module.enabled).length} enabled / {automationModules.length} installed</span>
     {#if pinned}
       <span class="warn" data-pkg-pinned
         >Ruleset pinned — a turn has been resolved. To play other strategic rules, create a new
@@ -187,7 +307,15 @@
           >needs {p.missingDependencies.join(", ")}</span
         >
       {/if}
-      {#if p.active}
+      {#if p.type === "module"}
+        {#if p.enabled}
+          <span data-ais-enabled>enabled in world profile</span>
+          <button type="button" data-ais-disable disabled={pkgBusy} onclick={() => disableAutomationModule(p.id)}>Disable</button>
+        {:else}
+          <span data-ais-disabled>disabled</span>
+          <button type="button" data-ais-enable disabled={pkgBusy} onclick={() => enableAutomationModule(p.id)}>Enable</button>
+        {/if}
+      {:else if p.active}
         <span data-pkg-active>active</span>
       {:else if p.type === "system" && !pinned}
         <button
@@ -223,11 +351,84 @@
         {/if}
       {/if}
     </div>
+    {#if p.type === "module"}
+      <div class="module-review" data-ais-module-review={p.id}>
+        <span title={p.hash ?? ""}>SHA-256: {p.hash ? `${p.hash.slice(0, 16)}…` : "unavailable"}</span>
+        <span>{p.approved ? "Code approved on this device for this exact hash" : "Code is not approved and will not run"}</span>
+        {#if p.commands.length > 0}
+          <p class="hint" data-ais-commands>Macro-callable commands: {p.commands.map((command) => `${command.id} (contract v${command.contract})`).join(", ")}. Calls require the separate reviewed script-macro grant.</p>
+        {/if}
+        {#if p.emittedEvents.length > 0}
+          <p class="hint" data-ais-emitted-events>Declared custom events: {p.emittedEvents.join(", ")}. Subscribers also need the local action.observe capability.</p>
+        {/if}
+        <button type="button" data-ais-preview disabled={pkgBusy || aisPreviewLoadingId === p.id} onclick={() => void loadAisCodePreview(p.id)}>
+          {aisPreviewLoadingId === p.id ? "Loading entry…" : aisCodePreviews[p.id] ? "Entry source shown" : "View entry source"}
+        </button>
+        {#if aisCodePreviews[p.id]}
+          <details class="ais-source-preview" open>
+            <summary>Entry file: {aisCodePreviews[p.id]?.entry}</summary>
+            <pre>{aisCodePreviews[p.id]?.source}</pre>
+            {#if aisCodePreviews[p.id]?.truncated}
+              <p class="warn">Preview truncated at 120,000 characters. Inspect the imported ZIP for the remainder before approval.</p>
+            {/if}
+          </details>
+        {/if}
+        {#if p.requestedCapabilities.length > 0}
+          <fieldset>
+            <legend>Requested capabilities · local to this device</legend>
+            {#each p.requestedCapabilities as capability (capability)}
+              <label>
+                <input
+                  type="checkbox"
+                  checked={capabilitiesFor(p.id, p).includes(capability)}
+                  disabled={pkgBusy}
+                  onchange={(event) => toggleCapability(p.id, p, capability, event.currentTarget.checked)}
+                />
+                {capability}
+              </label>
+            {/each}
+          </fieldset>
+        {:else}
+          <p class="hint">This module requests no host capabilities; approval still allows its sandboxed code to run.</p>
+        {/if}
+        {#if p.approved}
+          <span data-ais-approved>Approved: {p.grantedCapabilities.length ? p.grantedCapabilities.join(", ") : "no capabilities"}</span>
+          <button type="button" data-ais-revoke disabled={pkgBusy} onclick={() => revokeAisApproval(p.id)}>Revoke local approval</button>
+          <button type="button" data-ais-update-grant disabled={pkgBusy} onclick={() => void approveAisModule(p.id, capabilitiesFor(p.id, p))}>Update capabilities</button>
+        {:else}
+          <button type="button" data-ais-approve disabled={pkgBusy || aisPreviewLoadingId === p.id} onclick={() => requestAisApproval(p.id, p)}>
+            {aisApprovalConfirmId === p.id ? "Confirm sandboxed-code approval" : "Review & approve code"}
+          </button>
+        {/if}
+      </div>
+    {/if}
   {/each}
+  {#if aisState}
+    <div class="ais-manager" data-ais-manager>
+      <h5>Contribution arbitration</h5>
+      {#each aisState.resolution.providers.filter((provider) => provider.mode === "exclusive") as provider (provider.slotId)}
+        <label class="provider-row">
+          <span><b>{provider.slotId}</b> · exclusive contract v{provider.contract}</span>
+          <select
+            aria-label={`Selected provider for ${provider.slotId}`}
+            value={provider.selected ?? ""}
+            disabled={pkgBusy}
+            onchange={(event) => void selectAutomationProvider(provider.slotId, event.currentTarget.value)}
+          >
+            <option value="" disabled>Select provider…</option>
+            {#each provider.providers as candidate (candidate)}
+              <option value={candidate}>{candidate}</option>
+            {/each}
+          </select>
+        </label>
+      {/each}
+      {#each aisState.resolution.issues as issue (`${issue.kind}:${issue.packageId ?? ""}:${issue.slotId ?? ""}:${issue.message}`)}
+        <p class={issue.blocking ? "error" : "warn"} data-ais-issue>{issue.message}</p>
+      {/each}
+    </div>
+  {/if}
   <div class="row">
-    <label for="pkg-file"
-      >{pinned ? "Add content pack (.zip)" : "Add ruleset / content pack (.zip)"}</label
-    >
+    <label for="pkg-file">Add package (.zip)</label>
     <input
       id="pkg-file"
       type="file"
@@ -241,6 +442,12 @@
     <p class="hint" data-pkg-pending>
       <b>{pkgPendingReload}</b> takes over strategic scenes when the world reloads.
       <button type="button" data-pkg-reload onclick={reloadWorld}>Reload now</button>
+    </p>
+  {/if}
+  {#if aisPendingReload}
+    <p class="hint" data-ais-pending>
+      Automation profile, approval, or capability changes apply after reload. Local grants are not exported with the world.
+      <button type="button" data-ais-reload onclick={reloadWorld}>Reload now</button>
     </p>
   {/if}
   {#each pkgWarnings as w (w)}
@@ -281,6 +488,66 @@
     margin: 0;
     font-size: 0.8125rem;
     color: #7d8ea6;
+  }
+  .module-review,
+  .ais-manager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid #34465d;
+    border-radius: 6px;
+    background: #101a27;
+    font-size: 0.8125rem;
+  }
+  .module-review fieldset {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    width: 100%;
+    margin: 0;
+    padding: 6px 8px;
+    border: 1px solid #34465d;
+    border-radius: 5px;
+  }
+  .module-review fieldset label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .ais-source-preview {
+    width: 100%;
+    min-width: 0;
+  }
+  .ais-source-preview summary {
+    cursor: pointer;
+    color: #d5dfeb;
+  }
+  .ais-source-preview pre {
+    max-height: 20rem;
+    overflow: auto;
+    margin: 6px 0;
+    padding: 8px;
+    border: 1px solid #34465d;
+    border-radius: 5px;
+    background: #080e16;
+    white-space: pre;
+    tab-size: 2;
+  }
+  .ais-manager h5 {
+    width: 100%;
+    margin: 0;
+  }
+  .provider-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+  }
+  .provider-row select {
+    max-width: 55%;
   }
   .warn {
     margin: 0;

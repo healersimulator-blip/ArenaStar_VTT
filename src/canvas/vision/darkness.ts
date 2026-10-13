@@ -27,7 +27,9 @@
  * erring toward "a bit too much light reaches" keeps a hall lit by a torch in the next room
  * playable instead of silently black. Recorded in D-260.
  */
-import type { SceneDocument, SceneGrid, TokenDocument } from "../../core/documents";
+import type { LightAnimation, SceneDocument, SceneGrid, TokenDocument } from "../../core/documents";
+import { parseLightAnimation } from "../../core/lightAnimation";
+import type { VisionCone } from "./polygon";
 
 /** One light that lights the scene: a scene light or a light a token carries. */
 export interface PF1eLightSource {
@@ -43,6 +45,11 @@ export interface PF1eLightSource {
   color?: string;
   /** Render alpha; absent = the layer's default. */
   alpha?: number;
+  /** Optional directional beam width and axis (token rotation for carried light). */
+  angle?: number;
+  rotation?: number;
+  /** Declarative renderer effect; never changes light range or vision. */
+  animation?: LightAnimation;
 }
 
 /**
@@ -128,13 +135,15 @@ export function tokenVisionOf(token: Pick<TokenDocument, "sight" | "darkvision">
  * lights.
  */
 export function tokenLightSourceOf(
-  token: Pick<TokenDocument, "_id" | "x" | "y" | "light">,
+  token: Pick<TokenDocument, "_id" | "x" | "y" | "rotation" | "light">,
 ): PF1eLightSource | null {
   const raw = asRecord(token.light);
   if (raw === null) return null;
   const dim = positiveOrNull(raw.radius);
   if (dim === null) return null;
-  const bright = positiveOrNull(raw.bright) ?? Math.max(1, Math.round(dim / 2));
+  const authoredBright = finiteNumber(raw.bright);
+  const bright = authoredBright === null ? Math.max(1, Math.round(dim / 2)) : Math.max(0, authoredBright);
+  const animation = parseLightAnimation(raw.animation);
   return {
     id: `token:${token._id}`,
     x: token.x,
@@ -143,6 +152,10 @@ export function tokenLightSourceOf(
     dim,
     ...(typeof raw.color === "string" ? { color: raw.color } : {}),
     ...(finiteNumber(raw.alpha) !== null ? { alpha: finiteNumber(raw.alpha) as number } : {}),
+    ...(finiteNumber(raw.angle) !== null && (finiteNumber(raw.angle) as number) >= 1 && (finiteNumber(raw.angle) as number) < 360
+      ? { angle: finiteNumber(raw.angle) as number, rotation: finiteNumber(token.rotation) ?? 0 }
+      : {}),
+    ...(animation.ok && animation.value ? { animation: animation.value } : {}),
   };
 }
 
@@ -159,6 +172,8 @@ export function sceneLightSources(
     const dim = positiveOrNull(light.dim);
     if (dim === null) continue;
     const bright = positiveOrNull(light.bright) ?? 0;
+    const angle = finiteNumber(light.angle);
+    const animation = parseLightAnimation(light.animation);
     out.push({
       id: light._id,
       x: light.x,
@@ -167,6 +182,10 @@ export function sceneLightSources(
       dim,
       ...(typeof light.color === "string" ? { color: light.color } : {}),
       ...(finiteNumber(light.alpha) !== null ? { alpha: finiteNumber(light.alpha) as number } : {}),
+      ...(angle !== null && angle >= 1 && angle < 360
+        ? { angle, rotation: finiteNumber(light.rotation) ?? 0 }
+        : {}),
+      ...(animation.ok && animation.value ? { animation: animation.value } : {}),
     });
   }
   for (const token of scene.tokens ?? []) {
@@ -187,6 +206,41 @@ export function sceneLighting(
   };
 }
 
+/** Whether a point lies within a source's radius and optional oriented beam. */
+export function lightCoversPoint(
+  light: PF1eLightSource,
+  point: { x: number; y: number },
+): boolean {
+  const dx = point.x - light.x;
+  const dy = point.y - light.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance > light.dim) return false;
+  if (light.angle === undefined || light.angle >= 360 || distance <= 1e-9) return true;
+  const direction = (light.rotation ?? 0) * Math.PI / 180;
+  const angle = Math.atan2(dy, dx);
+  const deviation = Math.atan2(Math.sin(angle - direction), Math.cos(angle - direction));
+  return Math.abs(deviation) <= (Math.max(1, light.angle) * Math.PI / 360) + 1e-9;
+}
+
+/**
+ * The token's own cone bounds its vision only when total darkness makes that beam the sole
+ * illumination at its origin. Ambient light, darkvision or another active source keeps the
+ * existing full-circle sight model rather than silently narrowing it.
+ */
+export function tokenVisionCone(
+  scene: Pick<SceneDocument, "darkness" | "lights" | "tokens">,
+  token: TokenDocument,
+): VisionCone | null {
+  const darkness = finiteNumber(scene.darkness) ?? 0;
+  if (darkness < 1 || tokenVisionOf(token).darkvisionFeet > 0) return null;
+  const ownId = `token:${token._id}`;
+  const own = sceneLightSources(scene).find((light) => light.id === ownId);
+  if (!own || own.angle === undefined || own.angle >= 360) return null;
+  const point = { x: token.x, y: token.y };
+  if (sceneLightSources(scene).some((light) => light.id !== ownId && lightCoversPoint(light, point))) return null;
+  return { directionDeg: finiteNumber(token.rotation) ?? 0, widthDeg: own.angle };
+}
+
 /** The level of light at a point (`{x, y}` in scene pixels). */
 export function lightLevelAt(
   point: { x: number; y: number },
@@ -199,8 +253,8 @@ export function lightLevelAt(
   let litRadiusPx = ambient ? Number.POSITIVE_INFINITY : 0;
   for (const light of lighting.lights) {
     const distance = Math.hypot(point.x - light.x, point.y - light.y);
-    if (distance <= light.bright) bright = true;
-    if (distance > light.dim) continue;
+    if (!lightCoversPoint(light, point)) continue;
+    if (light.bright > 0 && distance <= light.bright) bright = true;
     lit = true;
     // Standing in this light means seeing everything it reaches from here — out to its edge.
     litRadiusPx = Math.max(litRadiusPx, light.dim - distance);

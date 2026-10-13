@@ -87,6 +87,21 @@ describe("G-22 cross-floor lighting layer", () => {
     layer.destroy();
   });
 
+  test("light animation updates alpha per frame without rebuilding geometry and respects reduced motion", () => {
+    const layer = new LightingLayer();
+    const animated: LightView = { ...lamp, light: { ...lamp.light, animation: { type: "pulse", speed: 1, intensity: 1 } } };
+    layer.sync([animated], { darkness: 0, color: "#000000" }, camera, viewport, null, 0);
+    const lights = child<Container>(layer.container, "lights"), glow = lights.children[0] as Graphics;
+    const minimum = glow.alpha;
+    expect(minimum).toBeCloseTo(0.81);
+    layer.sync([animated], { darkness: 0, color: "#000000" }, camera, viewport, null, 0.25);
+    expect(lights.children[0]).toBe(glow);
+    expect(glow.alpha).toBe(1);
+    layer.sync([animated], { darkness: 0, color: "#000000" }, camera, viewport, null, 0.5, true);
+    expect(glow.alpha).toBe(1);
+    layer.destroy();
+  });
+
   test("light from above needs no solid area here: the darkness stays whole, the group still draws", () => {
     const layer = new LightingLayer();
     layer.sync([], { darkness: 0.7, color: "#000000" }, camera, viewport, { solid: null, belowDarkness: null, groups: [{ key: "above:upper", masks: [floor], views: [lamp] }] });
