@@ -85,6 +85,52 @@ export function pf1eCompendiumComponents(raw: unknown): string {
   return codes.join(", ");
 }
 
+/** The compendium row shape `PF1eCompendiumPicker` hands back (a `CompendiumEntry`, narrowed). */
+export interface CompendiumSpellRow {
+  name: string;
+  data?: { system?: Record<string, unknown> } | undefined;
+}
+
+/**
+ * D-455 — a compendium spell row as the `prepare` edit the spellbook applies.
+ *
+ * **Why this is a function and not four lines in the sheet.** A `.svelte` script block is invisible
+ * to `tsc` in this repository (D-256/T-12), and the sheet built `{kind:"prepare", entry:{…}}` for
+ * this path: `pf1eSpellbookEdit` reads `edit.name`, so **Add from the compendium threw
+ * `Cannot read properties of undefined (reading 'trim')` and prepared nothing** — since the
+ * prepared-list edit shape was last changed. Nothing caught it because no batch ran
+ * `e2e/fx_spell_binding.spec.ts` (the 89-spec hole that `tests/scripts/e2eBatchCoverage.test.ts`
+ * now closes). Typed here, `tsc` owns the mapping's shape and
+ * `tests/ui/pf1eSpellbook.test.ts` owns its behaviour against the shipped pack row.
+ *
+ * **The level is unresolved, and that is recorded rather than guessed.** The shipped pack stores
+ * `system.level` as a per-class map for all 75 spells (and no `levelNumber`), so this falls back to
+ * 1 today — a level-5 spell added from the compendium is prepared at level 1, and the GM edits the
+ * row. Reading a column out of that map would be the mistake D-151 already refused: the pack's
+ * table is content the reference system does not read and ships wrong (its `dispel-magic` row says
+ * sorcerer/wizard 2; CRB says 3), which is why the four automated spells carry verified levels in
+ * `PF1E_PACK_MASS_SPELL_MIRRORS` instead. A verified tactical table (or a level prompt in the
+ * picker) is a content decision, not a shape fix.
+ */
+export function pf1ePrepareFromCompendium(
+  entry: CompendiumSpellRow,
+): Extract<PF1eSpellbookEdit, { kind: "prepare" }> {
+  const system = entry.data?.system ?? {};
+  const published =
+    typeof system.levelNumber === "number"
+      ? system.levelNumber
+      : Number.parseInt(String(system.level ?? ""), 10);
+  const level =
+    Number.isInteger(published) && published >= 0 && published <= 9 ? published : 1;
+  return {
+    kind: "prepare",
+    name: entry.name,
+    level,
+    slotLevel: level,
+    components: pf1eCompendiumComponents(system.components) || "V, S",
+  };
+}
+
 export interface PF1eSpellbookView {
   /** False when the actor has no spellcasting data — the tab stays hidden. */
   casting: boolean;

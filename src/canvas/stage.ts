@@ -79,6 +79,9 @@ export const LAYER_ORDER = [
   "grid",
   "drawings",
   "templates",
+  // G-14 (D-430): stair markers sit under walls, lighting and fog — and the raised-area
+  // outlines (D-453) live in the same holder.
+  "stairs",
   "walls",
   "lighting",
   // §20 hexcrawl overlay (D-271): tints and the cell grid, under the tokens and above the
@@ -93,6 +96,8 @@ export const LAYER_ORDER = [
   "foreground",
   "fxAboveTokens",
   "fog",
+  // G-24 (D-438): roofs flagged "show through fog" are copied here while live sight touches them.
+  "roofsOverFog",
   "effects",
   "notes",
   "controls",

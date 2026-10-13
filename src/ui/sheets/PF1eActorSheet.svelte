@@ -41,7 +41,7 @@
   import PF1eItemsTab from "./PF1eItemsTab.svelte";
   import TagEditor from "./TagEditor.svelte";
   import {
-    pf1eCompendiumComponents,
+    pf1ePrepareFromCompendium,
     pf1eSpellbookEdit,
     pf1eSpellbookView,
     type PF1eSpellbookEdit,
@@ -1266,20 +1266,9 @@
         });
       }
     } else if (compendiumPickerKind === "spell") {
-      const entrySys = (entry.data?.system ?? {}) as Record<string, unknown>;
-      const level = typeof entrySys.levelNumber === "number" ? entrySys.levelNumber : (parseInt(String(entrySys.level), 10) || 1);
-      // Compendium packs commonly store structured flags (verbal/somatic/material) rather than
-      // PF1e's printed abbreviations. Normalize the fields the shared cast gate understands.
-      const components = pf1eCompendiumComponents(entrySys.components) || "V, S";
-      updateSpellbook({
-        kind: "prepare",
-        entry: {
-          name: entry.name,
-          level,
-          slotLevel: level,
-          components,
-        },
-      });
+      // D-455: the mapping lives in `pf1eSpellbook.ts` — a `.svelte` literal is not type-checked
+      // here (D-256/T-12), and this call site shipped a shape `pf1eSpellbookEdit` could not read.
+      updateSpellbook(pf1ePrepareFromCompendium(entry));
     }
     compendiumPickerKind = null;
   }

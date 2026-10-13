@@ -50,6 +50,11 @@ machines, while preserving failures for investigation. The four groups cover the
 regression selection plus the two image/audio lifecycle cases: **101 cases**, not the complete
 A01–A41 or cross-browser acceptance matrix.
 
+## The rest of the suite
+
+The PF1e, table, hexcrawl, image, network and core batches — and the rule that every spec belongs to
+one of them — are in `E2E_BATCHES.md`, with the same prepare step and the same 25-minute budget.
+
 ## Other checks (separate commands)
 
 ```sh

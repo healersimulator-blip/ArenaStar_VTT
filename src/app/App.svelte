@@ -6137,7 +6137,10 @@ const WALL_PICK_RADIUS = 12;
     flex-direction: column;
     gap: 8px;
     width: min(420px, calc(100vw - var(--gm-dock-width) - 48px));
-    z-index: 60;
+    /* D-456: above the window band (80) — a refusal notice must never be *behind* a window,
+       and the stack lands in the same bottom-right corner windows open in. Below the image
+       drop hint (4999) and the in-window modals (10030). */
+    z-index: 4998;
     pointer-events: none;
   }
   .notify {

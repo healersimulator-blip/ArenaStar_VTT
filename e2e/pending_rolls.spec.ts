@@ -220,7 +220,11 @@ test.describe("F03 pending rolls (Messages system.pendingRoll v1)", () => {
     expect((windowProbe as { expiredAt4: boolean }).expiredAt4).toBe(true);
   });
 
-  test("structured multi-target action resolves selected checks, keeps effect stages pending, highlights area, and lets the GM override", async ({ page }) => {
+  // D-458: the deferred-save producer (`runQuickbarEntangleArea`) emits one card per creature — a
+  // single evidenced save row plus an explicitly pending "spell effect" continuation row — with the
+  // caster's 40-ft spread. The host rederives that row's DC/formula from the live actors and proves
+  // the row's token sits inside the spread, so the resolved row reads `host`.
+  test("area cast card resolves its one evidenced save as host-verified and keeps the effect stage pending", async ({ page }) => {
     test.setTimeout(90_000);
     await page.goto(entry + "?e2e=1");
     await expect.poll(() => page.evaluate(() =>
@@ -243,10 +247,20 @@ test.describe("F03 pending rolls (Messages system.pendingRoll v1)", () => {
           : { saves: { fort: 0, ref: 5, will: 0 } } },
         items: [], effects: [],
       });
+      // The verifier proves a target *inside the area*, so the fixture carries the tokens the
+      // producer's cards name: a token-less or token-less-row card can only ever be "reported".
+      const token = (id: string, actorId: string, name: string, x: number, y: number) => ({
+        _id: id, type: "token", name, actorId, ownership: { default: 3 }, flags: {}, system: {},
+        x, y, rotation: 0, width: 100, height: 100, img: "", hidden: false,
+        disposition: "neutral", vision: true, light: { radius: 0, color: "#ffffff", alpha: 0.5 },
+      });
       client.submit([
         { kind: "create", coll: "actors", data: actor("action-e2e-source", "Host Source") },
-        { kind: "create", coll: "actors", data: actor("action-e2e-a", "Host Target A") },
         { kind: "create", coll: "actors", data: actor("action-e2e-b", "Host Target B") },
+        { kind: "create", coll: "tokens", parent: { coll: "scenes", id: scene._id },
+          data: token("action-e2e-tok-source", "action-e2e-source", "Host Source", 350, 350) },
+        { kind: "create", coll: "tokens", parent: { coll: "scenes", id: scene._id },
+          data: token("action-e2e-tok-b", "action-e2e-b", "Host Target B", 450, 350) },
       ]);
       return scene._id;
     });
@@ -262,10 +276,13 @@ test.describe("F03 pending rolls (Messages system.pendingRoll v1)", () => {
         user: { id: string }; submit: (ops: unknown[]) => void;
       } } } } }).__vttE2E.app.gm.client;
       const actionId = "action-e2e-card";
-      const pending = (id: string, targetKey: string, actorId: string, name: string) => ({
+      // The pending-roll linkage validator requires each roll's token to match the card row's
+      // token, and the verifier re-checks the same pairing.
+      const pending = (id: string, targetKey: string, actorId: string, tokenId: string, name: string) => ({
         v: 1, id, actionId, targetKey, kind: "save", saveType: "ref",
-        initiator: { actorId: "action-e2e-source", tokenId: null, name: "forged source", actionLabel: "Entangle" },
-        target: { actorId, tokenId: null, name }, formula: "1d20+5", dc: 12,
+        initiator: { actorId: "action-e2e-source", tokenId: "action-e2e-tok-source", name: "Host Source",
+          actionLabel: "Entangle" },
+        target: { actorId, tokenId, name }, formula: "1d20+5", dc: 12,
         modifiers: [{ label: "REF", value: 5, reason: "save" }],
         turnNumber: 0, expiresTurn: 2, resolved: false, rollMode: "roll",
       });
@@ -276,14 +293,14 @@ test.describe("F03 pending rolls (Messages system.pendingRoll v1)", () => {
         system: {
           action: {
             v: 1, id: actionId, revision: 0, kind: "cast", label: "Entangle", state: "pending",
-            source: { name: "forged source", actorId: "action-e2e-source" },
+            source: { name: "forged source", actorId: "action-e2e-source",
+              tokenId: "action-e2e-tok-source" },
             sceneId: activeSceneId,
-            area: { sceneId: activeSceneId, shape: "spread", origin: { x: 300, y: 300 }, radius: 20, units: "ft" },
+            area: { sceneId: activeSceneId, shape: "spread", origin: { x: 300, y: 300 },
+              radius: 40, units: "ft" },
             targets: [
-              { key: "save-a", name: "forged A", label: "Reflex save", actorId: "action-e2e-a",
-                state: "pending", outcome: "pending", check: check("action-e2e-roll-a"),
-                evidence: { adapter: "pf1e.pendingSave.v1", payload: { spellLevel: 1, saveType: "ref" } } },
               { key: "save-b", name: "forged B", label: "Reflex save", actorId: "action-e2e-b",
+                tokenId: "action-e2e-tok-b",
                 state: "pending", outcome: "pending", check: check("action-e2e-roll-b"),
                 evidence: { adapter: "pf1e.pendingSave.v1", payload: { spellLevel: 1, saveType: "ref" } } },
               { key: "effect", name: "forged B", label: "spell effect", actorId: "action-e2e-b",
@@ -293,8 +310,130 @@ test.describe("F03 pending rolls (Messages system.pendingRoll v1)", () => {
             notes: [], createdAt: 1, updatedAt: 1,
           },
           pendingRolls: [
-            pending("action-e2e-roll-a", "save-a", "action-e2e-a", "forged A"),
-            pending("action-e2e-roll-b", "save-b", "action-e2e-b", "forged B"),
+            pending("action-e2e-roll-b", "save-b", "action-e2e-b", "action-e2e-tok-b", "Host Target B"),
+          ],
+        },
+        author: client.user.id, content: "Entangle saves pending", whisper: [], roll: null,
+        flavor: "cast resolution",
+      } }]);
+    }, sceneId);
+
+    const card = page.locator('[data-action-card="action-e2e-card"]');
+    try {
+      await expect(card).toBeVisible({ timeout: 10_000 });
+    } catch (error) {
+      const rejected = await page.evaluate(() => globalThis.localStorage.getItem("vtt-e2e-last-rejected"));
+      throw new Error(`card not rendered; host said: ${rejected ?? "nothing"}`, { cause: error });
+    }
+    await expect(card.locator("[data-action-target]")).toHaveCount(2);
+    await expect(card.locator("[data-action-roll]")).toHaveCount(1);
+    await expect(card.locator("[data-action-source]")).toHaveText("Host Source");
+    await expect(card.locator('[data-action-target="save-b"] [data-action-target-name]')).toHaveText("Host Target B");
+    await expect(card.locator('[data-action-target="effect"] [data-action-target-label]')).toHaveText("spell effect");
+    await expect(card.locator('[data-action-target="effect"]')).toContainText("Awaiting a host-verifiable");
+
+    await card.locator("[data-action-area]").click();
+    await expect.poll(() => page.evaluate(() =>
+      (globalThis as unknown as { __stage?: { getRollHighlightLayer?: () => { rectCount: number } } })
+        .__stage?.getRollHighlightLayer?.().rectCount ?? 0)).toBeGreaterThan(0);
+
+    await card.locator('[data-action-roll="action-e2e-roll-b"]').click();
+    await expect(card.locator('[data-action-target="save-b"]')).toHaveAttribute("data-target-state", "resolved");
+    await expect(card.locator('[data-action-target="save-b"]')).toHaveAttribute("data-target-provenance", "host");
+    await expect(card.locator('[data-action-target="effect"]')).toHaveAttribute("data-target-state", "pending");
+    await expect(card.locator("[data-action-roll]")).toHaveCount(0);
+    await expect(card.locator("[data-action-status]")).toHaveText("pending");
+  });
+
+  test("multi-target pending card resolves only the selected check, keeps the others pending, and lets the GM override", async ({ page }) => {
+    test.setTimeout(90_000);
+    await page.goto(entry + "?e2e=1");
+    await expect.poll(() => page.evaluate(() =>
+      (globalThis as unknown as { __vttE2E?: { app?: unknown } }).__vttE2E?.app != null)).toBe(true);
+
+    const sceneId = await page.evaluate(() => {
+      const client = (globalThis as unknown as { __vttE2E: { app: { gm: { client: {
+        store: { getAll: (collection: string) => readonly unknown[] };
+        submit: (ops: unknown[]) => void;
+      } } } } }).__vttE2E.app.gm.client;
+      const scene = client.store.getAll("scenes").map((value) => value as { _id?: unknown; active?: unknown })
+        .find((value) => value.active === true) ??
+        client.store.getAll("scenes").map((value) => value as { _id?: unknown })[0];
+      if (!scene || typeof scene._id !== "string") throw new Error("active scene missing");
+      const actor = (id: string, name: string) => ({
+        _id: id, type: "actor", name, ownership: { default: 0 }, flags: {},
+        system: { pf1e: id === "action-e2e-source"
+          ? { abilities: { wis: 12 }, spells: { keyAbility: "wis", mode: "prepared", casterLevel: 3,
+              slotsPerDay: { 1: 2 }, prepared: [] } }
+          : { saves: { fort: 0, ref: 5, will: 0 } } },
+        items: [], effects: [],
+      });
+      const token = (id: string, actorId: string, name: string, x: number, y: number) => ({
+        _id: id, type: "token", name, actorId, ownership: { default: 3 }, flags: {}, system: {},
+        x, y, rotation: 0, width: 100, height: 100, img: "", hidden: false,
+        disposition: "neutral", vision: true, light: { radius: 0, color: "#ffffff", alpha: 0.5 },
+      });
+      client.submit([
+        { kind: "create", coll: "actors", data: actor("action-e2e-source", "Host Source") },
+        { kind: "create", coll: "actors", data: actor("action-e2e-a", "Host Target A") },
+        { kind: "create", coll: "actors", data: actor("action-e2e-b", "Host Target B") },
+        { kind: "create", coll: "tokens", parent: { coll: "scenes", id: scene._id },
+          data: token("action-e2e-tok-source", "action-e2e-source", "Host Source", 350, 350) },
+        { kind: "create", coll: "tokens", parent: { coll: "scenes", id: scene._id },
+          data: token("action-e2e-tok-a", "action-e2e-a", "Host Target A", 500, 400) },
+        { kind: "create", coll: "tokens", parent: { coll: "scenes", id: scene._id },
+          data: token("action-e2e-tok-b", "action-e2e-b", "Host Target B", 450, 350) },
+      ]);
+      return scene._id;
+    });
+    await expect.poll(() => page.evaluate(() => {
+      const client = (globalThis as unknown as { __vttE2E: { app: { gm: { client: {
+        store: { get: (collection: string, id: string) => unknown };
+      } } } } }).__vttE2E.app.gm.client;
+      return client.store.get("actors", "action-e2e-b") != null;
+    })).toBe(true);
+
+    await page.evaluate((activeSceneId) => {
+      const client = (globalThis as unknown as { __vttE2E: { app: { gm: { client: {
+        user: { id: string }; submit: (ops: unknown[]) => void;
+      } } } } }).__vttE2E.app.gm.client;
+      const actionId = "action-e2e-card";
+      const pending = (id: string, targetKey: string, actorId: string, tokenId: string, name: string) => ({
+        v: 1, id, actionId, targetKey, kind: "save", saveType: "ref",
+        initiator: { actorId: "action-e2e-source", tokenId: "action-e2e-tok-source", name: "Host Source",
+          actionLabel: "Entangle" },
+        target: { actorId, tokenId, name }, formula: "1d20+5", dc: 12,
+        modifiers: [{ label: "REF", value: 5, reason: "save" }],
+        turnNumber: 0, expiresTurn: 2, resolved: false, rollMode: "roll",
+      });
+      const check = (pendingRollId: string) => ({ kind: "save", status: "pending", formula: "1d20+5",
+        dc: 12, total: null, saveType: "ref", pendingRollId });
+      client.submit([{ kind: "create", coll: "messages", data: {
+        _id: actionId, type: "message", name: "Entangle", ownership: { default: 1 }, flags: {},
+        system: {
+          action: {
+            v: 1, id: actionId, revision: 0, kind: "cast", label: "Entangle", state: "pending",
+            source: { name: "forged source", actorId: "action-e2e-source",
+              tokenId: "action-e2e-tok-source" },
+            sceneId: activeSceneId,
+            targets: [
+              { key: "save-a", name: "forged A", label: "Reflex save", actorId: "action-e2e-a",
+                tokenId: "action-e2e-tok-a",
+                state: "pending", outcome: "pending", check: check("action-e2e-roll-a"),
+                evidence: { adapter: "pf1e.pendingSave.v1", payload: { spellLevel: 1, saveType: "ref" } } },
+              { key: "save-b", name: "forged B", label: "Reflex save", actorId: "action-e2e-b",
+                tokenId: "action-e2e-tok-b",
+                state: "pending", outcome: "pending", check: check("action-e2e-roll-b"),
+                evidence: { adapter: "pf1e.pendingSave.v1", payload: { spellLevel: 1, saveType: "ref" } } },
+              { key: "effect", name: "forged B", label: "spell effect", actorId: "action-e2e-b",
+                state: "pending", outcome: "pending",
+                notes: ["Awaiting a host-verifiable spell-effect continuation."] },
+            ],
+            notes: [], createdAt: 1, updatedAt: 1,
+          },
+          pendingRolls: [
+            pending("action-e2e-roll-a", "save-a", "action-e2e-a", "action-e2e-tok-a", "Host Target A"),
+            pending("action-e2e-roll-b", "save-b", "action-e2e-b", "action-e2e-tok-b", "Host Target B"),
           ],
         },
         author: client.user.id, content: "Entangle saves pending", whisper: [], roll: null,
@@ -311,13 +450,11 @@ test.describe("F03 pending rolls (Messages system.pendingRoll v1)", () => {
     await expect(card.locator('[data-action-target="effect"] [data-action-target-label]')).toHaveText("spell effect");
     await expect(card.locator('[data-action-target="effect"]')).toContainText("Awaiting a host-verifiable");
 
-    await card.locator("[data-action-area]").click();
-    await expect.poll(() => page.evaluate(() =>
-      (globalThis as unknown as { __stage?: { getRollHighlightLayer?: () => { rectCount: number } } })
-        .__stage?.getRollHighlightLayer?.().rectCount ?? 0)).toBeGreaterThan(0);
-
     await card.locator('[data-action-roll="action-e2e-roll-b"]').click();
     await expect(card.locator('[data-action-target="save-b"]')).toHaveAttribute("data-target-state", "resolved");
+    // No area on this card, so the host rederives the resolved row from the live actors alone
+    // (DC/formula/identity) and stamps it. The area clause — the one that refuses a card whose
+    // spread the host cannot rederive — is only consulted when the card claims an area.
     await expect(card.locator('[data-action-target="save-b"]')).toHaveAttribute("data-target-provenance", "host");
     await expect(card.locator('[data-action-target="save-a"]')).toHaveAttribute("data-target-state", "pending");
     await expect(card.locator('[data-action-target="effect"]')).toHaveAttribute("data-target-state", "pending");

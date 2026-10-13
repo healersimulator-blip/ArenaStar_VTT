@@ -2603,6 +2603,26 @@ export class HostSync {
     return true;
   }
 
+  /**
+   * D-458 — the area branch of the pending-save verifier proves **one** mechanical row, so the
+   * card's other rows must be the placeholder the producer writes beside it: `pf1eCastFlow.ts`
+   * publishes a deferred save as the save row plus an explicitly pending "spell effect" row (no
+   * check, no mechanics, its own note). D-447's rewrite of {@link pf1eSpellAreaTargetVerified}
+   * applied the single-target rule to the whole card, which no card the app produces can satisfy —
+   * an area spell's deferred save could never be host-verified, so `provenance` stayed `reported`
+   * and every area cast's `ActionFxContext.verified` stayed false.
+   *
+   * The allowance is deliberately narrow: a second check, a damage/healing/condition claim, a rider
+   * or the row's own evidence keeps the card unverified. The verifier then still sees exactly the
+   * row it can rederive, and nothing about "proved" is widened.
+   */
+  private pf1ePendingSaveContinuationOnly(action: ActionCard, target: ActionTarget): boolean {
+    return action.targets.filter((entry) => entry !== target).every((entry) =>
+      entry.state === "pending" && entry.outcome === "pending" && entry.check === undefined &&
+      entry.damage === undefined && entry.healing === undefined && entry.conditions === undefined &&
+      (entry.riders?.length ?? 0) === 0 && entry.evidence === undefined);
+  }
+
   private pf1ePendingSaveEvidenceVerified(
     action: ActionCard, target: ActionTarget, ops: readonly Op[],
   ): boolean {
@@ -2615,9 +2635,11 @@ export class HostSync {
         !action.source.actorId || action.source.itemId !== undefined || !target.actorId ||
         target.state !== "pending" || target.outcome !== "pending" || target.check?.kind !== "save" ||
         target.check.status !== "pending" || target.damage !== undefined || target.healing !== undefined ||
-        target.conditions !== undefined || action.area !== undefined &&
-          !this.pf1eSpellAreaTargetVerified(action, target,
-            action.label.trim().toLowerCase() === "entangle" ? "entangle" : undefined)) return false;
+        target.conditions !== undefined ||
+        action.area !== undefined &&
+          (!this.pf1ePendingSaveContinuationOnly(action, target) ||
+            !this.pf1eSpellAreaTargetVerified({ ...action, targets: [target] }, target,
+              action.label.trim().toLowerCase() === "entangle" ? "entangle" : undefined))) return false;
     const source = this.store.get("actors", action.source.actorId) as ActorDocument | undefined;
     const defender = this.store.get("actors", target.actorId) as ActorDocument | undefined;
     if (!source || !defender || !this.pf1eEvidenceSourceStable(source, ops)) return false;
