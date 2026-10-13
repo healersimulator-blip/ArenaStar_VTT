@@ -16,7 +16,7 @@
   ],
   "lights": [
     { "x": 500, "y": 400, "elevation": 0, "config": { "dim": 30, "bright": 15, "color": "#FF8800", "alpha": 0.4, "angle": 360 }, "flags": { "levels": { "rangeTop": 9 } } },
-    { "x": 600, "y": 400, "elevation": 10, "config": { "dim": 20, "bright": 10, "angle": 90 }, "flags": { "levels": { "rangeTop": 19 } } },
+    { "x": 600, "y": 400, "elevation": 10, "rotation": 45, "config": { "dim": 20, "bright": 10, "angle": 90 }, "flags": { "levels": { "rangeTop": 19 } } },
     { "x": 700, "y": 400, "config": { "dim": 20, "bright": 0 } },
     { "x": 700, "y": 500, "config": { "dim": 20 }, "hidden": true },
     { "x": 700, "y": 600, "config": { "dim": 20, "negative": true } }
@@ -28,7 +28,7 @@
   ],
   "tokens": [
     { "name": "Guard", "x": 450, "y": 350, "width": 1, "height": 1, "elevation": 10, "disposition": -1, "texture": { "src": "tokens/guard.webp" }, "sight": { "enabled": true, "range": 60, "visionMode": "darkvision" }, "actorId": "abcdefgh12345678" },
-    { "name": "Hero", "x": 650, "y": 550, "width": 1, "height": 1, "elevation": 0, "disposition": 1, "texture": { "src": "tokens/hero.webp" }, "light": { "dim": 20, "bright": 10, "color": "#ffeeaa", "alpha": 0.5 } }
+    { "name": "Hero", "x": 650, "y": 550, "width": 1, "height": 1, "elevation": 0, "rotation": 90, "disposition": 1, "texture": { "src": "tokens/hero.webp" }, "light": { "dim": 20, "bright": 10, "angle": 45, "color": "#ffeeaa", "alpha": 0.5 } }
   ],
   "drawings": [
     { "x": 850, "y": 250, "shape": { "type": "r", "width": 100, "height": 200 }, "elevation": 0, "text": "Main stairs", "flags": { "levels": { "drawingMode": 2, "rangeTop": 10 } } },

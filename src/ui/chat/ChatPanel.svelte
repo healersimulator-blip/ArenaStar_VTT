@@ -379,6 +379,26 @@
         <span>Say hello or roll a die to start the story.</span>
       </div>
     {/if}
+    {#snippet narrativeLine(message: MessageDocument)}
+      <!-- One narrative paragraph for a message that renders as a card: the F01 roll card and a
+           D-405 action card both keep the prose (verdict, hp before → after, any honest write
+           warning) visible instead of swallowing it. -->
+      <p class="line rollcard" data-mode={message.rollMode ?? "roll"}>
+        <span class="author">{userName(message.author)}</span>
+        {#each richSegments(message.content) as segment, i (i)}
+          {#if segment.kind === "chip"}
+            <span class="chip" title={segment.chip}>{segment.text}</span>
+          {:else}
+            <!-- eslint-disable-next-line svelte/no-at-html-tags -- markdown is HTML-escaped by renderMarkdown before any transform -->
+            {@html segment.html}
+          {/if}
+        {/each}
+        {#if message.whisper.length > 0}
+          <span class="tag">🔒 {message.whisper.map(userName).join(", ")}</span>
+        {/if}
+      </p>
+    {/snippet}
+
     {#each messages as message (message._id)}
       {@const action = actionCardOf(message)}
       {@const pendingRolls = pendingRollsOfSystem(message.system)}
@@ -407,6 +427,12 @@
           onHighlight={(kind: "initiator" | "target" | "area", id: string | null) =>
             highlightFromAction(action, kind, id)}
         />
+        {#if message.content}
+          <!-- D-459: D-405 cards render structurally, but the resolution prose (hit/miss verdict,
+               hp before → after, "HP write rejected" warnings) is the audit trail — the action
+               branch must not swallow it (the ledger branch below states the same rule). -->
+          {@render narrativeLine(message)}
+        {/if}
       {:else if pendingRoll}
         <PendingRollCard
           pending={pendingRoll}
@@ -434,20 +460,7 @@
         {#if message.content}
           <!-- F01: the card's narrative (hit/miss verdict, hp delta) is part of
                the audit — render it under the card instead of swallowing it. -->
-          <p class="line rollcard" data-mode={message.rollMode ?? "roll"}>
-            <span class="author">{userName(message.author)}</span>
-            {#each richSegments(message.content) as segment, i (i)}
-              {#if segment.kind === "chip"}
-                <span class="chip" title={segment.chip}>{segment.text}</span>
-              {:else}
-                <!-- eslint-disable-next-line svelte/no-at-html-tags -- markdown is HTML-escaped by renderMarkdown before any transform -->
-                {@html segment.html}
-              {/if}
-            {/each}
-            {#if message.whisper.length > 0}
-              <span class="tag">🔒 {message.whisper.map(userName).join(", ")}</span>
-            {/if}
-          </p>
+          {@render narrativeLine(message)}
         {/if}
         {#if message.roll}
           <p class="line rollcard" data-mode={message.rollMode ?? "roll"}>

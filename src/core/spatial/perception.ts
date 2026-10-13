@@ -2,7 +2,9 @@
  * Point/body samples authorize individual tokens, NOT terrain pixels between samples.
  * No implicit floors and no filtering occluders by a selected editing level.
  */
-import type { Point3, SpatialKernel } from "./kernel";
+import type { Point3, SpatialHit, SpatialKernel } from "./kernel";
+
+export type SightRayPolicy = (from: Point3, to: Point3, hits: readonly SpatialHit[]) => boolean;
 
 export interface SpatialLight {
   id: string;
@@ -44,7 +46,7 @@ export class SpatialPerception {
   private readonly lights: readonly SpatialLight[];
   private rays = 0;
   constructor(private readonly kernel: SpatialKernel, lights: readonly SpatialLight[], private readonly pixelsPerUnit: number,
-    private readonly rayBudget = 20_000) {
+    private readonly rayBudget = 20_000, private readonly sightRayPolicy?: SightRayPolicy) {
     if (!finite(pixelsPerUnit) || pixelsPerUnit <= 0 || !Number.isSafeInteger(rayBudget) || rayBudget < 1 || rayBudget > 200_000 || !Array.isArray(lights) || lights.length > 256) throw new Error("Invalid perception budget/units");
     const ids = new Set<string>();
     for (const l of lights) {
@@ -58,7 +60,10 @@ export class SpatialPerception {
   begin(): void { this.rays = 0; }
   private clear(a: Point3, b: Point3, axis: "sight" | "light"): boolean {
     if (++this.rays > this.rayBudget) throw new Error("Perception ray budget exceeded");
-    return this.kernel.ray(a, b, axis).length === 0;
+    const hits = this.kernel.ray(a, b, axis);
+    return axis === "sight" && this.sightRayPolicy
+      ? this.sightRayPolicy(a, b, hits)
+      : hits.length === 0;
   }
   distance(a: Point3, b: Point3): number {
     if (pointError(a) || pointError(b)) throw new Error("Invalid perception point");

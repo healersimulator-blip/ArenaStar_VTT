@@ -101,6 +101,26 @@ return { count: hits.length, caller: context.callerId, runAs: context.runAs };`,
     expect(actions).toEqual(["tags.find", "fx.play", "automation.fire"]);
   });
 
+  test("AIS command helper forwards only the declared-command request envelope", async () => {
+    vi.stubGlobal("Worker", WorkerShim);
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const result = await runScriptWorker(
+      "return await api.ais.invoke('pf1e-torch', 'toggle', { tokenId: args.tokenId });",
+      { tokenId: "token-1" },
+      { sceneId: "scene-1", callerId: "gm", requestId: "ais-run", runAs: "gm" },
+      async (method, payload) => {
+        calls.push({ method, payload });
+        return { sourceId: "torch", active: true };
+      },
+      500,
+    );
+    expect(calls).toEqual([{
+      method: "ais.invoke",
+      payload: { moduleId: "pf1e-torch", commandId: "toggle", input: { tokenId: "token-1" } },
+    }]);
+    expect(result).toEqual({ sourceId: "torch", active: true });
+  });
+
   test("Tagger-style script helpers route projected reads and authorized bulk writes through host RPCs", async () => {
     vi.stubGlobal("Worker", WorkerShim);
     const ref = { coll: "tiles", id: "zone", parent: { coll: "scenes", id: "s1" } };

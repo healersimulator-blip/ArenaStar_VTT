@@ -11,6 +11,7 @@ import {
   WorkerVisionComputer,
   type VisionComputer,
 } from "./visionWorkerClient";
+import type { ProximityOpeningSegment, VisionCone } from "../canvas/vision/polygon";
 
 class ResilientVisionComputer implements VisionComputer {
   private inline: InlineVisionWorker | null = null;
@@ -22,14 +23,16 @@ class ResilientVisionComputer implements VisionComputer {
     oy: number,
     segments: Float32Array,
     radius: number | null,
+    proximityOpenings: readonly ProximityOpeningSegment[] = [],
+    visionCone?: VisionCone | null,
   ): Promise<Float32Array> {
-    if (this.inline) return this.inline.compute(ox, oy, segments, radius);
+    if (this.inline) return this.inline.compute(ox, oy, segments, radius, proximityOpenings, visionCone);
     try {
-      return await this.worker.compute(ox, oy, segments, radius);
+      return await this.worker.compute(ox, oy, segments, radius, proximityOpenings, visionCone);
     } catch {
       this.inline = new InlineVisionWorker();
       this.worker.terminate();
-      return this.inline.compute(ox, oy, segments, radius);
+      return this.inline.compute(ox, oy, segments, radius, proximityOpenings, visionCone);
     }
   }
 

@@ -12,11 +12,31 @@
  * caller (see wallSight.ts); here segments are opaque lines.
  */
 
+import {
+  openingSightConeAt,
+  type OpeningSightCurve,
+} from "../../core/openingSightPolicy";
+
 export interface Segment {
   x1: number;
   y1: number;
   x2: number;
   y2: number;
+}
+
+/** A directed field-of-light/vision cone; 0° points east and positive angles turn clockwise. */
+export interface VisionCone {
+  directionDeg: number;
+  widthDeg: number;
+}
+
+/** A transparent physical opening whose allowed sight cone depends on this observer. */
+export interface ProximityOpeningSegment {
+  segment: Segment;
+  curve: OpeningSightCurve;
+  /** Scene pixels per configured scene-distance unit. */
+  pixelsPerUnit: number;
+  wallId?: string;
 }
 
 const EPS = 1e-9;
@@ -42,11 +62,23 @@ function raySegment(ox: number, oy: number, dx: number, dy: number, s: Segment):
   return Math.max(0, t);
 }
 
+interface PreparedOpening {
+  segment: Segment;
+  depthPx: number;
+  widthRad: number;
+  normalAngle: number;
+  side: number;
+  wallId?: string;
+}
+interface SweepSegment {
+  segment: Segment;
+  opening: PreparedOpening | null;
+}
 interface SweepEvent {
   angle: number;
-  /** +1 = segment span starts, -1 = span ends (at angle + ε removal). */
+  /** +1 = segment span starts, -1 = span ends; 0 = a cone edge. */
   delta: number;
-  seg: Segment;
+  item: SweepSegment | null;
 }
 
 /**
@@ -54,16 +86,58 @@ interface SweepEvent {
  * between the endpoints exceeds π the complementary (CW) span is used, so a
  * segment "behind" its own endpoints still blocks the rays it faces.
  */
-function spanEvents(ox: number, oy: number, s: Segment): Array<[Segment, number, number]> {
+function spanEvents(ox: number, oy: number, item: SweepSegment): Array<[SweepSegment, number, number]> {
+  const s = item.segment;
   const a1 = angleTo(ox, oy, s.x1, s.y1);
   const a2 = angleTo(ox, oy, s.x2, s.y2);
   let ccw = a2 - a1;
   if (ccw < 0) ccw += Math.PI * 2;
   if (ccw > Math.PI) {
     const cw = Math.PI * 2 - ccw; // span from a2 back to a1
-    return [[s, a2, cw]];
+    return [[item, a2, cw]];
   }
-  return [[s, a1, ccw]];
+  return [[item, a1, ccw]];
+}
+
+function distanceToSegment(ox: number, oy: number, s: Segment): number {
+  const dx = s.x2 - s.x1;
+  const dy = s.y2 - s.y1;
+  const length2 = dx * dx + dy * dy;
+  if (length2 <= EPS) return Math.hypot(ox - s.x1, oy - s.y1);
+  const t = Math.max(0, Math.min(1, ((ox - s.x1) * dx + (oy - s.y1) * dy) / length2));
+  return Math.hypot(ox - (s.x1 + dx * t), oy - (s.y1 + dy * t));
+}
+
+function prepareOpening(ox: number, oy: number, opening: ProximityOpeningSegment): PreparedOpening | null {
+  if (!Number.isFinite(opening.pixelsPerUnit) || opening.pixelsPerUnit <= 0) return null;
+  const d = distanceToSegment(ox, oy, opening.segment) / opening.pixelsPerUnit;
+  const cone = openingSightConeAt(opening.curve, d);
+  if (!cone) return null; // too far: the opening is opaque for this observer
+  const dx = opening.segment.x2 - opening.segment.x1;
+  const dy = opening.segment.y2 - opening.segment.y1;
+  const length = Math.hypot(dx, dy);
+  if (length <= EPS) return null;
+  const sideValue = dx * (oy - opening.segment.y1) - dy * (ox - opening.segment.x1);
+  const side = Math.abs(sideValue) <= EPS ? 0 : Math.sign(sideValue);
+  // From the viewer's side, the cone points through the wall to the opposite side.
+  const awayX = side === 0 ? 0 : side * dy / length;
+  const awayY = side === 0 ? 0 : -side * dx / length;
+  const normalAngle = side === 0 ? 0 : Math.atan2(awayY, awayX);
+  return {
+    segment: opening.segment,
+    depthPx: cone.depth * opening.pixelsPerUnit,
+    widthRad: cone.widthDeg * Math.PI / 180,
+    normalAngle,
+    side,
+    ...(opening.wallId ? { wallId: opening.wallId } : {}),
+  };
+}
+
+function rayWithinOpening(angle: number, opening: PreparedOpening): boolean {
+  if (opening.side === 0 || opening.widthRad >= Math.PI * 2 - EPS) return true;
+  const half = opening.widthRad / 2;
+  const dot = Math.cos(angle - opening.normalAngle);
+  return dot + EPS >= Math.cos(half);
 }
 
 /**
@@ -76,41 +150,87 @@ export function visibilityPolygon(
   oy: number,
   segments: readonly Segment[],
   radius: number | null,
+  proximityOpenings: readonly ProximityOpeningSegment[] = [],
+  visionCone?: VisionCone | null,
 ): Float32Array {
   const r = radius ?? Number.POSITIVE_INFINITY;
+  const cone = visionCone && Number.isFinite(visionCone.directionDeg) &&
+      Number.isFinite(visionCone.widthDeg) && visionCone.widthDeg > 0 && visionCone.widthDeg < 360
+    ? { direction: visionCone.directionDeg * Math.PI / 180, width: visionCone.widthDeg * Math.PI / 180 }
+    : null;
   const events: SweepEvent[] = [];
+  if (cone) {
+    events.push(
+      { angle: normalizeAngle(cone.direction - cone.width / 2), delta: 0, item: null },
+      { angle: normalizeAngle(cone.direction + cone.width / 2), delta: 0, item: null },
+    );
+  }
+  const activeAtZero = new Set<SweepSegment>();
+  const items: SweepSegment[] = segments.map((segment) => ({ segment, opening: null }));
+  const preparedOpenings = proximityOpenings.map((opening) => prepareOpening(ox, oy, opening));
+  proximityOpenings.forEach((opening, index) => {
+    const prepared = preparedOpenings[index] ?? null;
+    // Outside the partial threshold (or a malformed curve), keep the real opening segment as
+    // a normal opaque wall for this observer. Otherwise it becomes an attenuating ray cap.
+    items.push({ segment: opening.segment, opening: prepared });
+    if (prepared) {
+      const half = prepared.widthRad / 2;
+      if (prepared.widthRad < Math.PI * 2 - EPS && prepared.side !== 0) {
+        events.push({ angle: normalizeAngle(prepared.normalAngle - half), delta: 0, item: null });
+        events.push({ angle: normalizeAngle(prepared.normalAngle + half), delta: 0, item: null });
+      }
+    }
+  });
+
   /** Segments whose span crosses angle 0: active at the sweep start. */
-  const wrapped = new Set<Segment>();
-  for (const seg of segments) {
+  for (const item of items) {
+    const seg = item.segment;
     // skip degenerate segments
     if (Math.abs(seg.x2 - seg.x1) < EPS && Math.abs(seg.y2 - seg.y1) < EPS) continue;
-    for (const [s, start, span] of spanEvents(ox, oy, seg)) {
+    for (const [spanItem, start, span] of spanEvents(ox, oy, item)) {
       const end = start + span;
       if (end >= Math.PI * 2) {
         // wraps past 2π: active from the sweep start until `end − 2π`,
         // then again from `start` — pre-seeded here, removed at its end event
-        wrapped.add(s);
-        events.push({ angle: end - Math.PI * 2, delta: -1, seg: s });
-        events.push({ angle: start, delta: 1, seg: s });
+        activeAtZero.add(spanItem);
+        events.push({ angle: end - Math.PI * 2, delta: -1, item: spanItem });
+        events.push({ angle: start, delta: 1, item: spanItem });
       } else {
-        events.push({ angle: start, delta: 1, seg: s });
-        events.push({ angle: end, delta: -1, seg: s });
+        events.push({ angle: start, delta: 1, item: spanItem });
+        events.push({ angle: end, delta: -1, item: spanItem });
       }
     }
   }
-  // at equal angles process STARTS before ENDS: a wall ending exactly where
-  // another begins must hand over the ray without an empty active-set gap
+  // At equal angles process STARTS before ENDS: a wall ending exactly where another begins
+  // must hand over the ray without an empty active-set gap. Cone edges have delta 0.
   events.sort((a, b) => a.angle - b.angle || b.delta - a.delta);
 
-  const active = new Set<Segment>(wrapped);
+  const active = new Set<SweepSegment>(activeAtZero);
   const out: number[] = [];
   const castAt = (angle: number): void => {
     const dx = Math.cos(angle);
     const dy = Math.sin(angle);
-    let best = r;
-    for (const s of active) {
-      const t = raySegment(ox, oy, dx, dy, s);
-      if (t >= 0 && t < best) best = t;
+    const delta = cone ? Math.atan2(Math.sin(angle - cone.direction), Math.cos(angle - cone.direction)) : 0;
+    const insideVisionCone = !cone || Math.abs(delta) <= cone.width / 2 + EPS;
+    const hits: Array<{ distance: number; item: SweepSegment }> = [];
+    if (insideVisionCone) {
+      for (const item of active) {
+        const distance = raySegment(ox, oy, dx, dy, item.segment);
+        if (distance >= 0 && distance < r) hits.push({ distance, item });
+      }
+      hits.sort((a, b) => a.distance - b.distance || Number(!!a.item.opening) - Number(!!b.item.opening) ||
+        (a.item.opening?.wallId ?? "").localeCompare(b.item.opening?.wallId ?? ""));
+    }
+    let best = insideVisionCone ? r : 0;
+    for (const hit of hits) {
+      if (hit.distance >= best) break;
+      const opening = hit.item.opening;
+      if (!opening || !rayWithinOpening(angle, opening)) {
+        // Physical blockers, distant openings and rays outside an aperture stop at the wall.
+        best = hit.distance;
+        break;
+      }
+      best = Math.min(best, hit.distance + opening.depthPx);
     }
     out.push(ox + dx * best, oy + dy * best);
   };
@@ -129,21 +249,27 @@ export function visibilityPolygon(
     return new Float32Array(out);
   }
 
-  // process events in order; the stable arc BEFORE each event is sampled so
-  // radius-capped regions become proper arc polygons
+  // Process events in order; the stable arc BEFORE each event is sampled so
+  // radius-capped regions become proper arc polygons.
   let prev = events[0]?.angle ?? 0;
   for (const ev of events) {
     const gap = ev.angle - prev;
     if (gap > EPS) castArc(prev, ev.angle);
-    if (ev.delta > 0) active.add(ev.seg);
-    else active.delete(ev.seg);
+    if (ev.item && ev.delta > 0) active.add(ev.item);
+    else if (ev.item && ev.delta < 0) active.delete(ev.item);
     castAt(ev.angle + EPS);
     prev = ev.angle;
   }
-  // wrap-around arc back to the first event
+  // Wrap-around arc back to the first event.
   const first = events[0]?.angle ?? 0;
   castArc(prev, Math.PI * 2 + first);
   return new Float32Array(out);
+}
+
+function normalizeAngle(angle: number): number {
+  const tau = Math.PI * 2;
+  const value = angle % tau;
+  return value < 0 ? value + tau : value;
 }
 
 /** Winding-agnostic point-in-polygon over a flat [x,y,…] polygon. */

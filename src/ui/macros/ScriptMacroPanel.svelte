@@ -74,7 +74,9 @@
     slot = 0; reviewed = false; error = ""; status = ""; response = null;
   }
   function toggleGrant(grant: ScriptGrant): void {
-    grants = grants.includes(grant) ? grants.filter((g) => g !== grant) : [...grants, grant];
+    const enabling = !grants.includes(grant);
+    grants = enabling ? [...grants, grant] : grants.filter((g) => g !== grant);
+    if (grant === "ais.invoke" && enabling) runAs = "gm";
     reviewed = false;
   }
   function updateInput(index: number, patch: Partial<ScriptInput>): void {
@@ -151,13 +153,13 @@
 
 <section class="scripts" data-script-wizard aria-label="Script macro wizard">
   <header><h3>Script macros · programmable actions</h3>{#if canEdit}<button type="button" onclick={reset}>New</button>{/if}</header>
-  <p class="hint">Async JavaScript can query live scene tags, edit authorized targets, send chat, play a saved FX timeline, place/dismiss an approved summon, fire a published zone or await a nested macro. The host validates and commits each authorized world action; a multi-action script is not atomic. This is not yet the full parity action API.</p>
+  <p class="hint">Async JavaScript can query live scene tags, edit authorized targets, send chat, play a saved FX timeline, place/dismiss an approved summon, fire a published zone, await a nested macro, or call an explicitly declared AIS module command. The host validates and commits each authorized world action; a multi-action script is not atomic. This is not arbitrary AIS JavaScript execution.</p>
   {#if canEdit}
     <p class="warning">Trusted GM code only. Workers isolate the canvas, but cannot reliably sandbox hostile network code. Never approve pasted code you have not reviewed. Changing source, authority or grants invalidates the revision approval.</p>
     <label>Name <input data-script-name bind:value={name} oninput={() => reviewed = false} placeholder="e.g. Open tagged gates" /></label>
     <div class="row">
       <label>Fixed scene <select data-script-scene bind:value={sceneId} onchange={() => reviewed = false}>{#each scenes as scene (scene._id)}<option value={scene._id}>{scene.name}</option>{/each}</select></label>
-      <label>Run as <select bind:value={runAs} onchange={() => reviewed = false}><option value="caller">Invoking user</option><option value="gm">GM (reviewed elevation)</option></select></label>
+      <label>Run as <select bind:value={runAs} onchange={() => reviewed = false}><option value="caller" disabled={grants.includes("ais.invoke")}>Invoking user</option><option value="gm">GM (reviewed elevation)</option></select></label>
       <label><input type="checkbox" bind:checked={playerCallable} onchange={() => reviewed = false} />Allow players to invoke</label>
       <label>Hotbar slot <select bind:value={slot}><option value={0}>—</option>{#each [1, 2, 3, 4, 5] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
     </div>
@@ -187,6 +189,9 @@
         {/each}
         {#if !prefabs.length}<small>Save a template in the Prefabs tab first.</small>{/if}
       </fieldset>
+    {/if}
+    {#if grants.includes("ais.invoke")}
+      <p class="hint" data-script-ais-grant>Code: <code>await api.ais.invoke('pf1e-torch', 'toggle', &#123; tokenId: args.tokenId &#125;)</code>. Calls only a manifest-declared command on a module that is enabled and locally approved on the GM host. The macro needs explicit GM run-as, the target module's individual AIS capabilities are rechecked, and command execution is limited to eight seconds. No raw source, Foundry globals or unrestricted macro evaluation is exposed to the module.</p>
     {/if}
     {#if grants.includes("summons")}
       <fieldset data-script-summon-allowlist><legend>Summon grant</legend>

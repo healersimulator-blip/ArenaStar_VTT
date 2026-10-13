@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import type { ActorDocument, Json } from "../../src/core/documents";
 import type { PermissionUser } from "../../src/core/ownership";
@@ -5,6 +7,7 @@ import { applyDiff } from "../../src/core/diff";
 import { pf1eSheetView } from "../../src/ui/sheets/pf1eSheetModel";
 import {
   pf1eCompendiumComponents,
+  pf1ePrepareFromCompendium,
   pf1eSpellbookEdit,
   pf1eSpellbookView,
   type PF1eSpellbookEdit,
@@ -305,5 +308,57 @@ describe("PF1e compendium spell components", () => {
   test("normalizes word-form lists, preserves slash alternatives and deduplicates", () => {
     expect(pf1eCompendiumComponents(["verbal", "S", "M/DF", "somatic"])).toBe("V, S, M/DF");
     expect(pf1eCompendiumComponents("verbal, somatic, material")).toBe("V, S, M");
+  });
+});
+
+/**
+ * D-455 — the compendium's **Add** path (the bug the batch coverage found).
+ *
+ * The sheet used to hand `pf1eSpellbookEdit` a nested `{kind:"prepare", entry:{…}}` from a
+ * `.svelte` script block — invisible to `tsc` — which threw on `edit.name.trim()` and prepared
+ * nothing while the picker window closed as if it had worked. The row below is the **shipped**
+ * `systems/pf1e-core/packs/spells.json` entry, because the pack's own shape (a per-class `level`
+ * map, structured component flags) is what made the old literal wrong.
+ */
+describe("PF1e compendium Add → prepared row (D-455)", () => {
+  const packPath = fileURLToPath(
+    new URL("../../systems/pf1e-core/packs/spells.json", import.meta.url),
+  );
+  const pack = JSON.parse(readFileSync(packPath, "utf8")) as {
+    entries: Array<{ id: string; name: string; data: { system: Record<string, unknown> } }>;
+  };
+  const mageArmor = pack.entries.find((entry) => entry.id === "mage-armor");
+  if (!mageArmor) throw new Error("mage-armor is missing from the shipped spell pack");
+
+  test("the shipped row is the shape this test assumes", () => {
+    // Nothing reads the pack's class-keyed `level` table (D-151), so the shape is worth pinning:
+    // if the pack starts publishing a numeric level, the fallback below stops being exercised.
+    expect(typeof mageArmor.data.system.level).toBe("object");
+    expect(mageArmor.data.system.levelNumber).toBeUndefined();
+  });
+
+  test("a compendium row becomes a flat prepare edit with normalized components", () => {
+    expect(pf1ePrepareFromCompendium(mageArmor)).toEqual({
+      kind: "prepare",
+      name: "Mage Armor",
+      level: 1,
+      slotLevel: 1,
+      components: "V, S, M",
+    });
+  });
+
+  test("the edit prepares a real row instead of throwing", () => {
+    const a = wizard({ prepared: [] });
+    const result = edit(a, pf1ePrepareFromCompendium(mageArmor));
+    expect(result.error).toBeNull();
+    const next = apply(a, result);
+    expect(preparedOf(next)).toEqual([
+      { name: "Mage Armor", level: 1, slotLevel: 1, components: "V, S, M" },
+    ]);
+  });
+
+  test("a numeric published level is honoured, and junk falls back to 1", () => {
+    expect(pf1ePrepareFromCompendium({ name: "Fireball", data: { system: { levelNumber: 3 } } }).level).toBe(3);
+    expect(pf1ePrepareFromCompendium({ name: "Odd", data: { system: { level: "not a level" } } }).level).toBe(1);
   });
 });

@@ -55,6 +55,7 @@ test.describe("canvas (§9 M1 subset)", () => {
       "grid",
       "drawings",
       "templates",
+      "stairs", // G-14/D-430: stair markers (and D-453 raised-area outlines) below walls
       "walls",
       "lighting",
       "hexcrawl", // §20 overlay: under the tokens, above the lighting (D-271)
@@ -65,6 +66,7 @@ test.describe("canvas (§9 M1 subset)", () => {
       "foreground", // §6.2 scene foreground: an overhead overlay with no occlusion
       "fxAboveTokens",
       "fog",
+      "roofsOverFog", // G-24/D-438: "show through fog" roof copies
       "effects",
       "notes",
       "controls",

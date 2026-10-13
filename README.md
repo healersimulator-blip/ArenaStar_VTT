@@ -80,6 +80,13 @@ Each module folder has an `index.ts` barrel. Tracking files live in the repo roo
 `PLAN.md`, `DECISIONS.md`, `DEVIATIONS.md`, `ROADMAP.md`, `PROTOCOL.md`, and the
 structured rules/chat/FX contract in `ACTION_SYSTEM.md`.
 
+### Modding with the Automation Interconnect System
+
+The [AIS design](AUTOMATION_INTERCONNECT_DESIGN.md) describes the architecture and remaining
+implementation gaps. `modules/pf1e-torch/` is the worked ArenaStar-native carried-light module; its
+README documents the current command/event contracts and capabilities. Full feature parity with
+the original Foundry Torch module is not yet established.
+
 ## World files, rulesets and content packs (§8, §12)
 
 A GM handles **one file per campaign**: the world file. Everything else travels inside it

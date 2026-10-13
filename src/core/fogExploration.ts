@@ -29,7 +29,7 @@ import type { Op } from "./ops";
 import type { PermissionUser } from "./ownership";
 import { can } from "./permissions";
 import { fogMaskLog, pointInFogMask } from "./fogMask";
-import { pointInPolygon } from "../canvas/vision/polygon";
+import { pointInPolygon, type VisionCone } from "../canvas/vision/polygon";
 import { raisedSight, raisedSightKey, raisedTokenSeen, type RaisedSight } from "./raisedAreas";
 import {
   feetToPixels,
@@ -37,6 +37,7 @@ import {
   sceneLightSources,
   tokenVisionOf,
   viewerSightRadiusPx,
+  tokenVisionCone,
   withinDarkvision,
   type PF1eLighting,
 } from "../canvas/vision/darkness";
@@ -101,6 +102,8 @@ export interface FogViewer {
   radiusPx: number;
   /** The same viewer's darkvision range in pixels (0 = none), for the target-visibility term. */
   darkvisionPx: number;
+  /** Directional flashlight/lantern sight where its beam is the only illumination. */
+  visionCone?: VisionCone;
 }
 
 export interface FogViewerContext {
@@ -137,6 +140,7 @@ export function fogViewers(
   for (const token of scene.tokens) {
     if (!token.vision) continue;
     if (!controlsToken(user, token, scene, context.actors ?? [])) continue;
+    const visionCone = tokenVisionCone(scene, token);
     out.push({
       tokenId: token._id,
       x: token.x,
@@ -145,6 +149,7 @@ export function fogViewers(
       // by its darkvision, all capped by the scene's own range.
       radiusPx: viewerSightRadiusPx(scene, token, cap),
       darkvisionPx: feetToPixels(tokenVisionOf(token).darkvisionFeet, scene.grid),
+      ...(visionCone ? { visionCone } : {}),
     });
   }
   return out;
@@ -296,25 +301,30 @@ export function fogRevealKey(
   const eyes = viewers
     .map(
       (v) =>
-        `${v.tokenId}@${Math.round(v.x)},${Math.round(v.y)}:${Math.round(v.radiusPx)}:${Math.round(v.darkvisionPx)}`,
+        `${v.tokenId}@${Math.round(v.x)},${Math.round(v.y)}:${Math.round(v.radiusPx)}:${Math.round(v.darkvisionPx)}:${v.visionCone ? `${Math.round(v.visionCone.directionDeg)}:${Math.round(v.visionCone.widthDeg)}` : "full"}`,
     )
     .sort()
     .join(";");
   const walls = scene.walls
-    .map((w) => `${w._id}:${w.c.join(",")}:${w.sight}:${w.door}`)
+    .map((w) => `${w._id}:${w.c.join(",")}:${w.sight}:${w.move}:${w.sound}:${w.light}:${w.door}:${JSON.stringify(w.openingSightOverride ?? null)}`)
     .join(";");
+  const openingPolicy = JSON.stringify({
+    scene: (scene.flags?.["core"] as Record<string, unknown> | undefined)?.["openingSight"] ?? null,
+    apertures: (scene.levels ?? []).map((level) => level.apertureSightOverrides ?? null),
+  });
   // §2.1: darkness and the lights themselves change what is seen, so they belong in the key —
   // lighting a torch (or raising the ambient darkness) must recompute, not wait for a move.
   const darkness = Math.round((scene.darkness ?? 0) * 100);
   const lights = sceneLightSources(scene)
     .map(
       (l) =>
-        `${l.id}:${Math.round(l.x)},${Math.round(l.y)}:${Math.round(l.bright)}:${Math.round(l.dim)}`,
+        `${l.id}:${Math.round(l.x)},${Math.round(l.y)}:${Math.round(l.bright)}:${Math.round(l.dim)}:${Math.round(l.angle ?? 360)}:${Math.round(l.rotation ?? 0)}`,
     )
     .join(";");
   // D-453: solid raised areas and the eyes' heights change what each eye sees past them.
   const raised = raisedSightKey(raisedSight(scene, viewers, floorZ));
-  return `${scene._id}|${Math.round(radius)}|${darkness}|${eyes}|${lights}|${walls}${raised ? `|${raised}` : ""}`;
+  const grid = `${scene.grid.size}:${scene.grid.distance}`;
+  return `${scene._id}|${grid}|${Math.round(radius)}|${darkness}|${eyes}|${lights}|${walls}|${openingPolicy}${raised ? `|${raised}` : ""}`;
 }
 
 /**

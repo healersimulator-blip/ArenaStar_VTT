@@ -91,8 +91,16 @@ test.describe("GM tab app shell (§2, §14 M1)", () => {
     await page.getByRole("button", { name: "Host a world" }).click();
     await expect(page.locator("[data-canvas-toolbar]")).toBeVisible();
     // D-256: the rail carries Roll20's tool set — select/pan, the drawing tools, measure,
-    // dice, and the GM's fog / wall / light / pin placements.
-    await expect(page.locator("[data-canvas-tool]")).toHaveCount(10);
+    // dice, and the GM's fog / wall / light / pin placements. D-453 added the GM's Raised
+    // area tool, so a fresh tactical scene shows eleven: the *Travel path* tool wants a
+    // hexcrawl scene and *Stairs* wants two saved floors plus the v2 capability, so both
+    // stay hidden here. The ids are named rather than counted so the next added tool has to
+    // be acknowledged in this line instead of quietly failing a number.
+    const tools = page.locator("[data-canvas-tool]");
+    await expect(tools).toHaveCount(11);
+    expect(
+      await tools.evaluateAll((els) => els.map((el) => el.getAttribute("data-canvas-tool"))),
+    ).toEqual(["select", "pan", "draw", "text", "measure", "dice", "fog", "wall", "light", "pin", "raised"]);
     await page.locator('[data-canvas-tool="dice"]').click();
     await expect(page.getByLabel("Dice formula")).toHaveValue("1d20");
     await page.getByLabel("Dice formula").fill("1d20+5");

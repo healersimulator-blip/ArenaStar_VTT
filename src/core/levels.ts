@@ -5,7 +5,8 @@ import type { Op } from "./ops";
 import { sceneMembershipError, isScopedCollection } from "./levelMembership";
 import { applyDiff } from "./diff";
 import { elevationBandError, inElevationBand } from "./multilevelGeometry";
-import { levelSurfaceError } from "./floorSurface";
+import { levelSurfaceError, surfaceApertures } from "./floorSurface";
+import { apertureSightOverridesError } from "./openingSightPolicy";
 export const MAX_LEVELS = 32;
 const idPattern = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -28,6 +29,13 @@ export function sceneLevelsError(scene: { levels?: unknown; walls?: unknown; lig
     if (!Array.isArray(l.visibleLevelIds) || l.visibleLevelIds.length > MAX_LEVELS ||
         new Set(l.visibleLevelIds).size !== l.visibleLevelIds.length || !Array.from(l.visibleLevelIds).every((id) => typeof id === "string" && idPattern.test(id))) return "Invalid level visibility references";
     if (l.surface !== undefined) { const surfaceError = levelSurfaceError(l.surface); if (surfaceError) return surfaceError; }
+    if (l.apertureSightOverrides !== undefined) {
+      const overrideError = apertureSightOverridesError(l.apertureSightOverrides);
+      if (overrideError) return overrideError;
+      const apertureIds = new Set(surfaceApertures(l).map((aperture) => aperture.id));
+      if (Object.keys(l.apertureSightOverrides).some((id) => !apertureIds.has(id)))
+        return "Aperture LOS override refers to a hole that is no longer on this floor";
+    }
     if (!l.ownership || typeof l.ownership !== "object" || Array.isArray(l.ownership) ||
         ![0, 1, 2, 3].includes(l.ownership.default) || !Object.values(l.ownership).every((n) => [0, 1, 2, 3].includes(n)) ||
         !l.flags || typeof l.flags !== "object" || Array.isArray(l.flags) || !l.system || typeof l.system !== "object" || Array.isArray(l.system)) return "Invalid level base fields";
@@ -118,7 +126,7 @@ export function levelDraftOps(sceneId: string, before: readonly LevelDocument[],
     if (!previous) { ops.push({ kind: "create", coll: "levels", parent, data: structuredClone(next) }); continue; }
     const diff: Record<string, import("./documents").Json> = {};
     for (const field of fields) if (JSON.stringify(previous[field]) !== JSON.stringify(next[field])) diff[field] = structuredClone(next[field]);
-    for (const field of ["tileIds", "useSceneBackground", "surface"] as const) if (JSON.stringify(next[field]) !== JSON.stringify(previous[field])) {
+    for (const field of ["tileIds", "useSceneBackground", "surface", "apertureSightOverrides"] as const) if (JSON.stringify(next[field]) !== JSON.stringify(previous[field])) {
       if (next[field] === undefined) diff[`-=${field}`] = null; else diff[field] = structuredClone(next[field]) as import("./documents").Json;
     }
     if (next.darkness !== previous.darkness) {

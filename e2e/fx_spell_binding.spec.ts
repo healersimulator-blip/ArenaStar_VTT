@@ -100,7 +100,10 @@ test("a world-compendium spell outside the tactical catalogue binds FX and works
 
   // The same non-catalogue spell can be bound to the actor quickbar. Its cast inputs are
   // explicit and stored with the slot; no save or damage behavior is guessed from the name.
-  await page.locator(".wm-window").filter({ has: sheet }).locator("[data-window-close]").click();
+  // The sheet's window by its own id (`pf1e-sheet:<actor>`, `pf1eSheetWindow.ts`). The old
+  // `filter({ has: sheet })` re-rooted a locator that already began with `.wm-window`, so it
+  // asked for a window inside a window and waited forever (found by D-457's batch run).
+  await page.locator('[data-window^="pf1e-sheet:"] [data-window-close]').click();
   const camera = await hostCall<{ x: number; y: number; scale: number }>(page, "camera");
   const box = await page.locator(".canvas-host canvas").boundingBox();
   if (!box) throw new Error("canvas not mounted");

@@ -33,6 +33,8 @@ The useful mechanisms are tile-derived roof masks, linked occlusion, eye-height/
 
 Documentation discovery caveat: `/article/scene-levels/` and the guessed `BaseSceneLevel` API URL returned 404. The actual public class is `BaseLevel` / `Level`. The Scenes article still contains older UI descriptions; it was not used as definitive V14 schema documentation.
 
+For the window-specific **Proximity / Reverse Proximity / attenuation** contract and ArenaStar's **scene-default plus sparse per-opening override** requirement, see [Foundry V14 window LOS research](FOUNDRY_V14_WINDOW_PROXIMITY_LOS.md). It records the public wall-doc semantics, the V14 release-note check, the gap in ArenaStar's current LOS path, and the updated product/implementation plan. The attenuation curve is not published by Foundry; the note does not claim to reproduce its private implementation.
+
 ## Better Levels: verified publication, unverified code
 
 - Product: **Baileywiki Better Levels**, publisher **Baileywiki**.

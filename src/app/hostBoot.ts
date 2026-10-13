@@ -1,4 +1,16 @@
 import { getFogEpoch, putFogEpoch } from "../storage/idb";
+import {
+  emptyAisProfile,
+  resolveAisProfile,
+  validateAisActivationProfile,
+  withAisModule,
+  type AisActivationProfile,
+  type AisCapability,
+  type AisModuleCommandDeclaration,
+  type AisPackageCandidate,
+  type AisResolution,
+} from "../core/automationInterconnect";
+import { packageContentHash } from "../packages/packageHash";
 import { CloudBackupController } from "../storage/cloud/cloudBackup";
 import { acquireWorldLock } from "../storage/worldLock";
 import { SaveCoordinator, SaveWork } from "../storage/saveCoordinator";
@@ -111,9 +123,19 @@ export interface PackageSummary {
   id: string;
   name: string;
   version: string;
-  type: "system" | "data";
+  type: "system" | "data" | "module";
   packCount: number;
   active: boolean;
+  enabled: boolean;
+  /** Content hash for AIS modules; null for non-executable system/data packages. */
+  hash: string | null;
+  requestedCapabilities: AisCapability[];
+  grantedCapabilities: AisCapability[];
+  /** Manifest-declared callable entry points; these are not arbitrary string dispatch. */
+  commands: AisModuleCommandDeclaration[];
+  emittedEvents: string[];
+  /** Exact-hash local code approval (separate from the world-shared enabled profile). */
+  approved: boolean;
   /** §12 module asks for in-page execution (GM must grant). */
   trustRequested: boolean;
   /** §12 GM granted in-page trust for this world. */
@@ -122,6 +144,43 @@ export interface PackageSummary {
   dependencies: string[];
   /** The subset of `dependencies` not imported into this world — what the GM still has to add. */
   missingDependencies: string[];
+}
+
+export interface HostAutomationModuleBoot {
+  packageId: string;
+  version: string;
+  hash: string;
+  source: string;
+  capabilities: AisCapability[];
+  commands: AisModuleCommandDeclaration[];
+  emittedEvents: string[];
+}
+
+export interface HostAutomationBoot {
+  /** World-shared intent only; local capability grants are excluded. */
+  profile: AisActivationProfile;
+  resolution: AisResolution;
+  /** Only exact-hash enabled modules with local execution approval appear here. */
+  modules: HostAutomationModuleBoot[];
+}
+
+export interface HostAutomationModuleSummary {
+  id: string;
+  name: string;
+  version: string;
+  hash: string;
+  enabled: boolean;
+  approved: boolean;
+  requestedCapabilities: AisCapability[];
+  grantedCapabilities: AisCapability[];
+  commands: AisModuleCommandDeclaration[];
+  emittedEvents: string[];
+}
+
+export interface HostAutomationState {
+  profile: AisActivationProfile;
+  modules: HostAutomationModuleSummary[];
+  resolution: AisResolution;
 }
 
 export interface HostModuleBoot {
@@ -174,6 +233,22 @@ export interface HostPackages {
   revokeTrust(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
   /** §12 compendia: parsed read-only packs from every imported package. */
   compendia(): Promise<Array<{ packageId: string; packFile: string; pack: CompendiumPack }>>;
+  /** Current AIS profile, module approvals and provider diagnostics. */
+  automation(): Promise<HostAutomationState>;
+  /** Bounded, text-only view of an entry file so local approval can be informed. */
+  previewAutomationModule(id: string): Promise<
+    | { ok: true; entry: string; source: string; truncated: boolean }
+    | { ok: false; error: string }
+  >;
+  /** Add an exact version/hash lock to the world-shared profile; code consent is separate. */
+  enableAutomationModule(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  disableAutomationModule(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Choose a declared exclusive provider, enabling that provider if needed. */
+  selectAutomationProvider(slotId: string, providerRef: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Replace this package's local capability allow-list (hash-bound to installed bytes). */
+  grantAutomationCapabilities(id: string, capabilities: AisCapability[]): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Clear this package's local code/capability approval. */
+  revokeAutomationApproval(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 export interface HostApp {
@@ -194,6 +269,8 @@ export interface HostApp {
   readonly rulesBoot: HostRulesBoot;
   /** §12 active package module entry for the sandboxed iframe (null = none). */
   readonly moduleBoot: HostModuleBoot | null;
+  /** AIS independent multi-module runtime plan (local grants never enter its profile). */
+  readonly automationBoot: HostAutomationBoot;
   /** §12 world-load migration record (null = versions already current). */
   readonly migrationBoot: HostMigrationBoot | null;
   /** §12 package management (import/activate world-scoped). */
@@ -215,6 +292,94 @@ export interface HostApp {
    * does not contain (D-179). Callers that only tear down may `void` it.
    */
   close(): Promise<void>;
+}
+
+function aisCandidates(records: readonly PackageRecord[]): AisPackageCandidate[] {
+  return records.map((rec) => ({
+    id: rec.id,
+    version: rec.version,
+    hash: packageContentHash(rec.files),
+    type: rec.type,
+    ...(rec.manifest.interconnect ? { interconnect: rec.manifest.interconnect } : {}),
+  }));
+}
+
+function resolveAutomationState(
+  records: readonly PackageRecord[],
+  world: WorldsRecord | undefined,
+): { state: HostAutomationState; boot: HostAutomationBoot } {
+  const profileValidation = validateAisActivationProfile(world?.automationProfile ?? emptyAisProfile());
+  const profile = profileValidation.ok ? profileValidation.value : emptyAisProfile();
+  const candidates = aisCandidates(records);
+  const resolution = resolveAisProfile(candidates, profile, world?.activeRulesPackage ?? world?.system ?? BUILTIN_SYSTEM_ID);
+  if (!profileValidation.ok) resolution.issues.unshift({
+    kind: "invalid-profile",
+    message: profileValidation.error,
+    blocking: true,
+  });
+
+  const conflictingPackages = new Set<string>();
+  let blocksAll = false;
+  for (const issue of resolution.issues) {
+    if (!issue.blocking) continue;
+    if (issue.kind === "invalid-profile") blocksAll = true;
+    if (issue.packageId) conflictingPackages.add(issue.packageId);
+    if (issue.slotId) {
+      for (const module of resolution.modules) {
+        if (module.interconnect?.provides?.some((entry) => entry.id === issue.slotId))
+          conflictingPackages.add(module.id);
+      }
+    }
+  }
+
+  const modules: HostAutomationModuleSummary[] = [];
+  const bootModules: HostAutomationModuleBoot[] = [];
+  for (const rec of records) {
+    if (rec.type !== "module" || !rec.manifest.interconnect) continue;
+    const hash = packageContentHash(rec.files);
+    const requestedCapabilities = [...(rec.manifest.interconnect.capabilities ?? [])];
+    const commands = [...(rec.manifest.interconnect.commands ?? [])];
+    const emittedEvents = [...(rec.manifest.interconnect.emits ?? [])];
+    const lock = profile.modules.find((entry) => entry.id === rec.id);
+    const enabled = lock?.version === rec.version && lock.hash === hash;
+    const savedGrant = world?.automationGrants?.[rec.id];
+    const approved = savedGrant?.hash === hash && Array.isArray(savedGrant.capabilities);
+    const grantedCapabilities = approved
+      ? savedGrant.capabilities.filter((capability) => requestedCapabilities.includes(capability))
+      : [];
+    modules.push({
+      id: rec.id,
+      name: rec.name,
+      version: rec.version,
+      hash,
+      enabled,
+      approved,
+      requestedCapabilities,
+      grantedCapabilities,
+      commands,
+      emittedEvents,
+    });
+
+    if (!enabled || !approved || blocksAll || conflictingPackages.has(rec.id)) continue;
+    const resolved = resolution.modules.find((candidate) => candidate.id === rec.id);
+    if (!resolved) continue;
+    bootModules.push({
+      packageId: rec.id,
+      version: rec.version,
+      hash,
+      source: rec.files[rec.manifest.interconnect.entry] ?? "",
+      capabilities: grantedCapabilities,
+      commands,
+      emittedEvents,
+    });
+  }
+  modules.sort((a, b) => a.id.localeCompare(b.id));
+  const orderIndex = new Map(resolution.order.map((id, index) => [id, index]));
+  bootModules.sort((a, b) => (orderIndex.get(a.packageId) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(b.packageId) ?? Number.MAX_SAFE_INTEGER));
+  return {
+    state: { profile, modules, resolution },
+    boot: { profile, resolution, modules: bootModules },
+  };
 }
 
 function sceneDoc(): SceneDocument {
@@ -652,6 +817,11 @@ async function bootHostAppLocked(
           mode: trustRequested && trustGranted ? "inPage" : "iframe",
         }
       : null;
+  const initialAis = resolveAutomationState(
+    await listPackages(db, meta.worldId),
+    await getWorld(db, meta.worldId),
+  );
+  const automationBoot = initialAis.boot;
   // N01 (§1.6): announce the ACTIVE battle on the wire — every welcome carries
   // the resolved schema + scene, so joiners adopt the package's columns instead
   // of the mass-battle-basic guess (PF1e campaigns decode on join). Before the
@@ -722,8 +892,10 @@ async function bootHostAppLocked(
     active: string | null,
     trustedIds: readonly string[],
     importedIds: readonly string[],
+    ais: HostAutomationState,
   ): PackageSummary => {
     const dependencies = rec.manifest.dependencies ?? [];
+    const module = ais.modules.find((entry) => entry.id === rec.id);
     return {
       id: rec.id,
       name: rec.name,
@@ -731,18 +903,63 @@ async function bootHostAppLocked(
       type: rec.type,
       packCount: rec.manifest.packs?.length ?? 0,
       active: active === rec.id,
+      enabled: module?.enabled ?? false,
+      hash: module?.hash ?? null,
+      requestedCapabilities: module?.requestedCapabilities ?? [],
+      grantedCapabilities: module?.grantedCapabilities ?? [],
+      commands: module?.commands ?? [],
+      emittedEvents: module?.emittedEvents ?? [],
+      approved: module?.approved ?? false,
       trustRequested: rec.manifest.module?.trusted === true,
       trusted: trustedIds.includes(rec.id),
       dependencies,
-      missingDependencies: dependencies.filter(
-        (dep) => !importedIds.includes(dep),
-      ),
+      missingDependencies: dependencies.filter((dep) => !importedIds.includes(dep)),
     };
   };
   const activePackageId = async (): Promise<string | null> =>
     (await getWorld(db, meta.worldId))?.activeRulesPackage ?? null;
   const importedIds = async (): Promise<string[]> =>
     (await listPackages(db, meta.worldId)).map((r) => r.id);
+  const automationState = async (): Promise<HostAutomationState> => {
+    const [records, world] = await Promise.all([
+      listPackages(db, meta.worldId),
+      getWorld(db, meta.worldId),
+    ]);
+    return resolveAutomationState(records, world).state;
+  };
+  const editableAutomationProfile = async (): Promise<{
+    profile: AisActivationProfile;
+    world: WorldsRecord | undefined;
+    records: PackageRecord[];
+  }> => {
+    const [world, records] = await Promise.all([
+      getWorld(db, meta.worldId),
+      listPackages(db, meta.worldId),
+    ]);
+    const validated = validateAisActivationProfile(world?.automationProfile ?? emptyAisProfile());
+    if (!validated.ok) throw new Error(`invalid saved AIS profile: ${validated.error}`);
+    return { profile: validated.value, world, records };
+  };
+  const savedEnabledAutomationIds = (world: WorldsRecord | undefined): string[] => {
+    const validated = validateAisActivationProfile(world?.automationProfile ?? emptyAisProfile());
+    return validated.ok ? validated.value.modules.map((module) => module.id) : [];
+  };
+  const revokeUnresolvedAutomationGrants = async (previouslyEnabledIds: readonly string[]): Promise<void> => {
+    if (previouslyEnabledIds.length === 0) return;
+    const [world, records] = await Promise.all([
+      getWorld(db, meta.worldId),
+      listPackages(db, meta.worldId),
+    ]);
+    const grants = world?.automationGrants;
+    if (!grants || Object.keys(grants).length === 0) return;
+    const resolvedIds = new Set(resolveAutomationState(records, world).boot.modules.map((module) => module.packageId));
+    const previouslyEnabled = new Set(previouslyEnabledIds);
+    const next = Object.fromEntries(Object.entries(grants).filter(([id]) =>
+      !previouslyEnabled.has(id) || resolvedIds.has(id),
+    ));
+    if (Object.keys(next).length !== Object.keys(grants).length)
+      await persister.patchWorld({ automationGrants: Object.keys(next).length ? next : undefined });
+  };
   const guardFreshCampaign = async (): Promise<string | null> => {
     // Rules are pinned per campaign: swapping after the first checkpoint would break §5A
     // determinism/replay. Checked across EVERY scene, not just the default one — a world may
@@ -763,11 +980,14 @@ async function bootHostAppLocked(
   };
   const packageImpl: HostPackages = {
     async list() {
-      const active = await activePackageId();
-      const trusted = await trustedIds();
-      const records = await listPackages(db, meta.worldId);
+      const [active, trusted, records, ais] = await Promise.all([
+        activePackageId(),
+        trustedIds(),
+        listPackages(db, meta.worldId),
+        automationState(),
+      ]);
       const ids = records.map((r) => r.id);
-      return records.map((r) => summarize(r, active, trusted, ids));
+      return records.map((r) => summarize(r, active, trusted, ids, ais));
     },
     async importZip(bytes) {
       const loaded = await readZipPackage(bytes);
@@ -783,10 +1003,22 @@ async function bootHostAppLocked(
         manifest,
         files,
       };
+      const previous = await getPackage(db, meta.worldId, rec.id);
+      const beforeWorld = await getWorld(db, meta.worldId);
+      const previouslyEnabledIds = savedEnabledAutomationIds(beforeWorld);
+      const previousHash = previous?.type === "module" ? packageContentHash(previous.files) : null;
+      const nextHash = rec.type === "module" ? packageContentHash(rec.files) : null;
+      if (previousHash !== nextHash) {
+        const grants = Object.fromEntries(
+          Object.entries(beforeWorld?.automationGrants ?? {}).filter(([id]) => id !== rec.id),
+        );
+        await persister.patchWorld({ automationGrants: Object.keys(grants).length ? grants : undefined });
+      }
       await putPackage(db, rec);
       // A package write invalidates the parsed-pack memo outright: two imports inside the same
       // millisecond would otherwise share an `importedAt` and serve the previous parse (G-45).
       clearParsedPackCache();
+      await revokeUnresolvedAutomationGrants(previouslyEnabledIds);
       return {
         ok: true,
         summary: summarize(
@@ -794,6 +1026,7 @@ async function bootHostAppLocked(
           await activePackageId(),
           await trustedIds(),
           await importedIds(),
+          await automationState(),
         ),
       };
     },
@@ -810,11 +1043,14 @@ async function bootHostAppLocked(
       if (guarded) return { ok: false, error: guarded };
       // §12: the world's version tracks the ACTIVE system (migration baseline), and `system`
       // names it — the record, the join welcome and the world file all read the same id.
+      const beforeWorld = await getWorld(db, meta.worldId);
+      const previouslyEnabledIds = savedEnabledAutomationIds(beforeWorld);
       await persister.patchWorld({
         activeRulesPackage: id,
         system: id,
         version: rec.manifest.version,
       });
+      await revokeUnresolvedAutomationGrants(previouslyEnabledIds);
       const present = await importedIds();
       const missing = (rec.manifest.dependencies ?? []).filter(
         (dep) => !present.includes(dep),
@@ -834,11 +1070,14 @@ async function bootHostAppLocked(
     async deactivate() {
       const guarded = await guardFreshCampaign();
       if (guarded) return { ok: false, error: guarded };
+      const beforeWorld = await getWorld(db, meta.worldId);
+      const previouslyEnabledIds = savedEnabledAutomationIds(beforeWorld);
       await persister.patchWorld({
         activeRulesPackage: undefined,
         system: BUILTIN_SYSTEM_ID,
         version: BUILTIN_SYSTEM_VERSION,
       });
+      await revokeUnresolvedAutomationGrants(previouslyEnabledIds);
       return { ok: true };
     },
     async grantTrust(id) {
@@ -858,6 +1097,138 @@ async function bootHostAppLocked(
       const current = await trustedIds();
       if (!current.includes(id)) return { ok: true };
       return writeTrusted(current.filter((x) => x !== id));
+    },
+    async automation() {
+      return automationState();
+    },
+    async previewAutomationModule(id) {
+      const rec = await getPackage(db, meta.worldId, id);
+      if (!rec || rec.type !== "module" || !rec.manifest.interconnect)
+        return { ok: false, error: `AIS module not imported: ${id}` };
+      const entry = rec.manifest.interconnect.entry;
+      const source = rec.files[entry];
+      if (source === undefined) return { ok: false, error: `AIS entry ${entry} is missing` };
+      const limit = 120_000;
+      return {
+        ok: true,
+        entry,
+        source: source.slice(0, limit),
+        truncated: source.length > limit,
+      };
+    },
+    async enableAutomationModule(id) {
+      try {
+        const rec = await getPackage(db, meta.worldId, id);
+        if (!rec || rec.type !== "module" || !rec.manifest.interconnect)
+          return { ok: false, error: `AIS module not imported: ${id}` };
+        const { profile, world, records } = await editableAutomationProfile();
+        const next = withAisModule(profile, {
+          id: rec.id,
+          version: rec.version,
+          hash: packageContentHash(rec.files),
+        });
+        const resolution = resolveAisProfile(
+          aisCandidates(records),
+          next,
+          world?.activeRulesPackage ?? world?.system ?? BUILTIN_SYSTEM_ID,
+        );
+        const blockers = resolution.issues.filter((issue) => issue.blocking);
+        if (blockers.length > 0)
+          return { ok: false, error: blockers.map((issue) => issue.message).join("; ") };
+        await persister.patchWorld({ automationProfile: next });
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    async disableAutomationModule(id) {
+      try {
+        const { profile } = await editableAutomationProfile();
+        const previouslyEnabledIds = profile.modules.map((entry) => entry.id);
+        const next: AisActivationProfile = {
+          api: profile.api,
+          modules: profile.modules.filter((entry) => entry.id !== id),
+          providers: Object.fromEntries(
+            Object.entries(profile.providers).filter(([, selected]) => !selected.startsWith(`${id}/`)),
+          ),
+        };
+        await persister.patchWorld({ automationProfile: next });
+        await revokeUnresolvedAutomationGrants(previouslyEnabledIds);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    async selectAutomationProvider(slotId, providerRef) {
+      try {
+        const { profile, world, records } = await editableAutomationProfile();
+        const slash = providerRef.indexOf("/");
+        const packageId = slash > 0 ? providerRef.slice(0, slash) : "";
+        const rec = records.find((entry) => entry.id === packageId && entry.type === "module");
+        const declaration = rec?.manifest.interconnect?.provides?.find((entry) =>
+          entry.id === slotId && `${rec.id}/${entry.id}` === providerRef,
+        );
+        if (!rec || !declaration)
+          return { ok: false, error: `${providerRef} does not declare ${slotId}` };
+        if (declaration.mode !== "exclusive")
+          return { ok: false, error: `${slotId} is not an exclusive provider slot` };
+        const slotDeclarations = records.flatMap((entry) => entry.type === "module"
+          ? (entry.manifest.interconnect?.provides ?? []).filter((candidate) => candidate.id === slotId)
+            .map((candidate) => ({ moduleId: entry.id, declaration: candidate }))
+          : [],
+        );
+        if (slotDeclarations.some((entry) => entry.declaration.mode !== "exclusive" || entry.declaration.contract !== declaration.contract))
+          return { ok: false, error: `${slotId} providers use incompatible modes or contract versions` };
+        const next = withAisModule(profile, {
+          id: rec.id,
+          version: rec.version,
+          hash: packageContentHash(rec.files),
+        });
+        next.providers[slotId] = providerRef;
+        const resolution = resolveAisProfile(
+          aisCandidates(records),
+          next,
+          world?.activeRulesPackage ?? world?.system ?? BUILTIN_SYSTEM_ID,
+        );
+        const blockers = resolution.issues.filter((issue) => issue.blocking);
+        if (blockers.length > 0)
+          return { ok: false, error: blockers.map((issue) => issue.message).join("; ") };
+        await persister.patchWorld({ automationProfile: next });
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    async grantAutomationCapabilities(id, capabilities) {
+      try {
+        const rec = await getPackage(db, meta.worldId, id);
+        if (!rec || rec.type !== "module" || !rec.manifest.interconnect)
+          return { ok: false, error: `AIS module not imported: ${id}` };
+        const requested = rec.manifest.interconnect.capabilities ?? [];
+        const grants = [...new Set(capabilities)];
+        const unsupported = grants.filter((capability) => !requested.includes(capability));
+        if (unsupported.length > 0)
+          return { ok: false, error: `module did not request ${unsupported.join(", ")}` };
+        const world = await getWorld(db, meta.worldId);
+        const next = { ...(world?.automationGrants ?? {}) };
+        next[id] = { hash: packageContentHash(rec.files), capabilities: grants };
+        await persister.patchWorld({ automationGrants: next });
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    async revokeAutomationApproval(id) {
+      try {
+        const world = await getWorld(db, meta.worldId);
+        const next = Object.fromEntries(
+          Object.entries(world?.automationGrants ?? {}).filter(([packageId]) => packageId !== id),
+        );
+        await persister.patchWorld({ automationGrants: Object.keys(next).length ? next : undefined });
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
     },
     async compendia() {
       const out: Array<{
@@ -903,6 +1274,12 @@ async function bootHostAppLocked(
     deactivate: () => packageWork.run(() => packageImpl.deactivate()),
     grantTrust: (id) => packageWork.run(() => packageImpl.grantTrust(id)),
     revokeTrust: (id) => packageWork.run(() => packageImpl.revokeTrust(id)),
+    automation: () => packageWork.run(() => packageImpl.automation()),
+    enableAutomationModule: (id) => packageWork.run(() => packageImpl.enableAutomationModule(id)),
+    disableAutomationModule: (id) => packageWork.run(() => packageImpl.disableAutomationModule(id)),
+    selectAutomationProvider: (slotId, providerRef) => packageWork.run(() => packageImpl.selectAutomationProvider(slotId, providerRef)),
+    grantAutomationCapabilities: (id, capabilities) => packageWork.run(() => packageImpl.grantAutomationCapabilities(id, capabilities)),
+    revokeAutomationApproval: (id) => packageWork.run(() => packageImpl.revokeAutomationApproval(id)),
   };
   const cloudBackups = new CloudBackupController({
     worldId: meta.worldId,
@@ -941,6 +1318,7 @@ async function bootHostAppLocked(
   return {
     rulesBoot,
     moduleBoot,
+    automationBoot,
     migrationBoot,
     packages,
     worldId: meta.worldId,

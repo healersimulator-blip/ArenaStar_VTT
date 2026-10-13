@@ -40,6 +40,10 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const STARTER_WORLD_FORMAT = 2;
 /** A world whose scenes need floor capabilities is written as format 3 with `requiredFeatures`. */
 export const STARTER_LEVELS_FORMAT = 3;
+/** Starter archives carrying an AIS activation profile use format 4. */
+export const STARTER_AIS_FORMAT = 4;
+const AIS_WORLD_FEATURE = "arena.ais/1";
+const OPENING_SIGHT_FEATURE = "proximity-opening-sight-v1";
 
 /**
  * The capabilities a set of scenes needs, in the reader's order — a plain-JS mirror of
@@ -48,27 +52,36 @@ export const STARTER_LEVELS_FORMAT = 3;
  */
 export function starterRequiredFeatures(scenes) {
   const scopedColls = ["walls", "lights", "regions", "drawings", "templates", "notes"];
-  const has = (l, field) => l && typeof l === "object" && Object.hasOwn(l, field);
+  const has = (value, field) => value && typeof value === "object" && Object.hasOwn(value, field);
   const stairsV2 = (value, depth = 0) => {
     if (!value || typeof value !== "object" || depth > 6) return false;
     if (Array.isArray(value)) return value.some((v) => stairsV2(v, depth + 1));
     if (value.stairs && typeof value.stairs === "object" && value.stairs.version === 2) return true;
-    return Object.entries(value).some(([k, v]) => k !== "stairs" && stairsV2(v, depth + 1));
+    return Object.entries(value).some(([key, child]) => key !== "stairs" && stairsV2(child, depth + 1));
   };
-  const scoped = (s) => scopedColls.some((c) => Array.isArray(s[c]) && s[c].some((row) => row?.levelScope !== undefined)) ||
-    (Array.isArray(s.tokens) && s.tokens.some((t) => t?.levelId !== undefined));
-  const play = scenes.some((s) => s.levelMode === "isolated" || s.levels?.some((l) => l.tileIds !== undefined || l.useSceneBackground !== undefined) ||
-    s.regions?.some((r) => r.stairs !== undefined));
+  const scoped = (scene) => scopedColls.some((coll) => Array.isArray(scene[coll]) && scene[coll].some((row) => row?.levelScope !== undefined)) ||
+    (Array.isArray(scene.tokens) && scene.tokens.some((token) => token?.levelId !== undefined));
+  const openingSight = scenes.some((scene) => {
+    const core = scene.flags?.core;
+    return (core && Object.hasOwn(core, "openingSight")) ||
+      scene.walls?.some((wall) => wall?.openingSightOverride !== undefined) ||
+      scene.levels?.some((level) => level?.apertureSightOverrides !== undefined);
+  });
+  const play = scenes.some((scene) => scene.levelMode === "isolated" || scene.levels?.some((level) => level.tileIds !== undefined || level.useSceneBackground !== undefined) ||
+    scene.regions?.some((region) => region.stairs !== undefined));
   const scopes = scenes.some(scoped);
-  return [
+  const features = [
+    ...(openingSight ? [OPENING_SIGHT_FEATURE] : []),
     ...(play ? ["scene-level-play-v1"] : []),
-    ...(scopes || scenes.some((s) => s.levels !== undefined) ? ["scene-level-drafts-v1"] : []),
+    ...(scopes || scenes.some((scene) => scene.levels !== undefined) ? ["scene-level-drafts-v1"] : []),
     ...(scopes ? ["scene-level-scopes-v1"] : []),
-    ...(scenes.some((s) => s.lights?.some((l) => l.levelScope !== undefined)) ? ["scene-level-lighting-v1"] : []),
-    ...(scenes.some((s) => Array.isArray(s.levels) && s.levels.some((l) => has(l, "darkness"))) ? ["scene-level-ambient-v1"] : []),
-    ...(scenes.some((s) => s.levels?.some((l) => l.fogEpoch !== undefined)) ? ["scene-level-fog-reset-v1"] : []),
-    ...(scenes.some((s) => stairsV2({ x: s.regions })) ? ["scene-level-stairs-v2"] : []),
+    ...(scenes.some((scene) => scene.lights?.some((light) => light.levelScope !== undefined)) ? ["scene-level-lighting-v1"] : []),
+    ...(scenes.some((scene) => Array.isArray(scene.levels) && scene.levels.some((level) => has(level, "darkness"))) ? ["scene-level-ambient-v1"] : []),
+    ...(scenes.some((scene) => scene.levels?.some((level) => level.fogEpoch !== undefined)) ? ["scene-level-fog-reset-v1"] : []),
+    ...(scenes.some((scene) => stairsV2({ x: scene.regions })) ? ["scene-level-stairs-v2"] : []),
   ];
+  if (features.length && !features.includes("scene-level-drafts-v1")) features.push("scene-level-drafts-v1");
+  return features;
 }
 
 /**
@@ -77,7 +90,10 @@ export function starterRequiredFeatures(scenes) {
  * exist under systems/. A ruleset without an entry here still gets a starter from its manifest.
  */
 const STARTERS = {
-  "pf1e-mass-battles": { name: "Pathfinder 1e Mass Battles — starter" },
+  "pf1e-mass-battles": {
+    name: "Pathfinder 1e Mass Battles — starter",
+    modules: ["pf1e-torch"],
+  },
 };
 
 function listPackageDirs(systemsDir) {
@@ -173,6 +189,7 @@ function packageEntriesFromDir(dir, manifest) {
   for (const [label, path] of [
     ["rules.entry", manifest.rules?.entry],
     ["module.entry", manifest.module?.entry],
+    ["interconnect.entry", manifest.interconnect?.entry],
     ...[...(manifest.packs ?? [])].map((pack) => [`pack ${pack.name}`, pack.file]),
   ]) {
     if (path === undefined) continue;
@@ -188,6 +205,24 @@ function packageEntriesFromDir(dir, manifest) {
     entries[`packages/${manifest.id}/${rel}`] = strToU8(readFileSync(join(dir, rel), "utf8"));
   }
   return { files, entries };
+}
+
+/** Stable digest matching packageContentHash(): sorted UTF-8 file paths and package text. */
+function packageDirectoryHash(dir) {
+  const files = listPackageFiles(dir).sort();
+  const hash = createHash("sha256");
+  const uint32 = (value) => {
+    const bytes = Buffer.alloc(4);
+    bytes.writeUInt32BE(value);
+    return bytes;
+  };
+  hash.update(uint32(files.length));
+  for (const rel of files) {
+    const pathBytes = Buffer.from(rel, "utf8");
+    const textBytes = Buffer.from(readFileSync(join(dir, rel), "utf8"), "utf8");
+    hash.update(uint32(pathBytes.byteLength)).update(uint32(textBytes.byteLength)).update(pathBytes).update(textBytes);
+  }
+  return hash.digest("hex");
 }
 
 /**
@@ -210,6 +245,7 @@ function assembleArchive(systemsDir, rulesetId, opts = {}) {
     recipe.content ??
     [...(ruleset.dependencies ?? [])].filter((dep) => readManifest(systemsDir, dep) !== null);
   const manifests = [ruleset];
+  const manifestDirs = [join(systemsDir, rulesetId)];
   for (const dep of contentIds) {
     const m = readManifest(systemsDir, dep);
     if (!m) throw new Error(`${rulesetId}: starter content ${dep} has no manifest.json`);
@@ -217,31 +253,61 @@ function assembleArchive(systemsDir, rulesetId, opts = {}) {
       throw new Error(`${rulesetId}: starter content ${dep} is a ${m.type} package, not a content pack`);
     }
     manifests.push(m);
+    manifestDirs.push(join(systemsDir, dep));
   }
   // Extra content package from its own folder (the converted PF1e content for the tester).
   const extraContent = opts.contentDir ? readManifestFromDir(resolve(opts.contentDir)) : null;
   if (opts.contentDir && !extraContent) {
     throw new Error(`content dir ${opts.contentDir}: no manifest.json`);
   }
-  const extraDirs = [];
   if (extraContent) {
     if (extraContent.type !== "data") {
       throw new Error(`${extraContent.id} is a ${extraContent.type} package, not a content pack`);
     }
     manifests.push(extraContent);
-    extraDirs.push(resolve(opts.contentDir));
+    manifestDirs.push(resolve(opts.contentDir));
+  }
+
+  const automationPackages = [];
+  for (const moduleId of recipe.modules ?? []) {
+    const dir = join(repoRoot, "modules", moduleId);
+    const manifest = readManifestFromDir(dir, moduleId);
+    if (!manifest || manifest.type !== "module" || !manifest.interconnect) {
+      throw new Error(`${moduleId}: starter AIS module needs a module manifest and interconnect entry`);
+    }
+    const pkg = { manifest, dir, hash: packageDirectoryHash(dir) };
+    automationPackages.push(pkg);
+    manifests.push(manifest);
+    manifestDirs.push(dir);
   }
 
   const worldId = `starter-${rulesetId}${opts.worldIdSuffix ?? ""}`;
   const name = opts.nameOverride ?? recipe.name ?? `${ruleset.name} — starter`;
   const docRows = (opts.docs ?? []).map(docRow);
   const requiredFeatures = starterRequiredFeatures(docRows.filter((row) => row.coll === "scenes").map((row) => row.doc));
+  const providers = {};
+  for (const { manifest } of automationPackages) {
+    for (const declaration of manifest.interconnect.provides ?? []) {
+      if (declaration.mode === "exclusive" && !Object.hasOwn(providers, declaration.id))
+        providers[declaration.id] = `${manifest.id}/${declaration.id}`;
+    }
+  }
+  const automation = automationPackages.length ? {
+    api: AIS_WORLD_FEATURE,
+    modules: automationPackages.map(({ manifest, hash }) => ({ id: manifest.id, version: manifest.version, hash })),
+    providers,
+  } : null;
+  if (automation) {
+    requiredFeatures.push(AIS_WORLD_FEATURE);
+    if (!requiredFeatures.includes("scene-level-drafts-v1")) requiredFeatures.push("scene-level-drafts-v1");
+  }
+  const format = automation ? STARTER_AIS_FORMAT
+    : requiredFeatures.length ? STARTER_LEVELS_FORMAT : STARTER_WORLD_FORMAT;
   const assets = opts.assets ?? [];
   const entries = {};
   const json = (value) => strToU8(JSON.stringify(value, null, 2));
   entries["world.json"] = json({
-    // D-454: floors (the Ice Beacon scene) need format 3 and their capabilities declared
-    format: requiredFeatures.length ? STARTER_LEVELS_FORMAT : STARTER_WORLD_FORMAT,
+    format,
     ...(requiredFeatures.length ? { requiredFeatures } : {}),
     worldId,
     name,
@@ -250,6 +316,7 @@ function assembleArchive(systemsDir, rulesetId, opts = {}) {
     seq: docRows.length,
     exportedAt: now,
     rules: { active: ruleset.id },
+    ...(automation ? { automation } : {}),
     starter: true,
   });
   entries["documents.json"] = json({ seq: docRows.length, docs: docRows });
@@ -267,9 +334,8 @@ function assembleArchive(systemsDir, rulesetId, opts = {}) {
   );
   const files = [];
   for (const [i, m] of manifests.entries()) {
-    const dir = i < manifests.length - extraDirs.length
-      ? join(systemsDir, m.id)
-      : extraDirs[i - (manifests.length - extraDirs.length)];
+    const dir = manifestDirs[i];
+    if (!dir) throw new Error(`${m.id}: missing package source directory`);
     const pkg = packageEntriesFromDir(dir, m);
     Object.assign(entries, pkg.entries);
     files.push(...pkg.files.map((f) => `packages/${m.id}/${f}`));
@@ -429,9 +495,10 @@ function goblinPf1eFromPack(contentDir) {
 
 const TESTER_GUIDE = `# PF1e tester world — what to test
 
-This world bundles three things at once: the **PF1e tactical content** (pf1e-core), the
-**PF1e strategic ruleset** (pf1e-mass-battles — active), and the **converted PF1e content
-packs** (pf1e-content — spells, feats, classes, items, rules, roll tables, …).
+This world bundles the **PF1e tactical content** (pf1e-core), the **PF1e strategic ruleset**
+(pf1e-mass-battles — active), the **converted PF1e content packs** (pf1e-content — spells, feats,
+classes, items, rules, roll tables, …), and the **PF1e Torch AIS module** (enabled in the imported
+world profile). Local code approval and capability grants are intentionally not included.
 
 ## 1. Tactical — Scene 1 (Goblin Skirmish)
 - Open **Ser Aldric Vane** (Fighter 3) — the sheet's summary / attributes / combat / weapons /
@@ -469,7 +536,12 @@ packs** (pf1e-content — spells, feats, classes, items, rules, roll tables, …
 - roll tables → PF1e Ultimate Equipment + Roll Tables (Core).
 - actors: Goblin (basic NPC), Allosaurus (companion), deities, artifacts.
 
-## 5. Elevation — Ice Beacon (floors, stairs, raised areas, height labels)
+## 5. Carried light — PF1e Torch AIS module
+- The starter enables **pf1e-torch** in the world profile. Each human host must separately review and approve its exact code and grant the requested capabilities under **Settings → Packages → Automation**; this local consent is never imported from a ZIP.
+- Right-click a token, then choose **Choose carried light source…**, **Turn carried light on**, **Next carried light source**, or **Torch settings…**. Source choice reads only the linked actor's inventory; Candle and Torch items can be consumed on activation (optional in settings).
+- The configured fallback light works even when no matching inventory item exists. Bullseye and miner's lantern beams follow the token's rotation; rotate the token to aim the beam.
+
+## 6. Elevation — Ice Beacon (floors, stairs, raised areas, height labels)
 - Open **Ice Beacon — Elevation Test**: a four-floor ice tower (Hall 20 ft, Gallery 15 ft, Crystal
   Ring 10 ft, open-topped Beacon) in isolated floor play, with stairs between every floor and
   openings to look down through.
@@ -478,10 +550,10 @@ packs** (pf1e-content — spells, feats, classes, items, rules, roll tables, …
 - The text under each token is its height difference: from the ground for the GM, from your own
   token for players. The journal **Ice Beacon — Elevation Test** has the full script.
 
-## 6. Export round-trip
+## 7. Export round-trip
 Export this world to a zip and re-import it: every pre-placed document — the scenes, the armies
-and their units, the encounter tables and their hexes, the journals — the three packages, the active
-ruleset, and the explored fog must come back identical.
+and their units, the encounter tables and their hexes, the journals — all four packages, the active
+ruleset, the enabled automation profile, and the explored fog must come back identical.
 `;
 
 // ─── the Hollow Reach: a hexcrawl the starter world ships complete ────────────

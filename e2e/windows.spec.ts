@@ -72,9 +72,10 @@ test.describe("window manager + GM tools (§10)", () => {
     await page.click("[data-macro-create]");
     await expect(page.locator("[data-macro]")).toHaveCount(1);
     await page.selectOption("[data-macro-slot]", "1");
-    // hotbar slot shows the macro name
-    await expect(page.locator(".hotbar [data-slot='1']")).toContainText("wave");
-    await page.locator(".hotbar [data-slot='1']").click();
+    // hotbar slot shows the macro name (MC-01 renamed the slot attribute to
+    // `data-hotbar-slot`, so this is one row for both shells: `MacroHotbar.svelte`)
+    await expect(page.locator(".hotbar [data-hotbar-slot='1']")).toContainText("wave");
+    await page.locator(".hotbar [data-hotbar-slot='1']").click();
     await expect(page.locator("#chat-log")).toContainText("waves a flag");
     // a second run via the keyboard
     await page.locator("#chat-input").click();
@@ -151,5 +152,39 @@ test.describe("window manager + GM tools (§10)", () => {
     const popout = page.locator('[data-window^="journal:"]');
     await expect(popout).toBeVisible();
     await expect(popout.locator("[data-secret]")).toHaveCount(1);
+  });
+
+  test("a window owns its pixels: above the canvas widgets, so its own modals stay clickable (D-456)", async ({
+    page,
+  }) => {
+    await page.goto(entry + "?e2e=1");
+    await page.click("#gm-perms");
+    const win = page.locator('[data-window="permissions"]');
+    await expect(win).toBeVisible();
+
+    // Park the window over the board's floating zoom control, the widget the canvas rail puts at
+    // z 30 — the pair that used to swallow the FX binding picker's Close button.
+    const zoom = page.locator(".zoom-control");
+    const zoomBox = await zoom.boundingBox();
+    if (!zoomBox) throw new Error("no zoom control");
+    const target = { x: zoomBox.x - 40, y: zoomBox.y - 8 };
+    const title = win.locator(".wm-title");
+    const tb = await title.boundingBox();
+    if (!tb) throw new Error("no title box");
+    await page.mouse.move(tb.x + 40, tb.y + 10);
+    await page.mouse.down();
+    await page.mouse.move(target.x + 40, target.y + 10, { steps: 5 });
+    await page.mouse.up();
+
+    // The centre of the zoom control now belongs to the window. Before D-456 the hit test here
+    // returned the zoom control's <summary>, which is what made an in-window modal unclickable.
+    const owner = await page.evaluate(({ x, y }) => {
+      const el = document.elementFromPoint(x, y) as HTMLElement | null;
+      if (!el) return "none";
+      if (el.closest(".wm-window")) return "window";
+      if (el.closest(".zoom-control")) return "zoom";
+      return el.tagName.toLowerCase();
+    }, { x: Math.round(zoomBox.x + zoomBox.width / 2), y: Math.round(zoomBox.y + zoomBox.height / 2) });
+    expect(owner).toBe("window");
   });
 });

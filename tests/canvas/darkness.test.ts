@@ -44,6 +44,7 @@ import {
   sceneLightSources,
   sceneLighting,
   tokenLightSourceOf,
+  tokenVisionCone,
   tokenVisionOf,
   viewerSightRadiusPx,
   withinDarkvision,
@@ -183,6 +184,20 @@ describe("§2.1 — a token's own vision model", () => {
     expect(
       tokenLightSourceOf(token("t", { light: { radius: 200, bright: 400, color: "#fff", alpha: 0.5 } })),
     ).toMatchObject({ bright: 200, dim: 200 });
+    // Candle-class sources author zero bright radius explicitly; zero is not "missing".
+    expect(
+      tokenLightSourceOf(token("t", { light: { radius: 100, bright: 0, color: "#fff", alpha: 0.5 } })),
+    ).toMatchObject({ bright: 0, dim: 100 });
+  });
+
+  test("placed and carried lights expose only bounded declarative animation metadata", () => {
+    const animation = { type: "pulse" as const, speed: 1.5, intensity: 0.6 };
+    expect(tokenLightSourceOf(token("animated", { light: { radius: 100, color: "#fff", alpha: 0.8, animation } })))
+      .toMatchObject({ animation });
+    expect(tokenLightSourceOf(token("bad-animation", { light: { radius: 100, color: "#fff", alpha: 0.8,
+      animation: { type: "script", speed: 1, intensity: 1 } as never } }))).not.toHaveProperty("animation");
+    const placed = { ...placedLight("placed", 50, 50, 100), animation };
+    expect(sceneLightSources(scene({ lights: [placed] }))[0]).toMatchObject({ animation });
   });
 
   test("the scene's lights are the placed ones plus every carried torch", () => {
@@ -196,6 +211,23 @@ describe("§2.1 — a token's own vision model", () => {
     // Darkness is clamped: a scene cannot be more than totally dark or less than lit.
     expect(sceneLighting({ ...s, darkness: 5 }).darkness).toBe(1);
     expect(sceneLighting({ ...s, darkness: -2 }).darkness).toBe(0);
+  });
+
+  test("directional carried lights illuminate and bound vision to their beam in darkness", () => {
+    const lantern = token("lantern", {
+      x: 0,
+      y: 0,
+      rotation: 0,
+      light: { radius: 200, bright: 100, color: "#ffffff", alpha: 0.8, angle: 90 },
+    });
+    const dark = scene({ darkness: 1, tokens: [lantern] });
+    const lighting = sceneLighting(dark);
+    expect(lighting.lights[0]).toMatchObject({ angle: 90, rotation: 0 });
+    expect(lightLevelAt({ x: 100, y: 0 }, lighting).lit).toBe(true);
+    expect(lightLevelAt({ x: 0, y: 100 }, lighting).lit).toBe(false);
+    expect(tokenVisionCone(dark, lantern)).toEqual({ directionDeg: 0, widthDeg: 90 });
+    // Other ambient/vision sources retain the established full-circle model.
+    expect(tokenVisionCone(scene({ darkness: 0, tokens: [lantern] }), lantern)).toBeNull();
   });
 });
 
@@ -233,6 +265,8 @@ describe("§2.1 — the light level at a point", () => {
     // Distance is euclidean, not per-axis: (200,200) is 282 px out, inside the dim radius.
     expect(lightLevelAt({ x: 200, y: 200 }, lighting).lit).toBe(true);
     expect(lightLevelAt({ x: 250, y: 250 }, lighting).lit).toBe(false);
+    const candle = lightLevelAt({ x: 0, y: 0 }, { darkness: 1, lights: [{ id: "candle", x: 0, y: 0, bright: 0, dim: 100 }] });
+    expect(candle).toMatchObject({ bright: false, lit: true });
   });
 
   test("several lights: the best reach wins, and any bright radius makes the point bright", () => {

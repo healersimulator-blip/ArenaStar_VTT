@@ -35,7 +35,7 @@
  * GM shell does not wire it (the GM sees everything under a translucent cover).
  */
 import { sceneLighting, sceneForLevelPerception } from "../canvas/vision/darkness";
-import { sightSegments } from "../canvas/vision/wallSight";
+import { sceneSightGeometry } from "../canvas/vision/openings";
 import type { ActorDocument, SceneDocument } from "../core/documents";
 import {
   flatSegments,
@@ -349,8 +349,8 @@ export class FogExploration {
     const key = fogRevealKey(scene, viewers, radius, floorZ);
     const raised = raisedSight(scene, viewers, floorZ);
     if (key !== this.key) {
-      const walls = sightSegments(scene.walls);
-      const segments = flatSegments(walls);
+      const sight = sceneSightGeometry(scene);
+      const segments = flatSegments(sight.blockers);
       // §2.1: each viewer reveals within its own light-bounded radius — a token in an unlit
       // room reveals nothing while a lit one next door reveals its torch's reach.
       // D-453: solid raised areas taller than a viewer's eyes hide the floor behind them from it.
@@ -358,8 +358,11 @@ export class FogExploration {
       const extra = viewers.map((_, i) => raisedEyeSegments(raised, i));
       const [polys, wallPolys] = await Promise.all([
         Promise.all(viewers.map((v, i) => this.options.computer.compute(v.x, v.y,
-          extra[i]?.length ? flatSegments([...walls, ...(extra[i] ?? [])]) : segments, v.radiusPx))),
-        Promise.all(viewers.map((v, i) => extra[i]?.length ? this.options.computer.compute(v.x, v.y, segments, v.radiusPx) : null)),
+          extra[i]?.length ? flatSegments([...sight.blockers, ...(extra[i] ?? [])]) : segments,
+          v.radiusPx, sight.proximityOpenings, v.visionCone))),
+        Promise.all(viewers.map((v, i) => extra[i]?.length
+          ? this.options.computer.compute(v.x, v.y, segments, v.radiusPx, sight.proximityOpenings)
+          : null)),
       ]);
       if (this.destroyed || this.sceneId !== scene._id || this.surface !== surface || (levelId !== undefined && revision !== this.requestedRevision)) return;
       for (const poly of polys) surface.reveal(poly);

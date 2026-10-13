@@ -67,7 +67,10 @@ test.describe("encounter tables (§8 Phase 3, D-272)", () => {
       mimeType: "image/png",
       buffer: solidPng(1600, 1200),
     });
-    await expect(wizard.locator("[data-hx-map]")).toContainText("1600 × 1200");
+    // The map import is the load-sensitive part (decode + re-encode of a 1600×1200 PNG through
+    // the image pipeline): 3.6 s standalone, past 5 s once in a 15-test batch on a 2-CPU box.
+    // The ceiling is explicit, as in `hexcrawl_scene.spec.ts`.
+    await expect(wizard.locator("[data-hx-map]")).toContainText("1600 × 1200", { timeout: 30_000 });
     await page.fill("[data-hx-name]", "Table overland");
     await page.click("[data-hx-next]");
     await page.selectOption("[data-hx-grid-type]", "hex");

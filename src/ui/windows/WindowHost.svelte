@@ -425,6 +425,18 @@
   .wm-layer {
     position: absolute;
     inset: 0;
+    /**
+     * D-456 — the window band. Windows used to sit in the z 11…n band the manager assigns,
+     * which put *every* window below the canvas-side widgets (zoom control 30, scene menu 35,
+     * token menu 40, notices 60, dice host 65, session panel 70): the canvas rail's floating
+     * controls owned those pixels. Any modal inside a window is trapped by its window's own
+     * stacking context, so the FX binding picker's backdrop (z 10030, *inside* the window)
+     * was still painted under the zoom control — its Close button was unclickable, which is
+     * how `e2e/fx_spell_binding.spec.ts` found this the first time a batch ran it (D-457).
+     * One band above every canvas widget, below the page-level overlays (4998 notices,
+     * 4999 drop hint, 10030 in-window modals, which stay inside a window on purpose).
+     */
+    z-index: 80;
     pointer-events: none; /* windows re-enable their own pointer events */
     overflow: visible; /* windows may hang past the canvas edge (manager keeps
       the title bar reachable); hidden clipped the resize handle after a

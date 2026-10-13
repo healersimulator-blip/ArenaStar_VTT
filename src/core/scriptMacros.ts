@@ -8,7 +8,7 @@ import type { Json, MacroDocument } from "./documents";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 
-export const SCRIPT_GRANTS = ["chat", "tags.read", "tags.write", "fx", "automation", "macros", "prefabs.place", "summons"] as const;
+export const SCRIPT_GRANTS = ["chat", "tags.read", "tags.write", "fx", "automation", "macros", "prefabs.place", "summons", "ais.invoke"] as const;
 export type ScriptGrant = (typeof SCRIPT_GRANTS)[number];
 export type ScriptInputType = "string" | "number" | "boolean" | "token";
 export interface ScriptInput {
@@ -70,6 +70,8 @@ export function validateScriptMacro(doc: MacroDocument): { ok: true; policy: Scr
   if (p.playerCallable && p.grants.includes("summons") && p.runAs === "gm" &&
       !(p.summonIds as string[] | undefined)?.length)
     return bad("player-callable elevated summon scripts need approved preset IDs");
+  if (p.grants.includes("ais.invoke") && p.runAs !== "gm")
+    return bad("AIS module commands need explicitly reviewed GM elevation");
   const names = new Set<string>();
   for (const field of p.inputs) {
     if (!object(field) || !only(field, ["name", "type", "required"]) ||

@@ -50,6 +50,31 @@ const content = (): Uint8Array =>
     }),
   });
 
+const automationModule = (options: {
+  id: string;
+  capabilities?: string[];
+  requires?: Array<{ id: string; version?: string; optional?: boolean }>;
+  provides?: Array<{ id: string; mode: string; contract: number }>;
+}): Uint8Array => {
+  const entry = `AIS.events.on("turn.phase.changed", (event) => console.log(event.phase));`;
+  return zipOf({
+    "manifest.json": JSON.stringify({
+      id: options.id,
+      name: options.id,
+      version: "1.0.0",
+      type: "module",
+      interconnect: {
+        api: "arena.ais/1",
+        entry: "automation/entry.js",
+        ...(options.capabilities ? { capabilities: options.capabilities } : {}),
+        ...(options.requires ? { requires: options.requires } : {}),
+        ...(options.provides ? { provides: options.provides } : {}),
+      },
+    }),
+    "automation/entry.js": entry,
+  });
+};
+
 let n = 0;
 async function freshApp(): Promise<HostApp> {
   const db = await openVttDb();
@@ -178,5 +203,167 @@ describe("HostPackages — the record names the ruleset it runs", () => {
     expect(second.meta.systemVersion).toBe("3.1.0");
     await second.persister.flush();
     await second.close();
+  });
+});
+
+describe("HostPackages — AIS activation, approval and arbitration", () => {
+  test("imports disabled, enables an exact package lock, and boots only after exact-hash approval", async () => {
+    const app = await freshApp();
+    const imported = await app.packages.importZip(automationModule({
+      id: "observe-mod",
+      capabilities: ["action.observe", "ui.notify"],
+    }));
+    expect(imported.ok).toBe(true);
+    expect(app.automationBoot.modules).toEqual([]);
+    expect(await app.packages.previewAutomationModule("observe-mod")).toMatchObject({
+      ok: true,
+      entry: "automation/entry.js",
+      source: expect.stringContaining("AIS.events.on"),
+      truncated: false,
+    });
+    expect(await app.packages.enableAutomationModule("observe-mod")).toEqual({ ok: true });
+    let state = await app.packages.automation();
+    expect(state.modules[0]).toMatchObject({ enabled: true, approved: false });
+    expect(state.profile.modules[0]).toMatchObject({ id: "observe-mod", version: "1.0.0", hash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(await app.packages.grantAutomationCapabilities("observe-mod", ["action.observe"])).toEqual({ ok: true });
+    await app.persister.flush();
+    const world = await getWorld(app.db, app.worldId);
+    expect(world?.automationGrants?.["observe-mod"]).toMatchObject({ capabilities: ["action.observe"] });
+    await app.close();
+
+    const second = await bootHostApp({
+      db: await openVttDb(),
+      root: new MemDirHandle(),
+      codec: new FakeCodec(),
+      simRunner: new InlineSimRunner(),
+      worldId: app.worldId,
+    });
+    expect(second.automationBoot.modules).toHaveLength(1);
+    expect(second.automationBoot.modules[0]).toMatchObject({
+      packageId: "observe-mod",
+      capabilities: ["action.observe"],
+    });
+    state = await second.packages.automation();
+    expect(state.modules[0]).toMatchObject({ enabled: true, approved: true, grantedCapabilities: ["action.observe"] });
+    expect(await second.packages.disableAutomationModule("observe-mod")).toEqual({ ok: true });
+    expect((await getWorld(second.db, second.worldId))?.automationGrants?.["observe-mod"]).toBeUndefined();
+    expect(await second.packages.enableAutomationModule("observe-mod")).toEqual({ ok: true });
+    expect((await second.packages.automation()).modules[0]).toMatchObject({ enabled: true, approved: false });
+    await second.persister.flush();
+    await second.close();
+  });
+
+  test("changing the active system revokes grants for modules that stop resolving", async () => {
+    const app = await freshApp();
+    expect((await app.packages.importZip(ruleset({ dependencies: undefined }))).ok).toBe(true);
+    expect(await app.packages.activate("probe-rules")).toEqual({ ok: true });
+    expect((await app.packages.importZip(automationModule({
+      id: "system-addon",
+      capabilities: ["action.observe"],
+      requires: [{ id: "probe-rules", version: "3.1.0" }],
+    }))).ok).toBe(true);
+    expect(await app.packages.enableAutomationModule("system-addon")).toEqual({ ok: true });
+    expect(await app.packages.grantAutomationCapabilities("system-addon", ["action.observe"])).toEqual({ ok: true });
+    await app.persister.flush();
+    expect((await getWorld(app.db, app.worldId))?.automationGrants?.["system-addon"]).toBeDefined();
+
+    expect(await app.packages.deactivate()).toEqual({ ok: true });
+    expect((await getWorld(app.db, app.worldId))?.automationGrants?.["system-addon"]).toBeUndefined();
+    expect((await app.packages.automation()).modules[0]).toMatchObject({ enabled: true, approved: false });
+    await app.persister.flush();
+    await app.close();
+  });
+
+  test("a missing optional dependency warns but does not suppress an approved module", async () => {
+    const app = await freshApp();
+    const worldId = app.worldId;
+    expect((await app.packages.importZip(automationModule({
+      id: "optional-consumer",
+      capabilities: ["action.observe"],
+      requires: [{ id: "late-addon", version: "1.0.0", optional: true }],
+    }))).ok).toBe(true);
+    expect(await app.packages.enableAutomationModule("optional-consumer")).toEqual({ ok: true });
+    expect(await app.packages.grantAutomationCapabilities("optional-consumer", ["action.observe"])).toEqual({ ok: true });
+    await app.persister.flush();
+    await app.close();
+
+    const restarted = await bootHostApp({
+      db: await openVttDb(),
+      root: new MemDirHandle(),
+      codec: new FakeCodec(),
+      simRunner: new InlineSimRunner(),
+      worldId,
+    });
+    expect(restarted.automationBoot.modules.map((module) => module.packageId)).toEqual(["optional-consumer"]);
+    expect(restarted.automationBoot.resolution.issues.some((issue) => !issue.blocking)).toBe(true);
+    await restarted.persister.flush();
+    await restarted.close();
+  });
+
+  test("exact capability allow-lists reject unrequested grants and track a package update by hash", async () => {
+    const app = await freshApp();
+    expect((await app.packages.importZip(automationModule({ id: "hash-mod", capabilities: ["ui.notify"] }))).ok).toBe(true);
+    expect(await app.packages.grantAutomationCapabilities("hash-mod", ["chat.post"])).toMatchObject({ ok: false });
+    expect(await app.packages.enableAutomationModule("hash-mod")).toEqual({ ok: true });
+    expect(await app.packages.grantAutomationCapabilities("hash-mod", ["ui.notify"])).toEqual({ ok: true });
+
+    const before = (await app.packages.automation()).modules[0]?.hash;
+    const replacement = zipOf({
+      "manifest.json": JSON.stringify({
+        id: "hash-mod", name: "hash-mod", version: "1.0.1", type: "module",
+        interconnect: { api: "arena.ais/1", entry: "automation/entry.js", capabilities: ["ui.notify"] },
+      }),
+      "automation/entry.js": "AIS.ui.notify('updated code');",
+    });
+    expect((await app.packages.importZip(replacement)).ok).toBe(true);
+    const after = (await app.packages.automation()).modules[0];
+    expect(after?.hash).not.toBe(before);
+    expect(after).toMatchObject({ enabled: false, approved: false, grantedCapabilities: [] });
+    await app.persister.flush();
+    await app.close();
+  });
+
+  test("exclusive-provider conflicts block enablement until the GM selects a provider", async () => {
+    const app = await freshApp();
+    const slot = "pf1e.damage.resolve";
+    expect((await app.packages.importZip(automationModule({
+      id: "resolver-one",
+      provides: [{ id: slot, mode: "exclusive", contract: 1 }],
+    }))).ok).toBe(true);
+    expect((await app.packages.importZip(automationModule({
+      id: "resolver-two",
+      provides: [{ id: slot, mode: "exclusive", contract: 1 }],
+    }))).ok).toBe(true);
+    expect(await app.packages.enableAutomationModule("resolver-one")).toEqual({ ok: true });
+    const conflict = await app.packages.enableAutomationModule("resolver-two");
+    expect(conflict.ok).toBe(false);
+    if (!conflict.ok) expect(conflict.error).toContain("select one explicitly");
+    expect(await app.packages.selectAutomationProvider(slot, `resolver-two/${slot}`)).toEqual({ ok: true });
+    const state = await app.packages.automation();
+    expect(state.profile.modules.map((row) => row.id)).toEqual(["resolver-one", "resolver-two"]);
+    expect(state.profile.providers[slot]).toBe(`resolver-two/${slot}`);
+    expect(state.resolution.issues.filter((issue) => issue.blocking)).toEqual([]);
+    expect(state.resolution.providers[0]?.selected).toBe(`resolver-two/${slot}`);
+    const worldId = app.worldId;
+    expect(await app.packages.grantAutomationCapabilities("resolver-one", [])).toEqual({ ok: true });
+    expect(await app.packages.grantAutomationCapabilities("resolver-two", [])).toEqual({ ok: true });
+    await app.persister.flush();
+    await app.close();
+
+    const restarted = await bootHostApp({
+      db: await openVttDb(),
+      root: new MemDirHandle(),
+      codec: new FakeCodec(),
+      simRunner: new InlineSimRunner(),
+      worldId,
+    });
+    expect(restarted.automationBoot.modules.map((module) => module.packageId)).toEqual([
+      "resolver-one",
+      "resolver-two",
+    ]);
+    expect(await restarted.packages.disableAutomationModule("resolver-two")).toEqual({ ok: true });
+    expect((await restarted.packages.automation()).profile.providers[slot]).toBeUndefined();
+    await restarted.persister.flush();
+    await restarted.close();
   });
 });

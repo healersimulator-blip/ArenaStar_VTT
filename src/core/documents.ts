@@ -48,11 +48,26 @@ export interface DocRef {
 
 // ─── Embedded document shapes (§4) ────────────────────────────────────────────
 
+export interface LightAnimation {
+  /** Built-in declarative effects; module-authored JavaScript never participates in rendering. */
+  type: "torch" | "pulse";
+  /** Oscillation rate in cycles per second, clamped to 0–10. */
+  speed: number;
+  /** Blend depth from static (0) to the effect's full modulation (1). */
+  intensity: number;
+  /** Invert the animation phase. */
+  reverse?: boolean;
+}
+
 export interface TokenLight {
   /** The dim (outer) radius, in scene pixels. `0` = the token carries no light. */
   radius: number;
   /** The bright (fully lit) radius; absent = half the dim radius, as the rail's tool writes it. */
   bright?: number;
+  /** Optional directional beam width in degrees; absent/360 means an all-around light. */
+  angle?: number;
+  /** Safe, declarative animation; `null` explicitly clears an inherited animation. */
+  animation?: LightAnimation | null;
   color: string;
   alpha: number;
 }
@@ -94,6 +109,8 @@ export interface TokenDocument extends BaseDocument {
 export interface WallDocument extends BaseDocument {
   /** GM authoring topology, not a substitute for physical wall height. */
   levelScope?: LevelScope;
+  /** Sparse exception to the scene's proximity LOS rule; absent means inherit the scene. */
+  openingSightOverride?: import("./openingSightPolicy").OpeningSightOverride;
   type: "wall";
   /** [x1, y1, x2, y2]. */
   c: [number, number, number, number];
@@ -118,6 +135,12 @@ export interface LightDocument extends BaseDocument {
   y: number;
   dim: number;
   bright: number;
+  /** Optional directed beam; absent/360 means an all-around light. */
+  angle?: number;
+  /** Beam axis in degrees (0 east, positive clockwise); tokens use their own rotation. */
+  rotation?: number;
+  /** Safe, declarative animation; `null` explicitly clears an inherited animation. */
+  animation?: LightAnimation | null;
   color: string;
   alpha: number;
 }
@@ -769,6 +792,8 @@ export interface LevelDocument extends BaseDocument {
   fogEpoch?: string;
   /** Optional ambient darkness [0,1]; absent inherits the scene. Used by isolated floor views and GM diagnostics. */
   darkness?: number;
+  /** Sparse per-aperture LOS exceptions keyed by a geometry-derived stable aperture ID. */
+  apertureSightOverrides?: Record<string, import("./openingSightPolicy").OpeningSightOverride>;
   type: "level";
   bottom: number | null;
   top: number | null;

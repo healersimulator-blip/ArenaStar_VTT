@@ -104,8 +104,9 @@ import { sceneDifficultCells } from "../core/rules";
 import { tileTriggerElevationError, tileTriggerZoneError } from "../core/tileTriggerZone";
 import { roofOcclusionError, tileRoofError } from "../core/roofs";
 import { guardedWallEditError, type WallEditGuard } from "../core/wallEditing";
-import { SUPPORTED_WIRE_FEATURES, featureListError, requiredOpFeatures, requiredWorldFeatures } from "../core/capabilities";
+import { SUPPORTED_WIRE_FEATURES, featureListError, opsNeedOpeningSight, requiredOpFeatures, requiredWorldFeatures } from "../core/capabilities";
 import { levelTransactionError } from "../core/levels";
+import { OPENING_SIGHT_FEATURE, openingSightTransactionError } from "../core/openingSightPolicy";
 import { regionTransactionError, sceneRegionsError } from "../core/regionValidation";
 import { automationSourceTile, regionGeometryError } from "../core/regionGeometry";
 import { pf1eMovePlan } from "../packages/pf1e/movement";
@@ -311,6 +312,19 @@ export interface SimChannelHooks {
   handleReportDetail(user: SessionUser, msg: ReportDetailMsg): void;
   handleSimSnapshotGet(user: SessionUser, msg: SimSnapshotGetMsg): void;
 }
+
+export interface AisMacroModuleInvocation {
+  moduleId: string;
+  commandId: string;
+  input: Json;
+  sceneId: string;
+  callerId: string;
+  requestId: string;
+  runAs: "gm";
+  isActive: () => boolean;
+}
+
+export type AisMacroModuleInvoker = (invocation: AisMacroModuleInvocation) => Promise<Json>;
 
 export interface HostSyncOptions {
   store: DocumentStore;
@@ -846,6 +860,7 @@ export class HostSync {
   private readonly rng: RngFn;
   private readonly now: () => number;
   private readonly scriptRunner: ScriptRunner;
+  private aisMacroModuleInvoker: AisMacroModuleInvoker | null = null;
   private readonly resolveSummonSource: HostSyncOptions["resolveSummonSource"];
   private readonly summonRequests = new Map<string, number>();
   private summonTimer: ReturnType<typeof setTimeout> | null = null;
@@ -992,6 +1007,11 @@ export class HostSync {
     this.scriptRunner = options.scriptRunner ?? runScriptWorker;
     this.resolveSummonSource = options.resolveSummonSource;
     this.scheduleSummonExpiry();
+  }
+
+  /** The browser host wires this bridge to its already-approved AIS module iframes. */
+  setAisMacroModuleInvoker(invoker: AisMacroModuleInvoker | null): void {
+    this.aisMacroModuleInvoker = invoker;
   }
 
   // ─── Sessions ───────────────────────────────────────────────────────────────
@@ -2603,6 +2623,26 @@ export class HostSync {
     return true;
   }
 
+  /**
+   * D-458 — the area branch of the pending-save verifier proves **one** mechanical row, so the
+   * card's other rows must be the placeholder the producer writes beside it: `pf1eCastFlow.ts`
+   * publishes a deferred save as the save row plus an explicitly pending "spell effect" row (no
+   * check, no mechanics, its own note). D-447's rewrite of {@link pf1eSpellAreaTargetVerified}
+   * applied the single-target rule to the whole card, which no card the app produces can satisfy —
+   * an area spell's deferred save could never be host-verified, so `provenance` stayed `reported`
+   * and every area cast's `ActionFxContext.verified` stayed false.
+   *
+   * The allowance is deliberately narrow: a second check, a damage/healing/condition claim, a rider
+   * or the row's own evidence keeps the card unverified. The verifier then still sees exactly the
+   * row it can rederive, and nothing about "proved" is widened.
+   */
+  private pf1ePendingSaveContinuationOnly(action: ActionCard, target: ActionTarget): boolean {
+    return action.targets.filter((entry) => entry !== target).every((entry) =>
+      entry.state === "pending" && entry.outcome === "pending" && entry.check === undefined &&
+      entry.damage === undefined && entry.healing === undefined && entry.conditions === undefined &&
+      (entry.riders?.length ?? 0) === 0 && entry.evidence === undefined);
+  }
+
   private pf1ePendingSaveEvidenceVerified(
     action: ActionCard, target: ActionTarget, ops: readonly Op[],
   ): boolean {
@@ -2615,9 +2655,11 @@ export class HostSync {
         !action.source.actorId || action.source.itemId !== undefined || !target.actorId ||
         target.state !== "pending" || target.outcome !== "pending" || target.check?.kind !== "save" ||
         target.check.status !== "pending" || target.damage !== undefined || target.healing !== undefined ||
-        target.conditions !== undefined || action.area !== undefined &&
-          !this.pf1eSpellAreaTargetVerified(action, target,
-            action.label.trim().toLowerCase() === "entangle" ? "entangle" : undefined)) return false;
+        target.conditions !== undefined ||
+        action.area !== undefined &&
+          (!this.pf1ePendingSaveContinuationOnly(action, target) ||
+            !this.pf1eSpellAreaTargetVerified({ ...action, targets: [target] }, target,
+              action.label.trim().toLowerCase() === "entangle" ? "entangle" : undefined))) return false;
     const source = this.store.get("actors", action.source.actorId) as ActorDocument | undefined;
     const defender = this.store.get("actors", target.actorId) as ActorDocument | undefined;
     if (!source || !defender || !this.pf1eEvidenceSourceStable(source, ops)) return false;
@@ -3150,6 +3192,25 @@ export class HostSync {
     | { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
     const hostOps: Op[] = [];
     if (user.role !== "GM" && user.role !== "ASSISTANT") {
+      // These are GM-authored sight rules, not ordinary scene ownership edits. Whole-object
+      // scene replacements also need checking: a caller must not erase an existing policy or
+      // per-opening override by omitting it from a flags/walls/levels replacement.
+      const removesExistingOpeningSight = ops.some((op) => {
+        if (op.kind !== "update" || op.ref.coll !== "scenes") return false;
+        const scene = this.store.get("scenes", op.ref.id) as SceneDocument | undefined;
+        if (!scene) return false;
+        const keys = Object.keys(op.diff);
+        const core = scene.flags?.["core"];
+        const hasScenePolicy = core !== null && typeof core === "object" && !Array.isArray(core) &&
+          (core as Record<string, unknown>)["openingSight"] !== undefined;
+        const hasWallOverrides = scene.walls?.some((wall) => wall.openingSightOverride !== undefined) ?? false;
+        const hasApertureOverrides = scene.levels?.some((level) => level.apertureSightOverrides !== undefined) ?? false;
+        return hasScenePolicy && keys.some((key) => key === "flags" || key === "flags.core") ||
+          hasWallOverrides && keys.some((key) => key === "walls" || /^walls\.\d+$/.test(key)) ||
+          hasApertureOverrides && keys.some((key) => key === "levels" || /^levels\.\d+$/.test(key));
+      });
+      if (opsNeedOpeningSight(ops) || removesExistingOpeningSight)
+        return { ok: false, reason: "forbidden", error: "only GMs author scene opening LOS rules" };
       for (const op of ops) {
         const coll = op.kind === "create" ? op.coll : op.ref.coll;
         if (coll === "scenes" && op.kind === "delete" && (this.store.get("scenes", op.ref.id)?.levels?.length ?? 0) > 0)
@@ -3169,6 +3230,8 @@ export class HostSync {
           return { ok: false, reason: "forbidden", error: "only GMs author or remove scene regions" };
       }
     }
+    const openingSightError = openingSightTransactionError(ops, (ref) => this.store.resolve(ref));
+    if (openingSightError) return { ok: false, reason: "invalid_schema", error: openingSightError };
     const levelsError = levelTransactionError(ops, (ref) => this.store.resolve(ref));
     if (levelsError) return { ok: false, reason: "invalid_schema", error: levelsError };
     const regionError = regionTransactionError(ops, (ref) => this.store.resolve(ref));
@@ -3780,8 +3843,8 @@ export class HostSync {
     const required = requiredOpFeatures(ops);
     if (!required.length) return null;
     for (const peer of this.sessions.values()) {
-      if (peer.user && required.some((feature) => (feature === LEVEL_PLAY_FEATURE || peer.user?.role === "GM" || peer.user?.role === "ASSISTANT") && !peer.features.has(feature)))
-        return `Upgrade or disconnect GM client ${peer.user.name} before changing draft levels`;
+      if (peer.user && required.some((feature) => (feature === LEVEL_PLAY_FEATURE || feature === OPENING_SIGHT_FEATURE || peer.user?.role === "GM" || peer.user?.role === "ASSISTANT") && !peer.features.has(feature)))
+        return `Upgrade or disconnect an incompatible client (${peer.user.name}) before changing scene sight features`;
     }
     return null;
   }
@@ -6659,11 +6722,36 @@ export class HostSync {
       "chat.say": "chat", "tags.find": "tags.read", "tags.get": "tags.read", "tags.edit": "tags.write",
       "tags.rules": "tags.write",
       "fx.play": "fx", "fx.stop": "fx", "fx.list": "fx", "fx.stopMatching": "fx",
-      "automation.fire": "automation", "macros.call": "macros",
+      "automation.fire": "automation", "macros.call": "macros", "ais.invoke": "ais.invoke",
       "prefabs.place": "prefabs.place", "summons.place": "summons", "summons.dismiss": "summons",
     } as Record<string, ScriptGrant>)[method];
     if (!grant || !policy.grants.includes(grant)) throw new Error(`Action ${method} not granted`);
     ctx.trace.push(`${seq}: ${macro._id} ${method}`);
+    if (method === "ais.invoke") {
+      if (Object.keys(payload).some((key) => !["moduleId", "commandId", "input"].includes(key)) ||
+          typeof payload.moduleId !== "string" || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(payload.moduleId) ||
+          typeof payload.commandId !== "string" || !/^[a-z0-9][a-z0-9._:-]{1,127}$/.test(payload.commandId) ||
+          !isRecord(payload.input) || !boundedJson(payload.input, 16 * 1024))
+        throw new Error("AIS invoke needs a module ID, declared command ID and bounded JSON object input");
+      if (runAs !== "gm")
+        throw new Error("AIS module commands require explicitly reviewed GM run-as");
+      const invoke = this.aisMacroModuleInvoker;
+      if (!invoke) throw new Error("AIS module command bridge is not active in this host");
+      if (!isActive()) throw new Error("Script action was cancelled");
+      const result = await invoke({
+        moduleId: payload.moduleId,
+        commandId: payload.commandId,
+        input: payload.input as Json,
+        sceneId: policy.sceneId,
+        callerId: caller.id,
+        requestId: ctx.requestId,
+        runAs: "gm",
+        isActive,
+      });
+      if (!isActive()) throw new Error("AIS module command was cancelled");
+      if (!boundedJson(result, 16 * 1024)) throw new Error("AIS module command result is too large or invalid");
+      return result;
+    }
     if (method === "tags.get") {
       if (Object.keys(payload).length !== 1 ||
           !(isWorldTagRef(payload.ref) || isWorldDocumentTagRef(payload.ref)))
@@ -7280,6 +7368,7 @@ export class HostSync {
   /** Tear down the expiry scheduler when the host world closes. */
   dispose(): void {
     this.disposed = true;
+    this.aisMacroModuleInvoker = null;
     if (this.summonTimer) clearTimeout(this.summonTimer);
     this.summonTimer = null;
     if (this.fxMediaTimer) clearTimeout(this.fxMediaTimer);

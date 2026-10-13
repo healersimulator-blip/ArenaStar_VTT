@@ -1,4 +1,4 @@
-import { DRAFT_LEVELS_FEATURE } from "../../src/core/capabilities";
+import { DRAFT_LEVELS_FEATURE, OPENING_SIGHT_FEATURE } from "../../src/core/capabilities";
 import { draftLevel } from "../../src/core/levels";
 import { planWallSplit, wallEditGuard } from "../../src/core/wallEditing";
 import { environmentPlaceables } from "../fixtures/automationPlaceables";
@@ -7225,6 +7225,59 @@ function awaitMacroResult(bus: EventBus<ClientEvents>, requestId: string): Promi
 }
 
 describe("GM-reviewed scripted macros: authority, projection, persistence", () => {
+  test("AIS macro grant dispatches only an approved module command under reviewed GM authority", async () => {
+    const h = await setup({}, async (_source, _args, context, action) => {
+      expect(context.runAs).toBe("gm");
+      return action("ais.invoke", {
+        moduleId: "pf1e-torch",
+        commandId: "toggle",
+        input: { tokenId: "t-pl" },
+      }, () => true);
+    });
+    const script = await reviewedScript({ runAs: "gm", playerCallable: false, grants: ["ais.invoke"], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: script }]);
+    await flushMicrotasks();
+    const invoked: unknown[] = [];
+    h.host.setAisMacroModuleInvoker(async (request) => {
+      expect(request.isActive()).toBe(true);
+      invoked.push({
+        moduleId: request.moduleId,
+        commandId: request.commandId,
+        input: request.input,
+        sceneId: request.sceneId,
+        callerId: request.callerId,
+        runAs: request.runAs,
+      });
+      return { sourceId: "torch", stateIndex: 1, active: true };
+    });
+
+    const requestId = h.gm.requestMacro(script._id, {});
+    const result = await awaitMacroResult(h.gmBus, requestId);
+    expect(result.ok).toBe(true);
+    expect(result.result).toEqual({ sourceId: "torch", stateIndex: 1, active: true });
+    expect(invoked).toEqual([{
+      moduleId: "pf1e-torch",
+      commandId: "toggle",
+      input: { tokenId: "t-pl" },
+      sceneId: "s1",
+      callerId: GM_ID,
+      runAs: "gm",
+    }]);
+  });
+
+  test("AIS module macro calls fail closed when the browser has no approved bridge", async () => {
+    const h = await setup({}, async (_source, _args, _context, action) => action("ais.invoke", {
+      moduleId: "pf1e-torch", commandId: "toggle", input: { tokenId: "t-pl" },
+    }, () => true));
+    const script = await reviewedScript({ runAs: "gm", playerCallable: false, grants: ["ais.invoke"], inputs: [] });
+    h.gm.submit([{ kind: "create", coll: "macros", data: script }]);
+    await flushMicrotasks();
+    const requestId = h.gm.requestMacro(script._id, {});
+    const result = await awaitMacroResult(h.gmBus, requestId);
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("bridge is not active");
+  });
+
   test("Tagger cross-scene reads and elevated bulk writes are scoped and reprojected for the actual caller", async () => {
     const remoteRef = { coll: "tokens", id: "same", parent: { coll: "scenes", id: "s2" } };
     const hiddenRef = { coll: "tiles", id: "secret", parent: { coll: "scenes", id: "s2" } };
@@ -11483,6 +11536,86 @@ describe("structured action cards and pending resolution", () => {
       ] });
   });
 
+  // D-458: `runQuickbarEntangleArea` emits one card per creature — an area (Entangle's 40-ft
+  // spread on a square feet grid) plus exactly two rows: the evidenced save and the explicitly
+  // pending "spell effect" continuation. Before D-458 the area branch demanded a one-row card, so
+  // no card the app produces could ever be host-verified; the allowance must stay narrow enough
+  // that a forged card with a second evidenced save row is still refused.
+  test("D-458: a producer-shaped area cast is host-verified while an extra evidenced save row is not", async () => {
+    const h = await setup({}, undefined, undefined, () => 10_000);
+    const area = { sceneId: "s1", shape: "spread", origin: { x: 300, y: 300 }, radius: 40, units: "ft" };
+    const row = (key: string, actorId: string, tokenId: string, rollId: string) => ({
+      key, name: `Forged ${key}`, label: "Reflex save", actorId, tokenId,
+      state: "pending" as const, outcome: "pending" as const,
+      check: { kind: "save" as const, status: "pending" as const, formula: "1d20+5", dc: 12,
+        total: null, saveType: "ref" as const, pendingRollId: rollId },
+      evidence: { adapter: "pf1e.pendingSave.v1", payload: { spellLevel: 1, saveType: "ref" } },
+    });
+    const roll = (cardId: string, id: string, targetKey: string, actorId: string, tokenId: string) => ({
+      v: 1 as const, id, actionId: cardId, targetKey, kind: "save" as const, saveType: "ref" as const,
+      initiator: { actorId: "action-source", tokenId: "tok-source", name: "Forged source",
+        actionLabel: "Entangle" },
+      target: { actorId, tokenId, name: `Forged ${targetKey}` },
+      formula: "1d20+5", dc: 12, modifiers: [{ label: "REF", value: 5, reason: "save" }],
+      turnNumber: 0, expiresTurn: 2, resolved: false, rollMode: "roll" as const,
+    });
+    const effectRow = { key: "effect", name: "Forged effect", label: "spell effect", actorId: "action-target",
+      state: "pending" as const, outcome: "pending" as const,
+      notes: ["Awaiting a host-verifiable spell-effect continuation."] };
+    const card = (id: string, targets: unknown[], rolls: unknown[]) => ({
+      _id: id, type: "message", name: "Entangle", ownership: { default: 1 }, flags: {},
+      author: "", content: "Entangle save pending", whisper: [], roll: null, flavor: "cast resolution",
+      system: { action: { v: 1, id, revision: 0, kind: "cast", label: "Entangle", state: "pending",
+        source: { name: "Forged source", actorId: "action-source", tokenId: "tok-source" },
+        sceneId: "s1", area, targets, notes: [], createdAt: 1, updatedAt: 1 },
+      pendingRolls: rolls },
+    });
+    h.gm.submit([
+      { kind: "create", coll: "settings", data: worldSettingsDoc({ playerPendingRollMode: "manual" }) },
+      { kind: "create", coll: "actors", data: {
+        _id: "action-source", type: "actor", name: "Druid", ownership: { default: 0, [GM_ID]: 3 },
+        flags: {}, system: { pf1e: { abilities: { wis: 12 }, spells: {
+          keyAbility: "wis", mode: "prepared", casterLevel: 3, slotsPerDay: { 1: 2 }, prepared: [],
+        } } }, items: [], effects: [],
+      } as ActorDocument },
+      { kind: "create", coll: "actors", data: {
+        _id: "action-target", type: "actor", name: "Target", ownership: { default: 0, [PLAYER_ID]: 3 },
+        flags: {}, system: { pf1e: { saves: { fort: 0, ref: 5, will: 0 } } }, items: [], effects: [],
+      } as ActorDocument },
+      { kind: "create", coll: "actors", data: {
+        _id: "action-other", type: "actor", name: "Other", ownership: { default: 0, [PLAYER_ID]: 3 },
+        flags: {}, system: { pf1e: { saves: { fort: 0, ref: 5, will: 0 } } }, items: [], effects: [],
+      } as ActorDocument },
+      { kind: "create", coll: "tokens", parent: { coll: "scenes", id: "s1" },
+        data: tokenDoc("tok-source", { actorId: "action-source", x: 350, y: 350 }) },
+      { kind: "create", coll: "tokens", parent: { coll: "scenes", id: "s1" },
+        data: tokenDoc("tok-one", { actorId: "action-target", x: 450, y: 350 }) },
+      { kind: "create", coll: "tokens", parent: { coll: "scenes", id: "s1" },
+        data: tokenDoc("tok-two", { actorId: "action-other", x: 400, y: 400 }) },
+    ]);
+    await flushMicrotasks();
+    // Actors and tokens first: the host validates a card's live references against committed state.
+    h.gm.submit([
+      { kind: "create", coll: "messages", data: card("area-card",
+        [row("save-one", "action-target", "tok-one", "roll-one"), effectRow],
+        [roll("area-card", "roll-one", "save-one", "action-target", "tok-one")]) as unknown as MessageDocument },
+      { kind: "create", coll: "messages", data: card("area-two-saves-card",
+        [row("save-one", "action-target", "tok-one", "roll-one"), row("save-two", "action-other", "tok-two", "roll-two"), effectRow],
+        [roll("area-two-saves-card", "roll-one", "save-one", "action-target", "tok-one"),
+          roll("area-two-saves-card", "roll-two", "save-two", "action-other", "tok-two")]) as unknown as MessageDocument },
+    ]);
+    await flushMicrotasks();
+    const verified = h.hostStore.get("messages", "area-card") as MessageDocument | undefined;
+    expect(verified?.system.action).toMatchObject({ targets: [
+      { key: "save-one", provenance: "host" }, { key: "effect", provenance: "host" },
+    ] });
+    const refused = h.hostStore.get("messages", "area-two-saves-card") as MessageDocument | undefined;
+    expect(refused?.system.action).toMatchObject({ targets: [
+      { key: "save-one", provenance: "reported" }, { key: "save-two", provenance: "reported" },
+      { key: "effect", provenance: "host" },
+    ] });
+  });
+
   test("combat-window expiry commits one explicit expired revision and emits its FX facts", async () => {
     let now = 20_000;
     const h = await setup({}, undefined, undefined, () => now);
@@ -11870,6 +12003,29 @@ async function capabilityPeer(h: Harness, peer: string, hello: HelloMsg) {
   return { pair, frames };
 }
 
+test("opening sight capability is negotiated before settings reach players and gates mixed-version writes", async () => {
+  const h = await setup();
+  const hello: HelloMsg = { kind: "hello", pubkey: PLAYER_ID, displayName: "Rex", ts: 1, sig: "valid" };
+  const legacy = await capabilityPeer(h, "legacy-opening-live", hello);
+  expect(legacy.frames[0]).toMatchObject({ kind: "welcome", requiredFeatures: [] });
+  const policy = {
+    enabled: true, applyTo: { windows: true, doors: true, apertures: true },
+    partialAt: 20, partial: { depth: 2, widthDeg: 30 }, fullAt: 5, full: { depth: 20, widthDeg: 120 },
+  } as unknown as Json;
+  const rejected: ClientEvents["rejected"][] = []; h.gmBus.on("rejected", (message) => rejected.push(message));
+  const scene = { coll: "scenes" as const, id: "s1" }, seq = h.hostStore.seq;
+  const update: Op = { kind: "update", ref: scene, diff: { flags: { core: { openingSight: policy } } } };
+  h.gm.submit([update]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq); expect(rejected.at(-1)?.detail).toContain("Upgrade or disconnect");
+  h.host.removeSession("legacy-opening-live", "upgrade");
+  h.gm.submit([update]); await flushMicrotasks();
+
+  const lateLegacy = await capabilityPeer(h, "legacy-opening-late", { ...hello, pubkey: OTHER_ID, displayName: "Ivy" });
+  expect(lateLegacy.frames[0]).toMatchObject({ kind: "kick", reason: expect.stringContaining("Upgrade required") });
+  const modern = await capabilityPeer(h, "modern-opening", { ...hello, pubkey: OTHER_ID, displayName: "Ivy", features: [OPENING_SIGHT_FEATURE] });
+  expect(modern.frames[0]).toMatchObject({ kind: "welcome", requiredFeatures: [OPENING_SIGHT_FEATURE] });
+});
+
 test("draft-capability negotiation precedes all GM data; legacy players remain projected", async () => {
   const h = await setup();
   h.gm.submit([{ kind: "create", coll: "levels", parent: { coll: "scenes", id: "s1" }, data: draftLevel("private-level", "Hidden plan") }]);
@@ -11886,6 +12042,28 @@ test("draft-capability negotiation precedes all GM data; legacy players remain p
   const oldPlayer = await capabilityPeer(h, "old-player", { ...hello, pubkey: PLAYER_ID, displayName: "Rex" });
   expect(oldPlayer.frames[0]).toMatchObject({ kind: "welcome", requiredFeatures: [] });
   expect(JSON.stringify(oldPlayer.frames)).not.toContain("Hidden plan");
+});
+
+test("opening sight policy and per-opening data remain GM-authored even on a player-owned scene", async () => {
+  const h = await setup();
+  const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const rejected: ClientEvents["rejected"][] = []; bus.on("rejected", (message) => rejected.push(message));
+  const ref = { coll: "scenes" as const, id: "s1" };
+  h.gm.submit([{ kind: "update", ref, diff: { ownership: { default: 3 } } }]); await flushMicrotasks();
+  const policy = {
+    enabled: true, applyTo: { windows: true, doors: true, apertures: true },
+    partialAt: 20, partial: { depth: 2, widthDeg: 30 }, fullAt: 5, full: { depth: 20, widthDeg: 120 },
+  } as unknown as Json;
+  const seq = h.hostStore.seq;
+  player.submit([{ kind: "update", ref, diff: { flags: { core: { openingSight: policy } } } }]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(seq); expect(rejected.at(-1)?.reason).toBe("forbidden");
+  expect(rejected.at(-1)?.detail).toContain("only GMs author scene opening LOS rules");
+
+  h.gm.submit([{ kind: "update", ref, diff: { flags: { core: { openingSight: policy } } } }]); await flushMicrotasks();
+  const withPolicy = h.hostStore.seq;
+  // Replacing the whole flags object with one that omits the policy must not bypass the guard.
+  player.submit([{ kind: "update", ref, diff: { flags: {} } }]); await flushMicrotasks();
+  expect(h.hostStore.seq).toBe(withPolicy); expect(rejected.at(-1)?.reason).toBe("forbidden");
 });
 
 test("an incompatible live GM blocks draft commits atomically but not ordinary edits", async () => {

@@ -96,7 +96,11 @@ export function checkRecipe(recipe: WorldRecipe): { errors: string[]; warnings: 
   }
   for (const pkg of recipe.content) {
     const m = pkg.manifest;
-    if (m.type !== "data") {
+    if (m.type === "module") {
+      errors.push(
+        `${m.name} is an automation module — create the world first, then manage modules in Settings → Packages`,
+      );
+    } else if (m.type !== "data") {
       errors.push(
         `${m.name} is a strategic ruleset — a world runs one ruleset, chosen above, not as content`,
       );

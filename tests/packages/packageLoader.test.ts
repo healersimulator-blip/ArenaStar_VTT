@@ -21,7 +21,7 @@ const zipOf = (files: Record<string, string>): Uint8Array =>
   zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)])));
 
 describe("validatePackageManifest (§12)", () => {
-  test("accepts system and data manifests", () => {
+  test("accepts system, data, and independent AIS module manifests", () => {
     const sys = validatePackageManifest(systemManifest());
     expect(sys.ok).toBe(true);
     const data = validatePackageManifest(
@@ -33,6 +33,62 @@ describe("validatePackageManifest (§12)", () => {
       }),
     );
     expect(data.ok).toBe(true);
+    const module = validatePackageManifest({
+      id: "condition-mod",
+      name: "Condition Mod",
+      version: "1.0.0",
+      type: "module",
+      interconnect: {
+        api: "arena.ais/1",
+        entry: "automation/entry.js",
+        requires: [{ id: "pf1e-core", version: "2.0.0" }],
+        provides: [{ id: "pf1e.damage.resolve", mode: "exclusive", contract: 1 }],
+        commands: [{ id: "torch.toggle", contract: 1 }],
+        emits: ["torch.changed"],
+        capabilities: ["scene.read.visible", "action.observe", "event.emit"],
+      },
+    });
+    expect(module.ok).toBe(true);
+    if (module.ok) expect(module.value.interconnect).toMatchObject({
+      entry: "automation/entry.js",
+      commands: [{ id: "torch.toggle", contract: 1 }],
+      emits: ["torch.changed"],
+    });
+  });
+
+  test("rejects unknown AIS fields, invalid capabilities, and non-exact dependency versions", () => {
+    const moduleManifest = {
+      id: "strict-module",
+      name: "Strict Module",
+      version: "1.0.0",
+      type: "module",
+      interconnect: { api: "arena.ais/1", entry: "module.js", capabilities: ["action.observe"] },
+    };
+    expect(validatePackageManifest({ ...moduleManifest, interconnect: { ...moduleManifest.interconnect, typo: true } }).ok).toBe(false);
+    expect(validatePackageManifest({
+      ...moduleManifest,
+      interconnect: { ...moduleManifest.interconnect, capabilities: ["world.write"] },
+    }).ok).toBe(false);
+    expect(validatePackageManifest({
+      ...moduleManifest,
+      interconnect: { ...moduleManifest.interconnect, requires: [{ id: "other-module", version: "^1.0.0" }] },
+    }).ok).toBe(false);
+  });
+
+  test("validates declared macro commands and custom event capabilities", () => {
+    const base = {
+      id: "typed-module", name: "Typed Module", version: "1.0.0", type: "module",
+      interconnect: { api: "arena.ais/1", entry: "module.js", capabilities: ["action.observe"] },
+    };
+    expect(validatePackageManifest({ ...base, interconnect: {
+      ...base.interconnect, emits: ["torch.changed"],
+    } })).toMatchObject({ ok: false, error: "package typed-module: interconnect.emits requires the event.emit capability" });
+    expect(validatePackageManifest({ ...base, interconnect: {
+      ...base.interconnect, commands: [{ id: "toggle", contract: 1 }, { id: "toggle", contract: 1 }],
+    } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: {
+      ...base.interconnect, commands: [{ id: "../toggle", contract: 1 }],
+    } }).ok).toBe(false);
   });
 
   test("rejects bad ids, names, versions, types", () => {
@@ -40,7 +96,7 @@ describe("validatePackageManifest (§12)", () => {
     expect(validatePackageManifest(systemManifest({ id: "x" })).ok).toBe(false); // too short
     expect(validatePackageManifest(systemManifest({ name: "" })).ok).toBe(false);
     expect(validatePackageManifest(systemManifest({ version: "one" })).ok).toBe(false);
-    expect(validatePackageManifest(systemManifest({ type: "module" as "system" })).ok).toBe(false);
+    expect(validatePackageManifest(systemManifest({ type: "other" as "system" })).ok).toBe(false);
     expect(validatePackageManifest(null).ok).toBe(false);
   });
 
@@ -117,6 +173,34 @@ describe("readZipPackage / buildPackageFromFiles (§12)", () => {
     if (!res.ok) return;
     expect(res.value.manifest.id).toBe("probe-rules");
     expect(res.value.files["rules.js"]).toBe(RULES_JS);
+  });
+
+  test("AIS module ZIP requires and loads its independent interconnect entry", async () => {
+    const manifest = {
+      id: "condition-mod",
+      name: "Condition Mod",
+      version: "1.0.0",
+      type: "module",
+      interconnect: { api: "arena.ais/1", entry: "automation/entry.js", capabilities: ["action.observe"] },
+    };
+    const missing = await readZipPackage(zipOf({ "manifest.json": JSON.stringify(manifest) }));
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error).toContain("AIS entry automation/entry.js is missing");
+    const loaded = await readZipPackage(zipOf({
+      "manifest.json": JSON.stringify(manifest),
+      "automation/entry.js": "AIS.on('action.intent', () => {});",
+    }));
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok) expect(loaded.value.manifest.type).toBe("module");
+  });
+
+  test("package ZIP extraction rejects unsafe entry paths before importing", async () => {
+    const result = await readZipPackage(zipSync({
+      "manifest.json": strToU8(JSON.stringify(systemManifest())),
+      "../outside.js": strToU8("malicious"),
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("unsafe entry path");
   });
 
   test("nested single root directory is tolerated", async () => {

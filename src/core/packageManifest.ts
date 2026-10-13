@@ -1,13 +1,21 @@
 /**
- * §12 package manifest — the manifest.json contract every rules/data
- * package zip carries. Data-only packages (`type: "data"`) declare packs and
- * no code; script packages (`type: "system"`) additionally declare a single
- * self-contained ESM rules entry (D-086 blob-URL import inside the SimWorker)
- * plus the ModelPool sys columns the host must build the pool with.
+ * §12 package manifest — the manifest.json contract for system, data and AIS module ZIPs.
+ * Data packages declare packs and no code; system packages provide the strategic rules entry;
+ * independent `type: "module"` packages use the versioned AIS interconnect contract.
  */
 import type { ModelColumnType } from "./strategic";
 import type { MigrationStep } from "./migrations";
 import { validateMigrationSteps } from "./migrations";
+import {
+  AIS_API_VERSION,
+  AIS_CAPABILITIES,
+  AIS_CONTRIBUTION_MODES,
+  type AisCapability,
+  type AisContributionDeclaration,
+  type AisInterconnectManifest,
+  type AisModuleCommandDeclaration,
+  type AisPackageRequirement,
+} from "./automationInterconnect";
 import type { Result } from "./result";
 import { err, okVal } from "./result";
 
@@ -55,8 +63,10 @@ export interface PackageManifest {
   name: string;
   /** Semver-ish. */
   version: string;
-  type: "system" | "data";
+  type: "system" | "data" | "module";
   description?: string;
+  /** Independent AIS v1 entry point for `type: "module"` packages. */
+  interconnect?: AisInterconnectManifest;
   /**
    * Package ids this one expects alongside it (e.g. a strategic ruleset naming its content
    * pack). Advisory, never enforced (D-110: a system package must stay loadable alone) — the
@@ -76,6 +86,129 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 const VERSION_RE = /^\d+\.\d+\.\d+(-[A-Za-z0-9.+-]+)?$/;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+const AIS_SLOT_RE = /^[a-z0-9][a-z0-9._:-]{1,127}$/;
+
+function validateInterconnect(value: unknown, id: string): Result<AisInterconnectManifest> {
+  if (!isRecord(value)) return err(`package ${id}: interconnect must be an object`);
+  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities"]);
+  const unknown = Object.keys(value).find((key) => !allowed.has(key));
+  if (unknown) return err(`package ${id}: interconnect has unsupported field ${unknown}`);
+  if (value.api !== AIS_API_VERSION)
+    return err(`package ${id}: interconnect.api must be ${AIS_API_VERSION}`);
+  if (typeof value.entry !== "string" || !isSafePackagePath(value.entry))
+    return err(`package ${id}: interconnect.entry must be a safe package-relative path`);
+
+  const requires: AisPackageRequirement[] = [];
+  if (value.requires !== undefined) {
+    if (!Array.isArray(value.requires) || value.requires.length > 128)
+      return err(`package ${id}: interconnect.requires must be an array of at most 128 entries`);
+    const seen = new Set<string>();
+    for (const raw of value.requires) {
+      if (!isRecord(raw)) return err(`package ${id}: interconnect requirement must be an object`);
+      const keys = Object.keys(raw);
+      if (keys.some((key) => !["id", "version", "optional"].includes(key)))
+        return err(`package ${id}: interconnect requirement has an unsupported field`);
+      if (typeof raw.id !== "string" || !ID_RE.test(raw.id) || raw.id === id)
+        return err(`package ${id}: interconnect requirement has an invalid package id`);
+      if (seen.has(raw.id)) return err(`package ${id}: duplicate interconnect requirement ${raw.id}`);
+      if (raw.version !== undefined && (typeof raw.version !== "string" || !VERSION_RE.test(raw.version)))
+        return err(`package ${id}: interconnect requirement ${raw.id} has an invalid exact version`);
+      if (raw.optional !== undefined && typeof raw.optional !== "boolean")
+        return err(`package ${id}: interconnect requirement ${raw.id} optional must be boolean`);
+      seen.add(raw.id);
+      requires.push({
+        id: raw.id,
+        ...(raw.version === undefined ? {} : { version: raw.version as string }),
+        ...(raw.optional === undefined ? {} : { optional: raw.optional as boolean }),
+      });
+    }
+  }
+
+  const provides: AisContributionDeclaration[] = [];
+  if (value.provides !== undefined) {
+    if (!Array.isArray(value.provides) || value.provides.length > 128)
+      return err(`package ${id}: interconnect.provides must be an array of at most 128 entries`);
+    const seen = new Set<string>();
+    for (const raw of value.provides) {
+      if (!isRecord(raw)) return err(`package ${id}: interconnect contribution must be an object`);
+      if (Object.keys(raw).some((key) => !["id", "mode", "contract", "priority"].includes(key)))
+        return err(`package ${id}: interconnect contribution has an unsupported field`);
+      if (typeof raw.id !== "string" || !AIS_SLOT_RE.test(raw.id))
+        return err(`package ${id}: interconnect contribution id is invalid`);
+      if (seen.has(raw.id)) return err(`package ${id}: interconnect repeats contribution ${raw.id}`);
+      if (!(AIS_CONTRIBUTION_MODES as readonly unknown[]).includes(raw.mode))
+        return err(`package ${id}: interconnect contribution ${raw.id} has an invalid mode`);
+      if (!Number.isSafeInteger(raw.contract) || Number(raw.contract) < 1)
+        return err(`package ${id}: interconnect contribution ${raw.id} needs a positive contract version`);
+      if (raw.priority !== undefined &&
+          (typeof raw.priority !== "number" || !Number.isFinite(raw.priority) || Math.abs(raw.priority) > 100_000))
+        return err(`package ${id}: interconnect contribution ${raw.id} has an invalid priority`);
+      seen.add(raw.id);
+      provides.push({
+        id: raw.id,
+        mode: raw.mode as AisContributionDeclaration["mode"],
+        contract: Number(raw.contract),
+        ...(raw.priority === undefined ? {} : { priority: Number(raw.priority) }),
+      });
+    }
+  }
+
+  const commands: AisModuleCommandDeclaration[] = [];
+  if (value.commands !== undefined) {
+    if (!Array.isArray(value.commands) || value.commands.length > 128)
+      return err(`package ${id}: interconnect.commands must be an array of at most 128 entries`);
+    const seen = new Set<string>();
+    for (const raw of value.commands) {
+      if (!isRecord(raw) || Object.keys(raw).some((key) => !["id", "contract"].includes(key)))
+        return err(`package ${id}: interconnect command must contain only id and contract`);
+      if (typeof raw.id !== "string" || !AIS_SLOT_RE.test(raw.id))
+        return err(`package ${id}: interconnect command id is invalid`);
+      if (seen.has(raw.id)) return err(`package ${id}: interconnect repeats command ${raw.id}`);
+      if (!Number.isSafeInteger(raw.contract) || Number(raw.contract) < 1 || Number(raw.contract) > 65_535)
+        return err(`package ${id}: interconnect command ${raw.id} needs a positive contract version`);
+      seen.add(raw.id);
+      commands.push({ id: raw.id, contract: Number(raw.contract) });
+    }
+  }
+
+  const emits: string[] = [];
+  if (value.emits !== undefined) {
+    if (!Array.isArray(value.emits) || value.emits.length > 128)
+      return err(`package ${id}: interconnect.emits must be an array of at most 128 event ids`);
+    const seen = new Set<string>();
+    for (const raw of value.emits) {
+      if (typeof raw !== "string" || !AIS_SLOT_RE.test(raw))
+        return err(`package ${id}: interconnect event id is invalid`);
+      if (seen.has(raw)) return err(`package ${id}: interconnect repeats emitted event ${raw}`);
+      seen.add(raw);
+      emits.push(raw);
+    }
+  }
+
+  const capabilities: AisCapability[] = [];
+  if (value.capabilities !== undefined) {
+    if (!Array.isArray(value.capabilities) || value.capabilities.length > AIS_CAPABILITIES.length)
+      return err(`package ${id}: interconnect.capabilities must be an array`);
+    for (const raw of value.capabilities) {
+      if (!(AIS_CAPABILITIES as readonly unknown[]).includes(raw))
+        return err(`package ${id}: unsupported AIS capability ${String(raw)}`);
+      if (!capabilities.includes(raw as AisCapability)) capabilities.push(raw as AisCapability);
+    }
+  }
+
+  if (emits.length > 0 && !capabilities.includes("event.emit"))
+    return err(`package ${id}: interconnect.emits requires the event.emit capability`);
+
+  return okVal({
+    api: AIS_API_VERSION,
+    entry: value.entry,
+    ...(requires.length ? { requires } : {}),
+    ...(provides.length ? { provides } : {}),
+    ...(commands.length ? { commands } : {}),
+    ...(emits.length ? { emits } : {}),
+    ...(capabilities.length ? { capabilities } : {}),
+  });
+}
 
 /** Package-internal path: relative, no traversal, sane length, no NULs. */
 export function isSafePackagePath(path: string): boolean {
@@ -98,8 +231,8 @@ export function validatePackageManifest(raw: unknown): Result<PackageManifest> {
   if (typeof version !== "string" || !VERSION_RE.test(version)) {
     return err(`package ${id}: manifest.version must be semver (x.y.z[-tag])`);
   }
-  if (type !== "system" && type !== "data") {
-    return err(`package ${id}: manifest.type must be "system" or "data"`);
+  if (type !== "system" && type !== "data" && type !== "module") {
+    return err(`package ${id}: manifest.type must be "system", "data", or "module"`);
   }
   if (description !== undefined && typeof description !== "string") {
     return err(`package ${id}: manifest.description must be a string`);
@@ -128,7 +261,20 @@ export function validatePackageManifest(raw: unknown): Result<PackageManifest> {
     if ((raw as Record<string, unknown>).module !== undefined) {
       return err(`package ${id}: data-only packages must not declare a module block`);
     }
+    if (raw.interconnect !== undefined) {
+      return err(`package ${id}: data-only packages must not declare interconnect code`);
+    }
+  } else if (type === "module") {
+    if (rules !== undefined) return err(`package ${id}: AIS modules must not declare a rules block`);
+    if (raw.module !== undefined) return err(`package ${id}: AIS modules use interconnect, not the legacy module block`);
+    if (raw.migrations !== undefined) return err(`package ${id}: AIS module migrations are not supported in v1`);
+    const interconnect = validateInterconnect(raw.interconnect, id);
+    if (!interconnect.ok) return interconnect;
+    manifest.interconnect = interconnect.value;
   } else {
+    if (raw.interconnect !== undefined) {
+      return err(`package ${id}: system packages cannot declare an independent interconnect entry`);
+    }
     if (!isRecord(rules)) return err(`package ${id}: system packages need a rules block`);
     const { entry, modelColumns } = rules;
     if (typeof entry !== "string" || !isSafePackagePath(entry)) {

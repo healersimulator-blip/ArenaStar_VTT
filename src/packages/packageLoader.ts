@@ -5,8 +5,8 @@
  * tests and in the browser host alike. Script entries are NOT executed here —
  * activation/import into the SimWorker goes through D-086's blob-URL loader.
  */
-import { unzip } from "fflate";
 import type { Json } from "../core/documents";
+import { extractZipEntriesBounded } from "../host/worldZip";
 import type { PackageManifest } from "../core/packageManifest";
 import { validatePackageManifest } from "../core/packageManifest";
 import type { Result } from "../core/result";
@@ -87,6 +87,17 @@ export function buildPackageFromFiles(rawFiles: Record<string, string>): Result<
       );
     }
   }
+  if (manifest.value.interconnect) {
+    const entry = files[manifest.value.interconnect.entry];
+    if (entry === undefined) {
+      return err(
+        `package ${manifest.value.id}: AIS entry ${manifest.value.interconnect.entry} is missing`,
+      );
+    }
+    if (entry.trim().length === 0) {
+      return err(`package ${manifest.value.id}: AIS entry is empty`);
+    }
+  }
   for (const pack of manifest.value.packs ?? []) {
     const text = files[pack.file];
     if (text === undefined)
@@ -104,28 +115,21 @@ export function buildPackageFromFiles(rawFiles: Record<string, string>): Result<
   return okVal({ manifest: manifest.value, files });
 }
 
-/** Promisified fflate unzip (same streaming API worldFile.ts uses). */
-function unzipFiles(bytes: Uint8Array): Promise<Result<Record<string, string>>> {
-  return new Promise((resolve) => {
-    unzip(bytes, (error, unzipped) => {
-      if (error) {
-        resolve(err(`package: not a readable zip — ${error.message}`));
-        return;
-      }
-      const rawFiles: Record<string, string> = {};
-      for (const [path, data] of Object.entries(unzipped)) {
-        // zip directory entries end with "/" and carry no bytes
-        if (path.endsWith("/")) continue;
-        const text = decodeText(data);
-        if (!text.ok) {
-          resolve(err(`package: ${path} — ${text.error}`));
-          return;
-        }
-        rawFiles[path] = text.value;
-      }
-      resolve(okVal(rawFiles));
-    });
-  });
+/** Bounded ZIP extraction also rejects traversal paths, duplicates, and unsupported compression. */
+async function unzipFiles(bytes: Uint8Array): Promise<Result<Record<string, string>>> {
+  let entries: Map<string, Uint8Array>;
+  try {
+    entries = await extractZipEntriesBounded(bytes);
+  } catch (error) {
+    return err(`package: not a readable zip — ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const rawFiles: Record<string, string> = {};
+  for (const [path, data] of entries) {
+    const text = decodeText(data);
+    if (!text.ok) return err(`package: ${path} — ${text.error}`);
+    rawFiles[path] = text.value;
+  }
+  return okVal(rawFiles);
 }
 
 /** Read + validate a package zip (ArrayBuffer/Uint8Array). */

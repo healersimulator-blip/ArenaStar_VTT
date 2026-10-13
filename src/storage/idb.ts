@@ -16,6 +16,7 @@ import { openDB, type IDBPDatabase } from "idb";
 export type { IDBPDatabase } from "idb";
 import type { AssetManifestEntry, BaseDocument, CollectionName, Json } from "../core/documents";
 import type { PackageManifest } from "../core/packageManifest";
+import type { AisActivationProfile, AisCapability } from "../core/automationInterconnect";
 import type { AssetId, DocId } from "../core/ids";
 import type { Op, OpEnvelope } from "../core/ops";
 import type { DocId as SceneId, UserId, WorldId } from "../core/ids";
@@ -59,8 +60,12 @@ export interface WorldsRecord {
   oplogBase: number;
   /** §12 active system package id (applies at world load; null/absent = built-in). */
   activeRulesPackage?: string;
-  /** §12 GM-granted in-page trust per package id (trusted tier opt-in). */
+  /** §12 GM-granted in-page trust per package id (legacy trusted tier opt-in). */
   trustedPackages?: string[];
+  /** AIS world-shared activation/provider profile; does not carry local code approval. */
+  automationProfile?: AisActivationProfile;
+  /** AIS per-device consent, bound to the exact package hash. Never written to world ZIPs. */
+  automationGrants?: Record<string, { hash: string; capabilities: AisCapability[] }>;
 }
 
 export interface DocumentsRecord {
@@ -248,7 +253,7 @@ export interface PackageRecord {
   id: string;
   name: string;
   version: string;
-  type: "system" | "data";
+  type: PackageManifest["type"];
   importedAt: number;
   manifest: PackageManifest;
   files: Record<string, string>;

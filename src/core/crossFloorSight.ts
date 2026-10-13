@@ -13,15 +13,18 @@
  * above their floor. The targets' floors, this floor and the floor above all light targets; the
  * floor planes pass light through openings only (G-22, D-446).
  */
-import type { ActorDocument, LevelDocument, SceneDocument, TokenDocument } from "./documents";
+import type { ActorDocument, LevelDocument, SceneDocument, TokenDocument, WallDocument } from "./documents";
 import { maskHiddenTokenIds } from "./fogExploration";
-import { floorSurfaces } from "./floorSurface";
+import { floorSurfaces, surfaceApertures } from "./floorSurface";
 import { floorAbove, visibleFloorsBelow } from "./levelPlay";
 import type { PermissionUser } from "./ownership";
 import { can } from "./permissions";
 import { raisedBarriers } from "./raisedAreas";
-import { SpatialKernel, legacySpatialBarrier, type SpatialBarrier } from "./spatial/kernel";
-import { SpatialPerception, bodySamples, type PerceptionBody, type SpatialLight } from "./spatial/perception";
+import { classifyRing, type SpatialPoint } from "./multilevelGeometry";
+import { apertureOpeningSightCurve, pixelsPerSceneUnit, wallOpeningSightCurve } from "../canvas/vision/openings";
+import { openingSightConeAt, openingSightPolicyOf, type OpeningSightCurve } from "./openingSightPolicy";
+import { SpatialKernel, legacySpatialBarrier, type Point3, type SpatialBarrier } from "./spatial/kernel";
+import { SpatialPerception, bodySamples, type PerceptionBody, type SpatialLight, type SightRayPolicy } from "./spatial/perception";
 
 export interface TokenBelow { id: string; depth: number }
 export const EYE_HEIGHT = 0.9;
@@ -47,15 +50,27 @@ export function capToBand(body: PerceptionBody, level: Pick<LevelDocument, "top"
 }
 
 /** Floor-scoped walls as kernel barriers, one per floor band. Unscoped walls do nothing in floor play. */
-export function floorBarriers(scene: Pick<SceneDocument, "walls" | "levels">): SpatialBarrier[] {
+export function floorBarriers(
+  scene: Pick<SceneDocument, "walls" | "levels" | "flags" | "grid">,
+  includeProximitySightOpenings = false,
+): SpatialBarrier[] {
   const levels = new Map((scene.levels ?? []).map((l) => [l._id, l] as const));
+  const policy = includeProximitySightOpenings
+    ? openingSightPolicyOf(scene as Pick<SceneDocument, "flags" | "grid">)
+    : null;
   return scene.walls.flatMap((wall) => {
     const scope = wall.levelScope;
     if (!scope) return [];
     const base = legacySpatialBarrier(wall);
-    if (scope.mode === "all") return [base];
+    const curve = policy ? wallOpeningSightCurve(policy, wall) : null;
+    // Proximity openings are virtual sight hits only for the sight-disclosure query. Other
+    // spatial consumers (e.g. spell effects) keep the physical wall axes they already used.
+    const barrier = curve
+      ? { ...base, restrictions: { ...base.restrictions, sight: 0 as const } }
+      : base;
+    if (scope.mode === "all") return [barrier];
     return scope.ids.map((id) => levels.get(id)).filter((l): l is LevelDocument => !!l)
-      .map((l) => ({ ...base, id: `${wall._id}@${l._id}`, zSpan: { bottom: l.bottom, top: l.top } }));
+      .map((l) => ({ ...barrier, id: `${wall._id}@${l._id}`, zSpan: { bottom: l.bottom, top: l.top } }));
   });
 }
 
@@ -69,6 +84,136 @@ export function floorLights(scene: Pick<SceneDocument, "lights" | "levels" | "gr
       const z = level.top === null ? level.floorZ + up : Math.min(level.floorZ + up, (level.floorZ + level.top) / 2);
       return { id: `${light._id}@${level._id}`, at: { x: light.x, y: light.y, z }, bright: Math.max(0, light.bright) / perUnit, dim: Math.max(light.dim, light.bright, 0) / perUnit };
     }));
+}
+
+interface WallSightOpeningRule {
+  wall: WallDocument;
+  curve: OpeningSightCurve;
+  pixelsPerUnit: number;
+}
+interface FloorApertureSightRule {
+  id: string;
+  level: LevelDocument;
+  points: SpatialPoint[];
+  curve: OpeningSightCurve;
+}
+
+/** Virtual hit rules match the same scoped wall identities installed in `floorBarriers`. */
+function wallSightOpeningRules(scene: SceneDocument): Map<string, WallSightOpeningRule> {
+  const policy = openingSightPolicyOf(scene);
+  const levelIds = new Set((scene.levels ?? []).map((level) => level._id));
+  const pixelsPerUnit = pixelsPerSceneUnit(scene);
+  const rules = new Map<string, WallSightOpeningRule>();
+  for (const wall of scene.walls) {
+    const curve = wallOpeningSightCurve(policy, wall);
+    const scope = wall.levelScope;
+    if (!curve || !scope) continue;
+    const rule = { wall, curve, pixelsPerUnit };
+    if (scope.mode === "all") rules.set(wall._id, rule);
+    else for (const id of scope.ids) if (levelIds.has(id)) rules.set(`${wall._id}@${id}`, rule);
+  }
+  return rules;
+}
+
+/** Only valid traced holes can acquire a proximity rule; solid floor geometry is never removed. */
+function floorApertureSightRules(scene: SceneDocument): FloorApertureSightRule[] {
+  const policy = openingSightPolicyOf(scene);
+  const rules: FloorApertureSightRule[] = [];
+  for (const level of scene.levels ?? []) for (const aperture of surfaceApertures(level)) {
+    const curve = apertureOpeningSightCurve(policy, level, aperture.id);
+    if (curve) rules.push({ id: `${level._id}:${aperture.id}`, level, points: aperture.points, curve });
+  }
+  return rules;
+}
+
+function distanceToSegment2D(point: { x: number; y: number }, segment: readonly [number, number, number, number]): number {
+  const [x1, y1, x2, y2] = segment;
+  const dx = x2 - x1, dy = y2 - y1, length2 = dx * dx + dy * dy;
+  if (length2 === 0) return Math.hypot(point.x - x1, point.y - y1);
+  const amount = Math.max(0, Math.min(1, ((point.x - x1) * dx + (point.y - y1) * dy) / length2));
+  return Math.hypot(point.x - (x1 + amount * dx), point.y - (y1 + amount * dy));
+}
+
+function wallRayPassesOpening(rule: WallSightOpeningRule, from: Point3, to: Point3, t: number): boolean {
+  const { wall, curve, pixelsPerUnit } = rule;
+  const cone = openingSightConeAt(curve, distanceToSegment2D(from, wall.c) / pixelsPerUnit);
+  if (!cone) return false;
+  const [x1, y1, x2, y2] = wall.c;
+  const sx = x2 - x1, sy = y2 - y1, length = Math.hypot(sx, sy);
+  if (length <= 1e-9) return false;
+  const sideValue = sx * (from.y - y1) - sy * (from.x - x1);
+  const side = Math.abs(sideValue) <= 1e-9 ? 0 : Math.sign(sideValue);
+  const rayX = to.x - from.x, rayY = to.y - from.y;
+  const rayLength = Math.hypot(rayX, rayY);
+  if (side !== 0 && cone.widthDeg < 360) {
+    if (rayLength <= 1e-9) return false;
+    const normalX = side * sy / length, normalY = -side * sx / length;
+    const dot = (rayX * normalX + rayY * normalY) / rayLength;
+    if (dot + 1e-9 < Math.cos(cone.widthDeg * Math.PI / 360)) return false;
+  }
+  const hitZ = from.z + (to.z - from.z) * t;
+  const remaining = Math.hypot((to.x - (from.x + rayX * t)) / pixelsPerUnit,
+    (to.y - (from.y + rayY * t)) / pixelsPerUnit, to.z - hitZ);
+  return remaining <= cone.depth + 1e-9;
+}
+
+function distanceToRing2D(point: { x: number; y: number }, ring: readonly SpatialPoint[]): number {
+  if (classifyRing(ring, point) === 1) return 0;
+  let best = Infinity;
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    if (!a || !b) continue;
+    const dx = b.x - a.x, dy = b.y - a.y, length2 = dx * dx + dy * dy;
+    const amount = length2 === 0 ? 0 : Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / length2));
+    best = Math.min(best, Math.hypot(point.x - (a.x + amount * dx), point.y - (a.y + amount * dy)));
+  }
+  return best;
+}
+
+function apertureRayPassesOpening(rule: FloorApertureSightRule, from: Point3, to: Point3, t: number, pixelsPerUnit: number): boolean {
+  const horizontalDistance = distanceToRing2D(from, rule.points) / pixelsPerUnit;
+  const cone = openingSightConeAt(rule.curve, Math.hypot(horizontalDistance, from.z - rule.level.floorZ));
+  if (!cone) return false;
+  const dz = to.z - from.z;
+  if (Math.abs(dz) <= 1e-9) return false;
+  const horizontalRay = Math.hypot((to.x - from.x) / pixelsPerUnit, (to.y - from.y) / pixelsPerUnit);
+  const deviation = Math.atan2(horizontalRay, Math.abs(dz));
+  if (deviation > cone.widthDeg * Math.PI / 360 + 1e-9) return false;
+  const hitX = from.x + (to.x - from.x) * t;
+  const hitY = from.y + (to.y - from.y) * t;
+  const hitZ = from.z + dz * t;
+  const remaining = Math.hypot((to.x - hitX) / pixelsPerUnit, (to.y - hitY) / pixelsPerUnit, to.z - hitZ);
+  return remaining <= cone.depth + 1e-9;
+}
+
+function crossFloorSightRayPolicy(
+  openings: ReadonlyMap<string, WallSightOpeningRule>,
+  apertures: readonly FloorApertureSightRule[],
+  pixelsPerUnit: number,
+): SightRayPolicy {
+  return (from, to, hits) => {
+    const events: Array<{ t: number; id: string; opening: WallSightOpeningRule | FloorApertureSightRule | null; aperture: boolean }> =
+      hits.map((hit) => ({ t: hit.t, id: `${hit.kind}:${hit.id}:${hit.plane ?? ""}`,
+        opening: hit.kind === "wall" ? openings.get(hit.id) ?? null : null, aperture: false }));
+    const dz = to.z - from.z;
+    if (Math.abs(dz) > 1e-9) for (const rule of apertures) {
+      const t = (rule.level.floorZ - from.z) / dz;
+      if (t < 0 || t > 1) continue;
+      const point = { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t };
+      // Strict interior only: the traced aperture's rim belongs to the solid floor.
+      if (classifyRing(rule.points, point) === 1)
+        events.push({ t, id: `aperture:${rule.id}`, opening: rule, aperture: true });
+    }
+    events.sort((a, b) => a.t - b.t || Number(!!a.opening) - Number(!!b.opening) || a.id.localeCompare(b.id));
+    for (const event of events) {
+      if (!event.opening) return false; // hard wall, raised area or solid floor always wins
+      const passes = event.aperture
+        ? apertureRayPassesOpening(event.opening as FloorApertureSightRule, from, to, event.t, pixelsPerUnit)
+        : wallRayPassesOpening(event.opening as WallSightOpeningRule, from, to, event.t);
+      if (!passes) return false;
+    }
+    return true;
+  };
 }
 
 /**
@@ -91,14 +236,18 @@ export function tokensSeenBelow(scene: SceneDocument, actors: readonly ActorDocu
   if (!targets.length) return [];
   try {
     // D-453: solid raised areas hide what is behind them, up to their tops.
-    const kernel = new SpatialKernel([...floorBarriers(scene), ...raisedBarriers(scene)], floorSurfaces(scene));
+    const barriers = floorBarriers(scene, true);
+    const wallOpenings = wallSightOpeningRules(scene);
+    const apertureOpenings = floorApertureSightRules(scene);
+    const kernel = new SpatialKernel([...barriers, ...raisedBarriers(scene)], floorSurfaces(scene));
     const perUnit = scene.grid.size / (scene.grid.distance > 0 ? scene.grid.distance : 5);
     // G-22 (D-446): light from this floor and the floor above counts too; the floor planes let it
     // through openings only. Past the perception light budget, only the targets' floors light them.
     const up = floorAbove(scene, levelId);
     let lights = floorLights(scene, new Set([...below.keys(), levelId, ...(up ? [up._id] : [])]));
     if (lights.length > 256) lights = floorLights(scene, new Set(below.keys())).slice(0, 256);
-    const perception = new SpatialPerception(kernel, lights, perUnit, options.rayBudget ?? 20_000);
+    const perception = new SpatialPerception(kernel, lights, perUnit, options.rayBudget ?? 20_000,
+      crossFloorSightRayPolicy(wallOpenings, apertureOpenings, perUnit));
     const levelOf = (t: TokenDocument) => scene.levels?.find((l) => l._id === t.levelId);
     const eyes = observers.map((t) => capToBand(perceptionBody(t, scene.grid), levelOf(t)));
     const darkness = new Map((scene.levels ?? []).map((l) => [l._id, l.darkness ?? scene.darkness ?? 0] as const));

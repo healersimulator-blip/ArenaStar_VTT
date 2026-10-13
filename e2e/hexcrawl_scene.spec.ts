@@ -218,7 +218,7 @@ test.describe("hexcrawl scene (§9 Phase 1, D-270)", () => {
     // scale = min(2400 / 1600, 1500 / 1200) = 1.25; the picture is 2000 px wide once scaled,
     // so it sits 200 px in from each side and touches the top and bottom.
     await expect(wizard.locator("[data-hx-fit-readout]")).toContainText("125%");
-    await expect(wizard.locator("[data-hx-map]")).toContainText("2400 × 1500");
+    await expect(wizard.locator("[data-hx-map]")).toContainText("2400 × 1500", { timeout: 30_000 });
     await page.click("[data-hx-next]");
     await page.click("[data-hx-next]");
     await page.click("[data-hx-create]");

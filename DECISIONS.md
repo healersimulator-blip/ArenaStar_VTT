@@ -13249,3 +13249,159 @@ Open areas never block anything. Light, movement and sound on the floor are unaf
 **Testing.** `tests/scripts/iceBeaconScene.test.ts` builds the documents through the real builder and checks every claim of the script against the shipped code: structure and validation with a silent floor-play audit, landings on solid floor, the ground under each token, what a player's floor scene shows through the fog gate at the entrance and on each crate, the labels for GM and player on her floor and on the floor below, and who is seen from the Gallery, the Ring and the Beacon's rim. `e2e/ice_beacon_scene.spec.ts` opens the built zip in a browser as a GM plus a player and walks the same script, including the climb and the west spiral. `tests/scripts/buildStarterWorlds.test.ts` counts the documents and assets, checks the format-3 header and boots both archives.
 
 **Art.** The Levels 7.0.3 sample maps carry no licence grant (`tools/adopt/INVENTORY.md` row 15, `LEGAL.md` §3): the starter ships them for **internal testing only**, and `INVENTORY` says so at the row.
+
+## D-455 — Compendium Add: the crash the first batch run found, and where the mapping now lives (2026-10-13)
+
+**The bug.** The actor sheet's compendium picker added a spell by building the `{ kind: "prepare" }`
+edit inline in markup, over `CompendiumEntry.system`. A `.svelte` template literal is invisible to
+`tsc` (D-255), so the row shape was never checked: the **Add** button threw on every shipped spell
+row of `systems/pf1e-core/packs/spells.json`. Nothing ran the spec that would have shown it — the
+file was in no batch (D-457).
+
+**The fix.** `pf1ePrepareFromCompendium(entry)` in `src/ui/sheets/pf1eSpellbook.ts`, imported by
+`PF1eActorSheet.svelte`, which now only calls it. Level = numeric `system.levelNumber`, else the
+lowest class-keyed `system.level` in 0…9, else **1** — the D-151 fallback, named in the code and
+deliberately not guessed at (the shipped packs store `level` as a class-keyed map). Components =
+`pf1eCompendiumComponents(system.components) ?? "V, S"`. No levelling rule was invented.
+
+**Verification.** 4 new tests in `tests/ui/pf1eSpellbook.test.ts` (shipped-row shape, a real
+`apply()` prepare, `levelNumber` precedence, junk → 1); file 21 passed. The end-to-end Add path in
+`e2e/fx_spell_binding.spec.ts` (Add → prepared row → FX binding) **1 passed / 17.6 s**.
+
+## D-456 — The window band: a window owns its pixels (2026-10-13)
+
+**The bug.** `WindowManager` orders windows inside `.wm-layer`, which sat *below* the canvas-side
+widgets — the floating zoom control (30), scene menu (35), token/hex menus (40), dice host (65),
+session panel (70) painted over every window. A modal inside a window is trapped by that window's
+stacking context, so the FX binding picker's backdrop (z 10030, *inside* the window) stayed under
+the zoom control and its Close button was unclickable. `e2e/fx_spell_binding.spec.ts` hit exactly
+that interception when D-457's batch first ran it.
+
+**The fix (presentational only).** `.wm-layer { z-index: 80 }` in `src/ui/windows/WindowHost.svelte`
+— one band above every canvas widget, below the page-level overlays (4998 notices, 4999 drop hint,
+10030 in-window modals). `App.svelte`'s `.notify-stack` moves 60 → 4998 so a refusal notice can
+never be *behind* a window. No z assignment moved and no JS logic changed; a portal was considered
+and rejected (it would fight `.wm-window`'s own stacking context and the manager's bookkeeping).
+
+**Verification.** `e2e/windows.spec.ts:157` drags the permissions window over the zoom control and
+requires `elementFromPoint(zoom centre)` to be inside a `.wm-window` (7 passed / 38.7 s). Negative
+check: with `z-index: auto` restored, the guard fails *Expected "window" / Received "zoom"*.
+
+## D-457 — Every spec belongs to a bounded batch, and the rule is a test (2026-10-13)
+
+**Why.** 89 of the 138 spec files were named by no `test*` script. `pnpm test:e2e` runs them all and
+is the one command that does not respect the 25-minute rule, so in practice the batches *are* how
+the suite is run — and a spec in no batch is a spec that stops being run. Two of the 89 had already
+rotted (a canvas tool count, a renamed hotbar selector) and D-455/D-456 are the app defects the
+first batch run of the others found.
+
+**What was added.** Seven bounded batches in `package.json` — `test:e2e:core`, `:table`,
+`:hexcrawl`, `:images`, `:net`, `:pf1e-combat`, `:pf1e-sheets` — one Chromium worker, zero retries,
+`--global-timeout` ≤ 20 minutes each. `tests/scripts/e2eBatchCoverage.test.ts` asserts the rule in
+unit-test time: every `e2e/*.spec.ts` is named by at least one batch, no spec is named by two
+*different* batches, no batch script exceeds the 25-minute cap, and no batch runs the whole suite.
+All 138 files / 429 tests are covered exactly once. `E2E_BATCHES.md` is the operator's table.
+
+**The two rotted assertions.** `e2e/app.spec.ts` expected 10 canvas tools; D-453 added the GM's
+Raised-area tool, so it now asserts the **named** eleven (a bare count was the reason the drift was
+silent). `e2e/windows.spec.ts` clicked `.hotbar [data-slot='1']`; the attribute is
+`data-hotbar-slot`.
+
+**Verification.** `e2eBatchCoverage.test.ts` 5 passed, and it fails when a spec is added to no batch
+(negative check). Measured, one batch at a time: core **48 passed / 9.5 min**, table **39 passed /
+11.8 min**, images **29 passed / 2 skipped / 5.7 min**, hexcrawl **15 passed / 1 skipped / 9.0 min**,
+net **4 passed / 30.6 s**, pf1e-combat **64 passed / 6 failed** (see `E2E_BATCHES.md` — all six
+predate this work and four reproduce with the app changes below reverted).
+
+## D-458 — An area cast's deferred save can be host-verified (2026-10-13)
+
+**The bug.** `pf1ePendingSaveEvidenceVerified` proves an area claim through
+`pf1eSpellAreaTargetVerified`, whose area branch required `action.targets.length === 1` on the
+**whole card**. The one producer of an area deferred save — `runQuickbarEntangleArea`
+(`src/ui/quickbar/run.ts`): one card per creature, `context.area` = Entangle's 40-ft spread on the
+feet-based square grid it already validates, `pf1e.pendingSave.v1` attached because such a cast has
+no consumable source and no touch — always publishes **two** rows: the evidenced save *and* the
+explicitly pending "spell effect" continuation (D-447's own contract for a card whose effect stage
+has no executor yet). No such card could ever be verified: the save stayed `reported`, so
+`ActionFxContext.verified` stayed false for every area cast.
+
+**The fix.** `pf1ePendingSaveContinuationOnly(action, target)`: when an area is claimed, every
+*other* row must be the producer's placeholder — `pending`/`pending`, no check, no
+damage/healing/conditions, no riders, no evidence. A second evidenced save row (or any mechanic
+claim) keeps the whole card `reported`. The verifier still rederives exactly one row, against
+`{ ...action, targets: [target] }`, and Entangle's 40-ft radius and the single-target rule were not
+touched.
+
+**Why the fixture moved, not the gate.** The old `e2e/pending_rolls.spec.ts` card was forged: an
+area of `radius: 20` with three rows (two evidenced saves) — a shape no producer emits, and one the
+host is right to refuse. The spec now has two tests: the **producer-shaped area card** (tokens, the
+caster's own token, the 40-ft spread, one evidenced save + the effect placeholder) asserting
+`data-target-provenance="host"` on the resolved save while the effect row stays pending; and the
+**multi-row card without an area** (resolve-one-keeps-the-others, GM role override, revision 2),
+where the host rederives each resolved row from the live actors alone.
+
+**Verification.** New unit test *D-458* in `tests/host/sync.test.ts`: `area-card` → `save-one` and
+the placeholder `host`, `area-two-saves-card` → both evidenced saves `reported`, the placeholder
+still `host`; file 288 passed. `e2e/pending_rolls.spec.ts` 4 passed / 19.0 s; `test:e2e:table` 39
+passed / 11.8 min. Negative check: with the allowance reverted and the app rebuilt, the new area
+test fails *Expected "host" / Received "reported"*.
+
+## D-459 — A D-405 action card keeps its narrative (2026-10-13)
+
+**The bug.** `ChatPanel.svelte` renders one branch per message (encounter → **action** → pending
+roll → ledger → roll → plain line). `attackActionCard` (D-405) attaches an action card to every
+attack resolution, so those messages took the action branch and `message.content` — the verdict,
+the damage sentence and the audit facts `PF Dummy 12 → 4 HP` and `⚠ HP write rejected: …` — was
+never rendered anywhere. The F01 branch directly below states the opposite intent in a comment
+("render it under the card instead of swallowing it"); D-405's branch order made the prose
+unreachable, and no batch contained the spec that reads it.
+
+**The fix.** The narrative paragraph is now one `{#snippet narrativeLine(message)}` — the same
+markup, moved, not rewritten — rendered by both the ledger branch and the action branch (guarded by
+`{#if message.content}`). A rejected HP write is a fact a GM must be able to see.
+
+**Verification.** `e2e/sheets.spec.ts`'s A06b test (written before D-405, asserting the hp line in
+the card's text) passes **unchanged** — 1 passed / 8.3 s; `test:e2e:core` 48 passed / 9.5 min.
+
+## D-460 — Patch 131026 lands: the AIS v1 slice, applied verbatim, and the three things that were scuffed (2026-10-13)
+
+**What landed.** `patches/01a12f54-fbf7-7ad2-a4fd-0c5ccf1f0eb1_131026.patch` (2026-10-12) — the
+Automation Interconnect System v1 slice: `AUTOMATION_INTERCONNECT_DESIGN.md`, the module package kind
+and its manifest/interconnect contract, the sandboxed module iframe and its host-authoritative RPC
+families (`src/packages/aisModule*`, `src/core/automationInterconnect.ts`,
+`src/core/packageManifest.ts`), exact package hashing/locks, world ZIP format 4, the Settings →
+Packages manager, the `pf1e-torch` reference module, plus the vision/fog/lighting/level work the
+patch carries (openings, light animation, opening-sight policy, cross-floor proximity LOS,
+`floorSurface`, `idb` storage) and its unit tests. 72 files touched: 51 modified, 21 added.
+
+**How it was applied.** Verbatim: `git apply patches/01a12f54-…_131026.patch` onto the verification
+commit — `git apply --check` was clean both against the pristine tree and against this branch's
+uncommitted work, and the patch file is tracked in the repository. No hunk was edited, reordered or
+dropped. The one commit that follows carries only the working-shape adjustments below.
+
+**The scuffs (three, all outside the patch's own files).** The patch renames the Settings section
+that `e2e/worldfile.spec.ts` asserts (`Strategic ruleset & content (§12)` →
+`Packages & automation (§12 · AIS v1)`), so that assertion now matches the section rather than the
+AIS version label. The AIS rows make the Settings window long enough that
+`e2e/fog.spec.ts`'s 30 s default ceiling can expire while the scene-fog switch is scrolled into
+view and toggled (it passes in ~20 s with headroom, and carries a 90 s ceiling now). And
+`visionSmoke` in `src/app/e2eHook.ts` still read its fog round-trip out of a hand-built
+`"scene-1:gm"` key; the host has stored fog under the level-aware `fogVersionKey(sceneId, levelId,
+user, epoch)` since the level-fog work, so the hook now reads the key with the same helper the host
+writes it with. A stale doc comment in `RulesetSection.svelte` was corrected with them.
+
+**Verification on the patched tree.** Unit: **5659 passed / 12 skipped** across 424 files (+64 tests
+over the verification commit). `pnpm lint`, `pnpm typecheck` (tsc + `checkSvelte`: 92 components,
+0 blocking), `pnpm size` **5.05 MB raw / 1.44 MB gzip** (6 MB gate) — all green. Browser, one batch
+at a time: `test:e2e:core` **48 passed**, `test:e2e:table` **39 passed**, `test:e2e:hexcrawl`
+**16 passed**, `test:e2e:images` **30 passed / 1 skipped**, `test:e2e:net` **4 passed**,
+`test:fx:canvas` **25 passed**, `test:multilevel` **32 passed**; `test:e2e:pf1e-combat` **64 passed /
+6 pre-existing failures** and `test:e2e:pf1e-sheets` **23 passed / 5 pre-existing failures**,
+identical to their measurements before the patch (see `E2E_BATCHES.md` for the two groups and the
+evidence that they predate both this patch and the batch work).
+
+**Named limits.** The patch's own design doc records what AIS v1 does not yet do (no general
+workflow/mechanics pipeline, no theme/UI slot system, no player hydration; exact-version
+requirements only). It adds no `DECISIONS.md` entries of its own — the design doc carries its
+rationale — so the landing is recorded here. The six PF1e failures are untouched by this patch and
+still need their own repair pass (the manual-AoO prompt and the pre-area-flow Entangle spec).
