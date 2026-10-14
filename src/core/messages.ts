@@ -88,6 +88,8 @@ export const MsgKind = {
   "stair.offer": 0x5b,
   "stair.choose": 0x5c,
   "stair.request": 0x5d,
+  // D-468: host → player AIS module delivery (approved, shared module set).
+  "ais.profile": 0x5e,
   // D-394 — permitted personal macro authoring in the GM world (not execution).
   "macros.save": 0x51,
   // SQ-02 — private acknowledgement naming the exact host-approved run a requester may cancel.
@@ -1063,7 +1065,41 @@ export interface StairChooseMsg { kind: "stair.choose"; offerId: string; levelId
 /** G-08: client → host "take the stairs" for a token already standing in a stairwell. */
 export interface StairRequestMsg { kind: "stair.request"; sceneId: string; tokenId: string }
 
+/**
+ * D-468: one GM-approved AIS module as delivered to a player shell. The hash is the module's
+ * identity (player consent is keyed on it); `capabilities` are the host-granted capabilities
+ * restricted to the player-runnable subset — the host still authorizes every resulting op.
+ */
+export interface AisSharedModule {
+  packageId: string;
+  name: string;
+  version: string;
+  hash: string;
+  source: string;
+  resources?: Record<string, string>;
+  runtimeHash?: string;
+  runtimeContext?: Json;
+  commands: import("./automationInterconnect").AisModuleCommandDeclaration[];
+  capabilities: import("./automationInterconnect").AisCapability[];
+  emittedEvents: string[];
+}
+
+/**
+ * D-468: the host's current shared AIS module set for one world. Sent after the welcome
+ * snapshot and again whenever the GM's approvals, grants or provider selections change; a
+ * module missing from a later profile must stop at the player. `providers` are the GM's
+ * exclusive-slot selections (`slotId → "packageId/contributionId"`).
+ */
+export interface AisProfileMsg {
+  kind: "ais.profile";
+  worldId: WorldId;
+  seq: number;
+  providers: Record<string, string>;
+  modules: AisSharedModule[];
+}
+
 export type WireMessage =
+  | AisProfileMsg
   | LevelFocusMsg
   | LevelFocusStateMsg
   | StairOfferMsg

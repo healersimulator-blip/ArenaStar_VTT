@@ -66,6 +66,11 @@ export interface WorldsRecord {
   automationProfile?: AisActivationProfile;
   /** AIS per-device consent, bound to the exact package hash. Never written to world ZIPs. */
   automationGrants?: Record<string, { hash: string; capabilities: AisCapability[]; runtimeHash?: string }>;
+  /**
+   * D-468: GM sharing opt-out per module id. Absent/true = the approved module is delivered to
+   * players (`ais.profile`); false = it runs on the GM's device only.
+   */
+  automationSharing?: Record<string, boolean>;
 }
 
 export interface DocumentsRecord {

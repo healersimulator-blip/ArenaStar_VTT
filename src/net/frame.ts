@@ -92,6 +92,7 @@ function validateDecoded(obj: unknown, name: MsgName): Result<WireMessage> {
     case "stair.offer":
     case "stair.choose":
     case "stair.request":
+    case "ais.profile":
     case "fog.get":
     case "fog.state":
     case "relay.offer":
@@ -186,6 +187,7 @@ export function channelFor(kind: MsgName): ChannelName {
     case "stair.offer":
     case "stair.choose":
     case "stair.request":
+    case "ais.profile":
     case "fog.get":
     case "fog.state":
     case "relay.offer":

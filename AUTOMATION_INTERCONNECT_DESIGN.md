@@ -97,6 +97,30 @@ Verification: **5,721 unit tests passed / 12 skipped**, typecheck/lint/build/siz
 browser batch **3/3**, existing AIS browser batch **15/15**, adjacent shell/world tests **20/20**.
 The ordinary app is **5,355,180 raw bytes / 1,530,129 gzip bytes** (5.107 MiB raw), under the 6 MiB cap.
 
+### 0.4 Player-side execution of shared modules (D-468)
+
+The GM-only posture of 0.1–0.3 was an implementation stage, not a goal: the owner's rule is that
+the GM can share modules, UI and sheets with players, and the first acceptance case is the shipped
+`pf1e-torch` lighting a torch on a **player's own token from the player's own UI**. Slice P1a of
+[AIS_PLAYER_RUNTIME_PLAN.md](AIS_PLAYER_RUNTIME_PLAN.md) delivers exactly that:
+
+- a new `ais.profile` message (ops channel, after the welcome snapshot and on every change) carries
+  the GM-approved *shared* module set — archive, hash, commands and the host grant minus the
+  GM-device-only capabilities (`fx.play`, `scene.tags.write`, `ui.theme`);
+- each player allows each module per device, world and exact hash; GM approval is necessary and
+  never sufficient; un-sharing, revocation or a hash change stop the module without a reload;
+- the player runtime composes the unchanged sandboxed iframe and kernel RPC handlers over the
+  player's `ClientSync` replica, so every write is the player's own intent and the host's
+  `validateOps` + ownership decide (no authorization code changed);
+- the player shell gains a consent dialog, a choice dialog, notices and a token context menu with
+  the light entries; the GM's module review gains a per-module "Players run this module too" box.
+
+Verification: unit **5,775 passed / 12 skipped**, typecheck/lint/build clean, main file
+**5,723,400 B** (+24,504 B). The browser case `e2e/ais_player.spec.ts` joined `test:e2e:ais` but
+was not executed in the authoring sandbox. Later phases — player quickbar/chat commands, shared
+sheets/panels through a Svelte component-package contract, and moving the native PF1e logic into
+the world file — are planned there and not started.
+
 ## 1. Goals and non-goals
 
 ### Goals
@@ -416,6 +440,7 @@ No script-returned `true`, player-supplied roll total, or module-supplied permis
 - Prompts return typed player responses. The host stores a continuation token, validates the response once, then re-reads and revalidates world state before resuming.
 - Module versions, API contract versions, hashes, required features, and selected exclusive providers are part of the world profile. Host/player negotiation happens before features that need local UI or matching logic are used.
 - Mechanics remain host-resolved even when player UI code is missing. A client with no optional UI module sees the core fallback; a missing required rules provider is a compatibility error, never an invisible ruleset change.
+- (D-468) Player-side module code is **the same archive the GM approved**, delivered by the host in `ais.profile` and keyed by hash; it runs under the player's identity against the player's visibility-filtered replica, and its writes are ordinary intents — the host's permission path is the only authority for them, exactly as for a human player's own edits.
 - Module-produced player UI is client-side presentation only. It gets that player's projected data and can request actions through the host; it never gets GM documents or host-only secrets.
 
 ### Budgets and failure containment
@@ -619,12 +644,12 @@ The first generally usable AIS release should meet all of these:
 ## 17. Open decisions to settle before coding
 
 1. **Package role name:** `module`, `automation`, or a generic module with typed `contributes` fields? Recommendation: use `module` as the package role and classify behavior with `contributes`, so a package can provide automation + UI without duplicate wrappers.
-2. **Client code delivery:** require players to import the world ZIP, or transfer selected UI module blobs from host? Recommendation: first require exact local package/hash for client code and fall back to core UI; add verified bounded package transfer only if user testing shows this is too much friction.
+2. **Client code delivery:** require players to import the world ZIP, or transfer selected UI module blobs from host? Recommendation: first require exact local package/hash for client code and fall back to core UI; add verified bounded package transfer only if user testing shows this is too much friction. **Decided (D-468):** the host transfers the approved archive in `ais.profile`, identified by hash; the player consents per device and hash; no local import is required.
 3. **Custom UI ceiling:** is theme-token + schema-driven UI enough initially, or is a sandboxed custom panel required in v1? Recommendation: ship first two levels first; do isolated custom panels after sandbox/CSP proof.
 4. **Trusted in-page modules:** keep as a long-lived legacy tier, or deprecate after sandboxed capabilities reach parity? Recommendation: retain temporarily but make the warning and non-unloadability explicit; don't extend it with new APIs.
 5. **System-specific event evolution:** can an installed system package declare new events at boot, or must the main app predeclare every event? Recommendation: core owns universal events; a system may declare additional namespaced contracts, validated against a bounded schema subset and pinned with its version.
 6. **Code provenance:** is GM consent enough for local campaign use, or will ArenaStar eventually provide signed/published modules? Recommendation: start offline-first with local consent and hashes; don't imply hashes are signatures.
-7. **What counts as mandatory for a player client:** decide per contribution whether it is host-only, player-UI-optional, or player-UI-required, and encode this in the profile/handshake rather than guessing from `module.entry`.
+7. **What counts as mandatory for a player client:** decide per contribution whether it is host-only, player-UI-optional, or player-UI-required, and encode this in the profile/handshake rather than guessing from `module.entry`. **Decided (D-468):** mechanics stay host-resolved; shared modules at the player are optional UI/intent producers, and a player who declines still plays with the core fallback (the GM device keeps running the module).
 
 ## 18. Recommended prototype vertical slice
 

@@ -2,7 +2,7 @@ import { aisTagProposal, parseAisTagUpdate } from "../core/aisScene";
 import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE, STAIR_OFFER_TTL_MS, levelCreationOps, stairChoiceOps, stairChoicesHere, stairMovementPlan, type StairPrompt } from "../core/levelPlay";
 import { isScopedCollection } from "../core/levelMembership";
 import { levelFocusView, LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
-import type { LevelFocusMsg, StairChooseMsg, StairOfferMsg, StairRequestMsg } from "../core/messages";
+import type { AisProfileMsg, LevelFocusMsg, StairChooseMsg, StairOfferMsg, StairRequestMsg } from "../core/messages";
 import { fogVersionKey, fogLevelIdError, fogEpochError, LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "../core/levelFog";
 import { SaveWork } from "../storage/saveCoordinator";
 import { snapshotMoveEntry } from "../core/moveDestination";
@@ -862,6 +862,8 @@ export class HostSync {
   private readonly now: () => number;
   private readonly scriptRunner: ScriptRunner;
   private aisMacroModuleInvoker: AisMacroModuleInvoker | null = null;
+  /** D-468: builds the shared AIS module set (`ais.profile`) for players; null = no runtime wired. */
+  private aisProfileProvider: (() => Omit<AisProfileMsg, "kind" | "seq" | "worldId">) | null = null;
   private readonly resolveSummonSource: HostSyncOptions["resolveSummonSource"];
   private readonly summonRequests = new Map<string, number>();
   private summonTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1065,6 +1067,30 @@ export class HostSync {
   /** The browser host wires this bridge to its already-approved AIS module iframes. */
   setAisMacroModuleInvoker(invoker: AisMacroModuleInvoker | null): void {
     this.aisMacroModuleInvoker = invoker;
+  }
+
+  /**
+   * D-468: the browser host registers the builder of the player-facing module set. Every
+   * welcomed session hears the current profile right after its snapshot/catch-up; the host
+   * republishes to all sessions on every change (`publishAisProfile`). The GM's own in-process
+   * client receives it too and simply ignores it.
+   */
+  setAisProfileProvider(provider: (() => Omit<AisProfileMsg, "kind" | "seq" | "worldId">) | null): void {
+    this.aisProfileProvider = provider;
+    this.publishAisProfile();
+  }
+
+  /** Re-send the current shared module set to every authenticated session. */
+  publishAisProfile(): void {
+    const msg = this.currentAisProfile();
+    if (!msg) return;
+    for (const session of this.sessions.values()) if (session.user) this.send(session, msg);
+  }
+
+  private currentAisProfile(): AisProfileMsg | null {
+    const body = this.aisProfileProvider?.();
+    if (!body) return null;
+    return { kind: "ais.profile", worldId: this.store.meta.worldId, seq: this.store.seq, ...body };
   }
 
   // ─── Sessions ───────────────────────────────────────────────────────────────
@@ -1728,6 +1754,9 @@ export class HostSync {
       ...(this.simInfo !== null ? { sim: this.simInfo } : {}),
     });
     this.catchUpSeq(session, hello);
+    // D-468: the shared AIS module set follows the documents it will read.
+    const aisProfile = this.currentAisProfile();
+    if (aisProfile) this.send(session, aisProfile);
     // A viewer loading the active scene it does not already hold hears `sceneLoad` — the
     // per-player half of MATT's scene trigger (its wiki: "triggers for each player loading
     // in"). Fired after the snapshot so the graph's own commits arrive as later ops; a scene

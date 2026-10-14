@@ -204,6 +204,8 @@ e2e 14/14 incl. late join, token move, GM crash recovery.
 - [x] After-action replay from checkpoints (§8A) — D-098
 - [x] Strategic↔tactical scene linking (generated tokens mapping) (§9A) — D-099
 - [x] File System Access API "save to folder" (§8) — D-100
+- [x] AIS modules at players (route (b), slice P1a): `ais.profile` delivery of the GM-approved shared set, per-device/per-hash player consent, the same kernel handlers over the player's replica with ownership as the only authority, player token menu + GM "Players run this module too" (§12) — D-468; programme in AIS_PLAYER_RUNTIME_PLAN.md
+- [ ] AIS at players P1b/P2/P3: player quickbar & chat commands, shared sheets/panels (Svelte component-package contract), native PF1e logic into the world file — AIS_PLAYER_RUNTIME_PLAN.md §3
 
 ## M4 — Resilience & scale + Strategic stress (§19)
 

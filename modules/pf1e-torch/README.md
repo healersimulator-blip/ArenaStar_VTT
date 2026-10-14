@@ -26,6 +26,17 @@ The module's source data uses ordered state arrays, so sources can have several 
 
 Directional beams are 90° cones oriented along the token's current rotation. ArenaStar's lighting renderer, light-range checks, fog reveal, worker polygon computation, and Foundry-scene importer carry that direction. A source's beam is used as a token's sight cone in total darkness when it is the only illumination at that token; ordinary ambient light and darkvision retain ArenaStar's existing full-circle perception model. Flame sources carry declarative `torch` shimmer metadata; the host renderer supports bounded `torch` and `pulse` effects for placed and carried lights, honors reduced-motion preferences, and never changes vision/range calculations.
 
+### At the players' tables (D-468)
+
+The GM's approval shares the module with the table by default (Settings → Packages → *Players run
+this module too*). A player is asked once per device and code hash; once allowed, this same module
+runs in a sandbox on the player's machine and the right-click entries above appear on the tokens
+that player controls. Every change it makes is the player's own intent: lighting a torch on an
+owned token (and consuming it from the owned actor's inventory) is accepted by the host, any other
+token is refused. *Torch settings…* are stored per browser, so a player's preferences apply to
+their own copy only. Unsharing or revoking the module on the GM device stops the player's copy
+immediately.
+
 ## Macro commands and source-change events
 
 The manifest declares eight macro-callable commands: `toggle`, `extinguish`, `current-source`, `current-state`, `equipped-sources`, `select-source`, `inventory`, and `source-exhausted`. A GM-reviewed ArenaStar script macro with the separate **ais.invoke** grant can call, for example:

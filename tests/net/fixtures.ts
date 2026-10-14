@@ -16,6 +16,9 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
     case "stair.offer": return { kind, offerId: "o1", sceneId: "s1", tokenId: "t1", choices: [{ levelId: "upper", name: "Upper", direction: "up" }], ttlMs: 60000, status: "open" };
     case "stair.choose": return { kind, offerId: "o1", levelId: "upper" };
     case "stair.request": return { kind, sceneId: "s1", tokenId: "t1" };
+    case "ais.profile": return { kind, worldId: "w1", seq: 7, providers: { "scene.token.light.action": "torch/light" },
+      modules: [{ packageId: "torch", name: "Torch", version: "1.0.0", hash: "h1", source: "AIS.commands.on('x', () => null);",
+        commands: [{ id: "x", contract: 1 }], capabilities: ["action.observe"], emittedEvents: [] }] };
     case "audio.cmd":
       return {
         kind: "audio.cmd",

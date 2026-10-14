@@ -182,8 +182,10 @@ describe("AIS authoritative writes", () => {
       ]);
       expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled", "rejected"]);
       expect(quantities).toEqual([1, 0]);
-      expect(diffs[0]).toHaveProperty(["flags.ais.probe"]);
+      // The fixture token has no `flags.ais` yet: the namespace is created whole, never `flags`.
+      expect(diffs[0]).toHaveProperty(["flags.ais", "probe"]);
       expect(diffs[0]).not.toHaveProperty("flags");
+      expect(diffs[0]).not.toHaveProperty(["flags.ais", "other"]);
     } finally { db.close(); }
   });
 
@@ -252,7 +254,7 @@ describe("AIS authoritative writes", () => {
 
 describe("AIS exact boot identity and local consent", () => {
   const module: HostAutomationModuleBoot = {
-    packageId: "probe", version: "1.0.0", hash: "abc", source: "", capabilities: [...AIS_CAPABILITIES], commands: [], emittedEvents: [],
+    packageId: "probe", name: "Probe", version: "1.0.0", hash: "abc", sharedWithPlayers: true, source: "", capabilities: [...AIS_CAPABILITIES], commands: [], emittedEvents: [],
   };
   const world = (): WorldsRecord => ({
     worldId: "world-probe" as WorldsRecord["worldId"], name: "Probe", system: "test", version: "1.0.0",

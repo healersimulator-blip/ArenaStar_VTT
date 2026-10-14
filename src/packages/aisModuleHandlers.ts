@@ -410,6 +410,10 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         active: args.active,
         ...(sourceItemId ? { sourceItemId } : {}),
       } as unknown as Json;
+      // Dotted diffs need their intermediate objects to exist (core/diff.ts). A token that no
+      // module has touched has no `flags.ais` yet, so the first write creates the namespace
+      // whole and later writes address only this package's key, leaving other modules' state alone.
+      const existingAis = asRecord((token.flags as Record<string, unknown>).ais);
       ops.push({
         kind: "update",
         ref: { coll: "tokens", id: token._id, parent: { coll: "scenes", id: scene._id } },
@@ -422,7 +426,9 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
             angle: light.angle,
             animation: light.animation as unknown as Json,
           },
-          [`flags.ais.${ctx.packageId}`]: state,
+          ...(existingAis
+            ? { [`flags.ais.${ctx.packageId}`]: state }
+            : { "flags.ais": { [ctx.packageId]: state } as Json }),
         },
       });
       assertCommandActive(commandContext);

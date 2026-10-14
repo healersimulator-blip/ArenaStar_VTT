@@ -1,5 +1,5 @@
 import { LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
-import type { LevelFocusStateMsg, StairOfferMsg } from "../core/messages";
+import type { AisProfileMsg, LevelFocusStateMsg, StairOfferMsg } from "../core/messages";
 import { MAX_STAIR_LEVELS, STAIRS_V2_FEATURE } from "../core/levelPlay";
 import { fogVersionKey, fogLevelIdError, LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "../core/levelFog";
 /**
@@ -57,6 +57,8 @@ export interface ClientEvents {
   turnPhase: TurnPhaseMsg;
   /** §5A projected turn report (report field of the wire message). */
   turnReport: TurnReportMsg;
+  /** D-468: the host's shared AIS module set for this world (also retained as `aisProfile`). */
+  aisProfile: AisProfileMsg;
   /** §7 NTP-style probe reply (t3 is stamped by the handler). */
   pong: PongMsg;
   /** §7 host clock broadcast. */
@@ -169,6 +171,9 @@ export class ClientSync {
   private readonly bus: EventBus<ClientEvents>;
   /** §5A: the retained last turn report (see `lastTurnReport`). */
   private lastTurnReportMsg: TurnReportMsg | null = null;
+  private lastAisProfile: AisProfileMsg | null = null;
+  /** D-468: the latest `ais.profile` (a runtime created after the welcome must not miss it). */
+  get aisProfile(): AisProfileMsg | null { return this.lastAisProfile; }
   private readonly policy: OptimisticPolicy;
   private readonly now: () => number;
   private readonly ephemeralBucket: TokenBucket;
@@ -1005,6 +1010,18 @@ export class ClientSync {
       case "sim.snapshot":
         this.applySimSnapshot(msg);
         return;
+      case "ais.profile": {
+        // Bounded like every host→client payload the shell keeps: a malformed profile is dropped
+        // whole rather than half-applied (the sandbox never sees a module without its identity).
+        if (typeof msg.worldId !== "string" || !Number.isSafeInteger(msg.seq) || !Array.isArray(msg.modules) ||
+            msg.modules.length > 64 || typeof msg.providers !== "object" || msg.providers === null ||
+            !Array.from(msg.modules).every((m) => m && typeof m.packageId === "string" && typeof m.hash === "string" &&
+              typeof m.source === "string" && m.source.length <= 1_048_576 && Array.isArray(m.capabilities) && Array.isArray(m.commands))) return;
+        if (this.lastAisProfile && msg.seq < this.lastAisProfile.seq) return;
+        this.lastAisProfile = msg;
+        this.bus.emit("aisProfile", msg);
+        return;
+      }
       case "turn.phase":
         this.bus.emit("turnPhase", msg);
         return;

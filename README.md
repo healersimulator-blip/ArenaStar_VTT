@@ -102,6 +102,15 @@ without a reload; starting newly approved code still requires one. The acceptanc
 this lifecycle and the shipped Torch path over both `file://` and HTTPS. See D-461 and
 [E2E_BATCHES.md](E2E_BATCHES.md) for the verified scope; this is not yet the full AIS target design.
 
+**Players run shared modules too (D-468).** An approved module is shared with the table by default
+("Players run this module too" in its review). Each player is asked once per device and exact code
+hash; after allowing, the same sandboxed module runs on their machine against their own replica,
+and everything it writes is the player's own intent — the host's ownership rules decide, so a
+player lights the torch on *their* token from the token's right-click menu and is refused on anyone
+else's. Un-sharing or revoking stops the player's copy without a reload. The programme that
+continues this (player commands, shared sheets, native PF1e into the world file) is
+[AIS_PLAYER_RUNTIME_PLAN.md](AIS_PLAYER_RUNTIME_PLAN.md).
+
 **Runnable feasibility demo:** [Foundry through AIS](AIS_FOUNDRY_FEASIBILITY.md) loads original,
 byte-pinned Tagger 1.5.4 code through a separately packaged adapter, with host-validated tag writes
 and a small Sequence-style interface to our existing native FX engine. `test:fx:prepare` also builds

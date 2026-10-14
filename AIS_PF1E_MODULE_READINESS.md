@@ -96,7 +96,9 @@ Facts, with the file that proves each (unchanged since the AIS state report):
   no `ui.notifications`, no `game.socket`, no `FilePicker`, no `pf1` namespace.
 - **Guest loading**: a single IIFE rebundle produced by `scripts/buildAisDemo.mjs`; packages carry
   text resources only (scripts ≤ 1 MiB, UTF-8 resources ≤ 2 MiB/file, 8 MiB total; no binary, no
-  VFS, no ES-module graph loader). GM tab only; zero AIS in the player shell.
+  VFS, no ES-module graph loader). GM tab and, since D-468, player shells: the host delivers the
+  GM-approved shared set (`ais.profile`), each player consents per device and hash, and the same
+  kernel handlers run over the player's replica with ownership as the only authority.
 - **Data route**: `tools/content/sources.json` (two GitHub mirrors, exact commits, data-only usage)
   → `pnpm content:fetch` → `tools/convert/index.mjs` (28 packs: 13 pf1-system YAML + 15
   pf1e-content JSON; mappers for spell/feat/class/item/actor/roll table/journal; drop policy:

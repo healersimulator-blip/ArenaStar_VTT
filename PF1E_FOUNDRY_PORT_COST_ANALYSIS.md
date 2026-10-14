@@ -92,9 +92,12 @@ Largest PF1e files: `PF1eActorSheet.svelte` 82,670 Â· `pf1eCastFlow.ts` 47,183 Â
   has 302 lines mentioning pf1e, `e2eHook.ts` 171, `App.svelte` 87, `CombatPanel.svelte` 80,
   `quickbar/model.ts` 78, `JoinApp.svelte` 46, `agentBridge.ts` 30. Not byte-attributable; bounded
   below.
-- The player shell loads **no** packages: `packageLoader` / `trustedModule` / `aisModule*` have 0
-  references in `JoinApp.svelte` and `joinBoot.ts`; package loading exists only in `hostBoot.ts`,
-  `worldRecipe.ts`, `host/worldFile.ts`, `host/zipKind.ts`.
+- At the time of this measurement the player shell loaded **no** packages: `packageLoader` /
+  `trustedModule` / `aisModule*` had 0 references in `JoinApp.svelte` and `joinBoot.ts`; package
+  loading existed only in `hostBoot.ts`, `worldRecipe.ts`, `host/worldFile.ts`, `host/zipKind.ts`.
+  **Superseded by D-468** (same day): the player shell now runs GM-shared AIS modules delivered in
+  `ais.profile` (`src/app/playerAisRuntime.ts`); the "player-side package runtime" this analysis
+  asks for in T2/T3 exists for AIS archives, not yet for Svelte component packages.
 
 ### 1.3 The pf1 system package (measured on the mirror)
 

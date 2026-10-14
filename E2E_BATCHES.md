@@ -35,7 +35,7 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 | `test:e2e:hexcrawl` | 8 | 16 | 15 min | 8.2 min | **16 passed** |
 | `test:e2e:images` | 10 | 31 | 15 min | 4.9 min | **30 passed / 1 skipped** |
 | `test:e2e:net` | 4 | 5 | 15 min | 0.5 min | **4 passed** (+ `players_roster`, D-465) |
-| `test:e2e:ais` | 2 | 15 | 15 min | 6.6 min | **15 passed** |
+| `test:e2e:ais` | 3 | 16 | 15 min | 6.6 min (2 specs) | **15 passed** (+ `ais_player`, D-468, not yet run) |
 | `test:e2e:ui-adapters` | 2 | 5 | 15 min | 1.6 min | **5 passed** |
 | `test:e2e:pf1e-combat` | 16 | 70 | 20 min | 12.7 min | 64 passed / **6 pre-existing failures** |
 | `test:e2e:pf1e-sheets` | 14 | 28 | 20 min | 4.3 min | 23 passed / **5 pre-existing failures** |
@@ -87,6 +87,20 @@ See [AIS_FOUNDRY_FEASIBILITY.md](AIS_FOUNDRY_FEASIBILITY.md) for the exact suppo
 The existing adjacent browser checks were also rerun during this pass: **19/19** for
 `script_macros`, `worldfile`, `app`, `smoke`, and **2/2** native FX render/cancel checks.
 This is not a full rerun of all 446 tests, nor a claim that unrelated PF1e failures were repaired.
+
+## Player-side modules follow-up (D-468, 2026-10-14)
+
+`e2e/ais_player.spec.ts` joins the AIS batch: two browser contexts; the GM imports the PF1e
+starter, approves `pf1e-torch` (sharing ticked by default), hands the player an owned token with
+two torches; the player joins by manual signalling, is asked for consent naming
+"change the light carried by your tokens", allows, right-clicks the token, chooses
+*Turn carried light on* (host commit: radius > 0, torch consumed, `flags.ais.pf1e-torch`), puts it
+out again, and loses the module the moment the GM unticks sharing — with no reload and no
+`lastRejected`. **This spec has not been executed yet**: the authoring environment could not
+download Playwright browsers. Unit coverage of the same path is in
+`tests/app/playerAisRuntime.test.ts` (real `HostSync`↔`ClientSync`) and
+`tests/app/aisRuntimeSharing.test.ts` (booted `HostApp`). Run `pnpm test:e2e:ais` and record the
+result here before treating the batch as green.
 
 ## UI adapter / self-opening preview follow-up (D-463)
 

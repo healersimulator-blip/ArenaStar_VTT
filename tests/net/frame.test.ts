@@ -68,6 +68,7 @@ describe("channelFor (§6.1)", () => {
       "stair.offer": "ops",
       "stair.choose": "ops",
       "stair.request": "ops",
+      "ais.profile": "ops",
       hello: "ops",
       intent: "ops",
       roll: "ops",

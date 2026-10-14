@@ -1600,6 +1600,42 @@ Entering a stair region (outside→inside, token center, on a floor the region c
 
 `{kind,sceneId,tokenId}`. "Take the stairs" for a controlled token already standing in a stairwell: answered with an `open` offer (even for a single destination), `locked`, or `none`. Unknown, hidden and uncontrolled tokens share the `none` answer. Rate limited with intents.
 
+### ais.profile (0x5e · host → client · ops)
+
+D-468 player-side AIS. The host's current **shared module set** for the world: every automation
+module the GM has enabled in the world profile *and* locally approved by exact hash, minus
+appearance-only and runtime-provider packages and minus modules the GM un-shared in
+Settings → Packages. Sent to every welcomed session right after the snapshot/catch-up, and
+re-sent to all sessions whenever approvals, grants, sharing or provider selections change.
+A player shell diffs profiles by `(packageId, hash)`: a module that disappears (or changes
+hash) stops immediately; a new one starts only after the **player's own consent** for that
+exact hash (stored per device and world). The GM's own in-process client ignores the message.
+
+```ts
+interface AisProfileMsg {
+  kind: "ais.profile";
+  worldId: WorldId;
+  seq: number;                       // host store seq at publication (ordering only)
+  providers: Record<string, string>; // exclusive slot → "packageId/contributionId"
+  modules: AisSharedModule[];
+}
+interface AisSharedModule {
+  packageId: string; name: string; version: string;
+  hash: string;                      // module identity; consent is keyed on it
+  source: string;                    // entry source (≤ 1 MiB) or composed runtime source
+  resources?: Record<string, string>;
+  runtimeHash?: string; runtimeContext?: Json;
+  commands: AisModuleCommandDeclaration[];
+  capabilities: AisCapability[];     // host-granted ∩ player-runnable (no fx.play / scene.tags.write / ui.theme)
+  emittedEvents: string[];
+}
+```
+
+Delivery is not authority: a player's module runs in the same sandboxed iframe as on the host
+and every op it produces travels as an ordinary `intent`, so the host's `validateOps` and
+Foundry-default ownership rules decide what it may change (a torch module can light the tokens
+the player owns and nothing else). No new client → host message exists for this feature.
+
 ### Floor scopes for presentation objects; tokens always land on a floor (D-431, D-432)
 
 Drawings, templates, notes and regions accept the same optional `levelScope` as walls and lights (`{mode:"all"}` or `{mode:"levels",ids}`), validated against the scene's levels and re-keyed by scene copy; scoping them requires `scene-level-scopes-v1`, players may not author it, and projection strips it. In isolated play an **unscoped** drawing, template, note or region is shown on every floor (legacy objects are never hidden). `presentation.offFloor:{regions,drawings,templates,notes}` lists only the readable, non-hidden objects scoped to other floors; a client that receives a presentation without `offFloor` (an older host) hides these layers as before.

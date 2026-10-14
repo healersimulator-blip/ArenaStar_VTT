@@ -14032,3 +14032,73 @@ same order of magnitude; they differ in what they yield and when.
 `include` and outside every test batch; `eslint tools/analysis` is clean). The spike that would
 replace the widest estimates with measurements — port `test/actor-basics.test.mjs` to vitest and
 count the stub — is named in the document and not started.
+
+## D-468 — AIS modules run at players too: `ais.profile`, per-device consent, ownership authority (2026-10-14)
+
+**Context.** The implemented AIS (D-461–D-463) ran modules and their UI on the GM device only; the
+player shell loaded no packages, and D-466/D-467 described that as the baseline. The owner rejected
+the posture: the GM must be able to share modules, UI and sheets with players, and the acceptance
+example is the shipped `pf1e-torch` lighting a torch on a *player's own token* from the *player's
+own UI*. Of the two routes costed in D-467 — (b) upgrade AIS and its adapters once for every
+module, (c) rework the modules — the owner chose (b), and asked that the native PF1e implementation
+move into the world file as part of the same programme. This entry records the first slice (P1a);
+the programme is [AIS_PLAYER_RUNTIME_PLAN.md](AIS_PLAYER_RUNTIME_PLAN.md).
+
+**Decision.**
+1. **Delivery.** A new whole message `ais.profile` (0x5e, host → client, ops channel) carries the
+   GM-approved *shared* module set: archive source, resources, runtime context, commands, hash and
+   the host grant restricted to the player-runnable subset. It is sent after every welcome
+   snapshot/catch-up and republished to all sessions on every approval/grant/provider/sharing
+   change (`HostSync.setAisProfileProvider`/`publishAisProfile`). The GM's own in-process client
+   ignores it.
+2. **Policy** (`src/app/aisPlayerProfile.ts`, pure): share only modules in the frozen boot set;
+   never appearance-only packages or bare runtime providers; never a module the host could not
+   start; never a module whose GM-device consent is not currently active; honour the GM's live
+   per-module opt-out (`WorldsRecord.automationSharing`, a device preference kept across
+   re-imports like grants, with a checkbox "Players run this module too" in the module review).
+   `fx.play`, `scene.tags.write` and `ui.theme` are never advertised to players.
+3. **Consent.** The GM's approval is necessary, never sufficient: each player allows each module
+   per device, world and exact hash (IndexedDB settings scope `ais.player-consent:<worldId>`); a
+   changed hash is a new question ("was updated"); withdrawal and un-sharing stop the module
+   immediately without a reload. Because the package hash is asserted by the host and covers the
+   whole file map (not recomputable from the delivered subset), the record also binds a digest
+   the player computes over the delivered code (`deliveredDigest`) and the capability list shown:
+   the same hash with different code is refused and flagged in the dialog, a wider capability
+   list asks again, a narrower one does not.
+4. **Authority is unchanged.** The player runtime (`src/app/playerAisRuntime.ts`) composes the
+   same sandboxed iframe and the same kernel RPC handlers over a `ClientSync` context; every write
+   becomes the player's own intent and the host's `validateOps` + Foundry-default ownership decide.
+   No host authorization code changed for this — owners could already update their token's
+   `light`/`flags.ais.*` and their actor's item quantities. A `forbidden` rejection at the player
+   is surfaced as a notice.
+5. **Player UI.** `JoinApp` gains a consent dialog, a choice dialog for `ui.select`, module status
+   notices and a token context menu (`playerTokenContextMenuModel`: *Open sheet* plus the light
+   entries when a light provider is shared; disabled with a stated reason otherwise).
+
+**Fix surfaced by the player path.** `scene.token.light.apply` wrote `flags.ais.<pkg>` as a
+dotted key, which `src/core/diff.ts` rejects when the `flags.ais` namespace does not exist yet;
+the GM e2e masked it by seeding `"flags.ais": {}`. The handler now creates the namespace when
+absent and addresses only its own key otherwise; both shapes are asserted in
+`tests/packages/aisModule.test.ts` and `tests/packages/aisReliability.test.ts`.
+
+**Verification (measured).** `tsc --noEmit` clean; `checkSvelte` 0 blocking; `eslint .` clean;
+`vitest run` **5,775 passed / 12 skipped** (D-463: 5,721), including the new
+`tests/app/playerAisRuntime.test.ts` (10: real `HostSync`↔`ClientSync` over the memory transport —
+profile on join, consent gating, revocation, hash change, same-hash/different-code refusal,
+capability widening vs. narrowing, owned-token light commit accepted and the other player's token
+refused with `forbidden`), `tests/app/aisPlayerProfile.test.ts` (5),
+`tests/app/aisRuntimeSharing.test.ts` (2: a booted `HostApp` with a mocked iframe publishes,
+un-shares, re-shares and revokes end to end) and four `playerTokenContextMenuModel` cases.
+`dist/index.html` **5,723,400 B** (+24,504 B over D-467's 5,698,896 B; 568,056 B under the gate).
+**Not run:** the browser batch `test:e2e:ais`, now including `e2e/ais_player.spec.ts` (two
+contexts, real `pf1e-torch`, consent, right-click → *Turn carried light on* → host commit → off →
+GM un-share stops the player's copy) — the authoring sandbox cannot download Playwright browsers;
+run `pnpm test:e2e:ais` before claiming it green.
+
+**Consequences.** The sentences "GM tab only; zero AIS in the player shell" in
+`AIS_PF1E_MODULE_READINESS.md` and "the player shell loads no packages" in
+`PF1E_FOUNDRY_PORT_COST_ANALYSIS.md` are now history, and §17 items 2 and 7 of
+`AUTOMATION_INTERCONNECT_DESIGN.md` are decided (host-transferred blobs keyed by hash; per
+contribution the player side is optional UI, mechanics stay host-resolved). P1b (player quickbar
+and chat commands), P2 (shared sheets/panels) and P3 (native PF1e into the world file) are planned
+in the programme document and not started.

@@ -331,10 +331,29 @@ describe("AIS host handlers", () => {
         ref: { coll: "tokens", id: "token-1", parent: { coll: "scenes", id: "scene-1" } },
         diff: {
           light: { radius: 800, bright: 400, angle: 360, animation: { type: "torch", speed: 4.1, intensity: 0.32 } },
-          "flags.ais.sample-mod": { sourceId: "torch", sourceName: "Torch", sourceItemId: "item-torch", stateIndex: 1, active: true },
+          // A token no module touched yet has no `flags.ais`; the first write creates the
+          // namespace whole (dotted paths need their intermediates — core/diff.ts).
+          "flags.ais": { "sample-mod": { sourceId: "torch", sourceName: "Torch", sourceItemId: "item-torch", stateIndex: 1, active: true } },
         },
       },
     ]);
+    expect((submitted[0] as Array<{ diff: Record<string, unknown> }>)[1]?.diff).not.toHaveProperty("flags");
+    // Once the namespace exists, only this module's key is addressed — other modules' state survives.
+    token.flags = { ais: { "other-mod": { active: false } } } as unknown as typeof token.flags;
+    await handlers["scene.token.light.apply"]({
+      sceneId: "scene-1",
+      tokenId: "token-1",
+      sourceId: "torch",
+      sourceName: "Torch",
+      stateIndex: 0,
+      active: false,
+      light: { radius: 0, bright: 0, color: "#ffcf82", alpha: 0.8, angle: 360, animation: null },
+    });
+    expect((submitted[1] as Array<{ diff: Record<string, unknown> }>)[0]?.diff).toMatchObject({
+      "flags.ais.sample-mod": { sourceId: "torch", sourceName: "Torch", stateIndex: 0, active: false },
+    });
+    expect((submitted[1] as Array<{ diff: Record<string, unknown> }>)[0]?.diff).not.toHaveProperty("flags.ais");
+    submitted.pop();
     await expect(handlers["scene.token.light.apply"]({
       sceneId: "scene-1",
       tokenId: "token-1",

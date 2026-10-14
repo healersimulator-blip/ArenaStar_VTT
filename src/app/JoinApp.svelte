@@ -60,6 +60,14 @@
     hexContextMenuModel,
     type HexMenuEntry,
   } from "../ui/hexcrawl/hexContextMenu";
+  import { playerTokenContextMenuModel, type TokenMenuEntryId } from "../ui/combat/tokenContextMenu";
+  import {
+    PlayerAisRuntime,
+    describeAisCapability,
+    type PlayerAisPendingConsent,
+    type PlayerAisStatuses,
+  } from "./playerAisRuntime";
+  import type { AisModuleSelectRequest } from "../packages/aisModuleHandlers";
   import {
     NO_ONBOARDING_FACTS,
     onboardingSteps,
@@ -98,6 +106,7 @@
     SceneDocument,
     SceneGrid,
     TileDocument,
+    TokenDocument,
   } from "../core/documents";
   import type { Op } from "../core/ops";
   import { copyText } from "../ui/clipboard";
@@ -606,6 +615,7 @@
       void playerApp.ready.then(() => {
         phase = "live";
         mountCanvas();
+        startPlayerAis(playerApp);
       });
       if (new URLSearchParams(globalThis.location.search).has("e2e")) {
         void import("./e2eHook").then((m) => m.installPlayerE2e(playerApp));
@@ -687,6 +697,103 @@
     // A player's menu only ever offers "open" — everything else the model already refused to
     // list (the GM's entries are gated by the scene's write permission).
     if (entryId === "open") openHexWindow(menu.key);
+  }
+
+  // ─── D-468: player-side AIS — shared modules, consent, choices and the token menu ───
+  let playerAis: PlayerAisRuntime | null = null;
+  let aisPending = $state.raw<PlayerAisPendingConsent[]>([]);
+  let aisStatuses = $state.raw<PlayerAisStatuses>({});
+  let aisDeciding = $state(false);
+  interface PendingAisChoice extends AisModuleSelectRequest {
+    packageId: string;
+    resolve: (value: string | null) => void;
+  }
+  let pendingAisChoice = $state.raw<PendingAisChoice | null>(null);
+  let aisChoiceTimer: ReturnType<typeof setTimeout> | null = null;
+  function requestAisChoice(packageId: string, request: AisModuleSelectRequest): Promise<string | null> {
+    if (pendingAisChoice) {
+      showMoveNotice("Another module choice is already open.", "warn");
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      pendingAisChoice = { ...request, packageId, resolve };
+      aisChoiceTimer = globalThis.setTimeout(() => finishAisChoice(null), 5 * 60 * 1000);
+    });
+  }
+  function finishAisChoice(value: string | null): void {
+    const request = pendingAisChoice;
+    if (!request) return;
+    pendingAisChoice = null;
+    if (aisChoiceTimer !== null) globalThis.clearTimeout(aisChoiceTimer);
+    aisChoiceTimer = null;
+    request.resolve(value);
+  }
+  /** Started once the replica is live; the host's `ais.profile` may already be retained by the client. */
+  function startPlayerAis(playerApp: PlayerApp): void {
+    const client = playerApp.client;
+    if (!client || playerAis) return;
+    playerAis = new PlayerAisRuntime({
+      client,
+      bus: playerApp.bus,
+      db: playerApp.db,
+      worldId: client.world?.id ?? "",
+      activeScene,
+      select: requestAisChoice,
+      cancelChoice: (packageId) => { if (pendingAisChoice?.packageId === packageId) finishAisChoice(null); },
+      notify: (message, level) => showMoveNotice(message, level === "info" ? "info" : "warn"),
+      onStatus: (statuses) => { aisStatuses = statuses; },
+      onPending: (pending) => { aisPending = pending; },
+    });
+  }
+  async function decideAis(packageId: string, allow: boolean): Promise<void> {
+    if (!playerAis || aisDeciding) return;
+    aisDeciding = true;
+    try { if (allow) await playerAis.allow(packageId); else await playerAis.deny(packageId); }
+    catch (error) { showMoveNotice(error instanceof Error ? error.message : String(error), "warn"); }
+    finally { aisDeciding = false; }
+  }
+  /** Shared modules as the guide lists them: name, state on this device, and a way back after "Not now". */
+  const aisModuleRows = $derived.by(() => {
+    void aisStatuses; void aisPending;
+    const profile = playerAis?.currentProfile;
+    if (!profile) return [] as Array<{ packageId: string; name: string; version: string; state: string; pending: boolean }>;
+    return profile.modules.map((module) => {
+      const pending = aisPending.some((entry) => entry.packageId === module.packageId);
+      const status = aisStatuses[module.packageId];
+      return { packageId: module.packageId, name: module.name, version: module.version, pending,
+        state: pending ? "waiting for your decision" : status ? (status.state === "ready" ? "running" : status.error ?? status.state) : "not started" };
+    });
+  });
+  /** T01 for players: right-click on a token opens the reduced menu (sheet + shared light actions). */
+  let tokenMenu = $state<{ x: number; y: number; tokenId: string } | null>(null);
+  function closeTokenMenu(): void { tokenMenu = null; }
+  function tokenLightActionsFor(token: TokenDocument) {
+    void aisStatuses;
+    return playerAis?.tokenLightState(token);
+  }
+  /** The menu model re-reads the replica (storeVersion) so ownership and light state stay current. */
+  function tokenMenuModel(scene: SceneDocument, token: TokenDocument) {
+    void storeVersion;
+    return playerTokenContextMenuModel({
+      scene,
+      token,
+      user: app?.client.user ?? null,
+      actors: (app?.client.store.getAll("actors") ?? []) as readonly ActorDocument[],
+      lightActions: tokenLightActionsFor(token),
+    });
+  }
+  function runTokenMenuEntry(entryId: TokenMenuEntryId): void {
+    const menu = tokenMenu;
+    closeTokenMenu();
+    if (!menu) return;
+    const scene = activeScene();
+    const token = scene?.tokens.find((row) => row._id === menu.tokenId);
+    if (!token) return;
+    if (entryId === "open-sheet") { if (token.actorId) openActorSheet(token.actorId); return; }
+    const action = entryId === "token-light-toggle" ? "toggle" : entryId === "token-light-next" ? "next"
+      : entryId === "token-light-select" ? "select" : entryId === "token-light-off" ? "off"
+        : entryId === "token-light-settings" ? "settings" : null;
+    if (action) playerAis?.tokenLightAction(token._id, action);
   }
 
   function openHexWindow(key: string): void {
@@ -1483,6 +1590,7 @@
         const onToolKey = (e: KeyboardEvent) => {
           if (e.key !== "Escape" || isTypingTarget(e.target)) return;
           closeHexMenu(); // D-271: the hex menu dismisses like every other canvas menu
+          closeTokenMenu();
           if (e.defaultPrevented) return; // the rail's key layer already took this Escape
           e.preventDefault();
           runCanvasAction("escape");
@@ -1627,12 +1735,18 @@
               tokenElevationScaleOf(worldSettingsFrom(client.store.getAll("settings")))) queueMicrotask(refresh);
             if (ids.length === 1 && client.levelFocus?.isolated && client.levelFocus.mode !== "manual" && ids[0] !== client.levelFocus.followTokenId) chooseFloorFocus(null, ids[0]);
             closeHexMenu(); // any new gesture supersedes the menu
+            closeTokenMenu();
           },
           onTokenActivate: ({ token }) => {
             if (token.actorId) openActorSheet(token.actorId);
           },
+          // D-468: right-click on a token — the player's reduced menu (sheet + shared light actions).
+          onContextMenu: ({ screen, tokenId }) => {
+            closeHexMenu();
+            tokenMenu = { x: screen.x, y: screen.y, tokenId };
+          },
           // D-271: the same gesture where no token was hit — a hex a player has been shown.
-          onCanvasContextMenu: ({ screen, world }) => openHexMenu(screen, world),
+          onCanvasContextMenu: ({ screen, world }) => { closeTokenMenu(); openHexMenu(screen, world); },
           // D-294: the same yield in the player shell — a player who drags the map
           // during a GM-cued pan keeps their own view.
           onCameraInput: () => fxPlayer?.cancelCamera(),
@@ -1762,6 +1876,9 @@
   onDestroy(() => {
     clearTimeout(floorFocusTimer); clearTimeout(stairOfferTimer); clearTimeout(floorFadeTimer);
     if (imageNoticeTimer !== null) clearTimeout(imageNoticeTimer);
+    finishAisChoice(null);
+    playerAis?.dispose();
+    playerAis = null;
   });
 </script>
 
@@ -1925,7 +2042,7 @@
           role="application"
           aria-label="Game board"
           tabindex="-1"
-          onpointerdown={() => closeHexMenu()}
+          onpointerdown={() => { closeHexMenu(); closeTokenMenu(); }}
         >
           {#if measurePreview}
             {@const pts = measurePreview.points.map(measurePoint)}
@@ -1990,6 +2107,35 @@
                 {/if}
               </div>
             </div>
+          {/if}
+          {#if tokenMenu}
+            {@const menuScene = activeScene()}
+            {@const menuToken = menuScene?.tokens.find((row) => row._id === tokenMenu?.tokenId)}
+            {#if menuScene && menuToken && app?.client}
+              {@const model = tokenMenuModel(menuScene, menuToken)}
+              <!-- D-468: the player's token menu — the sheet, and the GM-shared light actions. -->
+              <div
+                class="token-menu"
+                data-token-menu={menuToken._id}
+                onpointerdown={(ev) => ev.stopPropagation()}
+                style={`left: ${Math.round(tokenMenu.x)}px; top: ${Math.round(tokenMenu.y)}px;`}
+                role="menu"
+                tabindex="-1"
+                aria-label="{model.title} actions"
+              >
+                <span class="token-menu-title">{model.title}</span>
+                {#each model.entries as entry (entry.id)}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-token-menu-action={entry.id}
+                    disabled={entry.disabled}
+                    title={entry.reason ?? ""}
+                    onclick={() => runTokenMenuEntry(entry.id)}>{entry.label}</button
+                  >
+                {/each}
+              </div>
+            {/if}
           {/if}
           {#if hexMenu}
             <!-- D-271: a player's reduced hex menu — the player text, and where the party is. -->
@@ -2117,6 +2263,23 @@
           <section class="guide-card"><h3>Effects on this device</h3>
             <FxViewPrefsPanel />
           </section>
+          {#if aisModuleRows.length > 0}
+            <section class="guide-card" data-player-ais-modules><h3>Shared modules</h3>
+              <p class="hint">Modules the GM shares with this table run sandboxed on your device, only after you allow them, and can only change what you already control.</p>
+              <ul class="ais-module-list">
+                {#each aisModuleRows as row (row.packageId)}
+                  <li data-player-ais-module={row.packageId} data-player-ais-state={row.state}>
+                    <span><strong>{row.name}</strong> v{row.version} · {row.state}</span>
+                    {#if !row.pending}
+                      <button type="button" data-player-ais-forget disabled={aisDeciding} onclick={() => void playerAis?.forget(row.packageId)}>
+                        {aisStatuses[row.packageId]?.state === "ready" ? "Stop and ask again" : "Ask again"}
+                      </button>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            </section>
+          {/if}
           <section class="guide-card"><h3>Connection</h3>
             <p>Playing as <strong>{playerName}</strong> in {worldName}.</p>
             <p>Connection state: <strong>{connState}</strong></p>
@@ -2125,6 +2288,51 @@
         </div>
       </div>
     {/if}
+  {/if}
+  {#if pendingAisChoice}
+    <div class="ais-choice-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) finishAisChoice(null); }}>
+      <dialog open class="ais-choice-dialog" aria-modal="true" aria-labelledby="ais-choice-title" onkeydown={(event) => { if (event.key === "Escape") finishAisChoice(null); }}>
+        <h2 id="ais-choice-title">{pendingAisChoice.title}</h2>
+        {#if pendingAisChoice.description}<p>{pendingAisChoice.description}</p>{/if}
+        <p class="ais-choice-origin">Requested by {pendingAisChoice.packageId}</p>
+        <div class="ais-choice-options">
+          {#each pendingAisChoice.options as option (option.value)}
+            <button type="button" data-ais-choice={option.value} onclick={() => finishAisChoice(option.value)}>
+              <span>{option.label}</span>
+              {#if option.description}<small>{option.description}</small>{/if}
+            </button>
+          {/each}
+        </div>
+        <button class="ais-choice-cancel" type="button" onclick={() => finishAisChoice(null)}>Cancel</button>
+      </dialog>
+    </div>
+  {:else if aisPending.length > 0}
+    {@const offer = aisPending[0]}
+    <!-- D-468: the player's own consent — the GM's approval delivers the module, this runs it. -->
+    <div class="ais-choice-backdrop" role="presentation">
+      <dialog open class="ais-choice-dialog" aria-modal="true" aria-labelledby="ais-consent-title" data-ais-consent={offer.packageId}>
+        <h2 id="ais-consent-title">{offer.updated ? `${offer.name} was updated` : `Run ${offer.name} on this device?`}</h2>
+        <p>The GM shares <strong>{offer.name}</strong> v{offer.version} with this table. It runs in a sandbox on your device, acts as you, and can only change what you already control.</p>
+        {#if offer.capabilities.length > 0}
+          <p>It may:</p>
+          <ul class="ais-consent-capabilities">
+            {#each offer.capabilities as capability (capability)}<li>{describeAisCapability(capability)}</li>{/each}
+          </ul>
+        {:else}
+          <p>It asks for no host services.</p>
+        {/if}
+        {#if offer.integrity === "mismatch"}
+          <p class="ais-consent-warning" role="alert" data-ais-consent-mismatch>
+            The code delivered now is not the code you allowed earlier under this same package hash. The host device may be misbehaving; do not allow unless you trust it.
+          </p>
+        {/if}
+        <p class="ais-choice-origin">Package {offer.packageId} · code hash {offer.hash.slice(0, 16)}{aisPending.length > 1 ? ` · ${aisPending.length - 1} more waiting` : ""}</p>
+        <div class="ais-consent-actions">
+          <button type="button" data-ais-consent-deny disabled={aisDeciding} onclick={() => void decideAis(offer.packageId, false)}>Not now</button>
+          <button type="button" data-ais-consent-allow disabled={aisDeciding} onclick={() => void decideAis(offer.packageId, true)}>Allow on this device</button>
+        </div>
+      </dialog>
+    </div>
   {/if}
 </main>
 {#if imageDragActive}
@@ -2403,6 +2611,40 @@
     display: block;
   }
   /* D-271: the player's hex menu (the canvas area is the positioned ancestor). */
+  .token-menu {
+    position: absolute;
+    z-index: 15;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 230px;
+    padding: 8px;
+    background: #1c2b3a;
+    border: 1px solid #56718e;
+    border-radius: 9px;
+    box-shadow: 0 8px 24px #0009;
+  }
+  .token-menu-title { font-weight: 700; padding: 4px 8px; }
+  .token-menu button { text-align: left; background: transparent; border: 1px solid transparent; color: inherit; padding: 8px 10px; cursor: pointer; }
+  .token-menu button:hover:not(:disabled), .token-menu button:focus-visible { border-color: #7bd7c9; background: #283d48; }
+  .token-menu button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .ais-choice-backdrop { position: fixed; inset: 0; z-index: 6000; display: grid; place-items: center; padding: 20px; background: #050810bb; backdrop-filter: blur(3px); }
+  .ais-choice-dialog { position: static; margin: 0; width: min(480px, 100%); max-height: min(80vh, 720px); overflow: auto; display: grid; gap: 12px; padding: 20px; border: 1px solid #7893b4; border-radius: 14px; background: #141b26; color: #e8edf6; box-shadow: 0 18px 48px #000a; }
+  .ais-choice-dialog h2 { margin: 0; font-size: 19px; }
+  .ais-choice-dialog p { margin: 0; color: #b9c5d7; }
+  .ais-choice-dialog .ais-choice-origin { color: #8193aa; font-size: 12px; }
+  .ais-choice-options { display: grid; gap: 8px; }
+  .ais-choice-options button { display: grid; gap: 3px; text-align: left; padding: 11px 13px; border: 1px solid #46566e; border-radius: 9px; background: #202b3a; color: inherit; cursor: pointer; }
+  .ais-choice-options button:hover, .ais-choice-options button:focus-visible { border-color: #7bd7c9; background: #283d48; }
+  .ais-choice-options small { color: #acb9c9; }
+  .ais-choice-dialog .ais-choice-cancel { justify-self: end; padding: 7px 12px; }
+  .ais-consent-capabilities { margin: 0; padding-left: 20px; color: #d6deea; display: grid; gap: 3px; }
+  .ais-consent-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .ais-consent-actions button { padding: 8px 14px; border-radius: 8px; border: 1px solid #46566e; background: #202b3a; color: inherit; cursor: pointer; }
+  .ais-consent-actions button[data-ais-consent-allow] { border-color: #7bd7c9; background: #1f4a45; }
+  .ais-consent-warning { margin: 0.5rem 0; padding: 0.5rem 0.75rem; border: 1px solid #d98a6b; border-radius: 6px; background: #4a2a1f; color: #ffd9c9; }
+  .ais-module-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .ais-module-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .hex-menu {
     position: absolute;
     z-index: 14;

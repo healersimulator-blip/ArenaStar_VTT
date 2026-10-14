@@ -163,6 +163,10 @@ export interface HostAutomationModuleBoot {
   runtimeContext?: import("../core/documents").Json;
   runtimeDependencies?: Array<{ packageId: string; version: string; hash: string; capabilities: AisCapability[] }>;
   blockedReason?: string;
+  /** D-468: package display name, carried to players with the shared module. */
+  name: string;
+  /** D-468: false when the GM keeps this approved module on the host device only. */
+  sharedWithPlayers: boolean;
   capabilities: AisCapability[];
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
@@ -189,6 +193,8 @@ export interface HostAutomationModuleSummary {
   runtimeProviderId?: string;
   runtimeHash?: string;
   runtimeError?: string;
+  /** D-468: delivered to players once approved (default true; GM opt-out per module). */
+  sharedWithPlayers: boolean;
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
 }
@@ -269,6 +275,8 @@ export interface HostPackages {
   grantAutomationCapabilities(id: string, capabilities: AisCapability[], reviewedHash?: string, reviewedRuntimeHash?: string): Promise<{ ok: true } | { ok: false; error: string }>;
   /** Clear this package's local code/capability approval. */
   revokeAutomationApproval(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** D-468: keep an approved module on this device only (false) or deliver it to players (true, default). */
+  setAutomationSharing(id: string, shared: boolean): Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 export interface HostApp {
@@ -363,6 +371,7 @@ function resolveAutomationState(
     const lock = profile.modules.find((entry) => entry.id === rec.id);
     const enabled = lock?.version === rec.version && lock.hash === hash;
     const savedGrant = world?.automationGrants?.[rec.id];
+    const sharedWithPlayers = world?.automationSharing?.[rec.id] !== false;
     let runtime: ReturnType<typeof aisRuntimePackage> = null;
     let runtimeError: string | undefined;
     try { runtime = aisRuntimePackage(rec, records); }
@@ -385,6 +394,7 @@ function resolveAutomationState(
       ...(rec.manifest.interconnect.runtime ? { runtimeProviderId: rec.manifest.interconnect.runtime.provider } : {}),
       ...(runtime ? { runtimeHash: runtime.hash } : {}),
       ...(runtimeError ? { runtimeError } : {}),
+      sharedWithPlayers,
       commands,
       emittedEvents,
     });
@@ -394,8 +404,10 @@ function resolveAutomationState(
     if (!resolved) continue;
     bootModules.push({
       packageId: rec.id,
+      name: rec.name,
       version: rec.version,
       hash,
+      sharedWithPlayers,
       source: runtime?.source ?? aisOwnSource(rec),
       resources: aisRuntimeResources(rec),
       ...(rec.manifest.interconnect.provides?.some((slot) => slot.id === "ui.theme" && slot.mode === "exclusive" && slot.contract === 1)
@@ -1304,6 +1316,17 @@ async function bootHostAppLocked(
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
     },
+    async setAutomationSharing(id, shared) {
+      try {
+        const world = await getWorld(db, meta.worldId);
+        const next = Object.fromEntries(Object.entries(world?.automationSharing ?? {}).filter(([key]) => key !== id));
+        if (!shared) next[id] = false;
+        await persister.patchWorld({ automationSharing: Object.keys(next).length ? next : undefined });
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
     async compendia() {
       const out: Array<{
         packageId: string;
@@ -1370,6 +1393,7 @@ async function bootHostAppLocked(
     selectAutomationProvider: (slotId, providerRef) => mutatePackage(() => packageImpl.selectAutomationProvider(slotId, providerRef)),
     grantAutomationCapabilities: (id, capabilities, reviewedHash, reviewedRuntimeHash) => mutatePackage(() => packageImpl.grantAutomationCapabilities(id, capabilities, reviewedHash, reviewedRuntimeHash)),
     revokeAutomationApproval: (id) => mutatePackage(() => packageImpl.revokeAutomationApproval(id)),
+    setAutomationSharing: (id, shared) => mutatePackage(() => packageImpl.setAutomationSharing(id, shared)),
   };
   const cloudBackups = new CloudBackupController({
     worldId: meta.worldId,

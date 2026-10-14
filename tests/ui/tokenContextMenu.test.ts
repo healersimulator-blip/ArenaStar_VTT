@@ -8,10 +8,12 @@ import type {
 import { startCombat } from "../../src/core/combat";
 import {
   applyTokenMenuEntry,
+  playerTokenContextMenuModel,
   tokenCombatant,
   tokenContextMenuModel,
   toggleTokenHiddenOp,
 } from "../../src/ui/combat/tokenContextMenu";
+import type { ActorDocument } from "../../src/core/documents";
 
 const gm = { id: "gm", role: "GM" as const };
 const player = { id: "p1", role: "PLAYER" as const };
@@ -281,5 +283,59 @@ describe("token context menu actions (T01)", () => {
         nextId: () => "id",
       }).error,
     ).toContain("You cannot update this scene");
+  });
+});
+
+// D-468: the player shell's reduced menu — sheet + shared light actions, never roster controls.
+describe("playerTokenContextMenuModel", () => {
+  const playerScene = (tokens: TokenDocument[]): SceneDocument =>
+    ({ ...scene(tokens), ownership: { default: 2 } }) as SceneDocument;
+  const actor = (id: string, ownership: Record<string, number>): ActorDocument =>
+    ({ _id: id, type: "actor", name: id, ownership, flags: {}, system: {}, items: [], effects: [] }) as unknown as ActorDocument;
+  const light = { enabled: true, reason: null, active: false, sourceName: null };
+
+  test("the player gets the sheet of a readable character and live light actions on a token they control", () => {
+    const own = token("own", { ownership: { default: 0, p1: 3 }, actorId: "a1" });
+    const model = playerTokenContextMenuModel({
+      scene: playerScene([own]), token: own, user: player, actors: [actor("a1", { default: 0, p1: 3 })], lightActions: light,
+    });
+    expect(model.title).toBe("own");
+    expect(model.entries.map((e) => e.id)).toEqual([
+      "open-sheet", "token-light-toggle", "token-light-next", "token-light-select", "token-light-off", "token-light-settings",
+    ]);
+    expect(model.entries.every((e) => !e.disabled)).toBe(true);
+    expect(model.entries[1]?.label).toBe("Turn carried light on");
+    // No roster, visibility or effect entries — those are the GM's.
+    expect(model.entries.some((e) => ["initiative", "add-combatant", "toggle-hidden", "apply-effect"].includes(e.id))).toBe(false);
+  });
+
+  test("another player's token: everything stays visible but disabled, with the reason", () => {
+    const foreign = token("foreign", { ownership: { default: 0, p2: 3 }, actorId: "a2" });
+    const model = playerTokenContextMenuModel({
+      scene: playerScene([foreign]), token: foreign, user: player, actors: [actor("a2", { default: 0, p2: 3 })], lightActions: light,
+    });
+    expect(model.entries[0]).toMatchObject({ id: "open-sheet", disabled: true, reason: "You cannot view this character." });
+    for (const entry of model.entries.slice(1)) expect(entry).toMatchObject({ disabled: true, reason: "You do not control this token." });
+  });
+
+  test("the provider's own state wins when the token is controlled; no provider means no light entries", () => {
+    const own = token("own", { ownership: { default: 0, p1: 3 } });
+    const waiting = playerTokenContextMenuModel({
+      scene: playerScene([own]), token: own, user: player, actors: [],
+      lightActions: { enabled: false, reason: "Allow the token-light module when prompted.", active: false },
+    });
+    expect(waiting.entries[0]).toMatchObject({ id: "open-sheet", disabled: true, reason: "This token has no character." });
+    expect(waiting.entries[1]).toMatchObject({ id: "token-light-toggle", disabled: true, reason: "Allow the token-light module when prompted." });
+    const bare = playerTokenContextMenuModel({ scene: playerScene([own]), token: own, user: player, actors: [] });
+    expect(bare.entries.map((e) => e.id)).toEqual(["open-sheet"]);
+  });
+
+  test("an active carried light flips the toggle label and names the source", () => {
+    const own = token("own", { ownership: { default: 0, p1: 3 } });
+    const model = playerTokenContextMenuModel({
+      scene: playerScene([own]), token: own, user: player, actors: [],
+      lightActions: { enabled: true, reason: null, active: true, sourceName: "Torch" },
+    });
+    expect(model.entries[1]?.label).toBe("Turn carried light off · Torch");
   });
 });

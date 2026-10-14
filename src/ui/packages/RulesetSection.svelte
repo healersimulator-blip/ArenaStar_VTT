@@ -224,6 +224,19 @@
     }
   }
 
+  /** D-468: sharing takes effect live (the host republishes `ais.profile`); no reload involved. */
+  async function setAisSharing(id: string, shared: boolean): Promise<void> {
+    pkgBusy = true;
+    pkgError = "";
+    try {
+      const result = await packages.setAutomationSharing(id, shared);
+      if (!result.ok) pkgError = result.error;
+      refresh();
+    } finally {
+      pkgBusy = false;
+    }
+  }
+
   const reloadWorld = (): void => {
     if (typeof location !== "undefined") location.reload();
   };
@@ -414,6 +427,11 @@
           <p class="hint">This module requests no host capabilities; approval still allows its sandboxed code to run.</p>
         {/if}
         {#if p.approved}
+          <label class="ais-share-players">
+            <input type="checkbox" data-ais-share-players checked={p.sharedWithPlayers} disabled={pkgBusy}
+              onchange={(event) => void setAisSharing(p.id, event.currentTarget.checked)} />
+            Players run this module too (they are asked for their own consent; their changes are limited to what they own)
+          </label>
           <span data-ais-approved>Approved: {p.grantedCapabilities.length ? p.grantedCapabilities.join(", ") : "no capabilities"}</span>
           <button type="button" data-ais-revoke disabled={pkgBusy} onclick={() => revokeAisApproval(p.id)}>Revoke local approval</button>
           <button type="button" data-ais-update-grant disabled={pkgBusy} onclick={() => void approveAisModule(p.id, capabilitiesFor(p.id, p), p.hash, p.runtimeHash)}>Update capabilities</button>
@@ -534,6 +552,7 @@
     border: 1px solid #34465d;
     border-radius: 5px;
   }
+  .module-review .ais-share-players { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
   .module-review fieldset label {
     display: inline-flex;
     align-items: center;

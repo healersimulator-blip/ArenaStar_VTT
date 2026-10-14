@@ -1,6 +1,8 @@
 import { UI_THEME_CAPABILITIES, UI_THEME_COMMAND } from "../core/uiTheme";
 /** Browser composition for AIS v1. Kept out of Svelte so the authority callbacks are type-checked. */
 import type { HostApp, HostAutomationModuleBoot } from "./hostBoot";
+import type { AisProfileMsg } from "../core/messages";
+import { buildAisPlayerProfile } from "./aisPlayerProfile";
 import type { Json, SceneDocument, TokenDocument, ActorDocument } from "../core/documents";
 import {
   aisTokenLightChanges,
@@ -64,12 +66,20 @@ export class AisRuntime {
   private disposed = false;
   private readonly definitions = new Map<string, HostAutomationModuleBoot>();
   private readonly mutate = createAisMutationQueue();
+  /** D-468: the last published player-facing module set (empty until consent is verified). */
+  private playerProfileBody: Omit<AisProfileMsg, "kind" | "seq" | "worldId"> = { providers: {}, modules: [] };
 
   constructor(options: AisRuntimeOptions) {
     this.options = options;
     const { app } = options;
     this.providers = app.automationBoot.resolution.providers;
     for (const module of app.automationBoot.modules) this.start(module);
+    // D-468: players receive the shared module set once the GM-device consent has been read.
+    app.host.setAisProfileProvider(() => this.playerProfileBody);
+    void getWorld(app.db, app.worldId).then(
+      (world) => this.publishPlayerProfile(world),
+      () => this.publishPlayerProfile(null),
+    );
     app.host.setAisMacroModuleInvoker(async (invocation) => {
       if (!invocation.isActive()) throw new Error("Script action was cancelled");
       const module = this.definitions.get(invocation.moduleId);
@@ -260,6 +270,27 @@ export class AisRuntime {
     }
   }
 
+  /**
+   * D-468: recompute and re-send the player-facing module set. `null` world = the authority
+   * read failed, which shares nothing (the same posture `reconcile` takes for local frames).
+   */
+  private publishPlayerProfile(world: WorldsRecord | undefined | null): void {
+    if (this.disposed) return;
+    const { app } = this.options;
+    this.playerProfileBody = world === null
+      ? { providers: {}, modules: [] }
+      : buildAisPlayerProfile({
+        modules: app.automationBoot.modules,
+        providers: this.providers,
+        assertConsent: (module) => assertAisModuleConsent(world, module),
+        isShared: (packageId) => world?.automationSharing?.[packageId] !== false,
+      });
+    app.host.publishAisProfile();
+  }
+
+  /** The current player-facing module set (what `ais.profile` carries). */
+  get playerProfile(): Omit<AisProfileMsg, "kind" | "seq" | "worldId"> { return this.playerProfileBody; }
+
   /** Removal/replacement/revocation stops immediately; additions still require explicit reload. */
   private async reconcile(): Promise<void> {
     if (this.disposed) return;
@@ -283,9 +314,11 @@ export class AisRuntime {
         }
       }
       this.options.onStatus({ ...this.statuses });
+      this.publishPlayerProfile(world);
     } catch {
       // A failed authority read is never permission to keep executing the cached profile.
       for (const frame of this.hosts.values()) frame.dispose("Could not verify current module approval; reload required");
+      this.publishPlayerProfile(null);
     }
   }
 
@@ -322,6 +355,7 @@ export class AisRuntime {
     this.disposed = true;
     for (const off of this.off) off();
     this.options.app.host.setAisMacroModuleInvoker(null);
+    this.options.app.host.setAisProfileProvider(null);
     for (const frame of this.hosts.values()) frame.dispose("World closed");
     this.hosts.clear();
   }

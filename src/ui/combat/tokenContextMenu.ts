@@ -23,6 +23,7 @@ import { editSelectedRoster } from "./tokenSelection";
 import type { CombatTransition } from "../../core/combat";
 
 export type TokenMenuEntryId =
+  | "open-sheet"
   | "initiative"
   | "add-combatant"
   | "remove-combatant"
@@ -178,6 +179,51 @@ export function tokenContextMenuModel(input: {
     );
   }
 
+  return { title: token.name, entries };
+}
+
+/** The light-action entries shared by both shells; `reason` wins over the provider's own state. */
+function tokenLightEntries(
+  lightActions: NonNullable<Parameters<typeof tokenContextMenuModel>[0]["lightActions"]>,
+  overrideReason: string | null,
+): TokenMenuEntry[] {
+  const disabled = overrideReason !== null || !lightActions.enabled;
+  const reason = overrideReason ?? (lightActions.enabled ? null : lightActions.reason ?? "The token-light module is not available.");
+  const current = lightActions.sourceName ? ` · ${lightActions.sourceName}` : "";
+  return [
+    { id: "token-light-toggle", label: `${lightActions.active ? "Turn carried light off" : "Turn carried light on"}${current}`, disabled, reason },
+    { id: "token-light-next", label: "Next carried light source", disabled, reason },
+    { id: "token-light-select", label: "Choose carried light source…", disabled, reason },
+    { id: "token-light-off", label: "Extinguish carried light", disabled, reason },
+    { id: "token-light-settings", label: "Torch settings…", disabled, reason },
+  ];
+}
+
+/**
+ * D-468: the player shell's token menu. Players never see roster or visibility controls (the
+ * host would refuse them anyway); they get their character sheet and — when the GM shares a
+ * token-light module and this player controls the token — the same light actions as the GM.
+ * Entries for tokens the player does not control stay visible but disabled, with the reason,
+ * so a refusal is explained before any intent leaves the device.
+ */
+export function playerTokenContextMenuModel(input: {
+  scene: SceneDocument;
+  token: TokenDocument;
+  user: PermissionUser | null;
+  actors: readonly ActorDocument[];
+  lightActions?: { enabled: boolean; reason: string | null; active: boolean; sourceName?: string | null };
+}): TokenMenuModel {
+  const { scene, token, user, actors, lightActions } = input;
+  const linkedActor = token.actorId ? actors.find((a) => a._id === token.actorId) : undefined;
+  const canReadActor = linkedActor !== undefined && user !== null && can(user, "read", linkedActor, "actors");
+  const controlsToken = user !== null && can(user, "update", token, "tokens", { parent: scene });
+  const entries: TokenMenuEntry[] = [{
+    id: "open-sheet",
+    label: "Open character sheet",
+    disabled: !canReadActor,
+    reason: linkedActor === undefined ? "This token has no character." : canReadActor ? null : "You cannot view this character.",
+  }];
+  if (lightActions) entries.push(...tokenLightEntries(lightActions, controlsToken ? null : "You do not control this token."));
   return { title: token.name, entries };
 }
 
