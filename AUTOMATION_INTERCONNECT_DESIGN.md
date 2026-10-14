@@ -119,7 +119,20 @@ Verification: unit **5,775 passed / 12 skipped**, typecheck/lint/build clean, ma
 **5,723,400 B** (+24,504 B). The browser case `e2e/ais_player.spec.ts` joined `test:e2e:ais` but
 was not executed in the authoring sandbox. Later phases — player quickbar/chat commands, shared
 sheets/panels through a Svelte component-package contract, and moving the native PF1e logic into
-the world file — are planned there and not started.
+the world file — are planned there.
+
+**P1b (D-469)** added the generic player-side controls without touching any module:
+
+- `interconnect.sharing: "players" | "host-only"` — the author's own declaration; `host-only`
+  modules never enter `ais.profile` and the GM's sharing box is disabled with that reason (the
+  answer to the "every copy observes the same events" constraint of plan §4.7);
+- `interconnect.tokenActions: [{ id, label }]` (≤ 16, needs `ui.interaction`) — token-menu entries
+  in **both** shells, dispatched as the existing `ui.token.action { sceneId, tokenId, action }` to
+  the declaring module; at the player, disabled on tokens the player does not control;
+- `runAs: "player"` — a player's frame (`AisModuleIframe` with `playerCommands: true`) runs declared
+  commands as that player (`PlayerAisRuntime.invokeCommand`), with the host validating every op
+  under the player's ownership; the *Shared modules* card has a command runner for the selected
+  token. Host frames keep refusing anything but the reviewed `"gm"` elevation.
 
 ## 1. Goals and non-goals
 

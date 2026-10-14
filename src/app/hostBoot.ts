@@ -9,6 +9,7 @@ import {
   type AisModuleCommandDeclaration,
   type AisPackageCandidate,
   type AisResolution,
+  type AisTokenActionDeclaration,
 } from "../core/automationInterconnect";
 import { aisOwnSource, aisRuntimePackage, aisRuntimeResources } from "../packages/aisRuntimePackage";
 import { packageContentHash } from "../packages/packageHash";
@@ -167,6 +168,10 @@ export interface HostAutomationModuleBoot {
   name: string;
   /** D-468: false when the GM keeps this approved module on the host device only. */
   sharedWithPlayers: boolean;
+  /** D-469: the manifest says `sharing: "host-only"` — never offered to players, whatever the GM ticks. */
+  hostOnly?: boolean;
+  /** D-469: manifest-declared token-menu entries (emitted back as `ui.token.action`). */
+  tokenActions?: AisTokenActionDeclaration[];
   capabilities: AisCapability[];
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
@@ -195,6 +200,8 @@ export interface HostAutomationModuleSummary {
   runtimeError?: string;
   /** D-468: delivered to players once approved (default true; GM opt-out per module). */
   sharedWithPlayers: boolean;
+  /** D-469: the manifest forbids player execution (`sharing: "host-only"`). */
+  hostOnly: boolean;
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
 }
@@ -371,7 +378,9 @@ function resolveAutomationState(
     const lock = profile.modules.find((entry) => entry.id === rec.id);
     const enabled = lock?.version === rec.version && lock.hash === hash;
     const savedGrant = world?.automationGrants?.[rec.id];
-    const sharedWithPlayers = world?.automationSharing?.[rec.id] !== false;
+    const hostOnly = rec.manifest.interconnect.sharing === "host-only";
+    const sharedWithPlayers = !hostOnly && world?.automationSharing?.[rec.id] !== false;
+    const tokenActions = rec.manifest.interconnect.tokenActions ?? [];
     let runtime: ReturnType<typeof aisRuntimePackage> = null;
     let runtimeError: string | undefined;
     try { runtime = aisRuntimePackage(rec, records); }
@@ -395,6 +404,7 @@ function resolveAutomationState(
       ...(runtime ? { runtimeHash: runtime.hash } : {}),
       ...(runtimeError ? { runtimeError } : {}),
       sharedWithPlayers,
+      hostOnly,
       commands,
       emittedEvents,
     });
@@ -408,6 +418,8 @@ function resolveAutomationState(
       version: rec.version,
       hash,
       sharedWithPlayers,
+      ...(hostOnly ? { hostOnly: true } : {}),
+      ...(tokenActions.length > 0 ? { tokenActions: tokenActions.map((action) => ({ ...action })) } : {}),
       source: runtime?.source ?? aisOwnSource(rec),
       resources: aisRuntimeResources(rec),
       ...(rec.manifest.interconnect.provides?.some((slot) => slot.id === "ui.theme" && slot.mode === "exclusive" && slot.contract === 1)

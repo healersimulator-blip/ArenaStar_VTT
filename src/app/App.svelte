@@ -82,6 +82,7 @@
   import {
     applyTokenMenuEntry,
     tokenContextMenuModel,
+    parseModuleActionEntryId,
   } from "../ui/combat/tokenContextMenu";
   import {
     activateEncounter,
@@ -2558,8 +2559,19 @@ const WALL_PICK_RADIUS = 12;
     void aisRuntimeStatuses;
     return aisRuntime?.tokenLightState(token);
   }
+  function tokenModuleActionsFor() {
+    void aisRuntimeStatuses;
+    return aisRuntime?.tokenActions() ?? [];
+  }
 
   /** Send a UI intent only to the current, explicitly selected AIS light provider. */
+  /** D-469: a manifest-declared token action → `ui.token.action` to the declaring module. */
+  function runModuleActionMenuEntry(entryId: string): void {
+    const parsed = parseModuleActionEntryId(entryId);
+    if (tokenMenu && parsed) aisRuntime?.runTokenAction(tokenMenu.tokenId, parsed.packageId, parsed.actionId);
+    closeTokenMenu();
+  }
+
   function runTokenLightMenuEntry(entryId: string): void {
     if (!tokenMenu) return;
     const action = entryId === "token-light-toggle" ? "toggle"
@@ -6021,6 +6033,7 @@ const WALL_PICK_RADIUS = 12;
                 actors: (app?.gm.client.store.getAll("actors") ??
                   []) as readonly ActorDocument[],
                 lightActions: tokenLightActionsFor(menuToken),
+                moduleActions: tokenModuleActionsFor(),
               })}
               <div
                 class="token-menu"
@@ -6048,6 +6061,7 @@ const WALL_PICK_RADIUS = 12;
                       title={entry.reason ?? ""}
                       onclick={() => {
                         if (entry.id.startsWith("token-light-")) runTokenLightMenuEntry(entry.id);
+                        else if (entry.id.startsWith("module-action:")) runModuleActionMenuEntry(entry.id);
                         else runTokenMenuEntry(entry.id as
                           | "add-combatant"
                           | "remove-combatant"

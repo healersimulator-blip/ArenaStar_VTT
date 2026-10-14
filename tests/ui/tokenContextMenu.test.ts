@@ -8,6 +8,8 @@ import type {
 import { startCombat } from "../../src/core/combat";
 import {
   applyTokenMenuEntry,
+  moduleActionEntryId,
+  parseModuleActionEntryId,
   playerTokenContextMenuModel,
   tokenCombatant,
   tokenContextMenuModel,
@@ -337,5 +339,40 @@ describe("playerTokenContextMenuModel", () => {
       lightActions: { enabled: true, reason: null, active: true, sourceName: "Torch" },
     });
     expect(model.entries[1]?.label).toBe("Turn carried light off · Torch");
+  });
+});
+
+describe("D-469 — manifest token actions in both menus", () => {
+  const actions = [
+    { packageId: "mounts", id: "mount", label: "Mount up", enabled: true, reason: null },
+    { packageId: "mounts", id: "dismount", label: "Dismount", enabled: false, reason: "The module is starting." },
+  ];
+  const playerScene = (tokens: TokenDocument[]): SceneDocument =>
+    ({ ...scene(tokens), ownership: { default: 2 } }) as SceneDocument;
+
+  test("entry ids round-trip and never collide with the built-in entries", () => {
+    expect(moduleActionEntryId("mounts", "mount")).toBe("module-action:mounts:mount");
+    expect(parseModuleActionEntryId("module-action:mounts:mount")).toEqual({ packageId: "mounts", actionId: "mount" });
+    expect(parseModuleActionEntryId("module-action:mounts:")).toBeNull();
+    expect(parseModuleActionEntryId("token-light-toggle")).toBeNull();
+  });
+
+  test("the player menu adds them after the sheet entry, disabled with the module's reason or the ownership reason", () => {
+    const own = token("own", { ownership: { default: 0, p1: 3 } });
+    const other = token("other", { ownership: { default: 0 } });
+    const mine = playerTokenContextMenuModel({ scene: playerScene([own, other]), token: own, user: player, actors: [], moduleActions: actions });
+    expect(mine.entries.map((e) => e.id)).toEqual(["open-sheet", "module-action:mounts:mount", "module-action:mounts:dismount"]);
+    expect(mine.entries[1]).toMatchObject({ label: "Mount up", disabled: false, reason: null });
+    expect(mine.entries[2]).toMatchObject({ label: "Dismount", disabled: true, reason: "The module is starting." });
+    const theirs = playerTokenContextMenuModel({ scene: playerScene([own, other]), token: other, user: player, actors: [], moduleActions: actions });
+    expect(theirs.entries[1]).toMatchObject({ disabled: true, reason: "You do not control this token." });
+  });
+
+  test("the GM menu appends them after the light entries with the module's own state", () => {
+    const hero = token("hero", {});
+    const model = tokenContextMenuModel({ combat: null, scene: scene([hero]), token: hero, user: gm, actors: [], moduleActions: actions });
+    const ids = model.entries.map((e) => e.id);
+    expect(ids.slice(-2)).toEqual(["module-action:mounts:mount", "module-action:mounts:dismount"]);
+    expect(model.entries.at(-1)).toMatchObject({ disabled: true, reason: "The module is starting." });
   });
 });

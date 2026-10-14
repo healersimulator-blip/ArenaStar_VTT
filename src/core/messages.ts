@@ -1082,6 +1082,8 @@ export interface AisSharedModule {
   commands: import("./automationInterconnect").AisModuleCommandDeclaration[];
   capabilities: import("./automationInterconnect").AisCapability[];
   emittedEvents: string[];
+  /** D-469: manifest token-menu entries, shown at the player for tokens they control. */
+  tokenActions?: import("./automationInterconnect").AisTokenActionDeclaration[];
 }
 
 /**

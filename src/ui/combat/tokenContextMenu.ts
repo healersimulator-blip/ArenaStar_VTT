@@ -33,7 +33,40 @@ export type TokenMenuEntryId =
   | "token-light-next"
   | "token-light-select"
   | "token-light-off"
-  | "token-light-settings";
+  | "token-light-settings"
+  /** D-469: `module-action:<packageId>:<actionId>` — a manifest-declared token action of a running module. */
+  | `module-action:${string}`;
+
+/** One manifest token action as either shell sees it (see AisRuntime/PlayerAisRuntime.tokenActions). */
+export interface TokenModuleAction {
+  packageId: string;
+  id: string;
+  label: string;
+  enabled: boolean;
+  reason: string | null;
+}
+
+export function moduleActionEntryId(packageId: string, actionId: string): `module-action:${string}` {
+  return `module-action:${packageId}:${actionId}`;
+}
+
+/** Inverse of moduleActionEntryId; null for any other entry id. */
+export function parseModuleActionEntryId(entryId: string): { packageId: string; actionId: string } | null {
+  if (!entryId.startsWith("module-action:")) return null;
+  const rest = entryId.slice("module-action:".length);
+  const cut = rest.indexOf(":");
+  if (cut <= 0 || cut === rest.length - 1) return null;
+  return { packageId: rest.slice(0, cut), actionId: rest.slice(cut + 1) };
+}
+
+function moduleActionEntries(actions: readonly TokenModuleAction[], overrideReason: string | null): TokenMenuEntry[] {
+  return actions.map((action) => ({
+    id: moduleActionEntryId(action.packageId, action.id),
+    label: action.label,
+    disabled: overrideReason !== null || !action.enabled,
+    reason: overrideReason ?? (action.enabled ? null : action.reason ?? "The module is not running."),
+  }));
+}
 
 export interface TokenMenuEntry {
   id: TokenMenuEntryId;
@@ -79,6 +112,8 @@ export function tokenContextMenuModel(input: {
   actors: readonly ActorDocument[];
   /** The selected AIS provider for the token-light UI slot, when one is installed. */
   lightActions?: { enabled: boolean; reason: string | null; active: boolean; sourceName?: string | null };
+  /** D-469: manifest-declared token actions of running modules. */
+  moduleActions?: readonly TokenModuleAction[];
 }): TokenMenuModel {
   const { combat, scene, token, user, actors, lightActions } = input;
   const member = tokenCombatant(combat, token);
@@ -178,6 +213,7 @@ export function tokenContextMenuModel(input: {
       { id: "token-light-settings", label: "Torch settings…", disabled, reason },
     );
   }
+  if (input.moduleActions?.length) entries.push(...moduleActionEntries(input.moduleActions, null));
 
   return { title: token.name, entries };
 }
@@ -212,8 +248,10 @@ export function playerTokenContextMenuModel(input: {
   user: PermissionUser | null;
   actors: readonly ActorDocument[];
   lightActions?: { enabled: boolean; reason: string | null; active: boolean; sourceName?: string | null };
+  /** D-469: manifest-declared token actions of running modules. */
+  moduleActions?: readonly TokenModuleAction[];
 }): TokenMenuModel {
-  const { scene, token, user, actors, lightActions } = input;
+  const { scene, token, user, actors, lightActions, moduleActions } = input;
   const linkedActor = token.actorId ? actors.find((a) => a._id === token.actorId) : undefined;
   const canReadActor = linkedActor !== undefined && user !== null && can(user, "read", linkedActor, "actors");
   const controlsToken = user !== null && can(user, "update", token, "tokens", { parent: scene });
@@ -224,6 +262,7 @@ export function playerTokenContextMenuModel(input: {
     reason: linkedActor === undefined ? "This token has no character." : canReadActor ? null : "You cannot view this character.",
   }];
   if (lightActions) entries.push(...tokenLightEntries(lightActions, controlsToken ? null : "You do not control this token."));
+  if (moduleActions?.length) entries.push(...moduleActionEntries(moduleActions, controlsToken ? null : "You do not control this token."));
   return { title: token.name, entries };
 }
 

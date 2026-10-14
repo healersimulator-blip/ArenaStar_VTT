@@ -54,13 +54,16 @@ describe("buildAisPlayerProfile — what the GM shares", () => {
       bootModule({ packageId: "blocked", blockedReason: "Enable the provider" }),
       bootModule({ packageId: "revoked" }),
       bootModule({ packageId: "private", sharedWithPlayers: false }),
-      bootModule({ packageId: "ok" }),
+      // D-469: the author's own declaration wins even when the GM never unticked the box.
+      bootModule({ packageId: "author-host-only", sharedWithPlayers: true, hostOnly: true }),
+      bootModule({ packageId: "ok", tokenActions: [{ id: "mount", label: "Mount up" }] }),
     ];
     const body = buildAisPlayerProfile({
       modules, providers: providers("private/light"),
       assertConsent: (module) => { if (module.packageId === "revoked") throw new Error("not approved"); },
     });
     expect(body.modules.map((m) => m.packageId)).toEqual(["ok"]);
+    expect(body.modules[0]?.tokenActions).toEqual([{ id: "mount", label: "Mount up" }]);
     // A selection whose provider does not travel is dropped: a player cannot act on it.
     expect(body.providers).toEqual({});
   });
@@ -121,5 +124,21 @@ describe("HostPackages.setAutomationSharing — the GM's per-module opt-out", ()
     await second.persister.flush();
     expect((await getWorld(second.db, second.worldId))?.automationSharing).toBeUndefined();
     await second.close();
+  });
+
+  test("D-469: a manifest with sharing: host-only boots as hostOnly and is never shared, whatever the record says", async () => {
+    const app = await freshApp();
+    expect((await app.packages.importZip(zipOf({
+      "manifest.json": JSON.stringify({ id: "gm-only-mod", name: "GM only", version: "1.0.0", type: "module",
+        interconnect: { api: "arena.ais/1", entry: "automation/entry.js", capabilities: ["action.observe", "ui.interaction"],
+          sharing: "host-only", tokenActions: [{ id: "ping", label: "Ping" }] } }),
+      "automation/entry.js": "AIS.events.on('turn.phase.changed', () => {});",
+    }))).ok).toBe(true);
+    expect(await app.packages.enableAutomationModule("gm-only-mod")).toEqual({ ok: true });
+    expect(await app.packages.grantAutomationCapabilities("gm-only-mod", ["action.observe", "ui.interaction"])).toEqual({ ok: true });
+    expect((await app.packages.automation()).modules[0]).toMatchObject({ approved: true, hostOnly: true, sharedWithPlayers: false });
+    const module = (await app.packages.runtimePlan()).modules.find((m) => m.packageId === "gm-only-mod");
+    expect(module).toMatchObject({ hostOnly: true, sharedWithPlayers: false, tokenActions: [{ id: "ping", label: "Ping" }] });
+    await app.close();
   });
 });

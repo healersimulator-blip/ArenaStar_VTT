@@ -52,7 +52,7 @@ document is the execution plan.
 | Phase | Scope | State |
 | --- | --- | --- |
 | **P1a — delivery, consent, authority, torch UI** | `ais.profile` message; GM-side profile builder and sharing policy; player runtime over `ClientSync`; per-device consent; player token menu with light entries; GM sharing checkbox; `flags.ais` namespace fix in the light handler | **Done** (D-468). 17 new unit tests + 4 menu tests + e2e spec `e2e/ais_player.spec.ts` (not executed in the authoring sandbox — no browser download allowed; run `pnpm test:e2e:ais`). |
-| P1b — player-side module UI beyond the token menu | chat commands from the player quickbar, module-declared player actions, module notices/choices (the select dialog exists; the quickbar binding does not) | Not started. ≈ 0.6–1.2 k LOC. |
+| **P1b — player-side module UI beyond the light slot** | manifest `interconnect.sharing` (`host-only` modules never travel) and `interconnect.tokenActions` (generic token-menu entries in both shells → `ui.token.action`); `runAs: "player"` command invocation inside the player's frame (`PlayerAisRuntime.invokeCommand`) with a command runner in the *Shared modules* card | **Done** (D-469). Player quickbar *binding* of module commands is still open (the hotbar is macro-only); notices/choices already existed. |
 | P2a — sandboxed module panels at the player | isolated custom panels (design §15 Phase 4) rendered inside the module's own iframe surface, a host-owned panel slot in both shells, the same consent/capability gate as P1a; this is the route for **third-party** module UI, which never runs in the page | Not started. ≈ 2–4 k LOC. |
 | P2b — first-party component packages (sheets) | Svelte component-package contract (externalised `svelte/internal/client`) for **ArenaStar-built** system UI only, loaded by both shells under build-signed hashes; actor-sheet contribution slot; GM "share with players" per UI package | Not started. ≈ 4–7 k LOC (cost analysis T3). Depends on P3's dispatch interface. |
 | P3 — native PF1e logic into the world file | package the 348 KB of PF1e logic behind the dispatch interface the host already consumes (183 symbols / 27 host files), keep `massBattlePf1e` as the proven shape, player shell loads the same package | Not started. ≈ 6–10 k LOC incl. the host slot; frees ≈ 350 KB of the main file, puts ≈ 160–310 KB back for the slot. |
@@ -135,7 +135,8 @@ otherwise (other modules' state survives). Tests in `tests/packages/aisModule.te
 - The browser batch `test:e2e:ais` (now three specs) was **not executed** here: the sandbox cannot
   download Playwright browsers. `e2e/ais_player.spec.ts` was written against the exact DOM hooks
   of the shells and the proven join/approve dances; run it before claiming the batch green.
-- Player quickbar/chat commands, module-declared player actions, shared sheets (P1b/P2).
+- Player quickbar/chat commands, module-declared player actions, shared sheets (P1b/P2). *P1b
+  landed in D-469: token actions + command runner; the quickbar binding remains open.*
 - Delivery over the asset channel for large modules: `ais.profile` is one ops-channel message
   (same path as the unfragmented `snapshot`); packages stay within the existing 1 MiB script /
   8 MiB resource caps, so this is adequate for P1 and must be revisited when P2 ships components.

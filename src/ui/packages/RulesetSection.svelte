@@ -428,9 +428,13 @@
         {/if}
         {#if p.approved}
           <label class="ais-share-players">
-            <input type="checkbox" data-ais-share-players checked={p.sharedWithPlayers} disabled={pkgBusy}
+            <input type="checkbox" data-ais-share-players checked={p.sharedWithPlayers} disabled={pkgBusy || p.hostOnly}
               onchange={(event) => void setAisSharing(p.id, event.currentTarget.checked)} />
-            Players run this module too (they are asked for their own consent; their changes are limited to what they own)
+            {#if p.hostOnly}
+              Host-only by the module's own declaration (<code>sharing: "host-only"</code>) — never run on player devices
+            {:else}
+              Players run this module too (they are asked for their own consent; their changes are limited to what they own)
+            {/if}
           </label>
           <span data-ais-approved>Approved: {p.grantedCapabilities.length ? p.grantedCapabilities.join(", ") : "no capabilities"}</span>
           <button type="button" data-ais-revoke disabled={pkgBusy} onclick={() => revokeAisApproval(p.id)}>Revoke local approval</button>

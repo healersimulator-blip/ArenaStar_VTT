@@ -93,7 +93,7 @@ export interface AisModuleCommandFrame {
     sceneId: string;
     callerId: string;
     requestId: string;
-    runAs: "gm";
+    runAs: "gm" | "player";
     deadlineAt: number;
   };
 }
@@ -111,7 +111,7 @@ export interface AisModuleCallContext extends AisModuleRequestContext {
   sceneId: string;
   callerId: string;
   requestId: string;
-  runAs: "gm";
+  runAs: "gm" | "player";
   deadlineAt: number;
   isActive(): boolean;
   assertActive(): void;
@@ -121,8 +121,12 @@ export interface AisModuleInvocationOptions {
   sceneId: string;
   callerId: string;
   requestId: string;
-  /** AIS commands execute only under an explicitly GM-reviewed script-macro elevation. */
-  runAs: "gm";
+  /**
+   * At the host, AIS commands execute only under an explicitly GM-reviewed script-macro elevation
+   * (`"gm"`). D-469: a frame created with `playerCommands: true` — the player-side runtime — accepts
+   * `"player"`: the command runs with that player's own authority (host-side ownership validation).
+   */
+  runAs: "gm" | "player";
   isActive: () => boolean;
 }
 
@@ -305,6 +309,8 @@ export interface AisModuleIframeOptions {
   onStatus?: (status: AisModuleRuntimeStatus) => void;
   onSubscribe?: (event: AisEventName) => void;
   hostElement?: HTMLElement;
+  /** D-469: this frame belongs to a player's runtime; commands run as `"player"`, never `"gm"`. */
+  playerCommands?: boolean;
 }
 
 interface ActiveModuleCommand {
@@ -459,7 +465,10 @@ export class AisModuleIframe {
     if (this.disposed) throw new Error(`AIS module ${this.packageId} is not running`);
     if (!this.commandIds.has(commandId)) throw new Error(`AIS module ${this.packageId} does not declare command ${commandId}`);
     if (!COMMAND_NAME_RE.test(commandId)) throw new Error("Invalid AIS command ID");
-    if (options.runAs !== "gm") throw new Error("AIS module commands require explicitly reviewed GM authority");
+    if (this.options.playerCommands ? options.runAs !== "player" : options.runAs !== "gm")
+      throw new Error(this.options.playerCommands
+        ? "AIS module commands at a player run only with that player's own authority"
+        : "AIS module commands require explicitly reviewed GM authority");
     if (!boundedJson(input) || (jsonByteLength(input) ?? Infinity) > MAX_COMMAND_BYTES)
       throw new Error("AIS command input exceeds 16 KiB or is not bounded JSON");
     if (this.commandPending) throw new Error(`AIS module ${this.packageId} already has a command running`);

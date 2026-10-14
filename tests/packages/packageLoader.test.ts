@@ -91,6 +91,30 @@ describe("validatePackageManifest (§12)", () => {
     } }).ok).toBe(false);
   });
 
+  test("D-469: sharing and tokenActions are validated and normalized", () => {
+    const base = {
+      id: "typed-module", name: "Typed Module", version: "1.0.0", type: "module",
+      interconnect: { api: "arena.ais/1", entry: "module.js", capabilities: ["action.observe", "ui.interaction"] },
+    };
+    const ok = validatePackageManifest({ ...base, interconnect: {
+      ...base.interconnect, sharing: "host-only", tokenActions: [{ id: "mount", label: "  Mount up  " }, { id: "dismount", label: "Dismount" }],
+    } });
+    expect(ok).toMatchObject({ ok: true, value: { interconnect: {
+      sharing: "host-only", tokenActions: [{ id: "mount", label: "Mount up" }, { id: "dismount", label: "Dismount" }],
+    } } });
+    // Absent by default — a module that says nothing is shareable and adds no menu entries.
+    const plain = validatePackageManifest(base);
+    expect(plain.ok && plain.value.type === "module" ? plain.value.interconnect?.sharing : "set").toBeUndefined();
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, sharing: "everyone" } }))
+      .toMatchObject({ ok: false, error: 'package typed-module: interconnect.sharing must be "players" or "host-only"' });
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, tokenActions: [{ id: "a", label: "A", icon: "x" }] } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, tokenActions: [{ id: "mount", label: "" }] } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, tokenActions: [{ id: "mount", label: "M" }, { id: "mount", label: "N" }] } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: {
+      ...base.interconnect, capabilities: ["action.observe"], tokenActions: [{ id: "mount", label: "Mount" }],
+    } })).toMatchObject({ ok: false, error: "package typed-module: interconnect.tokenActions requires the ui.interaction capability" });
+  });
+
   test("rejects bad ids, names, versions, types", () => {
     expect(validatePackageManifest(systemManifest({ id: "Bad_ID" })).ok).toBe(false);
     expect(validatePackageManifest(systemManifest({ id: "x" })).ok).toBe(false); // too short

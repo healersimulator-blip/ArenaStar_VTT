@@ -187,6 +187,25 @@ export interface AisInterconnectManifest {
   /** Package-local names permitted in `AIS.events.emit`; the host adds the source package ID. */
   emits?: string[];
   capabilities?: AisCapability[];
+  /**
+   * D-469: where the module may run. `players` (default) lets the GM share it with player
+   * devices (each player consents; the host still authorizes every write); `host-only` keeps it
+   * on the GM device — the author's choice for modules that write in reaction to observed events.
+   */
+  sharing?: AisModuleSharing;
+  /**
+   * D-469: entries both shells add to a token's context menu while the module runs; choosing
+   * one emits `ui.token.action` with `action: id` to this module (the generic form of the
+   * token-light slot). At a player they appear only for tokens that player controls.
+   */
+  tokenActions?: AisTokenActionDeclaration[];
+}
+
+export type AisModuleSharing = "players" | "host-only";
+
+export interface AisTokenActionDeclaration {
+  id: string;
+  label: string;
 }
 
 export interface AisModuleLock {

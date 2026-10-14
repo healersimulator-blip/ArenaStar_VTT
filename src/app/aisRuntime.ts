@@ -1,3 +1,4 @@
+import type { TokenModuleAction } from "../ui/combat/tokenContextMenu";
 import { UI_THEME_CAPABILITIES, UI_THEME_COMMAND } from "../core/uiTheme";
 /** Browser composition for AIS v1. Kept out of Svelte so the authority callbacks are type-checked. */
 import type { HostApp, HostAutomationModuleBoot } from "./hostBoot";
@@ -336,6 +337,31 @@ export class AisRuntime {
             ? "Approve action.observe for the token-light provider in Settings → Packages, then reload." : null;
     return { enabled: reason === null, reason, active: state?.active === true,
       sourceName: typeof state?.sourceName === "string" ? state.sourceName : null };
+  }
+
+  /** D-469: manifest token actions of every running module (the generic token-menu slot). */
+  tokenActions(): TokenModuleAction[] {
+    const out: TokenModuleAction[] = [];
+    for (const module of this.options.app.automationBoot.modules) {
+      if (!module.tokenActions?.length) continue;
+      const frame = this.hosts.get(module.packageId);
+      const reason = !frame ? "Enable the module and approve its code in Settings → Packages, then reload."
+        : frame.status.state !== "ready" ? frame.status.error ?? "The module is starting." : null;
+      for (const action of module.tokenActions)
+        out.push({ packageId: module.packageId, id: action.id, label: action.label, enabled: reason === null, reason });
+    }
+    return out;
+  }
+
+  runTokenAction(tokenId: string, packageId: string, actionId: string): void {
+    const scene = this.scene();
+    const token = scene?.tokens.find((row) => row._id === tokenId && !row.hidden);
+    const action = this.tokenActions().find((row) => row.packageId === packageId && row.id === actionId);
+    if (!scene || !token || !action?.enabled) {
+      this.options.notify(action?.reason ?? "That module action is not available.", "warn");
+      return;
+    }
+    this.hosts.get(packageId)?.emit("ui.token.action", { sceneId: scene._id, tokenId, action: actionId });
   }
 
   tokenLightAction(tokenId: string, action: string): void {

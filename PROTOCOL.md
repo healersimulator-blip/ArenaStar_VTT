@@ -1628,8 +1628,12 @@ interface AisSharedModule {
   commands: AisModuleCommandDeclaration[];
   capabilities: AisCapability[];     // host-granted ∩ player-runnable (no fx.play / scene.tags.write / ui.theme)
   emittedEvents: string[];
+  tokenActions?: { id: string; label: string }[]; // D-469: manifest token-menu entries → ui.token.action
 }
 ```
+
+A module whose manifest declares `interconnect.sharing: "host-only"` is never part of
+`modules` (D-469), whatever the GM's sharing checkbox says.
 
 Delivery is not authority: a player's module runs in the same sandboxed iframe as on the host
 and every op it produces travels as an ordinary `intent`, so the host's `validateOps` and

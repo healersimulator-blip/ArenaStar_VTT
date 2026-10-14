@@ -14102,3 +14102,52 @@ run `pnpm test:e2e:ais` before claiming it green.
 contribution the player side is optional UI, mechanics stay host-resolved). P1b (player quickbar
 and chat commands), P2 (shared sheets/panels) and P3 (native PF1e into the world file) are planned
 in the programme document and not started.
+
+## D-469 — P1b: modules declare their own sharing and token actions; players run declared commands as themselves (2026-10-14)
+
+**Context.** D-468 made shared modules *run* at players, but a player could only reach a module
+through the dedicated light slot (`scene.token.light.action`). Any other module — a mount/dismount
+helper, a condition tracker, a loot splitter — had no player-side control at all, and the GM had
+no way to know that a module *should not* be shared (plan §4.7 item 2: every copy receives the same
+observation events, so a module that writes in reaction to an observation would act once per
+device). Macro commands (`AIS.commands.on`) were callable only under `runAs: "gm"` from a reviewed
+script macro at the host.
+
+**Decision.** Three small, generic additions to the manifest and the runtimes, no module rework:
+
+1. **`interconnect.sharing: "players" | "host-only"`** (default `"players"`). `host-only` is the
+   author's declaration that the module must run on one device only. Boot carries it as
+   `hostOnly`; `sharedWithPlayers` is forced to `false`, the profile policy
+   (`isPlayerSharedModule`) never offers it, and the GM checkbox in Settings → Packages is
+   disabled with the reason spelled out. The GM opt-out of D-468 remains for modules that do not
+   declare anything.
+2. **`interconnect.tokenActions: [{ id, label }]`** (≤ 16, ids are slot-shaped, labels 1–48
+   printable characters, requires `ui.interaction`). Both shells append the entries of every
+   *running* module to the token context menu as `module-action:<packageId>:<actionId>`; a click
+   emits the existing `ui.token.action { sceneId, tokenId, action }` event to that module. At the
+   player the entry is disabled with "You do not control this token." on foreign tokens and with
+   the module's own state otherwise ("waiting for your decision", "starting", the failure text).
+   `AisRuntime.tokenActions()/runTokenAction()` and `PlayerAisRuntime.tokenActions()/runTokenAction()`
+   are the two implementations; the menu model (`moduleActions`) is shared.
+3. **`runAs: "player"`.** `AisModuleIframe` built with `playerCommands: true` (only the player
+   runtime does this) accepts command invocations with `runAs: "player"` and refuses `"gm"`; a host
+   frame still refuses anything but `"gm"`. `PlayerAisRuntime.invokeCommand(packageId, commandId,
+   input)` runs a declared command inside the player's own frame with `callerId` = the player's
+   user id; every write the command makes travels through `ClientSync` and is validated by the host
+   under that player's ownership, exactly like a hand-made edit (no new authority anywhere). The
+   player shell's *Shared modules* card gains a command `<select>` and *Run on selected token*
+   (`data-player-ais-command`, `data-player-ais-run`, `data-player-ais-result`); Torch's
+   `light.toggle` / `light.set` / `light.off` work unchanged with `{ tokenId }` because the module
+   never relied on `context.runAs`.
+
+**Rejected.** A per-command "player-safe" flag in the manifest: the host already refuses what the
+player may not do; a second allow-list would be a declaration without an enforcement point.
+Re-using `scene.token.light.action` as a generic slot: slots are for *one* chosen provider, token
+actions are additive across modules.
+
+**Verification (measured).** `tsc --noEmit` clean; `checkSvelte` 0 blocking; `eslint` clean on
+the touched files; new tests: manifest validation (`tests/packages/packageLoader.test.ts`), boot
+`hostOnly`/`tokenActions` and profile exclusion (`tests/app/aisPlayerProfile.test.ts`), menu model
+in both shells (`tests/ui/tokenContextMenu.test.ts`), player runtime token actions + command
+invocation as `"player"` (`tests/app/playerAisRuntime.test.ts`). Full-suite and bundle numbers are
+recorded with the commit that closes this round (see D-470/D-471).

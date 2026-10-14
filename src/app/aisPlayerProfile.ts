@@ -9,7 +9,9 @@
  *   3. never a module the host could not start itself (`blockedReason`);
  *   4. never a module whose consent is not *currently* active on the GM device (the same check
  *      the GM runtime makes before every RPC — a revoked grant stops delivery too);
- *   5. the GM's per-module opt-out (`sharedWithPlayers === false`).
+ *   5. the GM's per-module opt-out (`sharedWithPlayers === false`);
+ *   6. (D-469) never a module whose manifest says `sharing: "host-only"` — the author's call,
+ *      typically because the module writes in reaction to observed events and must act once.
  *
  * Capabilities travel as the host's grant restricted to the player-runnable subset: a player
  * shell has no FX service, no scene-tag authority and no theme slot, so advertising those
@@ -54,7 +56,7 @@ export function isPlayerSharedModule(
   assertConsent: (module: HostAutomationModuleBoot) => void,
   isShared: (packageId: string) => boolean = (id) => module.packageId !== id || module.sharedWithPlayers !== false,
 ): boolean {
-  if (module.appearance || module.runtimeProvider || module.blockedReason) return false;
+  if (module.appearance || module.runtimeProvider || module.blockedReason || module.hostOnly) return false;
   if (!isShared(module.packageId)) return false;
   try { assertConsent(module); } catch { return false; }
   return true;
@@ -74,6 +76,7 @@ export function sharedModuleOf(module: HostAutomationModuleBoot): AisSharedModul
     capabilities: playerRunnableCapabilities(module.capabilities.filter((capability) =>
       (module.runtimeDependencies ?? []).every((dependency) => dependency.capabilities.includes(capability)))),
     emittedEvents: [...module.emittedEvents],
+    ...(module.tokenActions && module.tokenActions.length > 0 ? { tokenActions: module.tokenActions.map((action) => ({ ...action })) } : {}),
   };
 }
 

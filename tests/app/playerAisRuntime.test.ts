@@ -22,8 +22,8 @@ import { createEventBus, type EventBus } from "../../src/core/events";
 import { DocumentStore, OpLog, UndoStack, type StoreMeta } from "../../src/core";
 import type { AisProfileMsg, AisSharedModule, HelloMsg } from "../../src/core/messages";
 import type { Op, OpEnvelope } from "../../src/core/ops";
-import type { SceneDocument, TokenDocument, UserDocument } from "../../src/core/documents";
-import type { AisModuleIframeOptions } from "../../src/packages/aisModuleIframe";
+import type { Json, SceneDocument, TokenDocument, UserDocument } from "../../src/core/documents";
+import type { AisModuleIframeOptions, AisModuleInvocationOptions } from "../../src/packages/aisModuleIframe";
 import { openVttDb, getSetting } from "../../src/storage/idb";
 import {
   PlayerAisRuntime,
@@ -140,8 +140,13 @@ class FakeFrame implements PlayerAisFrame {
   status: PlayerAisFrame["status"] = { state: "ready" };
   readonly events: Array<{ event: string; payload: unknown }> = [];
   disposedWith: string | null = null;
+  readonly commands: Array<{ commandId: string; input: Json; options: AisModuleInvocationOptions }> = [];
   constructor(readonly options: AisModuleIframeOptions) {}
   emit(event: string, payload: unknown): void { this.events.push({ event, payload }); }
+  invokeCommand(commandId: string, input: Json, options: AisModuleInvocationOptions): Promise<Json> {
+    this.commands.push({ commandId, input, options });
+    return Promise.resolve({ ok: true, commandId });
+  }
   dispose(reason: string): void { this.disposedWith = reason; this.status = { state: "stopped", error: reason }; }
 }
 
@@ -241,6 +246,48 @@ describe("D-468 — player consent", () => {
       r.runtime.tokenLightAction(REX, "toggle");
       expect(r.frames[0]?.events.at(-1)).toEqual({ event: "ui.token.action", payload: { sceneId: "s1", tokenId: REX, action: "toggle" } });
       r.runtime.dispose();
+    } finally { db.close(); }
+  });
+
+  test("D-469: manifest token actions are listed with the module's run state and reach the frame as ui.token.action", async () => {
+    const h = await setup();
+    const rex = await h.addPlayer(REX_OWNER, "Rex");
+    const db = await openVttDb();
+    try {
+      h.profileBody = { providers: {}, modules: [{ ...torchModule(), tokenActions: [{ id: "snuff", label: "Snuff the torch" }] }] };
+      h.host.publishAisProfile();
+      await flushMicrotasks();
+      const r = runtimeFor(rex, db);
+      await r.runtime.settled();
+      // Pending consent: listed, disabled, with a reason the menu can show.
+      expect(r.runtime.tokenActions()).toEqual([{
+        packageId: "pf1e-torch", id: "snuff", label: "Snuff the torch", enabled: false,
+        reason: "Allow this module when prompted (it is waiting for your decision).",
+      }]);
+      r.runtime.runTokenAction(REX, "pf1e-torch", "snuff");
+      expect(r.frames).toHaveLength(0);
+      expect(r.notices.at(-1)).toContain("waiting for your decision");
+
+      await r.runtime.allow("pf1e-torch");
+      expect(r.runtime.tokenActions()).toEqual([{ packageId: "pf1e-torch", id: "snuff", label: "Snuff the torch", enabled: true, reason: null }]);
+      r.runtime.runTokenAction(REX, "pf1e-torch", "snuff");
+      expect(r.frames[0]?.events.at(-1)).toEqual({ event: "ui.token.action", payload: { sceneId: "s1", tokenId: REX, action: "snuff" } });
+      // Unknown action ids never reach a frame.
+      const before = r.frames[0]?.events.length;
+      r.runtime.runTokenAction(REX, "pf1e-torch", "nope");
+      expect(r.frames[0]?.events.length).toBe(before);
+
+      // Declared commands run inside the player's frame as "player", never as "gm".
+      expect(r.frames[0]?.options.playerCommands).toBe(true);
+      await expect(r.runtime.invokeCommand("pf1e-torch", "light.toggle", { tokenId: REX })).resolves.toEqual({ ok: true, commandId: "light.toggle" });
+      expect(r.frames[0]?.commands[0]).toMatchObject({
+        commandId: "light.toggle", input: { tokenId: REX },
+        options: { sceneId: "s1", callerId: REX_OWNER, runAs: "player", requestId: "player-cmd-1" },
+      });
+      expect(r.frames[0]?.commands[0]?.options.isActive()).toBe(true);
+      await expect(r.runtime.invokeCommand("other", "x", {})).rejects.toThrow("not running on this device");
+      r.runtime.dispose();
+      expect(r.frames[0]?.commands[0]?.options.isActive()).toBe(false);
     } finally { db.close(); }
   });
 

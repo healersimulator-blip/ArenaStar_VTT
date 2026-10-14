@@ -14,6 +14,8 @@ import {
   type AisContributionDeclaration,
   type AisInterconnectManifest,
   type AisModuleCommandDeclaration,
+  type AisModuleSharing,
+  type AisTokenActionDeclaration,
   type AisPackageRequirement,
 } from "./automationInterconnect";
 import type { Result } from "./result";
@@ -87,10 +89,11 @@ const VERSION_RE = /^\d+\.\d+\.\d+(-[A-Za-z0-9.+-]+)?$/;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const AIS_SLOT_RE = /^[a-z0-9][a-z0-9._:-]{1,127}$/;
+const hasControlChars = (text: string): boolean => Array.from(text).some((ch) => (ch.codePointAt(0) ?? 0) < 0x20);
 
 function validateInterconnect(value: unknown, id: string): Result<AisInterconnectManifest> {
   if (!isRecord(value)) return err(`package ${id}: interconnect must be an object`);
-  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities", "runtime", "runtimeProvider"]);
+  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities", "runtime", "runtimeProvider", "sharing", "tokenActions"]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));
   if (unknown) return err(`package ${id}: interconnect has unsupported field ${unknown}`);
   if (value.api !== AIS_API_VERSION)
@@ -229,6 +232,33 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
     }
   }
 
+  let sharing: AisModuleSharing | undefined;
+  if (value.sharing !== undefined) {
+    if (value.sharing !== "players" && value.sharing !== "host-only")
+      return err(`package ${id}: interconnect.sharing must be "players" or "host-only"`);
+    sharing = value.sharing;
+  }
+
+  const tokenActions: AisTokenActionDeclaration[] = [];
+  if (value.tokenActions !== undefined) {
+    if (!Array.isArray(value.tokenActions) || value.tokenActions.length > 16)
+      return err(`package ${id}: interconnect.tokenActions must be an array of at most 16 entries`);
+    const seen = new Set<string>();
+    for (const raw of value.tokenActions) {
+      if (!isRecord(raw) || Object.keys(raw).some((key) => !["id", "label"].includes(key)))
+        return err(`package ${id}: interconnect token action must contain only id and label`);
+      if (typeof raw.id !== "string" || !AIS_SLOT_RE.test(raw.id))
+        return err(`package ${id}: interconnect token action id is invalid`);
+      if (typeof raw.label !== "string" || raw.label.trim().length === 0 || raw.label.length > 48 || hasControlChars(raw.label))
+        return err(`package ${id}: interconnect token action ${raw.id} needs a label of 1–48 printable characters`);
+      if (seen.has(raw.id)) return err(`package ${id}: interconnect repeats token action ${raw.id}`);
+      seen.add(raw.id);
+      tokenActions.push({ id: raw.id, label: raw.label.trim() });
+    }
+  }
+  if (tokenActions.length > 0 && !capabilities.includes("ui.interaction"))
+    return err(`package ${id}: interconnect.tokenActions requires the ui.interaction capability`);
+
   if (runtime?.resources?.length && !capabilities.includes("package.resources.read"))
     return err(`package ${id}: declared runtime resources require package.resources.read`);
   if ((runtimeProvider || runtime) && !capabilities.includes("runtime.execute"))
@@ -248,6 +278,8 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
     ...(commands.length ? { commands } : {}),
     ...(emits.length ? { emits } : {}),
     ...(capabilities.length ? { capabilities } : {}),
+    ...(sharing ? { sharing } : {}),
+    ...(tokenActions.length ? { tokenActions } : {}),
   });
 }
 

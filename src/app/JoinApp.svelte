@@ -60,7 +60,7 @@
     hexContextMenuModel,
     type HexMenuEntry,
   } from "../ui/hexcrawl/hexContextMenu";
-  import { playerTokenContextMenuModel, type TokenMenuEntryId } from "../ui/combat/tokenContextMenu";
+  import { parseModuleActionEntryId, playerTokenContextMenuModel, type TokenMenuEntryId } from "../ui/combat/tokenContextMenu";
   import {
     PlayerAisRuntime,
     describeAisCapability,
@@ -764,6 +764,30 @@
         state: pending ? "waiting for your decision" : status ? (status.state === "ready" ? "running" : status.error ?? status.state) : "not started" };
     });
   });
+  /** D-469: run a declared command of a running shared module on the selected token (player authority). */
+  let aisCommandChoice = $state<Record<string, string>>({});
+  let aisCommandResult = $state<Record<string, string>>({});
+  let aisCommandBusy = $state<string | null>(null);
+  function aisCommandsOf(packageId: string): string[] {
+    void aisStatuses;
+    if (aisStatuses[packageId]?.state !== "ready") return [];
+    return (playerAis?.currentProfile?.modules.find((module) => module.packageId === packageId)?.commands ?? []).map((command) => command.id);
+  }
+  async function runAisCommand(packageId: string): Promise<void> {
+    if (!playerAis || aisCommandBusy) return;
+    const commandId = aisCommandChoice[packageId] ?? aisCommandsOf(packageId)[0];
+    const tokenId = selection.length === 1 ? selection[0] : undefined;
+    if (!commandId) return;
+    if (!tokenId) { aisCommandResult = { ...aisCommandResult, [packageId]: "Select exactly one token first." }; return; }
+    aisCommandBusy = packageId;
+    try {
+      const result = await playerAis.invokeCommand(packageId, commandId, { tokenId });
+      const text = result === null || result === undefined ? "Done." : typeof result === "string" ? result : JSON.stringify(result);
+      aisCommandResult = { ...aisCommandResult, [packageId]: text.length > 240 ? `${text.slice(0, 237)}…` : text };
+    } catch (error) {
+      aisCommandResult = { ...aisCommandResult, [packageId]: error instanceof Error ? error.message : String(error) };
+    } finally { aisCommandBusy = null; }
+  }
   /** T01 for players: right-click on a token opens the reduced menu (sheet + shared light actions). */
   let tokenMenu = $state<{ x: number; y: number; tokenId: string } | null>(null);
   function closeTokenMenu(): void { tokenMenu = null; }
@@ -780,6 +804,7 @@
       user: app?.client.user ?? null,
       actors: (app?.client.store.getAll("actors") ?? []) as readonly ActorDocument[],
       lightActions: tokenLightActionsFor(token),
+      moduleActions: playerAis?.tokenActions() ?? [],
     });
   }
   function runTokenMenuEntry(entryId: TokenMenuEntryId): void {
@@ -790,6 +815,8 @@
     const token = scene?.tokens.find((row) => row._id === menu.tokenId);
     if (!token) return;
     if (entryId === "open-sheet") { if (token.actorId) openActorSheet(token.actorId); return; }
+    const moduleAction = parseModuleActionEntryId(entryId);
+    if (moduleAction) { playerAis?.runTokenAction(token._id, moduleAction.packageId, moduleAction.actionId); return; }
     const action = entryId === "token-light-toggle" ? "toggle" : entryId === "token-light-next" ? "next"
       : entryId === "token-light-select" ? "select" : entryId === "token-light-off" ? "off"
         : entryId === "token-light-settings" ? "settings" : null;
@@ -2275,6 +2302,20 @@
                         {aisStatuses[row.packageId]?.state === "ready" ? "Stop and ask again" : "Ask again"}
                       </button>
                     {/if}
+                    {#if aisCommandsOf(row.packageId).length > 0}
+                      <div class="ais-module-command" data-player-ais-command={row.packageId}>
+                        <label>Command
+                          <select value={aisCommandChoice[row.packageId] ?? aisCommandsOf(row.packageId)[0]}
+                            onchange={(event) => { aisCommandChoice = { ...aisCommandChoice, [row.packageId]: event.currentTarget.value }; }}>
+                            {#each aisCommandsOf(row.packageId) as commandId (commandId)}<option value={commandId}>{commandId}</option>{/each}
+                          </select>
+                        </label>
+                        <button type="button" data-player-ais-run disabled={aisCommandBusy !== null} onclick={() => void runAisCommand(row.packageId)}>
+                          Run on selected token
+                        </button>
+                        {#if aisCommandResult[row.packageId]}<span class="hint" data-player-ais-result>{aisCommandResult[row.packageId]}</span>{/if}
+                      </div>
+                    {/if}
                   </li>
                 {/each}
               </ul>
@@ -2644,7 +2685,8 @@
   .ais-consent-actions button[data-ais-consent-allow] { border-color: #7bd7c9; background: #1f4a45; }
   .ais-consent-warning { margin: 0.5rem 0; padding: 0.5rem 0.75rem; border: 1px solid #d98a6b; border-radius: 6px; background: #4a2a1f; color: #ffd9c9; }
   .ais-module-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
-  .ais-module-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .ais-module-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ais-module-command { flex-basis: 100%; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 0.9em; }
   .hex-menu {
     position: absolute;
     z-index: 14;

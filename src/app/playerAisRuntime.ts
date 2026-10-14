@@ -27,7 +27,7 @@ import {
 } from "../core/automationInterconnect";
 import type { ActorDocument, Json, SceneDocument, TokenDocument } from "../core/documents";
 import type { AisProfileMsg, AisSharedModule } from "../core/messages";
-import { AisModuleIframe, type AisModuleIframeOptions, type AisModuleRuntimeStatus } from "../packages/aisModuleIframe";
+import { AisModuleIframe, type AisModuleIframeOptions, type AisModuleInvocationOptions, type AisModuleRuntimeStatus } from "../packages/aisModuleIframe";
 import {
   createAisModuleHandlers,
   createAisMutationQueue,
@@ -36,6 +36,7 @@ import {
 } from "../packages/aisModuleHandlers";
 import { packageContentHash } from "../packages/packageHash";
 import { getSetting, putSetting } from "../storage/idb";
+import type { TokenModuleAction } from "../ui/combat/tokenContextMenu";
 
 export type PlayerAisStatuses = Readonly<Record<string, AisModuleRuntimeStatus>>;
 
@@ -88,6 +89,8 @@ function consentCovers(record: PlayerAisConsentRecord | null, module: AisSharedM
 export interface PlayerAisFrame {
   readonly status: AisModuleRuntimeStatus;
   emit<K extends AisEventName>(event: K, payload: AisEventPayloads[K]): void;
+  /** D-469: declared command, run as the player (see AisModuleIframe.invokeCommand). */
+  invokeCommand(commandId: string, input: Json, options: AisModuleInvocationOptions): Promise<Json>;
   dispose(reason: string): void;
 }
 
@@ -142,6 +145,7 @@ export function describeAisCapability(capability: AisCapability): string {
 export class PlayerAisRuntime {
   private readonly options: PlayerAisRuntimeOptions;
   private readonly frames = new Map<string, PlayerAisFrame>();
+  private commandSeq = 0;
   private readonly running = new Map<string, AisSharedModule>();
   private readonly statuses: Record<string, AisModuleRuntimeStatus> = {};
   private readonly pending = new Map<string, PlayerAisPendingConsent>();
@@ -317,6 +321,7 @@ export class PlayerAisRuntime {
       ...(module.runtimeContext !== undefined ? { runtimeContext: module.runtimeContext, stopOnCommandTimeout: true } : {}),
       commands: module.commands,
       grantedCapabilities: module.capabilities,
+      playerCommands: true,
       assertModuleActive: () => assertCapability(),
       isCapabilityCurrentlyGranted: async (capability) => {
         try { await assertCapability(capability); return true; } catch { return false; }
@@ -399,6 +404,52 @@ export class PlayerAisRuntime {
             ? "The GM has not shared action.observe for the token-light module." : null;
     return { enabled: reason === null, reason, active: state?.active === true,
       sourceName: typeof state?.sourceName === "string" ? state.sourceName : null };
+  }
+
+  /**
+   * D-469: run one declared command of a shared module as this player. The command executes inside
+   * the player's own frame; every write it makes travels through ClientSync and is validated by the
+   * host under this player's ownership, exactly like a hand-made edit.
+   */
+  async invokeCommand(packageId: string, commandId: string, input: Json): Promise<Json> {
+    const frame = this.running.has(packageId) ? this.frames.get(packageId) : undefined;
+    if (!frame) throw new Error("The module is not running on this device.");
+    const scene = this.options.activeScene();
+    if (!scene) throw new Error("No scene is open.");
+    const requestId = `player-cmd-${++this.commandSeq}`;
+    return frame.invokeCommand(commandId, input, {
+      sceneId: scene._id,
+      callerId: this.options.client.user?.id ?? "player",
+      requestId,
+      runAs: "player",
+      isActive: () => !this.disposed && this.frames.get(packageId) === frame,
+    });
+  }
+
+  /** D-469: manifest token actions of the shared modules, with this device's run state. */
+  tokenActions(): TokenModuleAction[] {
+    const out: TokenModuleAction[] = [];
+    for (const module of this.profile?.modules ?? []) {
+      if (!module.tokenActions?.length) continue;
+      const frame = this.running.has(module.packageId) ? this.frames.get(module.packageId) : undefined;
+      const reason = this.pending.has(module.packageId) ? "Allow this module when prompted (it is waiting for your decision)."
+        : !frame ? this.statuses[module.packageId]?.error ?? "The module is not running on this device."
+          : frame.status.state !== "ready" ? frame.status.error ?? "The module is starting." : null;
+      for (const action of module.tokenActions)
+        out.push({ packageId: module.packageId, id: action.id, label: action.label, enabled: reason === null, reason });
+    }
+    return out;
+  }
+
+  runTokenAction(tokenId: string, packageId: string, actionId: string): void {
+    const scene = this.options.activeScene();
+    const token = scene?.tokens.find((row) => row._id === tokenId);
+    const action = this.tokenActions().find((row) => row.packageId === packageId && row.id === actionId);
+    if (!scene || !token || !action?.enabled) {
+      this.options.notify(action?.reason ?? "That module action is not available at this table.", "warn");
+      return;
+    }
+    this.frames.get(packageId)?.emit("ui.token.action", { sceneId: scene._id, tokenId, action: actionId });
   }
 
   tokenLightAction(tokenId: string, action: string): void {
