@@ -514,6 +514,15 @@ describe("activating PF1e in a world (§1.1 acceptance, no browser)", () => {
     } } });
     expect(overlay).toMatchObject({ hp: 58, bab: 6, strMod: 4, dexMod: 3, sr: 21, drVal: 5 });
     expect(leaderStats?.fromActor(null)).toBeNull();
+    // D-472: the built artifact is published for players under its sha256; the GM loopback welcome
+    // names it. Its size is the whole strategic ruleset with its exclusive dependencies — the bytes
+    // that left the main bundle in D-471 now travel in 32 KB chunks on the assets channel.
+    const published = second.host.publishedArtifacts();
+    expect(published).toHaveLength(1);
+    const artifact = second.gm.client.simInfo?.artifact;
+    expect(artifact?.hash).toBe(published[0]);
+    expect(artifact?.name).toBe("Pathfinder 1e Mass Battles Engine");
+    expect(artifact?.size).toBeGreaterThan(200_000);
     await second.persister.drain();
     second.close();
   });

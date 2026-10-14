@@ -14259,3 +14259,61 @@ is here justified by activation + the existing fallback precedent. When third-pa
 packages become common, the owner may want the D-089 per-world trust grant (or a build-signed
 first-party hash list) to gate `rulesBoot.inPage`; the fallback to built-in rules already exists
 for that case.
+
+## D-472 — P3 step 2: the active rules package travels to players as a content-addressed artifact; the player shell runs it in-page after per-device consent (2026-10-14)
+
+**Context.** D-471 made the GM shell consume the active system package in-page from the world
+file. The player shell still fed its army window the built-in rules in every world (D-471 left
+`JoinApp`'s `WindowHost` without a module), so a player in a PF1e world saw mass-battle-basic
+sub-phases and validation — one instance of the "modules and UI are GM-only" posture this round
+removes. The cost analysis listed the prerequisite as "GM→player package transfer over the data
+channel, caching, consent/CSP" and the plan listed "chunked ops framing" ahead of P2b, because a
+single op cannot carry 330 KB on WebRTC data channels or relays.
+
+**Decision.**
+
+1. **No new framing.** The host publishes the package's `rules.js` bytes as a *published
+   artifact* — `HostSync.publishArtifact(sha256, bytes)` — and serves it through the §7
+   `AssetTransfer` (32 KB chunks, resume, per-peer pacing, `asset.get`/`asset.chunk`) to any
+   approved session, outside the asset manifest and its per-viewer ACL. Unknown hashes keep the
+   miss sentinel; sessions without a user are ignored as before. The transfer is created lazily
+   when there is an asset server *or* a published artifact.
+2. **Announcement rides the welcome.** `WelcomeSimInfo.artifact = { hash, size, name }` sits
+   next to the schema joiners already adopt; a change of hash alone re-announces (same as a
+   package switch), so a GM activating a new build reaches connected players.
+3. **Player side = `PlayerRulesPackage`** (`src/app/playerRulesPackage.ts`): reads the
+   announcement, asks this device once per world/package/exact hash (consent row in the
+   `settings` store, scope `rules-player-consent:<worldId>`), fetches through the shell's
+   `AssetFetcher` (so the content-addressed client cache makes a rejoin free), **verifies the
+   sha256 of the assembled bytes against the announced hash** (the cache keys by hash without
+   checking; a lying host or a poisoned cache fails closed), imports with the same
+   `importRulesModule` shape gate the host and worker use, and exposes `module` for the shell.
+   "Not now" is remembered for the hash; a changed hash asks again as an *update*; `forget`
+   drops the module and re-prompts. Without consent the shell behaves exactly as before.
+4. **Trust posture, stated in the UI.** A rules package is not an AIS module: it is evaluated in
+   the page with the app's authority. The prompt and the "World rules" card say so in plain words
+   ("not sandboxed … only load it if you trust this GM"), show the size and hash, and the
+   decision is per device. This is the D-089 in-page tier arriving on player devices under the
+   D-468 consent model rather than a GM grant; the owner question from D-471 (first-party
+   build-signed hashes that skip the prompt) stays open and now has a concrete place to land
+   (`PlayerRulesPackage.announce`).
+5. `JoinApp` passes `playerRulesModule` to `WindowHost` → `armyWindowRules(rulesModule)`: a
+   consenting player's army window validates orders and lists sub-phases from the world's own
+   package.
+
+**Measured.** Real artifact: `systems/pf1e-mass-battles/rules.js` = **329,288 B** → 11 chunks at
+32 KB, ≈0.3 s at the 1 MiB/s per-peer cap; `tests/packages/pf1ePackage.test.ts` boots the built
+package and asserts the published hash equals the welcome's `sim.artifact.hash` with
+`size > 200,000`. Unit harness (`tests/app/playerRulesPackage.test.ts`, 8 tests, host↔player over
+the memory transport with 64-byte chunks): delivery as ≥ 12 `asset.chunk` messages, consent
+persistence and re-prompt on hash change, `forget`, built-in worlds offering nothing, integrity
+failure before the importer, shape-gate failure, miss sentinel and no-user refusal.
+`dist/index.html` **5,688,191 → 5,696,558 B** (+8,367 B: controller, card, dialog, host publish);
+headroom 594,898 B. Gates: `tsc` 0, `eslint .` 0, svelte check 0 blocking, vitest **5,795
+passed / 12 skipped (5,807)**.
+
+**What this is not.** Players still run only the *strategic* package in-page; the tactical PF1e
+logic (348 KB) and UI (334 KB) remain bundled for everyone until the T2/T3 dispatch contracts
+exist. But the transport question for every later package (T2 logic, T3 components, P2b
+first-party component packages, large AIS modules) is now answered by reuse: publish under a
+sha256, name it in a message, fetch on the assets channel, verify, consent, import.

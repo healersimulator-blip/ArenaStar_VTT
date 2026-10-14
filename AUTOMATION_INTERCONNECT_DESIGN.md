@@ -146,6 +146,13 @@ longer compiled into the main file — the host imports the active system packag
 in-page (`HostApp.rulesModule`) and consumes it through `RulesModule` seams (`leaderStats` for the
 hero overlay, order validation in the army window). Measured −50,252 B; main file 5,688,191 B.
 
+**P3 step 2 (D-472)** carried the same package to players: the host publishes `rules.js` under
+its sha256 and serves it through the §7 chunked asset transfer (no new op framing); every welcome
+names it in `sim.artifact`; `PlayerRulesPackage` verifies the digest, asks this device once per
+world/package/hash (the prompt states that a rules package runs unsandboxed), imports in-page and
+hands the module to the player's `WindowHost`. The same publish → announce → fetch → verify →
+consent → import path is what later package tiers (T2/T3, P2b component packages) will reuse.
+
 ## 1. Goals and non-goals
 
 ### Goals

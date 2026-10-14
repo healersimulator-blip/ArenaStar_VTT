@@ -1106,6 +1106,9 @@ interface WelcomeMsg {
     };
     packageId: string | null; // null = built-in mass-battle-basic
     version: string;
+    /** D-472: the active package's rules.js as a content-addressed blob —
+     *  fetch with asset.get { assetId: hash } on the assets channel. */
+    artifact?: { hash: AssetId; size: number; name: string };
   };
 }
 ```
@@ -1146,7 +1149,21 @@ replica requests `sim.snapshot.get` for that scene (pre-start requests are a
 host-side no-op; `start` broadcasts the first snapshot). When the host
 re-announces a _changed_ `sim` (package switch), clients discard replicas
 decoded under the old shape and re-pull a snapshot before applying further
-deltas; re-announcing identical info (reconnect) is a no-op.
+deltas; re-announcing identical info (reconnect) is a no-op. A change of
+`sim.artifact.hash` alone (the GM activated a new build of the same package)
+also re-announces.
+
+`sim.artifact` (D-472) names the active package's `rules.js` as a
+**published artifact**: `hash` is the sha256 of its UTF-8 bytes and doubles as
+the `asset.get` id. The host serves published artifacts through the same
+`asset.chunk` machinery as scene media (32 KB chunks, resume, per-peer pacing)
+but outside the asset manifest and its per-viewer ACL — any approved session
+may fetch them, because they are code the GM activated for the whole table,
+not media. Unknown hashes still answer with the miss sentinel. A client MUST
+verify the assembled bytes against `hash` before evaluating them (the asset
+cache stores by hash without checking) and MUST NOT evaluate them without the
+device owner's consent for that exact hash: unlike AIS modules, a rules package
+runs in the page, unsandboxed.
 
 ### snapshot (0x21 · host → client · ops)
 

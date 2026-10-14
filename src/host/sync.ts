@@ -271,7 +271,7 @@ import { segmentsCross } from "../canvas/vision/polygon";
 import { MAX_FOG_PNG_BYTES } from "../core/fogExploration";
 import type { AssetServer } from "./assets";
 import type { ImportPipeline } from "./import";
-import { AssetTransfer } from "../net/transfer";
+import { AssetTransfer, type AssetTransferOptions } from "../net/transfer";
 import type { EventBus, PermissionUser } from "../core";
 import type { Transport } from "../core/net";
 import { frameMessage, deframeMessage, channelFor } from "../net/frame";
@@ -347,12 +347,8 @@ export interface HostSyncOptions {
   assets?: AssetServer;
   /** Host-side image validation/derivation/storage used only after the upload gate succeeds. */
   pipeline?: Pick<ImportPipeline, "importImage">;
-  /** Transfer overrides (tests): chunk size, bandwidth cap, clock. */
-  assetTransfer?: {
-    chunkSize?: number;
-    bytesPerSecond?: number;
-    now?: () => number;
-  };
+  /** Transfer overrides (tests): chunk size, bandwidth cap, clock, pacing sleep. */
+  assetTransfer?: AssetTransferOptions;
   /**
    * D-250: where explored-fog maps live between sessions (hostBoot wires the IDB `fog`
    * store). Absent → fog.put is kept in memory only and fog.get answers from that.
@@ -856,7 +852,14 @@ export class HostSync {
   ) => Promise<boolean>;
   private readonly manifestSource: NonNullable<HostSyncOptions["manifest"]>;
   private readonly assets: AssetServer | null;
-  private readonly transfer: AssetTransfer | null;
+  private transfer: AssetTransfer | null;
+  private readonly transferOptions: NonNullable<HostSyncOptions["assetTransfer"]>;
+  /**
+   * D-472: content-addressed blobs the host publishes outside the asset manifest — today the
+   * active rules package's `rules.js`. Any approved session may fetch them on the `assets`
+   * channel; they are code the GM activated for the whole table, not scene media with an ACL.
+   */
+  private readonly artifacts = new Map<AssetId, Uint8Array>();
   private readonly pipeline: HostSyncOptions["pipeline"];
   private readonly rng: RngFn;
   private readonly now: () => number;
@@ -896,6 +899,48 @@ export class HostSync {
   }
 
   /**
+   * D-472: publish a content-addressed blob (the active rules package's `rules.js`) that any
+   * approved session may fetch with `asset.get` on the `assets` channel. The transfer machinery
+   * is the §7 one (32 KB chunks, resume, per-peer pacing), so a 330 KB package needs no new
+   * framing on any transport. `hash` must be sha256(bytes) — the client verifies it before the
+   * code runs; a mismatch here would only make every fetch fail verification.
+   */
+  publishArtifact(hash: AssetId, bytes: Uint8Array): void {
+    this.artifacts.set(hash, bytes);
+    this.transfer ??= this.createTransfer();
+  }
+
+  /** Published artifact hashes (introspection / tests). */
+  publishedArtifacts(): AssetId[] {
+    return [...this.artifacts.keys()];
+  }
+
+  private createTransfer(): AssetTransfer {
+    return new AssetTransfer(
+      async (hash, offset, length, peerId) => {
+        const user = peerId ? this.sessions.get(peerId)?.user : null;
+        if (!user) return undefined; // indistinguishable from an unknown hash
+        const artifact = this.artifacts.get(hash);
+        if (artifact) {
+          // D-472: approved session is the whole gate — the GM activated this code for the table.
+          return { bytes: artifact.subarray(offset, offset + length), total: artifact.length };
+        }
+        // Re-check on EACH chunk, not only when queued: permissions and
+        // documents can change during a long premium-media transfer.
+        if (!canFetchAsset(this.store.world, this.manifestSource(), user, hash)) return undefined;
+        return this.assets?.read(hash, offset, length);
+      },
+      {
+        send: (peerId, chunk) => {
+          const session = this.sessions.get(peerId);
+          if (session?.user) this.send(session, chunk);
+        },
+      },
+      this.transferOptions,
+    );
+  }
+
+  /**
    * §5A/N01: set the active strategic battle (scene + package schema) that
    * every welcome announces, so joiners adopt it before their first sim frame
    * instead of guessing columns/scene. A *changed* announcement is re-sent to
@@ -911,6 +956,7 @@ export class HostSync {
         this.simInfo.sceneId === info.sceneId &&
         this.simInfo.packageId === info.packageId &&
         this.simInfo.version === info.version &&
+        this.simInfo.artifact?.hash === info.artifact?.hash &&
         sameSchema(this.simInfo.schema, info.schema));
     if (same) return;
     this.simInfo = info;
@@ -1035,26 +1081,8 @@ export class HostSync {
     this.manifestSource =
       options.manifest ?? (() => this.store.world.assetManifest);
     this.assets = options.assets ?? null;
-    this.transfer = this.assets
-      ? new AssetTransfer(
-          async (hash, offset, length, peerId) => {
-            const user = peerId ? this.sessions.get(peerId)?.user : null;
-            // Re-check on EACH chunk, not only when queued: permissions and
-            // documents can change during a long premium-media transfer.
-            if (!user || !canFetchAsset(this.store.world, this.manifestSource(), user, hash)) {
-              return undefined; // indistinguishable from an unknown hash
-            }
-            return options.assets?.read(hash, offset, length);
-          },
-          {
-            send: (peerId, chunk) => {
-              const session = this.sessions.get(peerId);
-              if (session?.user) this.send(session, chunk);
-            },
-          },
-          options.assetTransfer ?? {},
-        )
-      : null;
+    this.transferOptions = options.assetTransfer ?? {};
+    this.transfer = this.assets ? this.createTransfer() : null;
     this.pipeline = options.pipeline;
     this.fogStore = options.fogStore ?? null;
     this.rng = options.rng ?? cryptoRng;
@@ -9247,7 +9275,8 @@ export class HostSync {
     if (!session.user) return; // requires an approved session (§16)
     if (!session.assetBucket.tryRemove()) return; // §16: silently dropped
     if (!this.transfer) return; // no asset server wired (unit: assets)
-    if (!canFetchAsset(this.store.world, this.manifestSource(), session.user, msg.assetId)) {
+    if (!this.artifacts.has(msg.assetId) &&
+        !canFetchAsset(this.store.world, this.manifestSource(), session.user, msg.assetId)) {
       // Same miss sentinel as an unknown asset: a guessed hash gives no
       // existence oracle, and the fetcher's promise can terminate.
       this.send(session, { kind: "asset.chunk", assetId: msg.assetId,

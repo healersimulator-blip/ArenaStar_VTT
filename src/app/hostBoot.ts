@@ -40,7 +40,7 @@ import type {
 } from "../core/documents";
 import type { WorldId } from "../core/ids";
 import { HostSync, gmSessionUser, type HostEvents } from "../host/sync";
-import { AssetServer, wireManifestToStore } from "../host/assets";
+import { AssetServer, sha256Hex, wireManifestToStore } from "../host/assets";
 import { ImportPipeline } from "../host/import";
 import { HostPersister } from "../storage/persistence";
 import { listWorlds, openVttDb, type IDBPDatabase } from "../storage/idb";
@@ -62,6 +62,7 @@ import {
 } from "../workers/simWorkerClient";
 import { importRulesModule } from "../sim/rulesLoader";
 import type { RulesModule } from "../core/rules";
+import type { WelcomeRulesArtifact } from "../core/messages";
 import { MASS_BATTLE_SCHEMA_COLUMNS } from "../packages";
 import { readZipPackage } from "../packages/packageLoader";
 import { type CompendiumPack } from "../core/compendium";
@@ -870,6 +871,7 @@ async function bootHostAppLocked(
   let rulesModule: RulesModule | null = null;
   let simSys: SysSchema = MASS_BATTLE_SCHEMA_COLUMNS;
   let rulesSource: string | undefined;
+  let rulesArtifact: WelcomeRulesArtifact | undefined;
   if (pkg && pkgSource !== undefined) {
     // §12 gate: the package is imported (blob URL) + validated INSIDE the
     // worker sandbox before any campaign may start; failure degrades cleanly
@@ -891,6 +893,12 @@ async function bootHostAppLocked(
       };
       simSys = pkg.manifest.rules?.modelColumns ?? MASS_BATTLE_SCHEMA_COLUMNS;
       rulesSource = pkgSource;
+      // D-472: the same bytes travel to players as a content-addressed artifact on the assets
+      // channel, so a player shell can run the world's rules in-page after its own consent.
+      const artifactBytes = new TextEncoder().encode(pkgSource);
+      const artifactHash = await sha256Hex(artifactBytes);
+      host.publishArtifact(artifactHash, artifactBytes);
+      rulesArtifact = { hash: artifactHash, size: artifactBytes.byteLength, name: pkg.manifest.name };
     } catch (e) {
       rulesBoot = {
         source: "builtin",
@@ -936,6 +944,7 @@ async function bootHostAppLocked(
     schema: simSys,
     packageId: rulesBoot.packageId,
     version: rulesBoot.version,
+    ...(rulesArtifact ? { artifact: rulesArtifact } : {}),
   });
   const bridge = new SimBridge(DEFAULT_SCENE_ID, {
     db,

@@ -68,6 +68,8 @@
     type PlayerAisStatuses,
   } from "./playerAisRuntime";
   import { aisPanelLayer } from "../packages/aisPanel";
+  import { PlayerRulesPackage, type PlayerRulesStatus } from "./playerRulesPackage";
+  import type { RulesModule } from "../core/rules";
   import type { AisModuleSelectRequest } from "../packages/aisModuleHandlers";
   import {
     NO_ONBOARDING_FACTS,
@@ -617,6 +619,7 @@
         phase = "live";
         mountCanvas();
         startPlayerAis(playerApp);
+        startPlayerRules(playerApp);
       });
       if (new URLSearchParams(globalThis.location.search).has("e2e")) {
         void import("./e2eHook").then((m) => m.installPlayerE2e(playerApp));
@@ -747,6 +750,38 @@
       panelLayer: aisPanelLayer(),
     });
   }
+  // ─── D-472: the world's rules package on this device (in-page, after consent) ───
+  let playerRules: PlayerRulesPackage | null = null;
+  let playerRulesStatus = $state.raw<PlayerRulesStatus>({ state: "none" });
+  let playerRulesModule = $state.raw<RulesModule | null>(null);
+  let rulesDeciding = $state(false);
+  function startPlayerRules(playerApp: PlayerApp): void {
+    const client = playerApp.client;
+    const fetcher = playerApp.fetcher;
+    if (!client || !fetcher || playerRules) return;
+    playerRules = new PlayerRulesPackage({
+      client,
+      bus: playerApp.bus,
+      db: playerApp.db,
+      worldId: client.world?.id ?? "",
+      fetch: (hash) => fetcher.request(hash, "ui", "text/javascript"),
+      onStatus: (status) => {
+        playerRulesStatus = status;
+        playerRulesModule = playerRules?.module ?? null;
+      },
+    });
+  }
+  async function decideRules(action: "allow" | "deny" | "forget"): Promise<void> {
+    if (!playerRules || rulesDeciding) return;
+    rulesDeciding = true;
+    try {
+      if (action === "allow") await playerRules.allow();
+      else if (action === "deny") await playerRules.deny();
+      else await playerRules.forget();
+    } catch (error) { showMoveNotice(error instanceof Error ? error.message : String(error), "warn"); }
+    finally { rulesDeciding = false; }
+  }
+  const playerRulesSizeLabel = $derived(playerRulesStatus.state === "none" ? "" : `${Math.max(1, Math.round(playerRulesStatus.offer.size / 1024))} KB`);
   async function decideAis(packageId: string, allow: boolean): Promise<void> {
     if (!playerAis || aisDeciding) return;
     aisDeciding = true;
@@ -1908,6 +1943,8 @@
     finishAisChoice(null);
     playerAis?.dispose();
     playerAis = null;
+    playerRules?.dispose();
+    playerRules = null;
   });
 </script>
 
@@ -2229,6 +2266,7 @@
             windows={wmWindows}
             client={app.client}
             bus={app.bus}
+            rulesModule={playerRulesModule}
             sceneId={activeScene()?._id ?? null}
             selectedTokenId={selection.length === 1 ? (selection[0] ?? null) : null}
             {selectedItemRef}
@@ -2292,6 +2330,23 @@
           <section class="guide-card"><h3>Effects on this device</h3>
             <FxViewPrefsPanel />
           </section>
+          {#if playerRulesStatus.state !== "none"}
+            {@const rules = playerRulesStatus}
+            <section class="guide-card" data-player-rules={rules.offer.packageId} data-player-rules-state={rules.state}><h3>World rules</h3>
+              <p class="hint">This world runs on <strong>{rules.offer.name}</strong> v{rules.offer.version} ({playerRulesSizeLabel}).
+                {#if rules.state === "ready"}Loaded on this device: your army window uses the world's own orders and checks.
+                {:else if rules.state === "loading"}Loading…
+                {:else if rules.state === "failed"}Could not load it: {rules.error}
+                {:else if rules.state === "declined"}Not loaded on this device; your army window uses the built-in rules.
+                {:else}Waiting for your decision; until then your army window uses the built-in rules.{/if}</p>
+              <p class="hint">A rules package runs inside this page, not in a sandbox — only load it if you trust this GM. Code hash {rules.offer.hash.slice(0, 16)}…</p>
+              {#if rules.state === "ready" || rules.state === "loading"}
+                <button type="button" data-player-rules-forget disabled={rulesDeciding} onclick={() => void decideRules("forget")}>Forget on this device</button>
+              {:else if rules.state === "declined" || rules.state === "failed"}
+                <button type="button" data-player-rules-allow disabled={rulesDeciding} onclick={() => void decideRules("allow")}>{rules.state === "failed" ? "Retry" : "Load on this device"}</button>
+              {/if}
+            </section>
+          {/if}
           {#if aisModuleRows.length > 0}
             <section class="guide-card" data-player-ais-modules><h3>Shared modules</h3>
               <p class="hint">Modules the GM shares with this table run sandboxed on your device, only after you allow them, and can only change what you already control.</p>
@@ -2351,6 +2406,21 @@
           {/each}
         </div>
         <button class="ais-choice-cancel" type="button" onclick={() => finishAisChoice(null)}>Cancel</button>
+      </dialog>
+    </div>
+  {:else if playerRulesStatus.state === "pending"}
+    {@const offer = playerRulesStatus.offer}
+    <!-- D-472: the world's rules package runs in-page (not sandboxed) — this device decides, per exact artifact. -->
+    <div class="ais-choice-backdrop" role="presentation">
+      <dialog open class="ais-choice-dialog" aria-modal="true" aria-labelledby="rules-consent-title" data-rules-consent={offer.packageId}>
+        <h2 id="rules-consent-title">{offer.updated ? `${offer.name} was updated` : `Load this world's rules on this device?`}</h2>
+        <p>The GM runs this world on the rules package <strong>{offer.name}</strong> v{offer.version} ({playerRulesSizeLabel}). Loading it lets your army window use the world's own orders and checks instead of the built-in rules.</p>
+        <p class="ais-consent-warning" data-rules-consent-unsandboxed>Unlike shared modules, a rules package is <strong>not sandboxed</strong>: it runs inside this page with the same access as the app itself. Only load it if you trust this GM.</p>
+        <p class="ais-choice-origin">Package {offer.packageId} · code hash {offer.hash.slice(0, 16)}…</p>
+        <div class="ais-consent-actions">
+          <button type="button" data-rules-consent-deny disabled={rulesDeciding} onclick={() => void decideRules("deny")}>Not now</button>
+          <button type="button" data-rules-consent-allow disabled={rulesDeciding} onclick={() => void decideRules("allow")}>Load on this device</button>
+        </div>
       </dialog>
     </div>
   {:else if aisPending.length > 0}

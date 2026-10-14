@@ -14,6 +14,7 @@ import {
   type HostApp,
 } from "../../src/app/hostBoot";
 import { getWorld, openVttDb } from "../../src/storage/idb";
+import { sha256Hex } from "../../src/host/assets";
 import { MemDirHandle } from "../../src/storage/opfs";
 import { HostPersister } from "../../src/storage/persistence";
 import { putCheckpoint } from "../../src/storage/strategicStore";
@@ -204,6 +205,12 @@ describe("HostPackages — the record names the ruleset it runs", () => {
     expect(second.rulesModule?.schema.version).toBe("3.1.0");
     expect(second.rulesModule?.validateOrder).toBeTypeOf("function");
     expect(second.rulesModule?.leaderStats).toBeUndefined();
+    // D-472: the same bytes are published for players as a content-addressed artifact, and the
+    // welcome's `sim` block names it next to the schema joiners already adopt.
+    const artifactBytes = new TextEncoder().encode(RULES_JS);
+    const artifactHash = await sha256Hex(artifactBytes);
+    expect(second.host.publishedArtifacts()).toEqual([artifactHash]);
+    expect(second.gm.client.simInfo?.artifact).toEqual({ hash: artifactHash, size: artifactBytes.byteLength, name: "Probe Rules" });
     // meta.system feeds the join welcome's world block — it now agrees with rulesBoot
     expect(second.meta.system).toBe("probe-rules");
     expect(second.meta.systemVersion).toBe("3.1.0");

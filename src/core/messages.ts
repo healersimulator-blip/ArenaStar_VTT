@@ -867,6 +867,24 @@ export interface WelcomeSimInfo {
   packageId: string | null;
   /** Active rules version (package version, or the built-in's). */
   version: string;
+  /**
+   * D-472: the active package's `rules.js` as a content-addressed blob any approved session may
+   * fetch on the `assets` channel (`asset.get` with this hash, served from the host's published
+   * artifacts rather than the asset manifest). A player shell that loads it runs the world's
+   * own rules in-page (order validation, schema) — after this device's consent (not sandboxed).
+   * Absent for the built-in rules or when the host did not publish the artifact.
+   */
+  artifact?: WelcomeRulesArtifact;
+}
+
+/** D-472: how a player fetches and verifies the active rules package. */
+export interface WelcomeRulesArtifact {
+  /** sha256 (hex) of the UTF-8 `rules.js` bytes; doubles as the asset id to request. */
+  hash: AssetId;
+  /** Byte length, so the shell can size the fetch and the consent prompt. */
+  size: number;
+  /** The package's display name (manifest `name`). */
+  name: string;
 }
 
 /** §6.4: after approval the client is welcomed, then receives the snapshot. */
