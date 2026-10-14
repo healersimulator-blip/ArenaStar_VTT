@@ -14449,7 +14449,7 @@ base64). `dist/index.html` **5,865,319 → 5,857,329 B** (−7,990 B raw; gzip 1
 **+13,185 B** — the removed JS compressed well, the added zip bytes do not); headroom 434,127 B.
 The importer strings are gone from the main bundle's JS (`grep "a .por file is a zip archive"
 dist/index.html` → 0). Gates: `tsc` 0, `eslint .` 0, svelte check 0 blocking, vitest **5,805 passed
-/ 12 skipped (5,818)** (new: loaded-module import, seam shape gate, agent refusal without a seam;
+/ 12 skipped (5,817)** (new: loaded-module import, seam shape gate, agent refusal without a seam;
 `agentProjection` / `agentHexcrawlAuthoring` contexts now pass the PF1e module, as a PF1e host does).
 
 **What this says about T2.** The single-file size is now governed by *duplication*, not by what
