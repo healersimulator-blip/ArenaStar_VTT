@@ -13908,3 +13908,50 @@ horizontally inside the panel (`.roster-scroll`), so the compact copy inside Wor
 fits. A third observation is *not* a defect: every window in a headless screenshot sits on a
 large white block — the `.wm-window` box-shadow composited by SwiftShader over the WebGL
 canvas; it vanishes with the shadow off and does not appear on a GPU.
+
+## D-466 — Five PF1e Foundry repositories read against AIS + adapter: the readiness verdict and the gap list (2026-10-14)
+
+**Context.** After the AIS state report, the owner asked for something practical: read the
+documentation and code of the pf1 system (`foundryvtt-pathfinder1`), `pf1-content`,
+`pf1e-archetypes`, `pf1-statblock-library` and `pf1-statblock-converter` (SBC), decide whether
+ArenaStar's AIS and its Foundry adapter are ready to handle them, and if not, write down what is
+lacking. This is a feasibility slice (proposal §10 defines certification; nothing here claims it).
+
+**What was read.** GitLab pages/raw files for all five (READMEs, manifests, entry scripts, one
+source entry per data repo, LICENSE files, SBC's `sbc.mjs`/`sbcInput.js`/`sbcCompendium.js`/
+`sbcParser.js`), plus a sparse checkout of the pinned pf1 system mirror (`681929d1`: `module/`
+358 files / 102,928 LOC, 49 `pf1*` hooks, 51 settings, 69 Applications, 7 document subclasses,
+11,315 pack YAML files). Compared against the AIS kernel/bridge/adapter as on `main` and the data
+route (`tools/content`, `tools/convert`, 28 packs / 25,376 entries). No module was executed; no
+converter run against the new repos (no pins exist yet).
+
+**Decision — the document.** `AIS_PF1E_MODULE_READINESS.md` (new, repo root): a verdict table, a
+per-repo analysis (identity, licence, API footprint, what is in place, what is lacking), a
+consolidated gap list in four classes — AIS/adapter **R-01…R-11** (recorded, *not* recommended for
+action), converter **C-01…C-10**, native/product **N-01…N-05**, legal **L-01…L-04** — a
+what-not-to-do list, a seven-slice sequence, open questions, and an API-footprint appendix.
+
+**Verdicts.** The pf1 **system** is out of scope by design (proposal §7.4; INVENTORY row 2's
+clean-room rule stands); its remaining value is 11 unconverted packs, `class-abilities` (4,710)
+first. `pf1-content` and `pf1e-archetypes` are **content**: their scripts are SBC/registry glue
+that the adapter neither supports nor needs; the route is the converter (pf1-content needs a
+re-pin — the 2023 mirror's `src/packs/<pack>/*.json` layout no longer exists upstream, 21 packs
+are unconverted, and actors lose their embedded `items[]`). `pf1-statblock-library` is ≈10,000
+HTML statblock journal pages plus one sheet whose only feature is "send this text to SBC" — the
+native `importStatblock()` (D-267) already does that job, so the gap is a `.yml` walker, a
+journal-subtype rule, an *Import as actor* action behind the compendium reader, opt-in packaging
+(size unmeasured) and a Paizo CUP legal case. **SBC** is the only real code module and cannot run
+under AIS in any foreseeable phase: it needs compendium reads, document CRUD, settings,
+`ApplicationV2` + Handlebars, sockets, file storage, a module-to-module API bus and — decisively —
+the pf1 data model for the actor it produces. Its MIT licence makes its parsing tables and
+fixtures the right **oracle and transcription source** for the native importer's parity work.
+
+**Inventory.** `tools/adopt/INVENTORY.md` rows **16–18** added (archetypes GPLv3 + OGL + CUP
+icons; statblock-library GPLv3 + CUP, OGL notice not located; SBC MIT) — verified facts at the
+commits read, `legalStatus: pending`, per the D-252 posture.
+
+**What was deliberately not done.** No AIS/adapter change — nothing in these five repositories
+justifies a "content-aware guest" profile; R-01…R-11 are its requirement list if one is ever
+wanted, and the next kernel slice remains P3. No `sources.json` pins (GitLab is unreachable from
+this sandbox's build shell; C-10 asks the owner to choose GitLab pins vs. controlled mirrors). No
+converter code. No gates re-run: the change is three Markdown files.
