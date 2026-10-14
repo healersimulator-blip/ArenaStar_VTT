@@ -14,6 +14,7 @@
  *     `bundleAttribution.mjs`).
  *
  *   node tools/analysis/pf1eCoupling.mjs
+ *   node tools/analysis/pf1eCoupling.mjs --symbols   # host → PF1e by PF1e module, with symbols
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -92,6 +93,32 @@ for (const e of hostToPf1e) {
 for (const [k, v] of [...byHost].sort((a, b) => b[1].syms.size - a[1].syms.size).slice(0, 15)) {
   console.log(String(v.syms.size).padStart(4), "symbols", String(v.edges).padStart(3), "edges ", k);
 }
+// --symbols: the contract surface a tactical package boundary would have to carry — every
+// PF1e module the host imports, with the symbols, grouped by PF1e file and ranked by how
+// many host files need it (the shared ones are the dispatch interface; the one-offs are glue).
+if (process.argv.includes("--symbols")) {
+  console.log("\n== host → PF1e by PF1e module (--symbols) ==");
+  const byTarget = new Map();
+  for (const e of hostToPf1e) {
+    const k = rel(e.to);
+    const v = byTarget.get(k) ?? { hosts: new Set(), syms: new Map() };
+    v.hosts.add(rel(e.from));
+    for (const s of e.syms) {
+      const row = v.syms.get(s) ?? { hosts: new Set(), typeOnly: true };
+      row.hosts.add(rel(e.from));
+      if (!e.typeOnly) row.typeOnly = false;
+      v.syms.set(s, row);
+    }
+    byTarget.set(k, v);
+  }
+  for (const [k, v] of [...byTarget].sort((a, b) => b[1].hosts.size - a[1].hosts.size || b[1].syms.size - a[1].syms.size)) {
+    console.log(`\n${k}  (${v.hosts.size} host files, ${v.syms.size} symbols)`);
+    for (const [s, row] of [...v.syms].sort((a, b) => b[1].hosts.size - a[1].hosts.size)) {
+      console.log(`   ${String(row.hosts.size).padStart(2)}× ${row.typeOnly ? "type " : "     "}${s}`);
+    }
+  }
+}
+
 console.log("\n== PF1e → host (what PF1e needs from the host) ==");
 console.log(
   `edges ${pf1eToHost.length}  host files ${uniq(pf1eToHost.map((e) => e.to)).length}  distinct symbols ${uniq(pf1eToHost.flatMap((e) => e.syms)).length}`,

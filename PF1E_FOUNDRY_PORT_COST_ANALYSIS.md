@@ -436,5 +436,67 @@ node tools/analysis/foundryApiInventory.mjs --dir /tmp/pf1mirror/module --exclud
 ```
 
 LOC throughout = non-blank, non-comment lines. Bundle bytes = minified bytes of the production
-chunk attributed through its source map. In-repo LOC figures: `src` 178,751, `tests` 118,954,
+chunk attributed through its source map.
+
+## Appendix D — Re-measured after P3 steps 1–2 (D-471, D-472) and the T2 contract surface
+
+Same tooling as Appendix C, run at commit `c5a669a`.
+
+**Attribution (JS chunk 5,231,003 B):**
+
+| PF1e tier | D-467 | now | Δ |
+|---|---:|---:|---:|
+| strategic ruleset (`massBattlePf1e`) | 25,155 | **0** | −25,155 |
+| tactical logic (`src/packages/pf1e`, excl. `import/`) | 348,022 | **323,877** | −24,145 (exclusive deps left with the ruleset) |
+| UI (`src/ui/**/pf1e*`) | 310,713 | 310,689 | −24 |
+| importers (`src/packages/pf1e/import`) | 49,003 | 49,017 | +14 |
+| **PF1e total** | **732,893 (14.0 %)** | **683,583 (13.1 %)** | **−49,310** |
+
+Reachability: all 118 PF1e-named files 683,583 B; player shell reaches 107 files / 681,082 B;
+GM-shell-only 2 files / 2,501 B. Coupling host → PF1e: **143 edges (13 type-only), 27 host
+files, 57 PF1e modules, 179 symbols**; PF1e → host 264 edges / 39 host files / 110 symbols.
+
+**The T2 contract surface** (`node tools/analysis/pf1eCoupling.mjs --symbols`): the 179
+symbols split by how many host files need each PF1e module —
+
+| Imported by | PF1e modules | symbols | reading |
+|---|---:|---:|---|
+| ≥ 4 host files | 12 | 79 | the dispatch interface proper |
+| 2–3 host files | 19 | 58 | shared glue, mostly UI flows |
+| 1 host file | 26 | 42 | one-off glue (inline into the caller or into the package) |
+
+The twelve shared modules, with the symbols host code imports (counts = host files):
+`ui/sheets/pf1eSheetModel` (8: `isPF1eActor` ×6, `pf1eSheetView` ×3, `pf1eSpellSlotReadout`,
+`sheetRecord`) · `pendingRoll` (7: `PendingRoll` ×5, `isPendingExpired` ×4, `pendingPruneOps` ×3,
+`pendingRollsOfSystem` ×2 + 8 singles) · `actor` (7: `deriveFromActorDocument` ×4,
+`deriveFromDocuments` ×3, `PF1eDerived`) · `worldClock` (6: `readWorldClock` ×5,
+`advanceWorldClockOps`/`pf1eClockSweepOps` ×3, `formatWorldClock`/`setWorldClockOps`/
+`wrapAdvanceOps` ×2 + 3 constants) · `spellEffects` (6: `pf1eSpellEffectByName` ×4 + 4) ·
+`rollLedger` (5: `RollLedger` ×4, `canReroll`/`canRevert`/`pruneOpsForWindow`/
+`tacticalLedgerTurn` ×2 + 7 singles) · `combatState` (4: `readCombatantState` ×3, `pf1eNextTurn`/
+`readRoundState`/`startWithSurprise`/`isFlatFootedByRound` ×2 + 7) · `targeting` (4:
+`pf1eAreaGridFromScene` ×4, `lineIntersectsTokenFootprint` ×3 + 7) · `casting` (4:
+`PF1eSaveSeverity`/`PF1eSaveType` ×4, `PF1E_SAVE_SEVERITIES` ×3 + 3) · `rollApply` (4:
+`readRollApplications` ×4 + 3) · `healthState` (4: `PF1eEnergyType` ×4, `PF1E_ENERGY_TYPES` ×3) ·
+`aooSettings` (4: `autoResolveAoosOf`).
+
+Reading: the host's real dependency on PF1e is **derivation** (`actor`), **sheet identity**
+(`pf1eSheetModel`), **pending/ledgered rolls** (`pendingRoll`, `rollLedger`, `rollApply`),
+**combat/round state** (`combatState`, `aooSettings`), the **world clock**, **areas/targeting**
+and three **enumerations** (save types, energy types, spell effects). That is the shape of the
+tactical system contract T2 must carry; the 45 modules imported by ≤ 3 host files are glue that
+moves with the package or inlines into its single caller.
+
+**T1 finding (importers).** The seven importer files (49,017 B) are reached from exactly two
+host files through six functions (`importCharacter`, `characterImportOps`,
+`characterImportReport`, `formatLabel`, `characterImportActorId`, type `CharacterImportReport`),
+so the seam is trivial — but the *home* is not: the importers produce PF1e **tactical** actors,
+and today they work in every world, including the default world on built-in strategic rules
+(`e2e/pf1e_import.spec.ts`, `e2e/statblock_import.spec.ts` import into `?e2e=1` with no package
+active). Putting them behind the active *strategic* package (`pf1e-mass-battles`) would remove
+import from those worlds; putting them behind a tactical package needs T2's package to exist.
+The owner decision that unblocks T1 is therefore whether the default world activates the
+first-party PF1e package (then the importers — and later the tactical logic — move with the
+D-471/D-472 mechanism and the default world keeps every feature), or stays generic (then T1
+waits for T2). In-repo LOC figures: `src` 178,751, `tests` 118,954,
 `src/packages/pf1e` 27,094, PF1e UI 16,155, AIS v1 2,441 product / 2,240 tests.
