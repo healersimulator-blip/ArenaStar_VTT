@@ -22,12 +22,21 @@ The five repositories the question named:
 Readiness scale used throughout: **A** = the upstream code runs unchanged under the AIS adapter
 (proposal §10 "verified unchanged-code subset"); **B** = runs with a bounded new adapter profile or
 recipe; **C** = the *data* is usable through the converter, no upstream code runs; **D** = the
-*behaviour* is re-implemented natively (clean-room / licence-compatible transcription); **E** = out
-of scope by design.
+*behaviour* is re-implemented natively (clean-room / licence-compatible transcription); **E** = the
+upstream *code* is not a candidate for the adapter — it will not run as an AIS guest, by design of
+the adapter. **E says nothing about the value of the repository**; that is rated in the next column.
+
+> **Terminology.** "pf1 system" below always means the *Foundry VTT package* `pf1` — the
+> JavaScript implementation of Pathfinder 1e for Foundry. It never means Pathfinder 1e the game.
+> PF1e is ArenaStar's native base system (`src/packages/pf1e`, 79 files / 36 k LOC, plus sheets,
+> combat, builder, 188 unit-test files and 72 e2e specs). The question this document asks about
+> repo 1 is therefore not "do we support PF1e" but "do we run Foundry's PF1e *code*" (no — we are
+> the PF1e code) and "do we use Foundry's PF1e *data and rules text*" (yes — it is already the
+> primary source, and more of it should be).
 
 | # | Repo | AIS/adapter today | Best route | Already in place | What is lacking (summary; detail in §3–§4) |
 |---|---|---|---|---|---|
-| 1 | pf1 system | **E** — the adapter never emulates a game system (proposal §7.4; adapter README) | **C** for packs + **D** for rules (INVENTORY row 2, clean-room T1–T6) | 13 of 24 system packs converted (D-253); the native PF1e sheet/rules exist in-repo | 11 system packs not converted (incl. `class-abilities`, 4,710 entries — the largest pack); no plan to run 103 k LOC of GPLv3 system code, and none should be made |
+| 1 | pf1 system (Foundry's `pf1` *code package*) | **E** for the code — the adapter never hosts a game-system implementation (proposal §7.4; adapter README); ArenaStar *is* the PF1e implementation, so this repo is a data + reference source, not something to run | **C** for packs + **D** for rules (INVENTORY row 2, clean-room T1–T6) | 13 of 24 system packs converted (D-253); the native PF1e sheet/rules exist in-repo | 11 system packs not converted (incl. `class-abilities`, 4,710 entries — the largest pack); no plan to run 103 k LOC of GPLv3 system code, and none should be made |
 | 2 | pf1-content | **E** for the script (it only redirects UUIDs and registers sources with the pf1 registry); irrelevant to the value | **C** | 15 packs converted from a **2023 pin** (`baileymh/pf1e-content@baf5232c`) | 21 of today's 35 packs never converted; upstream layout/renames drifted since the pin; actors arrive without their embedded items |
 | 3 | pf1e-archetypes | **E** for the script (SBC integration only) | **C**, then a product decision on archetype UX (**D**) | Nothing — not pinned, not converted | New source + YAML walker; `@Embed` enricher reduction; `links.supplements` consumer; archetype/prestige affordance in the builder |
 | 4 | statblock-library | **E** for the sheet (a `JournalPageSheet` subclass + `DocumentSheetConfig.registerSheet` + jQuery + SBC's `api.openSBCDialog`); none of that exists in the adapter | **C** for the text + **D** for the one feature (Import) — the native `importStatblock()` (D-267) already exists | The journal mapper, the compendium reader (proven at 25,376 entries, D-266), the native statblock reader | New source; `.yml` walker; custom page subtype rule; an "Import as actor" action behind the compendium reader; opt-in packaging (size), licence posture (Paizo CUP) |
@@ -97,7 +106,7 @@ Facts, with the file that proves each (unchanged since the AIS state report):
 
 ## 3. Per-repository analysis
 
-### 3.1 `foundryvtt-pathfinder1` — the pf1 game system
+### 3.1 `foundryvtt-pathfinder1` — Foundry's `pf1` package (the Foundry implementation of PF1e)
 
 **Identity.** `public/system.json`: id `pf1`, version 11.11, `compatibility.minimum 14.361`
 (mirror) / `14.368` (master), `maximum 14`; `esmodules: ["pf1.mjs"]`; `socket: true`; `grid`
@@ -122,9 +131,12 @@ items/combat` and `CONFIG.Item.collection` at init. Packs are authored as **11,3
 49, `roll-tables` 24, `basic-monsters` 15, `racial-hd` 13, `companion-features` 11, `rules` 10,
 `macros` 9, `mythic-paths` 6) and compiled to LevelDB by its Vite build.
 
-**AIS/adapter today: E.** Everything the system is — document data models, derived-data
-preparation, 69 applications, canvas subclasses, settings, sockets, chat message types — is on the
-adapter's explicit "unsupported" list, and the proposal (§7.4) rules it out: "Full Foundry system
+**AIS/adapter today: E — for the code, not for PF1e.** PF1e is ArenaStar's base system and is
+implemented natively; what is not a candidate is loading Foundry's `pf1.mjs` and its 358 files as a
+*guest* of the adapter and letting it provide the rules. Everything that package is — document data
+models, derived-data preparation, 69 applications, canvas subclasses, settings, sockets, chat
+message types — is on the adapter's explicit "unsupported" list, and the proposal (§7.4) rules it
+out: "Full Foundry system
 execution is a separate project and not proposed here." Nothing changes that verdict; a system is
 also the one thing that could not be loaded as a *guest* of an adapter that pretends to be its
 host. The system additionally targets Foundry **v14** APIs at master (`foundry.canvas.placeables.*`,
@@ -425,10 +437,12 @@ kernel slice.
 
 ## 5. What not to do
 
-1. **Do not load the pf1 system under the adapter** or anywhere else in the app: 103 k LOC of
-   GPLv3, Foundry v14 APIs, canvas and document subclasses, and a 6 MiB app budget with 579 KiB of
-   headroom. The project's rules boundary (INVENTORY row 2, clean-room T1–T6) is already the right
-   decision; this reading only confirms it.
+1. **Do not load Foundry's `pf1` code package under the adapter** or anywhere else in the app:
+   103 k LOC of GPLv3, Foundry v14 APIs, canvas and document subclasses, and a 6 MiB app budget
+   with 579 KiB of headroom. The project's rules boundary (INVENTORY row 2: *data via converter,
+   logic via clean-room transcription*) is already the right decision; this reading only confirms
+   it. This is not a statement about PF1e support — PF1e is the native base system, and the same
+   repository remains its primary data source and parity reference.
 2. **Do not build a "compendium read" adapter profile to make pf1-content / archetypes /
    statblock-library "load".** Their scripts do nothing a user would notice; their value is data,
    and the converter already turns that data into packs the native reader browses faster than

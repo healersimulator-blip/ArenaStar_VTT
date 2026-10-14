@@ -13931,9 +13931,13 @@ consolidated gap list in four classes — AIS/adapter **R-01…R-11** (recorded,
 action), converter **C-01…C-10**, native/product **N-01…N-05**, legal **L-01…L-04** — a
 what-not-to-do list, a seven-slice sequence, open questions, and an API-footprint appendix.
 
-**Verdicts.** The pf1 **system** is out of scope by design (proposal §7.4; INVENTORY row 2's
-clean-room rule stands); its remaining value is 11 unconverted packs, `class-abilities` (4,710)
-first. `pf1-content` and `pf1e-archetypes` are **content**: their scripts are SBC/registry glue
+**Verdicts.** Terminology first: "pf1 system" means Foundry's `pf1` *code package*, never PF1e the
+game — PF1e is ArenaStar's native base system (`src/packages/pf1e`, 79 files / 36 k LOC). Running
+that Foundry code under AIS is out of scope (proposal §7.4: "Full Foundry system execution is a
+separate project"; INVENTORY row 2's rule — data via converter, logic via clean-room transcription —
+stands). The repository keeps the role it already has: primary data source (13 of 24 packs
+converted) and rules-parity reference; its remaining value is 11 unconverted packs,
+`class-abilities` (4,710) first. `pf1-content` and `pf1e-archetypes` are **content**: their scripts are SBC/registry glue
 that the adapter neither supports nor needs; the route is the converter (pf1-content needs a
 re-pin — the 2023 mirror's `src/packs/<pack>/*.json` layout no longer exists upstream, 21 packs
 are unconverted, and actors lose their embedded `items[]`). `pf1-statblock-library` is ≈10,000
