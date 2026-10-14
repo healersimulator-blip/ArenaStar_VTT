@@ -500,3 +500,13 @@ first-party PF1e package (then the importers — and later the tactical logic �
 D-471/D-472 mechanism and the default world keeps every feature), or stays generic (then T1
 waits for T2). In-repo LOC figures: `src` 178,751, `tests` 118,954,
 `src/packages/pf1e` 27,094, PF1e UI 16,155, AIS v1 2,441 product / 2,240 tests.
+
+**Outcome (D-473/D-474).** The owner chose the first option: the build embeds its own packages
+and the default world runs `pf1e-mass-battles` (D-473, +168,761 B raw for the two zips), and T1
+landed behind `RulesModule.characterImport` (D-474). Measured against the estimate above: the
+importers' own 49 KB left the main bundle as predicted, but `rules.js` grew by **110,457 B**
+because the readers pull ≈61 KB of PF1e helpers (`consumables`, `inventory`, `skills`, `tags`,
+`actor`, `rulesTables`) that the sheets still bundle — so the single file moved **−7,990 B raw /
++13,185 B gzip**, not −51 KB. Correction to the T1 row: a package-side move of code that shares
+helpers with code still in the shell costs the shared part twice until T2 moves the helpers too;
+the figure to watch from here is duplicated bytes, not T-tier bytes.

@@ -2298,7 +2298,7 @@
               <ChatPanel client={app.client} bus={app.bus}
                 targetTokenId={selection.length === 1 ? (selection[0] ?? null) : null} {selectedItemRef} />
             {:else if playerTab === "actors"}
-              <SheetPanel client={app.client} bus={app.bus} onOpenActor={openActorSheet} />
+              <SheetPanel client={app.client} bus={app.bus} onOpenActor={openActorSheet} rulesModule={playerRulesModule} />
             {:else}
               <ImageHandlingPanel
                 client={app.client}

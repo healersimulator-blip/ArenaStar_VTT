@@ -193,12 +193,7 @@ import { OWNERSHIP_LEVELS } from "../core/documents";
 import { getEffectiveOwnership } from "../core/permissions";
 import type { PermissionUser } from "../core/ownership";
 import { makeToken } from "./hostBoot";
-import {
-  characterImportOps,
-  characterImportReport,
-  formatLabel,
-  importCharacter as readCharacterDocument,
-} from "../packages/pf1e/import";
+import type { RulesModule } from "../core/rules";
 
 /** A pack list as the packages runtime hands it over; the shape the compendium index builder wants. */
 export interface AgentCompendiumSource {
@@ -217,6 +212,12 @@ export interface AgentWorldViewOptions {
    * rather than inventing a hash that resolves to nothing.
    */
   importImage?: (bytes: Uint8Array, name: string, mime: string) => Promise<{ hash: string }>;
+  /**
+   * D-474: the world's live rules module (`HostApp.rulesModule`), read at call time. Its
+   * `characterImport` seam is what `actor.from_statblock` reads with; without one the tool says
+   * so in the module's terms rather than reading nothing.
+   */
+  rules?: () => RulesModule | null;
 }
 
 /** An agent cannot upload a map the size of a map: 8 MB is three 4k textures. */
@@ -1081,23 +1082,27 @@ export function agentWorldView(
       return null;
     },
     importCharacter(text: string, spec: { id: string }): AgentImportPlan | { error: string } {
-      const parsed = readCharacterDocument(text);
-      // The importer's own sentence, not a summary of it: "a stat block starts with the creature's
-      // name and its CR" is the thing that tells an agent what to paste next time.
-      if (!parsed.ok) return { error: parsed.error };
-      const report = characterImportReport(parsed.value);
+      // D-474: the reader is the world's own rules package, through the RulesModule seam.
+      const importer = options.rules?.()?.characterImport;
+      if (!importer) {
+        return {
+          error:
+            "this world's strategic rules import no characters (the built-in mass-battle-basic reads no exports) — activate a system package that does, such as the shipped Pathfinder 1e Mass Battles Engine (Settings → Packages), and reload",
+        };
+      }
       // The actor belongs to the session that imported it, the same way the app's own import hands
       // a character to the GM: an import is not published to the table until somebody shares it.
       const owner = userOf()?.id;
+      const read = importer.read({ text, id: spec.id, ...(owner === undefined ? {} : { ownerId: owner }) });
+      // The importer's own sentence, not a summary of it: "a stat block starts with the creature's
+      // name and its CR" is the thing that tells an agent what to paste next time.
+      if (!read.ok) return { error: read.error };
       return {
-        name: report.name,
-        format: formatLabel(report.format),
-        ops: characterImportOps(parsed.value, {
-          id: spec.id,
-          ...(owner === undefined ? {} : { gmId: owner }),
-        }),
-        read: [...report.read],
-        warnings: [...report.warnings],
+        name: read.value.name,
+        format: read.value.format,
+        ops: read.value.ops,
+        read: [...read.value.read],
+        warnings: [...read.value.warnings],
       };
     },
     hexSummary(sceneId) {

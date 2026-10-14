@@ -62,8 +62,10 @@ test("§3.2 acceptance — a pasted stat block becomes a playable bestiary actor
   const runtimeErrors: string[] = [];
   page.on("pageerror", (error) => runtimeErrors.push(error.message));
 
-  await page.goto(entry + "?e2e=1");
+  // D-474: the importers travel with the PF1e package — the world has to run it.
+  await page.goto(entry + "?e2e=1&rules=pf1e");
   await waitForSurface(page, "app");
+  await expect(page.locator("#status [data-rules-status]")).toHaveText("strategic rules: pf1e-mass-battles v1.0.0");
   await page.click('[data-tab="actors"]');
 
   const rowsBefore = await page.locator("#sheet-list .sheet-row").count();
@@ -164,4 +166,14 @@ test("§3.2 acceptance — a pasted stat block becomes a playable bestiary actor
   await expect(page.locator("#sheet-list .sheet-row")).toHaveCount(rowsBefore + 1);
 
   expect(runtimeErrors).toEqual([]);
+});
+
+test("D-474: a world on the built-in rules offers no character import — the seam belongs to the package", async ({ page }) => {
+  await page.goto(entry + "?e2e=1");
+  await waitForSurface(page, "app");
+  await expect(page.locator("#status [data-rules-status]")).toHaveText(/strategic rules: built-in/);
+  await page.click('[data-tab="actors"]');
+  await expect(page.locator("#new-doc")).toBeVisible();
+  await expect(page.locator("[data-import-paste-trigger]")).toHaveCount(0);
+  await expect(page.locator("[data-import-character-trigger]")).toHaveCount(0);
 });

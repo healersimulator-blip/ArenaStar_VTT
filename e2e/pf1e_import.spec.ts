@@ -256,8 +256,10 @@ test("§3.1 acceptance — three exports land as playable characters, and a stra
   const runtimeErrors: string[] = [];
   page.on("pageerror", (error) => runtimeErrors.push(error.message));
 
-  await page.goto(entry + "?e2e=1");
+  // D-474: the importers travel with the PF1e package — the world has to run it.
+  await page.goto(entry + "?e2e=1&rules=pf1e");
   await waitForSurface(page, "app");
+  await expect(page.locator("#status [data-rules-status]")).toHaveText("strategic rules: pf1e-mass-battles v1.0.0");
   await page.click('[data-tab="actors"]');
 
   // ── 1. Foundry PF1e actor JSON ──────────────────────────────────────────────────────────

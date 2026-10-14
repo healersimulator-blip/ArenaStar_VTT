@@ -4,28 +4,31 @@
   import TagEditor from "./TagEditor.svelte";
   import { isPF1eActor } from "./pf1eSheetModel";
   import { can } from "../../core/permissions";
-  import {
-    characterImportActorId,
-    characterImportOps,
-    characterImportReport,
-    formatLabel,
-    importCharacter,
-    type CharacterImportReport,
-  } from "../../packages/pf1e/import";
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { BaseDocument, Json, UserDocument } from "../../core/documents";
+  import type { RulesModule } from "../../core/rules";
 
   let {
     client,
     bus,
     onOpenActor,
+    rulesModule = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     onOpenActor?: (actorId: string) => void;
+    /**
+     * D-474: the world's live rules module — the host's in-page package (D-471) or the player's
+     * consented one (D-472). Its `characterImport` seam is the only importer this panel knows;
+     * without one (built-in rules, or a player who has not loaded the package) the Import and
+     * Stat block controls are not offered.
+     */
+    rulesModule?: RulesModule | null;
   } = $props();
+
+  const characterImport = $derived(rulesModule?.characterImport ?? null);
 
   type SheetColl = "actors" | "items";
   let coll = $state<SheetColl>("actors");
@@ -115,60 +118,55 @@
   /**
    * G-08 (D-267): the same read, from text the GM pasted instead of a file. A stat block has no
    * file behind it — it is copied out of a PDF, a wiki page or another table's handout — so the
-   * Actors tab also takes text, and everything after `importCharacter` is the path above
-   * unchanged: one create op, one report, the same list.
+   * Actors tab also takes text, and everything after the read is the path above unchanged: one
+   * create op, one report, the same list.
    */
   let pasteOpen = $state(false);
   let pasteText = $state("");
-  /** What the box shows before anything is typed: the head of a real SRD block. */
-  const PASTE_EXAMPLE = [
-    "Goblin Warrior CR 1/3",
-    "NE Small humanoid (goblinoid)",
-    "Init +6; Senses darkvision 60 ft.; Perception -1",
-    "",
-    "DEFENSE",
-    "",
-    "AC 16, touch 13, flat-footed 14 (+2 armor, +2 Dex, +1 shield, +1 size)",
-    "hp 6 (1d10+1)",
-    "Fort +3, Ref +4, Will -1",
-    "",
-    "OFFENSE",
-    "",
-    "Speed 30 ft.",
-    "Melee short sword +2 (1d4/19-20)",
-    "Ranged short bow +4 (1d4/\u00d73)",
-    "",
-    "STATISTICS",
-    "",
-    "Str 11, Dex 15, Con 12, Int 10, Wis 9, Cha 6",
-    "Base Atk +1; CMB +1; CMD 12",
-    "Feats Improved Initiative",
-    "Languages Goblin",
-  ].join("\n");
+
+  /**
+   * One read through the seam (D-474): the module decides what the text is and what it becomes;
+   * this panel mints the id (the same `a-…` shape the importer always used), submits the ops and
+   * shows the report.
+   */
+  function importThrough(text: string, source: string, fileName: string | undefined): boolean {
+    if (!characterImport) {
+      importReport = { ok: false, name: source, lines: [], warnings: ["this world's rules do not import characters"] };
+      return false;
+    }
+    const id = `a-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+    const owner = client.user?.id;
+    const read = characterImport.read({
+      text,
+      id,
+      ...(fileName === undefined ? {} : { fileName }),
+      ...(owner === undefined ? {} : { ownerId: owner }),
+    });
+    if (!read.ok) {
+      importReport = { ok: false, name: source, lines: [], warnings: [read.error] };
+      return false;
+    }
+    client.submit(read.value.ops);
+    importReport = {
+      ok: true,
+      name: `${read.value.name} (${read.value.format})`,
+      lines: read.value.read,
+      warnings: read.value.warnings,
+    };
+    coll = "actors";
+    selectedId = id;
+    // the create lands through the store's own round trip, so the list refreshes with the op
+    globalThis.setTimeout(refresh, 50);
+    return true;
+  }
 
   function importPasted(): void {
     const text = pasteText;
     if (!text.trim()) return;
     const source = text.trim().split(/\r?\n/, 1)[0]?.trim() || "pasted text";
-    const parsed = importCharacter(text, { fileName: source });
-    if (!parsed.ok) {
-      importReport = { ok: false, name: source, lines: [], warnings: [parsed.error] };
-      return;
-    }
-    const id = characterImportActorId(globalThis.crypto.randomUUID());
-    const report: CharacterImportReport = characterImportReport(parsed.value);
-    client.submit(characterImportOps(parsed.value, { id, gmId: client.user?.id ?? undefined }));
-    importReport = {
-      ok: true,
-      name: `${report.name} (${formatLabel(report.format)})`,
-      lines: report.read,
-      warnings: report.warnings,
-    };
+    if (!importThrough(text, source, source)) return;
     pasteText = "";
     pasteOpen = false;
-    coll = "actors";
-    selectedId = id;
-    globalThis.setTimeout(refresh, 50);
   }
 
   async function importFile(file: File | undefined | null): Promise<void> {
@@ -176,26 +174,7 @@
     importBusy = true;
     try {
       const text = await file.text();
-      const parsed = importCharacter(text, { fileName: file.name });
-      if (!parsed.ok) {
-        importReport = { ok: false, name: file.name, lines: [], warnings: [parsed.error] };
-        return;
-      }
-      const id = characterImportActorId(globalThis.crypto.randomUUID());
-      const report: CharacterImportReport = characterImportReport(parsed.value);
-      client.submit(
-        characterImportOps(parsed.value, { id, gmId: client.user?.id ?? undefined }),
-      );
-      importReport = {
-        ok: true,
-        name: `${report.name} (${formatLabel(report.format)})`,
-        lines: report.read,
-        warnings: report.warnings,
-      };
-      coll = "actors";
-      selectedId = id;
-      // the create lands through the store's own round trip, so the list refreshes with the op
-      globalThis.setTimeout(refresh, 50);
+      importThrough(text, file.name, file.name);
     } finally {
       importBusy = false;
     }
@@ -249,13 +228,13 @@
     </button>
     {#if client.user?.role === "GM" || client.user?.role === "ASSISTANT"}
       <button id="new-doc" class="tab" onclick={() => createDoc()}>+ New</button>
-      {#if coll === "actors"}
+      {#if coll === "actors" && characterImport}
         <button
           type="button"
           class="tab import"
           id="statblock-toggle"
           data-import-paste-trigger
-          title="Paste a Pathfinder 1e monster stat block as text"
+          title={characterImport.pasteFormats}
           onclick={() => {
             pasteOpen = !pasteOpen;
             coll = "actors";
@@ -265,13 +244,13 @@
           class="tab import"
           for="character-import"
           data-import-character-trigger
-          title="Foundry PF1e actor JSON, Hero Lab XML, or a Roll20 sheet export"
+          title={characterImport.fileFormats}
           >{importBusy ? "Reading…" : "Import"}
           <input
             id="character-import"
             data-import-character
             type="file"
-            accept=".json,.xml,.txt"
+            accept={characterImport.fileAccept}
             hidden
             onchange={(event) => {
               const input = event.currentTarget as HTMLInputElement;
@@ -284,13 +263,13 @@
     {/if}
   </div>
 
-  {#if pasteOpen}
+  {#if pasteOpen && characterImport}
     <div class="paste">
       <textarea
         id="statblock-text"
         data-import-paste
         rows="8"
-        placeholder={PASTE_EXAMPLE}
+        placeholder={characterImport.pasteExample}
         bind:value={pasteText}
         onkeydown={(event) => {
           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {

@@ -4017,6 +4017,8 @@ const WALL_PICK_RADIUS = 12;
       // overland map cannot hang a picture on a hex.
       importImage: async (bytes, name, mime) =>
         current.pipeline.importImage(bytes, name, mime || "image/png"),
+      // D-474: the world's own rules package reads characters for `actor.from_statblock`.
+      rules: () => current.rulesModule,
     });
     // Canvas tool listeners are attached after `await createStage(...)`, i.e. after the
     // component-init context is gone — `onDestroy` may only be *called* synchronously
@@ -6435,6 +6437,7 @@ const WALL_PICK_RADIUS = 12;
               client={app.gm.client}
               bus={app.gm.bus}
               onOpenActor={openActorSheet}
+              rulesModule={app.rulesModule}
             />
           {:else if activeTab === "compendia"}
             <CompendiaPanel client={app.gm.client} packages={app.packages} />

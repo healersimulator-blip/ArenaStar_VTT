@@ -161,6 +161,12 @@ hash is in the build's own list without the consent prompt — the "build-signed
 the P2b row has been waiting for. Third-party packages and other builds of first-party packages
 still prompt.
 
+**P3 T1 (D-474)** moved the character importers into the package behind `RulesModule.characterImport`:
+the Actors tab in both shells and the agent bridge's `actor.from_statblock` read through the live
+module and offer nothing when it has no seam. Measured: `rules.js` +110,457 B, of which ≈61 KB are
+PF1e helpers the sheets still bundle — the duplication T2 has to remove before the single file
+shrinks again.
+
 ## 1. Goals and non-goals
 
 ### Goals

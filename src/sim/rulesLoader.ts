@@ -104,6 +104,21 @@ export function validateRulesModule(candidate: unknown): Result<RulesModule> {
       return err(`rules package: ${fn} must be a function when present`);
     }
   }
+  // D-474: the character-import seam, when the system carries one, must be usable as declared —
+  // a shell that offers an Import button on a half-shaped seam would fail on the first click.
+  if (m.characterImport !== undefined) {
+    const seam = m.characterImport;
+    if (
+      !isRecord(seam) ||
+      typeof seam.read !== "function" ||
+      typeof seam.pasteExample !== "string" ||
+      typeof seam.fileAccept !== "string" ||
+      typeof seam.fileFormats !== "string" ||
+      typeof seam.pasteFormats !== "string"
+    ) {
+      return err("rules package: characterImport must be { pasteExample, fileAccept, fileFormats, pasteFormats, read() } when present");
+    }
+  }
   return okVal(m as unknown as RulesModule);
 }
 

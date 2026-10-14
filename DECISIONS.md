@@ -14400,3 +14400,63 @@ in `vite.config.ts`, not a redesign.
 `pf1e_import.spec` / `statblock_import.spec` keep a home. P2b (first-party component packages)
 inherits the hash list and the trusted path unchanged. The starter worlds (`pnpm build:worlds`)
 are unaffected: they already carry both packages.
+
+## D-474 — P3 T1: the character importers travel with the PF1e package — `RulesModule.characterImport`, consumed by both shells and the agent bridge (2026-10-15)
+
+**Context.** The cost analysis (Appendix D, T1 finding) showed the seven importer files
+(49,017 B — Foundry PF1e actor JSON, Hero Lab XML, Roll20 sheet JSON, pasted stat block) reached
+from exactly two host files through six symbols: a trivial seam with no home, because the
+importers make PF1e *tactical* actors and the default world ran built-in strategic rules. D-473
+settled the home: the default world activates the first-party PF1e package, so the importers can
+ride in `rules.js` like the hero derivation (D-471) and the readers reach every world that wants
+them — GM device, player device (D-472/D-473) and the agent desk alike.
+
+**Decision.**
+
+1. **One seam, system-owned.** `RulesModule.characterImport?: RulesCharacterImport` =
+   `{ pasteExample, fileAccept, fileFormats, pasteFormats, read({ text, fileName?, id, ownerId? })
+   → Result<{ name, format, read[], warnings[], ops }> }` (`src/core/rules.ts`). The caller mints
+   the id (it is what a token links to and what an answer names) and names the owner; the module
+   decides what the text is, whether this system can play it (`characterImportCheck` stays the
+   gate), and what document it becomes. `validateRulesModule` accepts the seam when whole and
+   refuses a half-shaped one — a shell must not offer an Import button that fails on first click.
+2. **The PF1e package carries the readers.** `src/packages/pf1e/import/seam.ts` wraps the
+   existing importer API (unchanged; its unit tests still drive it directly) and
+   `createMassBattlePf1e()` sets `module.characterImport = pf1eCharacterImport`, so the built
+   `rules.js` carries it (`tests/packages/pf1ePackage.test.ts` reads a stat block through the
+   *loaded* module and checks the id/ownership it writes).
+3. **Shells consume, never import.** `SheetPanel` takes `rulesModule` (GM: `app.rulesModule`;
+   player: `playerRulesModule`) and shows **Import** / **Stat block** only when the live module has
+   the seam — the tooltip, accepted extensions and paste placeholder all come from the module. The
+   agent bridge's `actor.from_statblock` reads through `AgentWorldViewOptions.rules()` (threaded
+   from `createAgentManager({ rules: () => current.rulesModule })`); without a seam it answers
+   *"this world's strategic rules import no characters … activate the shipped Pathfinder 1e Mass
+   Battles Engine"* and creates nothing. `src/app/agentBridge.ts` and `src/ui/sheets/SheetPanel.svelte`
+   no longer import anything from `packages/pf1e/import`; the only remaining importers of that
+   folder are the package entry and its unit tests. A player who has loaded the package (D-472)
+   and holds the ASSISTANT role gets the same controls as the GM — no GM-only posture.
+4. **e2e homes.** `pf1e_import.spec` and `statblock_import.spec` run on `?e2e=1&rules=pf1e` and
+   assert the PF1e status line first; a new case asserts the built-in `?e2e=1` world offers no
+   import controls at all (the seam belongs to the package). Playwright cannot run in this sandbox:
+   typecheck/lint only, a run is owed.
+
+**Measured.** `rules.js` **329,288 → 439,745 B** (+110,457 B): the seven importer files (≈49 KB)
+plus ≈61 KB of PF1e helpers they need to author an actor document (`consumables`
+`attackEntryFromWeapon`, `inventory`, `skills`, `tags.normalizeTags`, `actor.parsePF1eActorSystem`,
+`rulesTables`) — helpers the sheets still use, so they now exist twice: in the main bundle and in
+the package. Package zip 95,055 → 125,778 B (+30,723 B compressed; +40,964 B as the embedded
+base64). `dist/index.html` **5,865,319 → 5,857,329 B** (−7,990 B raw; gzip 1,852,488 → 1,865,673 B,
+**+13,185 B** — the removed JS compressed well, the added zip bytes do not); headroom 434,127 B.
+The importer strings are gone from the main bundle's JS (`grep "a .por file is a zip archive"
+dist/index.html` → 0). Gates: `tsc` 0, `eslint .` 0, svelte check 0 blocking, vitest **5,805 passed
+/ 12 skipped (5,818)** (new: loaded-module import, seam shape gate, agent refusal without a seam;
+`agentProjection` / `agentHexcrawlAuthoring` contexts now pass the PF1e module, as a PF1e host does).
+
+**What this says about T2.** The single-file size is now governed by *duplication*, not by what
+leaves the shell: every PF1e module that both the package and the sheets need is paid twice until
+the tactical logic and its UI move together (T2 + T3) or the shell stops bundling the copies the
+package already carries. T1's own bytes were never the point — the point is that the shells have
+one fewer PF1e import and the player device runs the same importer the GM does. The next step
+that actually shrinks the download is T2's dispatch contract (12 modules / 79 symbols, Appendix D),
+after which the sheets' copies of `actor`, `consumables`, `inventory`, `skills` can follow the
+importers into the package.

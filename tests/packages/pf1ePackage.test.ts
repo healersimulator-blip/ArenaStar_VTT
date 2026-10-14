@@ -388,6 +388,42 @@ describe("the built rules.js (D-086 single-file constraint)", () => {
     expect(typeof loaded.value.module.detection).toBe("function");
   });
 
+  test("D-474: the LOADED module carries the character importers — a pasted stat block reads through the seam", () => {
+    const loaded = evalRulesModule(rulesSource);
+    if (!loaded.ok) throw new Error(loaded.error);
+    const seam = loaded.value.characterImport;
+    expect(seam?.fileAccept).toBe(".json,.xml,.txt");
+    expect(seam?.pasteExample.startsWith("Goblin Warrior CR 1/3")).toBe(true);
+    const read = seam?.read({
+      text: [
+        "Goblin Warrior CR 1/3",
+        "NE Small humanoid (goblinoid)",
+        "Init +6; Senses darkvision 60 ft.; Perception -1",
+        "AC 16, touch 13, flat-footed 14 (+2 armor, +2 Dex, +1 shield, +1 size)",
+        "hp 6 (1d10+1)",
+        "Fort +3, Ref +4, Will -1",
+        "Speed 30 ft.",
+        "Melee short sword +2 (1d4/19-20)",
+        "Str 11, Dex 15, Con 12, Int 10, Wis 9, Cha 6",
+        "Base Atk +1; CMB +1; CMD 12",
+      ].join("\n"),
+      id: "a-goblin",
+      ownerId: "u-gm",
+    });
+    if (!read?.ok) throw new Error(read?.error ?? "no seam");
+    expect(read.value).toMatchObject({ name: "Goblin Warrior", format: "stat block" });
+    expect(read.value.ops).toHaveLength(1);
+    const op = read.value.ops[0];
+    expect(op?.kind).toBe("create");
+    if (op?.kind !== "create") return;
+    expect(op.data).toMatchObject({ _id: "a-goblin", name: "Goblin Warrior", ownership: { default: 0, "u-gm": 3 } });
+    // and a refusal is the reader's own sentence
+    const refused = seam?.read({ text: "a bag of holding and 50 feet of rope", id: "a-x" });
+    expect(refused?.ok).toBe(false);
+    if (refused?.ok !== false) return;
+    expect(refused.error).toMatch(/unrecognised file|stat block/);
+  });
+
   test("a deployed battle resolves under the LOADED module, not the in-repo import", () => {
     const loaded = evalRulesModule(rulesSource);
     if (!loaded.ok) throw new Error(loaded.error);

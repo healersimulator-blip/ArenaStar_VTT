@@ -31,7 +31,8 @@ export interface RulesSchema {
 }
 
 export type { Ok, Err, OkOrErr } from "./result";
-import type { OkOrErr } from "./result";
+import type { OkOrErr, Result } from "./result";
+import type { Op } from "./ops";
 
 export interface RulesGridContext {
   type: "square" | "hex" | "gridless";
@@ -273,6 +274,43 @@ export interface RulesModule {
    * Absent ⇒ the system has no actor-derived unit stats (mass-battle-basic).
    */
   leaderStats?: RulesLeaderStats;
+  /**
+   * D-474 (T1 seam) — character import is system knowledge: which exports a world reads
+   * (for PF1e: Foundry PF1e actor JSON, Hero Lab XML, Roll20 sheet JSON, a pasted monster
+   * stat block) and what document they become. The package carries the readers; the shells
+   * only consume this seam — the Actors tab shows its Import / Stat block controls when the live
+   * module has one, and the agent bridge's `actor.from_statblock` answers plainly when it does
+   * not. Absent ⇒ this system imports nothing (mass-battle-basic).
+   */
+  characterImport?: RulesCharacterImport;
+}
+
+export interface RulesCharacterImport {
+  /** What the paste box shows before anything is typed: the head of a real accepted text. */
+  pasteExample: string;
+  /** The file picker's `accept` list, e.g. `.json,.xml,.txt`. */
+  fileAccept: string;
+  /** One line naming the file formats, for the Import control's tooltip. */
+  fileFormats: string;
+  /** One line naming what the paste box takes, for the Stat block control's tooltip. */
+  pasteFormats: string;
+  /**
+   * Read one export. `ops` create the character under `id` (the caller mints it — it is what a
+   * token links to and what the answer names), owned by `ownerId` when given, else the GM. The
+   * error is the reader's own sentence: it says what to paste or export next time.
+   */
+  read(input: { text: string; fileName?: string; id: string; ownerId?: string }): Result<RulesCharacterImportResult>;
+}
+
+export interface RulesCharacterImportResult {
+  name: string;
+  /** The reader's display name for the format it read — "stat block", "Hero Lab XML". */
+  format: string;
+  /** Every fact that came across, in the source's own terms. */
+  read: string[];
+  /** Everything the source stated that this system does not place. */
+  warnings: string[];
+  ops: Op[];
 }
 
 export interface RulesLeaderStats {
