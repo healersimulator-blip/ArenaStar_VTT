@@ -3,6 +3,23 @@
 /** Injected by vite.config.ts `define` from package.json version. */
 declare const __APP_VERSION__: string;
 
+/**
+ * D-473: injected by vite.config.ts `define` from `systems/.first-party/` (written by
+ * `pnpm build:systems`). Absent (undefined) in a tree without that build step; read it only
+ * through `src/app/firstPartyPackages.ts`, which tolerates both.
+ */
+declare const __FIRST_PARTY_PACKAGES__:
+  | ReadonlyArray<{
+      id: string;
+      name: string;
+      version: string;
+      type: string;
+      dependencies: readonly string[];
+      rulesSha256: string | null;
+      zipBase64: string;
+    }>
+  | undefined;
+
 // Allow .ts entry modules (e.g. main.ts) to import Svelte components under tsc.
 // Deep .svelte typechecking is performed by the build (vite-plugin-svelte compiles
 // each component with svelte 5's type-aware compiler).

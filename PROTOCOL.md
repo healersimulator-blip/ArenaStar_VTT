@@ -1163,7 +1163,12 @@ not media. Unknown hashes still answer with the miss sentinel. A client MUST
 verify the assembled bytes against `hash` before evaluating them (the asset
 cache stores by hash without checking) and MUST NOT evaluate them without the
 device owner's consent for that exact hash: unlike AIS modules, a rules package
-runs in the page, unsandboxed.
+runs in the page, unsandboxed. One exception (D-473): a client MAY treat a hash
+that its *own build* carries as first-party (`__FIRST_PARTY_PACKAGES__`,
+sha256 of the embedded `rules.js`) and load it without asking — that is the
+code this very release used to bundle, now carried by the world file. The
+exception is keyed on the exact hash, never on the package id: a different
+build of the same package prompts like any stranger's.
 
 ### snapshot (0x21 · host → client · ops)
 

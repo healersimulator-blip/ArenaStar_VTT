@@ -30,6 +30,8 @@ const application = joinMode
       target,
       props: {
         autoHost: e2eMode,
+        // D-473: `?e2e=1&rules=pf1e` — the fresh default world runs the first-party PF1e package.
+        autoHostFirstParty: e2eMode && params.get("rules") === "pf1e",
         onApp: e2eMode
           ? async (app: HostApp | null) => {
               const hook = await import("./e2eHook");

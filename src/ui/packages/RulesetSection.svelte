@@ -14,6 +14,7 @@
   import type { HostAutomationState, HostPackages, HostRulesBoot, PackageSummary } from "../../app/hostBoot";
   import type { AisCapability } from "../../core/automationInterconnect";
   import { classifyZip, packageKindLabel } from "../../host/zipKind";
+  import { firstPartyPackageBytes, firstPartyPackages } from "../../app/firstPartyPackages";
 
   let {
     packages,
@@ -95,6 +96,27 @@
     } finally {
       // let the same file be picked again after a fix
       if (pkgFileInput) pkgFileInput.value = "";
+      pkgBusy = false;
+    }
+  }
+
+  /**
+   * D-473: the packages this build ships (PF1e Mass Battles + Pathfinder 1e Core) can be added to
+   * an existing world without a file — the same `importZip` path, the same activate-then-reload
+   * step afterwards. Hidden once every first-party package is present.
+   */
+  const firstPartyMissing = $derived(firstPartyPackages().filter((entry) => !pkgList.some((p) => p.id === entry.id)));
+  async function installFirstParty(): Promise<void> {
+    pkgBusy = true;
+    pkgError = "";
+    try {
+      for (const entry of firstPartyMissing) {
+        const res = await packages.importZip(firstPartyPackageBytes(entry));
+        if (!res.ok) { pkgError = `${entry.name}: ${res.error}`; break; }
+        if (res.summary.type === "module" || res.summary.type === "system") aisPendingReload = true;
+      }
+      refresh();
+    } finally {
       pkgBusy = false;
     }
   }
@@ -480,6 +502,12 @@
       {#each aisState.resolution.issues as issue (`${issue.kind}:${issue.packageId ?? ""}:${issue.slotId ?? ""}:${issue.message}`)}
         <p class={issue.blocking ? "error" : "warn"} data-ais-issue>{issue.message}</p>
       {/each}
+    </div>
+  {/if}
+  {#if firstPartyMissing.length > 0}
+    <div class="row" data-pkg-first-party>
+      <span>Built into this release: {firstPartyMissing.map((entry) => `${entry.name} v${entry.version}`).join(", ")}</span>
+      <button type="button" data-pkg-install-first-party disabled={pkgBusy} onclick={() => void installFirstParty()}>Add to this world</button>
     </div>
   {/if}
   <div class="row">

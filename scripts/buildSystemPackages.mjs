@@ -21,6 +21,7 @@
  * writes the generated entries there instead of into `systems/` — that is what the tests use, so
  * a test run never mutates the tree.
  */
+import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,9 +43,37 @@ const PACKAGE_ROOT = "systems";
 
 function listPackageDirs(systemsDir) {
   return readdirSync(systemsDir, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
+    .filter((e) => e.isDirectory() && !e.name.startsWith("."))
     .map((e) => e.name)
     .sort();
+}
+
+/**
+ * D-473: the first-party embed set. `vite.config.ts` reads `systems/.first-party/index.json`
+ * and inlines the listed zips (base64) plus each system package's `rules.js` sha256 into the
+ * shell, so a fresh world can activate ArenaStar's own PF1e package without a file on disk and
+ * a player shell recognises the artifact its GM announces as first-party (no consent prompt).
+ * Written next to the sources rather than under `dist/`, which `vite build` empties.
+ */
+export const FIRST_PARTY_DIR = join(repoRoot, PACKAGE_ROOT, ".first-party");
+
+function writeFirstPartyIndex(results, systemsDir) {
+  rmSync(FIRST_PARTY_DIR, { recursive: true, force: true });
+  mkdirSync(FIRST_PARTY_DIR, { recursive: true });
+  const index = [];
+  for (const { id, version, type, zip, manifest } of results) {
+    if (!zip) continue;
+    const file = `${id}-${version}.zip`;
+    cpSync(zip, join(FIRST_PARTY_DIR, file));
+    const entry = manifest.rules?.entry;
+    const rulesSha256 =
+      type === "system" && entry !== undefined
+        ? createHash("sha256").update(readFileSync(join(systemsDir, id, entry))).digest("hex")
+        : null;
+    index.push({ id, name: manifest.name, version, type, dependencies: manifest.dependencies ?? [], zip: file, rulesSha256 });
+  }
+  writeFileSync(join(FIRST_PARTY_DIR, "index.json"), `${JSON.stringify(index, null, 2)}\n`);
+  return index;
 }
 
 /** Every file in a package folder, package-relative and deterministically sorted. */
@@ -223,9 +252,17 @@ export async function buildSystemPackages(opts = {}) {
         `${id}: ${manifest.version} → ${relative(repoRoot, zip)} (${(readFileSync(zip).length / 1024).toFixed(1)} kB)`,
       );
     }
-    results.push({ id, version: manifest.version, type: manifest.type, files, zip });
+    results.push({ id, version: manifest.version, type: manifest.type, files, zip, manifest });
   }
-  if (!dryRun && !staging) rmSync(tmpDir, { recursive: true, force: true });
+  if (!dryRun && !staging) {
+    rmSync(tmpDir, { recursive: true, force: true });
+    // Only a full in-place build describes the release; a staging/`--only` build must not
+    // leave a partial embed set behind for the shell to inline.
+    if (only === null) {
+      const index = writeFirstPartyIndex(results, systemsDir);
+      console.log(`first-party embed set: ${index.map((e) => `${e.id}@${e.version}`).join(", ")} → ${relative(repoRoot, FIRST_PARTY_DIR)}/`);
+    }
+  }
   return results;
 }
 

@@ -153,6 +153,14 @@ world/package/hash (the prompt states that a rules package runs unsandboxed), im
 hands the module to the player's `WindowHost`. The same publish → announce → fetch → verify →
 consent → import path is what later package tiers (T2/T3, P2b component packages) will reuse.
 
+**P3 step 3 (D-473)** made the package the default rather than an import: the build embeds its own
+packages (`systems/.first-party/` → `__FIRST_PARTY_PACKAGES__`), the New-world wizard creates on
+the first-party ruleset by default (built-in and zip remain choices), `bootHostApp({ firstPartyRules })`
+does the same for the auto-hosted world, and `PlayerRulesPackage` loads an announced artifact whose
+hash is in the build's own list without the consent prompt — the "build-signed first-party hashes"
+the P2b row has been waiting for. Third-party packages and other builds of first-party packages
+still prompt.
+
 ## 1. Goals and non-goals
 
 ### Goals

@@ -19,7 +19,7 @@ import { readZipPackage, type LoadedPackage } from "../packages/packageLoader";
 import { putPackage, type PackageRecord } from "../storage/idb";
 import { clearParsedPackCache } from "../core/compendiumCache";
 import { HostPersister } from "../storage/persistence";
-import { BUILTIN_SYSTEM_ID, BUILTIN_SYSTEM_VERSION } from "./hostBoot";
+import { BUILTIN_SYSTEM_ID, BUILTIN_SYSTEM_VERSION } from "./builtinSystem";
 import { packageKindLabel } from "../host/zipKind";
 
 /** A package the wizard has already sniffed and validated (bytes kept for nothing — text only). */

@@ -69,6 +69,7 @@
   } from "./playerAisRuntime";
   import { aisPanelLayer } from "../packages/aisPanel";
   import { PlayerRulesPackage, type PlayerRulesStatus } from "./playerRulesPackage";
+  import { isFirstPartyArtifact } from "./firstPartyPackages";
   import type { RulesModule } from "../core/rules";
   import type { AisModuleSelectRequest } from "../packages/aisModuleHandlers";
   import {
@@ -765,6 +766,7 @@
       db: playerApp.db,
       worldId: client.world?.id ?? "",
       fetch: (hash) => fetcher.request(hash, "ui", "text/javascript"),
+      trusted: isFirstPartyArtifact,
       onStatus: (status) => {
         playerRulesStatus = status;
         playerRulesModule = playerRules?.module ?? null;
@@ -2339,8 +2341,16 @@
                 {:else if rules.state === "failed"}Could not load it: {rules.error}
                 {:else if rules.state === "declined"}Not loaded on this device; your army window uses the built-in rules.
                 {:else}Waiting for your decision; until then your army window uses the built-in rules.{/if}</p>
-              <p class="hint">A rules package runs inside this page, not in a sandbox — only load it if you trust this GM. Code hash {rules.offer.hash.slice(0, 16)}…</p>
-              {#if rules.state === "ready" || rules.state === "loading"}
+              {#if rules.offer.firstParty}
+                <p class="hint" data-player-rules-first-party>Built into this release of ArenaStar — loaded without a prompt. Code hash {rules.offer.hash.slice(0, 16)}…</p>
+              {:else}
+                <p class="hint">A rules package runs inside this page, not in a sandbox — only load it if you trust this GM. Code hash {rules.offer.hash.slice(0, 16)}…</p>
+              {/if}
+              {#if rules.offer.firstParty}
+                {#if rules.state === "failed"}
+                  <button type="button" data-player-rules-allow disabled={rulesDeciding} onclick={() => void decideRules("allow")}>Retry</button>
+                {/if}
+              {:else if rules.state === "ready" || rules.state === "loading"}
                 <button type="button" data-player-rules-forget disabled={rulesDeciding} onclick={() => void decideRules("forget")}>Forget on this device</button>
               {:else if rules.state === "declined" || rules.state === "failed"}
                 <button type="button" data-player-rules-allow disabled={rulesDeciding} onclick={() => void decideRules("allow")}>{rules.state === "failed" ? "Retry" : "Load on this device"}</button>

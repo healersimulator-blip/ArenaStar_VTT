@@ -14317,3 +14317,86 @@ logic (348 KB) and UI (334 KB) remain bundled for everyone until the T2/T3 dispa
 exist. But the transport question for every later package (T2 logic, T3 components, P2b
 first-party component packages, large AIS modules) is now answered by reuse: publish under a
 sha256, name it in a message, fetch on the assets channel, verify, consent, import.
+
+## D-473 — P3 step 3: the build carries its own packages — the default world runs the first-party PF1e ruleset, and build-signed hashes skip the player prompt (2026-10-15)
+
+**Context.** D-471/D-472 moved the strategic PF1e ruleset out of the main file and into the
+world file, but a package only reached a world through a zip the GM found on disk
+(`dist/packages/`, wizard or Settings) or a starter world. The fresh default world — the wizard's
+first offer, every `?e2e=1` session, and therefore the place T1 (importers) and later T2/T3 code
+would have to keep working — stayed on the built-in `mass-battle-basic`. Moving more PF1e code
+behind the package would have moved it *out of the default world*. D-472 also left an owner
+question open: a player device prompted for ArenaStar's own code as if it were a stranger's.
+Owner decisions this round: **the default world activates the first-party PF1e package**, and
+**ArenaStar's own packages skip the player consent prompt via build-signed hashes embedded in
+the shell; third-party packages still prompt.**
+
+**Decision.**
+
+1. **The build embeds its own packages.** `pnpm build:systems` already builds `pf1e-mass-battles`
+   (`type: system`) and `pf1e-core` (`type: data`, declared companion) exactly as a GM would import
+   them; a full run now also writes `systems/.first-party/` (gitignored): the two zips plus
+   `index.json` `[{id, name, version, type, dependencies, zip, rulesSha256}]`, where `rulesSha256`
+   is the sha256 of the system package's `rules.js` **file bytes**. `vite.config.ts` inlines that
+   index with each zip as base64 into the shell (`define.__FIRST_PARTY_PACKAGES__`); `pnpm build`
+   runs `build:systems` first so a release never ships an empty list. `src/app/firstPartyPackages.ts`
+   is the only reader: `firstPartyPackages()`, `firstPartySystemPackage()`, `isFirstPartyArtifact(hash)`,
+   `firstPartyPackageBytes(entry)`, `loadFirstPartyRecipePackages()` (the ruleset plus the declared
+   companions this build also carries, read through `readZipPackage` — the same loader a GM's
+   file goes through). Every reader takes the list as an optional parameter (test seam) and treats
+   an empty list — plain `vite dev`, bare vitest — as the ordinary built-in path.
+   *Why zips, not a second bundle:* the embedded bytes are byte-identical to what `dist/packages/`
+   ships and what a world file carries, so one import path, one hash, one validation (worker
+   shape gate + in-page import) serves all three origins; `pf1e-core` rides along because
+   `checkRecipe` otherwise warns "expects pf1e-core alongside — not added" on the very first world.
+2. **Default world = first-party recipe.** `NewWorldWizard` offers a third ruleset choice,
+   `#wizard-ruleset-firstparty` ("built into this release · brings Pathfinder 1e Core"), selected by
+   default whenever the build carries a ruleset; it feeds `createWorldFromRecipe` the embedded
+   ruleset plus its companions (a GM's own pack of the same id wins), so the package rows and the
+   `activeRulesPackage` pin exist before the first boot — no activate-then-reload step. Built-in
+   and "load a package zip" stay one click away. `bootHostApp({ firstPartyRules: true })` creates
+   the auto-hosted "World One" the same way; `main.ts` turns it on for `?e2e=1&rules=pf1e`. The
+   bare `?e2e=1` world stays built-in on purpose: `app|start|workspace_profiles|worldfile|packages.spec`
+   assert the built-in path there, and the two routes let specs pick the world they need. Settings
+   → Packages gains "Built into this release … Add to this world" (`data-pkg-install-first-party`,
+   `packages.importZip` on the embedded bytes, hidden once both are present) so an existing world
+   can take the packages without a file; adding is still not activating.
+3. **Build-signed trust on the player side.** `PlayerRulesPackage` takes `trusted(hash)`;
+   `JoinApp` passes `isFirstPartyArtifact`. A trusted announcement skips the consent record and
+   loads immediately (`loading → ready`, no row in `rules-player-consent:<worldId>`), the "World
+   rules" card says *"one of ArenaStar's own packages — this release carried it"*, and `forget` is a
+   no-op for it (the decision was the build's, not the device's). An untrusted hash — a third-party
+   package, or a *different build* of pf1e-mass-battles than the player's own shell — prompts
+   exactly as D-472 specified. The equality this rests on is tested end-to-end: the hash the build
+   writes (file bytes on disk) is the hash the host publishes (re-encoded text read back from the
+   zip, D-472) is the hash the player shell matches (`tests/packages/pf1ePackage.test.ts`,
+   `tests/app/firstPartyPackages.test.ts`).
+
+**Measured.** Embedded payload: `pf1e-mass-battles-1.0.0.zip` 95,055 B + `pf1e-core-1.0.0.zip`
+28,273 B = 123,328 B → 164,440 B as base64, one copy in the bundle (verified by grepping the hash).
+`dist/index.html` **5,696,558 → 5,865,319 B** (+168,761 B raw; gzip 1,725,019 → 1,852,488 B,
++127,469 B — zip bytes do not compress twice); headroom under the 6,291,456 B gate **594,898 →
+426,137 B**. `build:systems` adds 0.4 s to `pnpm build`. Gates: `tsc` 0, `eslint .` 0, svelte check
+0 blocking, vitest **5,802 passed / 12 skipped (5,814)**; new unit coverage: list accessors,
+base64 round trip, companion resolution (declared-but-not-shipped companions are left to the GM,
+D-110), a broken embedded zip failing loudly, `bootHostApp({ firstPartyRules: true })` creating
+World One with rows + pin + published artifact, the real embedded set's hash matching its own
+`rules.js`, and the trusted-hash path in `playerRulesPackage.test.ts` (no consent row, `forget`
+no-op, an untrusted update prompts). e2e (typecheck/lint only here): `start.spec` asserts the new
+default and the built-in opt-out, `packages.spec` the Settings install; a Playwright run is still
+owed.
+
+**Trade-off stated plainly.** The single-file download stops shrinking as PF1e moves into the
+package: what leaves the main bundle (−50 KB at D-471) comes back as embedded zip bytes (+165 KB
+here, growing with T1–T3), and the raw-size headroom is now ≈426 KB. What the move buys is
+modularity, not bytes: the world file carries its rules, a GM can run a different build or a
+third-party ruleset through the same path, and players load first-party code without ceremony
+while strangers' code still asks. If the headroom becomes the constraint, the embedded zips are
+the first candidates for a side-car download (`dist/packages/` already exists) — a one-line change
+in `vite.config.ts`, not a redesign.
+
+**Consequences.** T1 (importers) can move behind the package now: the default world, the
+`?e2e=1&rules=pf1e` route and every world created by the wizard default have it active, so
+`pf1e_import.spec` / `statblock_import.spec` keep a home. P2b (first-party component packages)
+inherits the hash list and the trusted path unchanged. The starter worlds (`pnpm build:worlds`)
+are unaffected: they already carry both packages.

@@ -84,7 +84,7 @@ interface Harness {
   hostBus: EventBus<HostEvents>;
   worldId: string;
   announce: (source: string, over?: Partial<WelcomeSimInfo>) => Promise<string>;
-  addPlayer: (pubkey: string, options?: { importModule?: (source: string) => Promise<Result<RulesModule>> }) => Promise<Player>;
+  addPlayer: (pubkey: string, options?: { importModule?: (source: string) => Promise<Result<RulesModule>>; trusted?: (hash: string) => boolean }) => Promise<Player>;
 }
 
 async function setup(): Promise<Harness> {
@@ -155,6 +155,7 @@ async function setup(): Promise<Harness> {
         fetch: (hash) => { player.fetchCalls?.push(hash); return fetcher.request(hash, "ui", "text/javascript"); },
         onStatus: (status) => { player.statuses?.push(status); },
         ...(options.importModule ? { importModule: options.importModule } : {}),
+        ...(options.trusted ? { trusted: options.trusted } : {}),
         now: () => 1_700_000_000_000,
       });
       player.rules = rules;
@@ -177,7 +178,7 @@ describe("D-472 — delivery: the active rules package reaches an approved playe
     expect(player.client.simInfo?.artifact).toEqual({ hash, size: encode(RULES_JS).byteLength, name: "Probe Rules" });
     const offer = must(player.statuses.find((status) => status.state === "pending"));
     if (offer.state !== "pending") throw new Error("unreachable");
-    expect(offer.offer).toEqual({ packageId: "probe-rules", name: "Probe Rules", version: "3.1.0", hash, size: encode(RULES_JS).byteLength, updated: false });
+    expect(offer.offer).toEqual({ packageId: "probe-rules", name: "Probe Rules", version: "3.1.0", hash, size: encode(RULES_JS).byteLength, updated: false, firstParty: false });
     // Nothing moved on the wire before the decision.
     expect(player.fetchCalls).toEqual([]);
     expect(player.rules.module).toBeNull();
@@ -275,6 +276,29 @@ describe("D-472 — consent: this device decides, per world, package and exact a
     await until(() => lastState(again) === "ready", "load v2");
     expect(must(again.rules.module).schema.version).toBe("3.2.0");
     again.rules.dispose();
+  });
+
+  test("D-473: a first-party artifact (hash in this build's own list) loads without a prompt and leaves no consent row", async () => {
+    const h = await setup();
+    const hash = await h.announce(RULES_JS);
+    const player = await h.addPlayer("rex-key", { trusted: (candidate) => candidate === hash });
+    await until(() => lastState(player) === "ready", "silent load");
+    expect(player.statuses.map((status) => status.state)).toEqual(["loading", "ready"]);
+    const ready = player.statuses[player.statuses.length - 1];
+    if (ready?.state !== "ready") throw new Error("unreachable");
+    expect(ready.offer.firstParty).toBe(true);
+    expect(must(player.rules.module).schema.version).toBe("3.1.0");
+    expect(await getSetting(player.db, playerRulesConsentScope(h.worldId), "probe-rules")).toBeUndefined();
+    // Nothing to forget: the decision was the build's, not this device's.
+    await player.rules.forget();
+    expect(lastState(player)).toBe("ready");
+    // A later, non-first-party build of the same package asks like any stranger.
+    await h.announce(RULES_JS_V2);
+    await until(() => lastState(player) === "pending", "prompt for the untrusted update");
+    const pending = player.statuses[player.statuses.length - 1];
+    if (pending?.state !== "pending") throw new Error("unreachable");
+    expect(pending.offer).toMatchObject({ firstParty: false, updated: false });
+    player.rules.dispose();
   });
 
   test("forget withdraws the decision: the module is dropped and the prompt returns", async () => {

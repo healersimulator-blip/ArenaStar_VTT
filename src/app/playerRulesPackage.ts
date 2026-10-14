@@ -17,6 +17,10 @@
  * a poisoned cache can substitute code under an allowed hash.
  *
  * Without consent (or before it) the shell behaves exactly as before D-472: built-in rules.
+ *
+ * D-473: an artifact whose hash is one of this build's own packages (`trusted`, wired to
+ * `isFirstPartyArtifact`) loads without the prompt — it is the code this release used to carry
+ * in its main bundle, now delivered by the world file; the status card says so.
  */
 import type { ClientSync, ClientEvents } from "../client/sync";
 import type { EventBus } from "../core/events";
@@ -50,6 +54,8 @@ export interface PlayerRulesOffer {
   size: number;
   /** True when this device allowed an earlier artifact of the same package (an update, not a stranger). */
   updated: boolean;
+  /** D-473: one of this build's own packages — loaded without a prompt, nothing to forget. */
+  firstParty: boolean;
 }
 
 export type PlayerRulesStatus =
@@ -74,6 +80,8 @@ export interface PlayerRulesPackageOptions {
   onStatus: (status: PlayerRulesStatus) => void;
   /** Test seam; production imports the verified source in-page. */
   importModule?: (source: string) => Promise<Result<RulesModule>>;
+  /** D-473: is this artifact hash one of this build's own packages? Default: none is. */
+  trusted?: (hash: string) => boolean;
   now?: () => number;
 }
 
@@ -141,7 +149,7 @@ export class PlayerRulesPackage {
   /** Withdraw this device's decision: the module is dropped and the prompt returns. */
   async forget(): Promise<void> {
     const offer = this.offerIf("ready", "declined", "failed", "loading");
-    if (!offer) return;
+    if (!offer || offer.firstParty) return;
     this.epoch += 1;
     await putSetting(this.options.db, { scope: playerRulesConsentScope(this.options.worldId), key: offer.packageId, value: null });
     if (this.disposed || this.current?.artifact.hash !== offer.hash) return;
@@ -183,7 +191,8 @@ export class PlayerRulesPackage {
     if (previous && previous.artifact.hash === announced.artifact.hash && previous.packageId === announced.packageId) return; // reconnect
     this.current = announced;
     const epoch = ++this.epoch;
-    const record = await this.consentRecord(announced.packageId);
+    const firstParty = this.options.trusted?.(announced.artifact.hash) === true;
+    const record = firstParty ? null : await this.consentRecord(announced.packageId);
     if (this.disposed || epoch !== this.epoch) return;
     const offer: PlayerRulesOffer = {
       packageId: announced.packageId,
@@ -192,7 +201,9 @@ export class PlayerRulesPackage {
       hash: announced.artifact.hash,
       size: announced.artifact.size,
       updated: record?.decision === "allow" && record.hash !== announced.artifact.hash,
+      firstParty,
     };
+    if (firstParty) { await this.load(announced, offer); return; }
     if (record?.decision === "allow" && record.hash === offer.hash) { await this.load(announced, offer); return; }
     if (record?.decision === "deny" && record.hash === offer.hash) { this.set({ state: "declined", offer }); return; }
     this.set({ state: "pending", offer });

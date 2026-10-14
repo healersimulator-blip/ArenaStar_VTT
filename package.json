@@ -10,7 +10,7 @@
   "description": "Serverless browser-only Virtual Tabletop — single self-contained index.html (host = GM tab)",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/buildSystemPackages.mjs && vite build",
     "test": "vitest run",
     "bench:dense": "VTT_DENSE_BENCH=1 vitest run tests/packages/pf1eDenseArmyBenchmark.test.ts",
     "test:e2e": "pnpm build && pnpm build:systems && node tools/convert/index.mjs --allow-missing && pnpm build:worlds && pnpm build:ais-demo && pnpm build:ui-demo && playwright test",

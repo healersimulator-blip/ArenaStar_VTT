@@ -10,7 +10,7 @@ the architecture spec in `uploads/VTT_Task.txt` (§0–§19) — see `PLAN.md`.
 ```sh
 pnpm install
 pnpm dev          # vite dev server
-pnpm build        # → dist/index.html (single file, ≤ 6 MB raw budget)
+pnpm build        # → dist/index.html (single file, ≤ 6 MB raw budget; runs build:systems first and embeds the first-party packages, D-473)
 pnpm test         # vitest unit tests
 pnpn typecheck    # tsc --noEmit
 pnpm lint         # eslint
@@ -40,6 +40,11 @@ Requires Node 20+ and pnpm 10.
 open `dist/index.html`, **Open file (.zip)** → `dist/worlds/pf1e-mass-battles-starter-1.0.0.zip`
 → **Open as new world**. The world boots with the PF1e strategic ruleset active and the PF1e
 Core compendia installed; nothing to activate, nothing to reload.
+
+**Or in one:** `pnpm build`, open `dist/index.html`, **New world** → Create. The build carries its
+own packages (D-473): the wizard's default ruleset is the shipped PF1e Mass Battles Engine with
+Pathfinder 1e Core beside it, no zip involved; "built-in" and "load a package" stay one click away,
+and Settings → Packages can add the shipped packages to an existing world the same way.
 
 ### Content: two ways in
 

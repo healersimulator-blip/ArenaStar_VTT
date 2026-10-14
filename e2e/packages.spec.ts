@@ -756,4 +756,31 @@ test.describe("Package loader (§12)", () => {
       await ctx.close();
     }
   });
+
+  test("D-473: the build's own packages can be added to an existing built-in world from Settings, no file", async ({
+    browser,
+  }) => {
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    try {
+      await page.goto(entry + "?e2e=1");
+      await waitForApp(page);
+      expect((await appCall<Record<string, string>>(page, "rulesBoot")).source).toBe("builtin");
+
+      await page.click("#gm-settings");
+      const settings = page.locator('[data-window="settings"]');
+      await expect(settings.locator("[data-pkg-first-party]")).toContainText("Pathfinder 1e Mass Battles Engine v1.0.0");
+      await settings.locator("[data-pkg-install-first-party]").click();
+      await expect(settings.locator('[data-pkg-row][data-pkg-id="pf1e-mass-battles"]')).toBeVisible();
+      await expect(settings.locator('[data-pkg-row][data-pkg-id="pf1e-core"]')).toBeVisible();
+      await expect(settings.locator("[data-pkg-install-first-party]")).toHaveCount(0);
+      await expect(settings.locator("[data-pkg-error]")).toHaveCount(0);
+      // adding is not activating: the world keeps its built-in rules until the GM says otherwise
+      expect((await appCall<Record<string, string>>(page, "rulesBoot")).source).toBe("builtin");
+      await settings.locator('[data-pkg-row][data-pkg-id="pf1e-mass-battles"] [data-pkg-activate]').click();
+      await expect(settings.locator("[data-pkg-pending]")).toContainText("Pathfinder 1e Mass Battles Engine");
+    } finally {
+      await ctx.close();
+    }
+  });
 });

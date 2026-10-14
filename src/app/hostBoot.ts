@@ -63,6 +63,10 @@ import {
 import { importRulesModule } from "../sim/rulesLoader";
 import type { RulesModule } from "../core/rules";
 import type { WelcomeRulesArtifact } from "../core/messages";
+import { BUILTIN_SYSTEM_ID, BUILTIN_SYSTEM_VERSION } from "./builtinSystem";
+import { createWorldFromRecipe } from "./worldRecipe";
+import { loadFirstPartyRecipePackages, type FirstPartyPackage } from "./firstPartyPackages";
+export { BUILTIN_SYSTEM_ID, BUILTIN_SYSTEM_VERSION } from "./builtinSystem";
 import { MASS_BATTLE_SCHEMA_COLUMNS } from "../packages";
 import { readZipPackage } from "../packages/packageLoader";
 import { type CompendiumPack } from "../core/compendium";
@@ -97,14 +101,6 @@ import { verifyHello } from "../net/identity";
 
 export const GM_USER_ID = "gm";
 export const DEFAULT_SCENE_ID = "scene-1";
-/**
- * The built-in strategic ruleset (`src/packages/massBattleBasic.ts`) — what a world runs when
- * no §12 system package is active. `WorldsRecord.system` is either this id or the active
- * package's id, so the record (and the join welcome that echoes it) always names the ruleset
- * the sim actually boots with.
- */
-export const BUILTIN_SYSTEM_ID = "mass-battle-basic";
-export const BUILTIN_SYSTEM_VERSION = "1.0.0";
 
 export interface HostAppOptions {
   /** Injected DB handle (tests); default opens "vtt". */
@@ -123,6 +119,15 @@ export interface HostAppOptions {
    */
   simRunner?: SimRunner;
   now?: () => number;
+  /**
+   * D-473: when no world exists and one has to be created, create it on the first-party PF1e
+   * ruleset (with its content companion) instead of the built-in rules — the `?e2e=1&rules=pf1e`
+   * host route. Ignored when this build carries no first-party package (built-in, as before) and
+   * when a world already exists (nothing is created then).
+   */
+  firstPartyRules?: boolean;
+  /** Test seam: the first-party list to use instead of the build's embedded one. */
+  firstPartyPackages?: readonly FirstPartyPackage[];
 }
 
 export interface PackageSummary {
@@ -601,15 +606,35 @@ async function bootHostAppLocked(
       };
     } else {
       const worldId = `w-${globalThis.crypto.randomUUID().slice(0, 8)}`;
-      meta = {
-        worldId,
-        name: "World One",
-        system: BUILTIN_SYSTEM_ID,
-        systemVersion: BUILTIN_SYSTEM_VERSION,
-      };
-      lock.release = await acquireWorldLock(meta.worldId);
-      persister = await HostPersister.createWorld(db, meta, { now });
-      worldRec = await getWorld(db, worldId);
+      lock.release = await acquireWorldLock(worldId);
+      const firstParty = options.firstPartyRules
+        ? await loadFirstPartyRecipePackages(...(options.firstPartyPackages ? [options.firstPartyPackages] : []))
+        : null;
+      if (firstParty) {
+        // D-473: the recipe writes the package rows and the `activeRulesPackage` pin before the
+        // first boot, exactly as the New-world wizard does — no activate-then-reload step.
+        await createWorldFromRecipe(
+          { name: "World One", ruleset: { kind: "package", pkg: firstParty.ruleset }, content: firstParty.content },
+          { db, now, worldId },
+        );
+        persister = await HostPersister.open(db, worldId, { now });
+        worldRec = await getWorld(db, worldId);
+        meta = {
+          worldId,
+          name: "World One",
+          system: worldRec?.system ?? firstParty.ruleset.manifest.id,
+          systemVersion: worldRec?.version ?? firstParty.ruleset.manifest.version,
+        };
+      } else {
+        meta = {
+          worldId,
+          name: "World One",
+          system: BUILTIN_SYSTEM_ID,
+          systemVersion: BUILTIN_SYSTEM_VERSION,
+        };
+        persister = await HostPersister.createWorld(db, meta, { now });
+        worldRec = await getWorld(db, worldId);
+      }
     }
   }
 

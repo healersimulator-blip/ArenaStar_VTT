@@ -13,6 +13,7 @@
 
 import { PF1E_MASS_SPELLS } from "../../src/packages/massBattlePf1e";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -519,6 +520,12 @@ describe("activating PF1e in a world (§1.1 acceptance, no browser)", () => {
     // that left the main bundle in D-471 now travel in 32 KB chunks on the assets channel.
     const published = second.host.publishedArtifacts();
     expect(published).toHaveLength(1);
+    // D-473: the hash the build writes into `systems/.first-party/index.json` (sha256 of the
+    // rules.js *file bytes*) must be the hash the host publishes (sha256 of the re-encoded text
+    // read back from the zip) — that equality is what lets a player shell recognise the
+    // artifact as first-party without a prompt.
+    const fileHash = createHash("sha256").update(readFileSync(join(outDir, "pf1e-mass-battles", "rules.js"))).digest("hex");
+    expect(published[0]).toBe(fileHash);
     const artifact = second.gm.client.simInfo?.artifact;
     expect(artifact?.hash).toBe(published[0]);
     expect(artifact?.name).toBe("Pathfinder 1e Mass Battles Engine");
