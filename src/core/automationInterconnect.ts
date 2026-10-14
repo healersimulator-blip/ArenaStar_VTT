@@ -129,6 +129,8 @@ export const AIS_CAPABILITIES = [
   "runtime.execute",
   "package.resources.read",
   "ui.theme",
+  // D-470: a host-chromed window around the module's own sandboxed document (AIS.ui.panel).
+  "ui.panel",
 ] as const;
 export type AisCapability = (typeof AIS_CAPABILITIES)[number];
 
@@ -199,6 +201,20 @@ export interface AisInterconnectManifest {
    * token-light slot). At a player they appear only for tokens that player controls.
    */
   tokenActions?: AisTokenActionDeclaration[];
+  /**
+   * D-470: the module draws its own UI inside its sandboxed iframe document; the shell shows that
+   * document in a window it chromes itself (title, origin, close). One panel per module; needs
+   * the `ui.panel` capability. The guest opens/closes it with `AIS.ui.panel.open()/close()`.
+   */
+  panel?: AisPanelDeclaration;
+}
+
+export interface AisPanelDeclaration {
+  title: string;
+  /** CSS pixels, 240–960 (default 360). */
+  width: number;
+  /** CSS pixels, 160–720 (default 420). */
+  height: number;
 }
 
 export type AisModuleSharing = "players" | "host-only";

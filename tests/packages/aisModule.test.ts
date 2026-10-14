@@ -27,6 +27,8 @@ const allHandlers = (): AisModuleHandlers => ({
   "chat.post": vi.fn(async () => ({ id: "message-1" })),
   "ui.notify": vi.fn(() => ({ ok: true })),
   "ui.select": vi.fn(async () => ({ selected: null })),
+  "ui.panel.open": vi.fn(async () => ({ open: true })),
+  "ui.panel.close": vi.fn(async () => ({ open: false })),
 });
 
 function sampleScene(): SceneDocument {
@@ -190,6 +192,29 @@ describe("AIS host handlers", () => {
     await expect(handlers["events.emit"]({ eventId: "torch.changed", payload: { data: "x".repeat(17 * 1024) } })).rejects.toThrow("16 KiB");
     granted.clear();
     await expect(handlers["events.emit"]({ eventId: "torch.changed", payload: {} })).rejects.toThrow("denied event.emit");
+    db.close();
+  });
+
+  test("D-470: ui.panel.open/close need the ui.panel capability and a shell-provided panel slot", async () => {
+    const db = await openVttDb();
+    const granted = new Set<string>(["ui.panel"]);
+    const calls: string[] = [];
+    const base = {
+      worldId: "w-ais-panel", packageId: "sample-mod", emittedEvents: [], db,
+      user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
+      select: async () => null, submit: () => "tx-unused", notify: () => undefined,
+      emitModuleEvent: () => undefined, newId: (prefix: string) => `${prefix}one`,
+      assertCapability: async (capability: string) => { if (!granted.has(capability)) throw new Error(`denied ${capability}`); },
+    };
+    const withPanel = createAisModuleHandlers({ ...base, panel: { open: () => calls.push("open"), close: () => calls.push("close") } });
+    await expect(withPanel["ui.panel.open"]({})).resolves.toEqual({ open: true });
+    await expect(withPanel["ui.panel.close"]({})).resolves.toEqual({ open: false });
+    expect(calls).toEqual(["open", "close"]);
+    const withoutPanel = createAisModuleHandlers(base);
+    await expect(withoutPanel["ui.panel.open"]({})).rejects.toThrow("declares no interconnect.panel");
+    granted.clear();
+    await expect(withPanel["ui.panel.open"]({})).rejects.toThrow("denied ui.panel");
+    expect(calls).toHaveLength(2);
     db.close();
   });
 

@@ -77,6 +77,7 @@ export function sharedModuleOf(module: HostAutomationModuleBoot): AisSharedModul
       (module.runtimeDependencies ?? []).every((dependency) => dependency.capabilities.includes(capability)))),
     emittedEvents: [...module.emittedEvents],
     ...(module.tokenActions && module.tokenActions.length > 0 ? { tokenActions: module.tokenActions.map((action) => ({ ...action })) } : {}),
+    ...(module.panel ? { panel: { ...module.panel } } : {}),
   };
 }
 

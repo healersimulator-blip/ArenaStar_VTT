@@ -35,6 +35,7 @@ import {
   type AisModuleSelectRequest,
 } from "../packages/aisModuleHandlers";
 import { packageContentHash } from "../packages/packageHash";
+import { createAisPanelHost, type AisPanelEntry, type AisPanelHost } from "../packages/aisPanel";
 import { getSetting, putSetting } from "../storage/idb";
 import type { TokenModuleAction } from "../ui/combat/tokenContextMenu";
 
@@ -91,6 +92,8 @@ export interface PlayerAisFrame {
   emit<K extends AisEventName>(event: K, payload: AisEventPayloads[K]): void;
   /** D-469: declared command, run as the player (see AisModuleIframe.invokeCommand). */
   invokeCommand(commandId: string, input: Json, options: AisModuleInvocationOptions): Promise<Json>;
+  /** D-470: visibility of the module's own document inside its panel. */
+  setVisible?(visible: boolean): void;
   dispose(reason: string): void;
 }
 
@@ -109,6 +112,10 @@ export interface PlayerAisRuntimeOptions {
   onPending: (pending: PlayerAisPendingConsent[]) => void;
   /** Test seam; production creates the sandboxed iframe. */
   createFrame?: (options: AisModuleIframeOptions) => PlayerAisFrame;
+  /** D-470: persistent layer element for sandboxed module panels; absent = panels unavailable. */
+  panelLayer?: HTMLElement;
+  /** Test seam for the panel host. */
+  panelHost?: AisPanelHost;
   now?: () => number;
 }
 
@@ -138,6 +145,7 @@ export function describeAisCapability(capability: AisCapability): string {
     case "runtime.execute": return "run inside a shared adapter runtime";
     case "package.resources.read": return "read its own bundled files";
     case "ui.theme": return "restyle the interface";
+    case "ui.panel": return "show its own panel in a window on your screen";
     default: return capability;
   }
 }
@@ -146,6 +154,7 @@ export class PlayerAisRuntime {
   private readonly options: PlayerAisRuntimeOptions;
   private readonly frames = new Map<string, PlayerAisFrame>();
   private commandSeq = 0;
+  private readonly panels: AisPanelHost | null;
   private readonly running = new Map<string, AisSharedModule>();
   private readonly statuses: Record<string, AisModuleRuntimeStatus> = {};
   private readonly pending = new Map<string, PlayerAisPendingConsent>();
@@ -157,6 +166,7 @@ export class PlayerAisRuntime {
 
   constructor(options: PlayerAisRuntimeOptions) {
     this.options = options;
+    this.panels = options.panelHost ?? (options.panelLayer ? createAisPanelHost(options.panelLayer) : null);
     const { client, bus } = options;
     this.off.push(
       bus.on("aisProfile", (message) => this.applyProfile(message)),
@@ -315,6 +325,12 @@ export class PlayerAisRuntime {
     const { options } = this;
     const { client } = options;
     const assertCapability = (capability?: AisCapability): Promise<void> => this.assertModuleActive(module, capability);
+    // D-470: the hidden host-chromed window exists before the iframe so the frame is born inside it.
+    const panels = this.panels;
+    const panelBody = module.panel && panels
+      ? panels.mount(module.packageId, { title: module.panel.title, moduleName: module.name,
+        width: module.panel.width, height: module.panel.height, onClose: () => this.publish() })
+      : undefined;
     const frameOptions: AisModuleIframeOptions = {
       packageId: module.packageId,
       source: module.source,
@@ -322,6 +338,7 @@ export class PlayerAisRuntime {
       commands: module.commands,
       grantedCapabilities: module.capabilities,
       playerCommands: true,
+      ...(panelBody ? { hostElement: panelBody } : {}),
       assertModuleActive: () => assertCapability(),
       isCapabilityCurrentlyGranted: async (capability) => {
         try { await assertCapability(capability); return true; } catch { return false; }
@@ -331,7 +348,10 @@ export class PlayerAisRuntime {
       },
       onStatus: (status) => {
         this.statuses[module.packageId] = status;
-        if (status.state === "failed" || status.state === "stopped") options.cancelChoice(module.packageId);
+        if (status.state === "failed" || status.state === "stopped") {
+          options.cancelChoice(module.packageId);
+          panels?.close(module.packageId);
+        }
         if (status.state === "failed") options.notify(`Module ${module.name}: ${status.error}`, "error");
         this.publish();
       },
@@ -350,12 +370,17 @@ export class PlayerAisRuntime {
         ...(module.resources ? { resources: module.resources } : {}),
         sequence: () => client.store.seq,
         notify: options.notify,
+        ...(panelBody && panels ? { panel: {
+          open: () => { panels.open(module.packageId); this.publish(); },
+          close: () => { panels.close(module.packageId); this.publish(); },
+        } } : {}),
         emitModuleEvent: (eventId, payload) => this.emitModuleEvent(module.packageId, eventId, payload),
         newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID()}`,
         assertCapability,
       }),
     };
     const frame = (options.createFrame ?? ((frameOptionsIn) => new AisModuleIframe(frameOptionsIn)))(frameOptions);
+    if (panelBody && panels) panels.attach(module.packageId, { setVisible: (visible) => frame.setVisible?.(visible) });
     this.frames.set(module.packageId, frame);
     this.running.set(module.packageId, module);
     this.statuses[module.packageId] = frame.status;
@@ -366,6 +391,8 @@ export class PlayerAisRuntime {
     this.frames.delete(packageId);
     this.running.delete(packageId);
     frame?.dispose(reason);
+    // D-470: the frame removed itself; its host-chromed window goes with it.
+    this.panels?.remove(packageId);
     this.statuses[packageId] = { state: "stopped", error: reason };
     this.options.cancelChoice(packageId);
   }
@@ -426,6 +453,27 @@ export class PlayerAisRuntime {
     });
   }
 
+  /** D-470: panels of running shared modules that declared one (for the Shared-modules card). */
+  panelEntries(): AisPanelEntry[] { return this.panels?.entries() ?? []; }
+
+  /** D-470: open a module's panel from the shell; false (with a notice) when it is not running. */
+  openPanel(packageId: string): boolean {
+    const frame = this.running.has(packageId) ? this.frames.get(packageId) : undefined;
+    if (!frame || frame.status.state !== "ready" || !this.panels) {
+      this.options.notify(frame?.status.error ?? "The module is not running on this device.", "warn");
+      return false;
+    }
+    const opened = this.panels.open(packageId);
+    if (opened) this.publish();
+    return opened;
+  }
+
+  closePanel(packageId: string): boolean {
+    const closed = this.panels?.close(packageId) ?? false;
+    if (closed) this.publish();
+    return closed;
+  }
+
   /** D-469: manifest token actions of the shared modules, with this device's run state. */
   tokenActions(): TokenModuleAction[] {
     const out: TokenModuleAction[] = [];
@@ -471,6 +519,7 @@ export class PlayerAisRuntime {
     for (const frame of this.frames.values()) frame.dispose("Left the table");
     this.frames.clear();
     this.running.clear();
+    this.panels?.dispose();
     this.pending.clear();
   }
 }

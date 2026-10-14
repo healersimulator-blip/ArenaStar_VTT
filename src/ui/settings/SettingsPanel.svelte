@@ -91,6 +91,7 @@
     packages = null,
     rulesBoot = null,
     aisRuntimeStatuses = {},
+    onOpenAisPanel = null,
     agents = null,
     saves = null,
     cloud = null,
@@ -118,6 +119,8 @@
     packages?: HostPackages | null;
     rulesBoot?: HostRulesBoot | null;
     aisRuntimeStatuses?: AisRuntimeStatuses;
+    /** D-470: opens a running module's sandboxed panel (GM shell). */
+    onOpenAisPanel?: ((packageId: string) => void) | null;
     /**
      * §3.2 the connector's agent desk (GM only; null hides the Agents section). The window holds
      * no transport handles of its own: sessions, grants and bridges are the manager's.
@@ -442,7 +445,7 @@
     <SavesPanel {saves} {cloud} {onBackup} onFolder={onBackupFolder} />
   {/if}
   {#if packages}
-    <RulesetSection {packages} {rulesBoot} {aisRuntimeStatuses} />
+    <RulesetSection {packages} {rulesBoot} {aisRuntimeStatuses} {onOpenAisPanel} />
   {/if}
   {#if agents}
     <AgentsSection

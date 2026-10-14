@@ -19,10 +19,12 @@
     packages,
     rulesBoot = null,
     aisRuntimeStatuses = {},
+    onOpenAisPanel = null,
   }: {
     packages: HostPackages;
     rulesBoot?: HostRulesBoot | null;
     aisRuntimeStatuses?: AisRuntimeStatuses;
+    onOpenAisPanel?: ((packageId: string) => void) | null;
   } = $props();
 
   let pkgList = $state<PackageSummary[]>([]);
@@ -390,6 +392,15 @@
         {#if p.runtimeProvider}<p class="hint" data-ais-runtime-provider>Runtime adapter: no standalone execution. Each guest requires separate approval; effective capabilities are the intersection of both grants.</p>{/if}
         {#if p.runtimeProviderId}<p class="hint" data-ais-runtime-binding>Experimental adapter-backed guest · {p.runtimeProviderId}. Review and enable the adapter first. Composition: {p.runtimeHash?.slice(0, 16) ?? "unresolved"}.</p>{/if}
         {#if p.runtimeError}<p class="error">{p.runtimeError}</p>{/if}
+        {#if p.panel}
+          <p class="hint" data-ais-panel-declared>
+            Panel: “{p.panel.title}” ({p.panel.width}×{p.panel.height}) drawn inside the module's own sandbox; the shell adds the window chrome.
+            {#if onOpenAisPanel}
+              <button type="button" data-ais-panel-open={p.id} disabled={aisRuntimeStatuses[p.id]?.state !== "ready"}
+                onclick={() => onOpenAisPanel?.(p.id)}>Open panel</button>
+            {/if}
+          </p>
+        {/if}
         {#if p.commands.length > 0}
           <p class="hint" data-ais-commands>Macro-callable commands: {p.commands.map((command) => `${command.id} (contract v${command.contract})`).join(", ")}. Calls require the separate reviewed script-macro grant.</p>
         {/if}

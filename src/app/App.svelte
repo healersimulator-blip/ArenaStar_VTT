@@ -118,6 +118,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { workspaceUi, setWorkspacePanel, resetWorkspaceUi } from "../ui/workspace/state";
   import { workspaceTabLabel, workspaceToolInset } from "../core/workspaceUi";
   import { AisRuntime, type AisRuntimeStatuses } from "./aisRuntime";
+  import { aisPanelLayer } from "../packages/aisPanel";
   import type { AisModuleSelectRequest } from "../packages/aisModuleHandlers";
   import { dice3dStats, diceInfoFromRecord, showDice3D } from "../dice/dice3d";
   import { verifyCommitRoll } from "../dice/commitReveal";
@@ -5168,6 +5169,7 @@ const WALL_PICK_RADIUS = 12;
           cancelChoice: (packageId) => { if (pendingAisChoice?.packageId === packageId) finishAisChoice(null); },
           notify: (message, level) => { notifyLog = [...notifyLog.slice(-49), { message, level }]; },
           onStatus: (statuses) => { aisRuntimeStatuses = statuses; },
+          panelLayer: aisPanelLayer(),
         });
         appearance = new AisAppearance(current, aisRuntime);
         offAppearance = appearance.subscribe((state) => { appearanceState = state; });
@@ -6266,6 +6268,7 @@ const WALL_PICK_RADIUS = 12;
           packages={app.packages}
           rulesBoot={app.rulesBoot}
           {aisRuntimeStatuses}
+          onOpenAisPanel={(packageId) => { aisRuntime?.openPanel(packageId); }}
           {agents}
           bindings={DEFAULT_BINDINGS}
           isGM={true}

@@ -68,6 +68,8 @@ export interface AisModuleHandlerContext {
     stop(runId: string): unknown;
   };
   notify: (message: string, level: "info" | "warn" | "error") => void;
+  /** D-470: the shell's panel slot for this module; absent when the manifest declares no panel. */
+  panel?: { open(): void; close(): void };
   emitModuleEvent: (eventId: string, payload: Json) => void;
   newId: (prefix: string) => string;
   /** Re-checks the exact profile lock and local hash-bound consent on each host request. */
@@ -498,6 +500,20 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       const normalizedLevel = level === "warn" || level === "error" ? level : "info";
       ctx.notify(message, normalizedLevel);
       return { ok: true };
+    },
+    "ui.panel.open": async (_args, commandContext) => {
+      await ctx.assertCapability("ui.panel");
+      assertCommandActive(commandContext);
+      if (!ctx.panel) throw new Error("This module declares no interconnect.panel");
+      ctx.panel.open();
+      return { open: true };
+    },
+    "ui.panel.close": async (_args, commandContext) => {
+      await ctx.assertCapability("ui.panel");
+      assertCommandActive(commandContext);
+      if (!ctx.panel) throw new Error("This module declares no interconnect.panel");
+      ctx.panel.close();
+      return { open: false };
     },
     "ui.select": async (args, commandContext) => {
       await ctx.assertCapability("ui.interaction");

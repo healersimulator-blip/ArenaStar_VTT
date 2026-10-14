@@ -115,6 +115,23 @@ describe("validatePackageManifest (§12)", () => {
     } })).toMatchObject({ ok: false, error: "package typed-module: interconnect.tokenActions requires the ui.interaction capability" });
   });
 
+  test("D-470: interconnect.panel is bounded, defaulted and tied to the ui.panel capability", () => {
+    const base = {
+      id: "typed-module", name: "Typed Module", version: "1.0.0", type: "module",
+      interconnect: { api: "arena.ais/1", entry: "module.js", capabilities: ["ui.panel"] },
+    };
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: " Loot " } } }))
+      .toMatchObject({ ok: true, value: { interconnect: { panel: { title: "Loot", width: 360, height: 420 } } } });
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: "Loot", width: 480, height: 160 } } }))
+      .toMatchObject({ ok: true, value: { interconnect: { panel: { title: "Loot", width: 480, height: 160 } } } });
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: "Loot", width: 100 } } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: "Loot", height: 720.5 } } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: "", width: 300 } } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: "Loot", icon: "x" } } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, capabilities: ["ui.notify"], panel: { title: "Loot" } } }))
+      .toMatchObject({ ok: false, error: "package typed-module: interconnect.panel requires the ui.panel capability" });
+  });
+
   test("rejects bad ids, names, versions, types", () => {
     expect(validatePackageManifest(systemManifest({ id: "Bad_ID" })).ok).toBe(false);
     expect(validatePackageManifest(systemManifest({ id: "x" })).ok).toBe(false); // too short

@@ -134,6 +134,13 @@ the world file — are planned there.
   under the player's ownership; the *Shared modules* card has a command runner for the selected
   token. Host frames keep refusing anything but the reviewed `"gm"` elevation.
 
+**P2a (D-470)** gave third-party modules a UI surface without ever running their markup in the
+shell page: `interconnect.panel { title, width, height }` + capability `ui.panel`; the module draws
+inside its own sandboxed iframe document (it always had one — the frame was merely hidden) and the
+shell draws the window chrome around it (`src/packages/aisPanel.ts`, used by both shells; the
+iframe is created inside the panel body and never re-parented). `AIS.ui.panel.open()/close()` from
+the module, "Open panel" buttons in Settings → Packages and in the player's *Shared modules* card.
+
 ## 1. Goals and non-goals
 
 ### Goals

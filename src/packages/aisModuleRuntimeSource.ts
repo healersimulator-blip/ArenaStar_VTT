@@ -111,7 +111,13 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
       chat: Object.freeze({ post: function (content) { return call("chat.post", { content: content }); } }),
       ui: Object.freeze({
         notify: function (message, level) { return call("ui.notify", { message: String(message), level: level || "info" }); },
-        select: function (request) { return call("ui.select", request); }
+        select: function (request) { return call("ui.select", request); },
+        // D-470: the module's own document is the panel body; the shell draws the chrome.
+        panel: Object.freeze({
+          open: function () { return call("ui.panel.open", {}); },
+          close: function () { return call("ui.panel.close", {}); },
+          root: function () { return document.body; }
+        })
       })
     });
   }

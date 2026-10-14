@@ -1629,6 +1629,7 @@ interface AisSharedModule {
   capabilities: AisCapability[];     // host-granted ∩ player-runnable (no fx.play / scene.tags.write / ui.theme)
   emittedEvents: string[];
   tokenActions?: { id: string; label: string }[]; // D-469: manifest token-menu entries → ui.token.action
+  panel?: { title: string; width: number; height: number }; // D-470: sandboxed panel the player shell chromes
 }
 ```
 

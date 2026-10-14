@@ -67,6 +67,7 @@
     type PlayerAisPendingConsent,
     type PlayerAisStatuses,
   } from "./playerAisRuntime";
+  import { aisPanelLayer } from "../packages/aisPanel";
   import type { AisModuleSelectRequest } from "../packages/aisModuleHandlers";
   import {
     NO_ONBOARDING_FACTS,
@@ -743,6 +744,7 @@
       notify: (message, level) => showMoveNotice(message, level === "info" ? "info" : "warn"),
       onStatus: (statuses) => { aisStatuses = statuses; },
       onPending: (pending) => { aisPending = pending; },
+      panelLayer: aisPanelLayer(),
     });
   }
   async function decideAis(packageId: string, allow: boolean): Promise<void> {
@@ -756,11 +758,11 @@
   const aisModuleRows = $derived.by(() => {
     void aisStatuses; void aisPending;
     const profile = playerAis?.currentProfile;
-    if (!profile) return [] as Array<{ packageId: string; name: string; version: string; state: string; pending: boolean }>;
+    if (!profile) return [] as Array<{ packageId: string; name: string; version: string; state: string; pending: boolean; panelTitle: string | null }>;
     return profile.modules.map((module) => {
       const pending = aisPending.some((entry) => entry.packageId === module.packageId);
       const status = aisStatuses[module.packageId];
-      return { packageId: module.packageId, name: module.name, version: module.version, pending,
+      return { packageId: module.packageId, name: module.name, version: module.version, pending, panelTitle: module.panel?.title ?? null,
         state: pending ? "waiting for your decision" : status ? (status.state === "ready" ? "running" : status.error ?? status.state) : "not started" };
     });
   });
@@ -2301,6 +2303,10 @@
                       <button type="button" data-player-ais-forget disabled={aisDeciding} onclick={() => void playerAis?.forget(row.packageId)}>
                         {aisStatuses[row.packageId]?.state === "ready" ? "Stop and ask again" : "Ask again"}
                       </button>
+                    {/if}
+                    {#if row.panelTitle}
+                      <button type="button" data-player-ais-panel-open={row.packageId} disabled={aisStatuses[row.packageId]?.state !== "ready"}
+                        onclick={() => { playerAis?.openPanel(row.packageId); }}>Open “{row.panelTitle}”</button>
                     {/if}
                     {#if aisCommandsOf(row.packageId).length > 0}
                       <div class="ais-module-command" data-player-ais-command={row.packageId}>

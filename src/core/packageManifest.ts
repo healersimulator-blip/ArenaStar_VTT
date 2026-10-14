@@ -15,6 +15,7 @@ import {
   type AisInterconnectManifest,
   type AisModuleCommandDeclaration,
   type AisModuleSharing,
+  type AisPanelDeclaration,
   type AisTokenActionDeclaration,
   type AisPackageRequirement,
 } from "./automationInterconnect";
@@ -93,7 +94,7 @@ const hasControlChars = (text: string): boolean => Array.from(text).some((ch) =>
 
 function validateInterconnect(value: unknown, id: string): Result<AisInterconnectManifest> {
   if (!isRecord(value)) return err(`package ${id}: interconnect must be an object`);
-  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities", "runtime", "runtimeProvider", "sharing", "tokenActions"]);
+  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities", "runtime", "runtimeProvider", "sharing", "tokenActions", "panel"]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));
   if (unknown) return err(`package ${id}: interconnect has unsupported field ${unknown}`);
   if (value.api !== AIS_API_VERSION)
@@ -259,6 +260,27 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
   if (tokenActions.length > 0 && !capabilities.includes("ui.interaction"))
     return err(`package ${id}: interconnect.tokenActions requires the ui.interaction capability`);
 
+  let panel: AisPanelDeclaration | undefined;
+  if (value.panel !== undefined) {
+    const raw = value.panel;
+    if (!isRecord(raw) || Object.keys(raw).some((key) => !["title", "width", "height"].includes(key)))
+      return err(`package ${id}: interconnect.panel must contain only title, width and height`);
+    if (typeof raw.title !== "string" || raw.title.trim().length === 0 || raw.title.length > 48 || hasControlChars(raw.title))
+      return err(`package ${id}: interconnect.panel needs a title of 1–48 printable characters`);
+    const dimension = (key: "width" | "height", fallback: number, min: number, max: number): number | null => {
+      const v = raw[key];
+      if (v === undefined) return fallback;
+      return typeof v === "number" && Number.isInteger(v) && v >= min && v <= max ? v : null;
+    };
+    const width = dimension("width", 360, 240, 960);
+    const height = dimension("height", 420, 160, 720);
+    if (width === null || height === null)
+      return err(`package ${id}: interconnect.panel width must be an integer 240–960 and height 160–720`);
+    panel = { title: raw.title.trim(), width, height };
+    if (!capabilities.includes("ui.panel"))
+      return err(`package ${id}: interconnect.panel requires the ui.panel capability`);
+  }
+
   if (runtime?.resources?.length && !capabilities.includes("package.resources.read"))
     return err(`package ${id}: declared runtime resources require package.resources.read`);
   if ((runtimeProvider || runtime) && !capabilities.includes("runtime.execute"))
@@ -280,6 +302,7 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
     ...(capabilities.length ? { capabilities } : {}),
     ...(sharing ? { sharing } : {}),
     ...(tokenActions.length ? { tokenActions } : {}),
+    ...(panel ? { panel } : {}),
   });
 }
 

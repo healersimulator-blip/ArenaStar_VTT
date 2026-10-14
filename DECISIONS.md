@@ -14151,3 +14151,49 @@ the touched files; new tests: manifest validation (`tests/packages/packageLoader
 in both shells (`tests/ui/tokenContextMenu.test.ts`), player runtime token actions + command
 invocation as `"player"` (`tests/app/playerAisRuntime.test.ts`). Full-suite and bundle numbers are
 recorded with the commit that closes this round (see D-470/D-471).
+
+## D-470 — P2a: sandboxed module panels — the module draws inside its own iframe, the shell draws the window (2026-10-14)
+
+**Context.** Plan §4.7 item 5 split P2: third-party module UI must never run in the shell page
+(design §15 isolation tiers), yet a torch kit, a loot splitter or a mount helper needs more than a
+menu entry and a `ui.select` list. `AisModuleIframe` already runs the module *inside the iframe's
+main document* (`sandbox="allow-scripts"`, opaque origin, CSP `default-src 'none'`, no network, no
+images, inline styles allowed) — the module has had a private DOM all along; the frame was simply
+`display: none`.
+
+**Decision.** Make that document the panel and keep every pixel of chrome host-owned:
+
+1. **Manifest** `interconnect.panel: { title, width?, height? }` (title 1–48 printable characters,
+   width 240–960 default 360, height 160–720 default 420, one panel per module) gated by the new
+   capability **`ui.panel`** (player-runnable; it is the player's own screen). Boot and the
+   package summary carry `panel`; `ais.profile` carries it to players.
+2. **Shell slot** `src/packages/aisPanel.ts` — plain DOM, shared by both shells: one persistent
+   layer (`aisPanelLayer()`), one `<section data-ais-panel role="dialog">` per module created
+   *hidden before the iframe* so the iframe is born inside the panel body via `hostElement` and is
+   **never re-parented** (moving an iframe reloads it, which the frame class treats as a navigation
+   and stops the module). Chrome = title, "<module name> · sandboxed module", Close; open/close
+   toggles the section and `AisModuleIframe.setVisible`. Stopped/failed/revoked modules close and
+   lose their window.
+3. **SDK/RPC** `AIS.ui.panel.open()/close()/root()` → methods `ui.panel.open` / `ui.panel.close`
+   (capability `ui.panel`; "declares no interconnect.panel" when the manifest has none).
+4. **Shell buttons** — GM: Settings → Packages shows "Panel: “title” (w×h) … Open panel"
+   (`data-ais-panel-open`, enabled while the runtime is `ready`); player: the *Shared modules*
+   card shows "Open “title”" (`data-player-ais-panel-open`).
+
+**Rejected.** Rendering module HTML in the shell (`{@html}`/component packages) for third-party
+code — that is P2b's build-signed first-party path, not a third-party one. A second iframe for
+the panel — two documents, two RPC ports, and the automation code could not touch its own UI.
+`allow-same-origin` or `allow-popups` on the panel frame — unchanged sandbox; the module cannot
+read the host page, open windows or navigate the top frame.
+
+**Consequences / limits.** No images or fonts inside a panel yet (CSP unchanged; a later decision
+may allow `blob:` images from package resources). One panel per module; no drag/resize (fixed
+bottom-right stagger). Focus: a visible sandboxed frame may take keyboard focus — the shell's
+hotkeys do not fire while the user types in a panel, which is the intended behaviour.
+
+**Verification (measured).** `tsc --noEmit` clean; `checkSvelte` 0 blocking; `eslint` clean on the
+touched files; tests: manifest bounds (`packageLoader.test.ts`), RPC handlers (`aisModule.test.ts`),
+the panel host against an element double (`tests/packages/aisPanel.test.ts`, 2), the player
+runtime's mount → attach → open/close → remove protocol (`playerAisRuntime.test.ts`) and the
+GM runtime + boot + summary + profile path (`aisRuntimeSharing.test.ts`). No browser run (see
+D-468 for the sandbox limitation).

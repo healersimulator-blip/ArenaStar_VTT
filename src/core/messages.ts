@@ -1084,6 +1084,8 @@ export interface AisSharedModule {
   emittedEvents: string[];
   /** D-469: manifest token-menu entries, shown at the player for tokens they control. */
   tokenActions?: import("./automationInterconnect").AisTokenActionDeclaration[];
+  /** D-470: the module's sandboxed panel declaration (the player shell chromes it). */
+  panel?: import("./automationInterconnect").AisPanelDeclaration;
 }
 
 /**

@@ -25,6 +25,7 @@ import type { Op, OpEnvelope } from "../../src/core/ops";
 import type { Json, SceneDocument, TokenDocument, UserDocument } from "../../src/core/documents";
 import type { AisModuleIframeOptions, AisModuleInvocationOptions } from "../../src/packages/aisModuleIframe";
 import { openVttDb, getSetting } from "../../src/storage/idb";
+import type { AisPanelEntry, AisPanelHost, AisPanelSpec } from "../../src/packages/aisPanel";
 import {
   PlayerAisRuntime,
   playerAisConsentScope,
@@ -141,7 +142,9 @@ class FakeFrame implements PlayerAisFrame {
   readonly events: Array<{ event: string; payload: unknown }> = [];
   disposedWith: string | null = null;
   readonly commands: Array<{ commandId: string; input: Json; options: AisModuleInvocationOptions }> = [];
+  readonly visibility: boolean[] = [];
   constructor(readonly options: AisModuleIframeOptions) {}
+  setVisible(visible: boolean): void { this.visibility.push(visible); }
   emit(event: string, payload: unknown): void { this.events.push({ event, payload }); }
   invokeCommand(commandId: string, input: Json, options: AisModuleInvocationOptions): Promise<Json> {
     this.commands.push({ commandId, input, options });
@@ -150,7 +153,36 @@ class FakeFrame implements PlayerAisFrame {
   dispose(reason: string): void { this.disposedWith = reason; this.status = { state: "stopped", error: reason }; }
 }
 
-function runtimeFor(player: { client: ClientSync; bus: EventBus<ClientEvents> }, db: Awaited<ReturnType<typeof openVttDb>>) {
+/** D-470: a panel-host double recording the shell-side protocol (mount → attach → open/close → remove). */
+class FakePanelHost implements AisPanelHost {
+  readonly log: string[] = [];
+  readonly openIds = new Set<string>();
+  readonly specs = new Map<string, AisPanelSpec>();
+  readonly bodies = new Map<string, HTMLElement>();
+  readonly frames = new Map<string, { setVisible(visible: boolean): void }>();
+  mount(packageId: string, spec: AisPanelSpec): HTMLElement {
+    this.log.push(`mount:${packageId}`);
+    this.specs.set(packageId, spec);
+    const body = { tag: `body:${packageId}` } as unknown as HTMLElement;
+    this.bodies.set(packageId, body);
+    return body;
+  }
+  attach(packageId: string, frame: { setVisible(visible: boolean): void }): void { this.log.push(`attach:${packageId}`); this.frames.set(packageId, frame); }
+  open(packageId: string): boolean {
+    if (!this.specs.has(packageId) || this.openIds.has(packageId)) return false;
+    this.openIds.add(packageId); this.frames.get(packageId)?.setVisible(true); this.log.push(`open:${packageId}`); return true;
+  }
+  close(packageId: string): boolean {
+    if (!this.openIds.delete(packageId)) return false;
+    this.frames.get(packageId)?.setVisible(false); this.log.push(`close:${packageId}`); return true;
+  }
+  remove(packageId: string): void { this.specs.delete(packageId); this.openIds.delete(packageId); this.log.push(`remove:${packageId}`); }
+  isOpen(packageId: string): boolean { return this.openIds.has(packageId); }
+  entries(): AisPanelEntry[] { return Array.from(this.specs, ([packageId, spec]) => ({ packageId, title: spec.title, open: this.openIds.has(packageId) })); }
+  dispose(): void { for (const id of Array.from(this.specs.keys())) this.remove(id); }
+}
+
+function runtimeFor(player: { client: ClientSync; bus: EventBus<ClientEvents> }, db: Awaited<ReturnType<typeof openVttDb>>, panelHost?: FakePanelHost) {
   const frames: FakeFrame[] = [];
   let pending: PlayerAisPendingConsent[] = [];
   let statuses: PlayerAisStatuses = {};
@@ -163,6 +195,7 @@ function runtimeFor(player: { client: ClientSync; bus: EventBus<ClientEvents> },
     onStatus: (next) => { statuses = next; },
     onPending: (next) => { pending = next; },
     createFrame: (options) => { const frame = new FakeFrame(options); frames.push(frame); return frame; },
+    ...(panelHost ? { panelHost } : {}),
     now: () => 1234,
   });
   return { runtime, frames, notices, pending: () => pending, statuses: () => statuses };
@@ -288,6 +321,51 @@ describe("D-468 — player consent", () => {
       await expect(r.runtime.invokeCommand("other", "x", {})).rejects.toThrow("not running on this device");
       r.runtime.dispose();
       expect(r.frames[0]?.commands[0]?.options.isActive()).toBe(false);
+    } finally { db.close(); }
+  });
+
+  test("D-470: a declared panel is mounted before the frame, the frame is born inside it, and open/close flow both ways", async () => {
+    const h = await setup();
+    const rex = await h.addPlayer(REX_OWNER, "Rex");
+    const db = await openVttDb();
+    try {
+      h.profileBody = { providers: {}, modules: [{ ...torchModule(), capabilities: [...torchModule().capabilities, "ui.panel"],
+        panel: { title: "Torch kit", width: 320, height: 240 } }] };
+      h.host.publishAisProfile();
+      await flushMicrotasks();
+      const panels = new FakePanelHost();
+      const r = runtimeFor(rex, db, panels);
+      await r.runtime.settled();
+      expect(panels.log).toEqual([]); // nothing before consent
+      expect(r.runtime.openPanel("pf1e-torch")).toBe(false);
+      expect(r.notices.at(-1)).toContain("not running on this device");
+
+      await r.runtime.allow("pf1e-torch");
+      expect(panels.log).toEqual(["mount:pf1e-torch", "attach:pf1e-torch"]);
+      expect(panels.specs.get("pf1e-torch")).toMatchObject({ title: "Torch kit", moduleName: "Torch", width: 320, height: 240 });
+      // The iframe host element IS the panel body (no re-parenting later).
+      expect(r.frames[0]?.options.hostElement).toBe(panels.bodies.get("pf1e-torch"));
+      expect(r.frames[0]?.options.grantedCapabilities).toContain("ui.panel");
+      expect(r.runtime.panelEntries()).toEqual([{ packageId: "pf1e-torch", title: "Torch kit", open: false }]);
+
+      // Shell → open; module (via its RPC handler) → close; module → open again.
+      expect(r.runtime.openPanel("pf1e-torch")).toBe(true);
+      expect(r.frames[0]?.visibility).toEqual([true]);
+      await expect(r.frames[0]?.options.handlers["ui.panel.close"]({})).resolves.toEqual({ open: false });
+      expect(panels.isOpen("pf1e-torch")).toBe(false);
+      await expect(r.frames[0]?.options.handlers["ui.panel.open"]({})).resolves.toEqual({ open: true });
+      expect(panels.isOpen("pf1e-torch")).toBe(true);
+      expect(r.frames[0]?.visibility).toEqual([true, false, true]);
+
+      // Un-sharing stops the module: the panel closes with it and disappears when the runtime goes.
+      h.profileBody = { providers: {}, modules: [] };
+      h.host.publishAisProfile();
+      await flushMicrotasks();
+      expect(r.frames[0]?.disposedWith).toBe("No longer shared by the GM");
+      expect(panels.log.at(-1)).toBe("remove:pf1e-torch");
+      expect(panels.entries()).toEqual([]);
+      expect(r.runtime.panelEntries()).toEqual([]);
+      r.runtime.dispose();
     } finally { db.close(); }
   });
 

@@ -1,4 +1,5 @@
 import type { TokenModuleAction } from "../ui/combat/tokenContextMenu";
+import { createAisPanelHost, type AisPanelEntry, type AisPanelHost } from "../packages/aisPanel";
 import { UI_THEME_CAPABILITIES, UI_THEME_COMMAND } from "../core/uiTheme";
 /** Browser composition for AIS v1. Kept out of Svelte so the authority callbacks are type-checked. */
 import type { HostApp, HostAutomationModuleBoot } from "./hostBoot";
@@ -29,6 +30,10 @@ export interface AisRuntimeOptions {
   cancelChoice: (packageId: string) => void;
   notify: (message: string, level: "info" | "warn" | "error") => void;
   onStatus: (statuses: AisRuntimeStatuses) => void;
+  /** D-470: persistent layer element for sandboxed module panels; absent = panels unavailable. */
+  panelLayer?: HTMLElement;
+  /** Test seam for the panel host. */
+  panelHost?: AisPanelHost;
 }
 
 /** Frozen boot identity + current local consent, never a portable world's assertion of trust. */
@@ -67,12 +72,15 @@ export class AisRuntime {
   private disposed = false;
   private readonly definitions = new Map<string, HostAutomationModuleBoot>();
   private readonly mutate = createAisMutationQueue();
+  /** D-470: host-chromed windows around module iframes (one per module that declares a panel). */
+  private readonly panels: AisPanelHost | null;
   /** D-468: the last published player-facing module set (empty until consent is verified). */
   private playerProfileBody: Omit<AisProfileMsg, "kind" | "seq" | "worldId"> = { providers: {}, modules: [] };
 
   constructor(options: AisRuntimeOptions) {
     this.options = options;
     const { app } = options;
+    this.panels = options.panelHost ?? (options.panelLayer ? createAisPanelHost(options.panelLayer) : null);
     this.providers = app.automationBoot.resolution.providers;
     for (const module of app.automationBoot.modules) this.start(module);
     // D-468: players receive the shared module set once the GM-device consent has been read.
@@ -142,6 +150,13 @@ export class AisRuntime {
         assertAisModuleConsent(await getWorld(app.db, app.worldId), module, capability);
         if (this.disposed) throw new Error("AIS world runtime was stopped");
       };
+      // D-470: a declared panel gets its hidden host-chromed window first, so the iframe is created
+      // inside it and never re-parented (re-parenting reloads an iframe = module navigation).
+      const panelBody = module.panel && this.panels
+        ? this.panels.mount(module.packageId, { title: module.panel.title, moduleName: module.name,
+          width: module.panel.width, height: module.panel.height, onClose: () => {} })
+        : undefined;
+      const panels = this.panels;
       const frame = new AisModuleIframe({
         packageId: module.packageId,
         source: module.source,
@@ -149,6 +164,7 @@ export class AisRuntime {
         commands: module.commands,
         grantedCapabilities: module.capabilities.filter((capability) =>
           (module.runtimeDependencies ?? []).every((dependency) => dependency.capabilities.includes(capability))),
+        ...(panelBody ? { hostElement: panelBody } : {}),
         assertModuleActive: () => assertCapability(),
         isCapabilityCurrentlyGranted: async (capability) => {
           try { await assertCapability(capability); return true; } catch { return false; }
@@ -165,6 +181,7 @@ export class AisRuntime {
             options.cancelChoice(module.packageId);
             for (const id of fxRuns.keys()) app.host.stopAisFx(id);
             fxRuns.clear();
+            panels?.close(module.packageId);
           }
           if (status.state === "failed") options.notify(`AIS module ${module.packageId}: ${status.error}`, "error");
           options.onStatus({ ...this.statuses });
@@ -203,13 +220,33 @@ export class AisRuntime {
             },
           },
           notify: options.notify,
+          ...(panelBody && panels ? { panel: {
+            open: () => { panels.open(module.packageId); },
+            close: () => { panels.close(module.packageId); },
+          } } : {}),
           emitModuleEvent: (eventId, payload) => this.emitModuleEvent(module.packageId, eventId, payload),
           newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID()}`,
           assertCapability,
         }),
       });
+      if (panelBody) panels?.attach(module.packageId, frame);
       this.hosts.set(module.packageId, frame);
   }
+
+  /** D-470: panels of modules that declared one, with their open state (for shell buttons). */
+  panelEntries(): AisPanelEntry[] { return this.panels?.entries() ?? []; }
+
+  /** D-470: open a module's panel from the shell; false when the module is not running. */
+  openPanel(packageId: string): boolean {
+    const frame = this.hosts.get(packageId);
+    if (!frame || frame.status.state !== "ready" || !this.panels) {
+      this.options.notify(frame?.status.error ?? "The module is not running; enable and approve it in Settings → Packages.", "warn");
+      return false;
+    }
+    return this.panels.open(packageId);
+  }
+
+  closePanel(packageId: string): boolean { return this.panels?.close(packageId) ?? false; }
 
   /** The ONLY live-start path: explicit local-GM activation of appearance-only packages. */
   async composeTheme(packageId: string, input: Json, isActive: () => boolean): Promise<{ value: Json; module: HostAutomationModuleBoot }> {
@@ -311,6 +348,7 @@ export class AisRuntime {
         } catch (error) {
           const reason = error instanceof Error ? error.message : "Module approval changed; reload required";
           frame?.dispose(reason);
+          this.panels?.remove(module.packageId);
           if (!frame) this.statuses[module.packageId] = { state: "stopped", error: reason };
         }
       }
@@ -319,6 +357,7 @@ export class AisRuntime {
     } catch {
       // A failed authority read is never permission to keep executing the cached profile.
       for (const frame of this.hosts.values()) frame.dispose("Could not verify current module approval; reload required");
+      this.panels?.dispose();
       this.publishPlayerProfile(null);
     }
   }
@@ -384,5 +423,6 @@ export class AisRuntime {
     this.options.app.host.setAisProfileProvider(null);
     for (const frame of this.hosts.values()) frame.dispose("World closed");
     this.hosts.clear();
+    this.panels?.dispose();
   }
 }

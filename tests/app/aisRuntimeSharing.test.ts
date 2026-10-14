@@ -21,6 +21,7 @@ import { MemDirHandle } from "../../src/storage/opfs";
 import { HostPersister } from "../../src/storage/persistence";
 import { InlineSimRunner } from "../../src/workers/simWorkerClient";
 import type { AisModuleIframeOptions } from "../../src/packages/aisModuleIframe";
+import type { AisPanelHost, AisPanelSpec } from "../../src/packages/aisPanel";
 import { FakeCodec } from "./fakes";
 
 vi.mock("../../src/packages/aisModuleIframe", async (load) => {
@@ -81,9 +82,29 @@ async function joinPlayer(app: HostApp, name: string) {
   await flushMicrotasks();
   return { client, profiles };
 }
-const runtimeFor = (app: HostApp) => new AisRuntime({
-  app, activeSceneId: () => null, select: async () => null, cancelChoice: vi.fn(), notify: vi.fn(), onStatus: vi.fn(),
+const runtimeFor = (app: HostApp, extra: { panelHost?: AisPanelHost; notify?: (message: string) => void } = {}) => new AisRuntime({
+  app, activeSceneId: () => null, select: async () => null, cancelChoice: vi.fn(), notify: extra.notify ?? vi.fn(), onStatus: vi.fn(),
+  ...(extra.panelHost ? { panelHost: extra.panelHost } : {}),
 });
+
+/** D-470: the GM shell's panel slot, recorded instead of drawn. */
+function fakePanelHost() {
+  const log: string[] = [];
+  const specs = new Map<string, AisPanelSpec>();
+  const bodies = new Map<string, HTMLElement>();
+  const open = new Set<string>();
+  const host: AisPanelHost = {
+    mount: (id, spec) => { log.push(`mount:${id}`); specs.set(id, spec); const body = { id } as unknown as HTMLElement; bodies.set(id, body); return body; },
+    attach: (id) => { log.push(`attach:${id}`); },
+    open: (id) => { if (!specs.has(id) || open.has(id)) return false; open.add(id); log.push(`open:${id}`); return true; },
+    close: (id) => { if (!open.delete(id)) return false; log.push(`close:${id}`); return true; },
+    remove: (id) => { if (specs.delete(id)) log.push(`remove:${id}`); open.delete(id); },
+    isOpen: (id) => open.has(id),
+    entries: () => Array.from(specs, ([packageId, spec]) => ({ packageId, title: spec.title, open: open.has(packageId) })),
+    dispose: () => { for (const id of Array.from(specs.keys())) host.remove(id); },
+  };
+  return { host, log, specs, bodies };
+}
 /** Package mutations republish after an IndexedDB read — a few timer turns, not just microtasks. */
 async function settle(): Promise<void> {
   for (let i = 0; i < 10; i += 1) { await flushMicrotasks(); await new Promise((r) => setTimeout(r, 5)); }
@@ -144,5 +165,38 @@ describe("AisRuntime → ais.profile", () => {
       expect(late.profiles).toEqual([]);
       expect(late.client.aisProfile).toBeNull();
     } finally { await app.close(); }
+  });
+});
+
+describe("D-470 — GM-side sandboxed panels", () => {
+  test("a module with interconnect.panel is born inside its host-chromed window; the shell opens it, revocation removes it", async () => {
+    let app = await freshApp();
+    expect((await app.packages.importZip(moduleZip("kit", ["action.observe", "ui.panel"],
+      { panel: { title: "Kit", width: 300, height: 200 } }))).ok).toBe(true);
+    expect((await app.packages.importZip(moduleZip("plain", ["action.observe"]))).ok).toBe(true);
+    await approve(app, "kit", ["action.observe", "ui.panel"]);
+    await approve(app, "plain", ["action.observe"]);
+    app = await reboot(app);
+    expect(app.automationBoot.modules.find((m) => m.packageId === "kit")?.panel).toEqual({ title: "Kit", width: 300, height: 200 });
+    expect((await app.packages.automation()).modules.find((m) => m.id === "kit")?.panel).toEqual({ title: "Kit", width: 300, height: 200 });
+    const panels = fakePanelHost();
+    const notices: string[] = [];
+    const runtime = runtimeFor(app, { panelHost: panels.host, notify: (message) => notices.push(message) });
+    try {
+      await settle();
+      expect(panels.log).toEqual(["mount:kit", "attach:kit"]);
+      expect(panels.specs.get("kit")).toMatchObject({ title: "Kit", moduleName: "kit name", width: 300, height: 200 });
+      expect(runtime.panelEntries()).toEqual([{ packageId: "kit", title: "Kit", open: false }]);
+      expect(runtime.openPanel("kit")).toBe(true);
+      expect(runtime.openPanel("plain")).toBe(false); // no panel declared
+      expect(runtime.closePanel("kit")).toBe(true);
+      // The module's own RPC path reaches the same slot.
+      const rex = await joinPlayer(app, "rex");
+      expect(rex.profiles.at(-1)?.modules.find((m) => m.packageId === "kit")?.panel).toEqual({ title: "Kit", width: 300, height: 200 });
+      expect(await app.packages.revokeAutomationApproval("kit")).toEqual({ ok: true });
+      await settle();
+      expect(panels.log.at(-1)).toBe("remove:kit");
+      expect(runtime.panelEntries()).toEqual([]);
+    } finally { runtime.dispose(); await app.close(); }
   });
 });

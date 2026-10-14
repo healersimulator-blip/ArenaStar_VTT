@@ -29,6 +29,8 @@ export const AIS_MODULE_METHODS = [
   "chat.post",
   "ui.notify",
   "ui.select",
+  "ui.panel.open",
+  "ui.panel.close",
   "scene.tags.snapshot",
   "scene.tags.update",
   "fx.play",
@@ -49,6 +51,8 @@ const REQUIRED_CAPABILITY: Record<AisModuleMethod, AisCapability> = {
   "chat.post": "chat.post",
   "ui.notify": "ui.notify",
   "ui.select": "ui.interaction",
+  "ui.panel.open": "ui.panel",
+  "ui.panel.close": "ui.panel",
   "scene.tags.snapshot": "scene.tags.read",
   "scene.tags.update": "scene.tags.write",
   "fx.play": "fx.play",
@@ -384,6 +388,18 @@ export class AisModuleIframe {
 
   get status(): AisModuleRuntimeStatus { return this.statusValue; }
   whenReady(): Promise<void> { return this.ready; }
+
+  /**
+   * D-470: show or hide the module's own document. The element never moves in the DOM (re-parenting
+   * an iframe reloads it, which this class treats as a navigation and stops the module); the shell
+   * creates it inside the panel body via `hostElement` and toggles visibility here.
+   */
+  setVisible(visible: boolean): void {
+    if (this.disposed && visible) return;
+    this.frame.style.display = visible ? "block" : "none";
+    if (visible) this.frame.removeAttribute("aria-hidden");
+    else this.frame.setAttribute("aria-hidden", "true");
+  }
 
   private readonly onLoad = (): void => {
     if (this.loaded) this.stop("Module iframe navigated; reload the world to restart it", true);

@@ -8,6 +8,7 @@ import {
   type AisCapability,
   type AisModuleCommandDeclaration,
   type AisPackageCandidate,
+  type AisPanelDeclaration,
   type AisResolution,
   type AisTokenActionDeclaration,
 } from "../core/automationInterconnect";
@@ -172,6 +173,8 @@ export interface HostAutomationModuleBoot {
   hostOnly?: boolean;
   /** D-469: manifest-declared token-menu entries (emitted back as `ui.token.action`). */
   tokenActions?: AisTokenActionDeclaration[];
+  /** D-470: the module draws a panel in its own sandboxed document; the shell chromes it. */
+  panel?: AisPanelDeclaration;
   capabilities: AisCapability[];
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
@@ -202,6 +205,8 @@ export interface HostAutomationModuleSummary {
   sharedWithPlayers: boolean;
   /** D-469: the manifest forbids player execution (`sharing: "host-only"`). */
   hostOnly: boolean;
+  /** D-470: declared sandboxed panel (title only matters to the review UI). */
+  panel?: AisPanelDeclaration;
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
 }
@@ -381,6 +386,7 @@ function resolveAutomationState(
     const hostOnly = rec.manifest.interconnect.sharing === "host-only";
     const sharedWithPlayers = !hostOnly && world?.automationSharing?.[rec.id] !== false;
     const tokenActions = rec.manifest.interconnect.tokenActions ?? [];
+    const panel = rec.manifest.interconnect.panel ? { ...rec.manifest.interconnect.panel } : undefined;
     let runtime: ReturnType<typeof aisRuntimePackage> = null;
     let runtimeError: string | undefined;
     try { runtime = aisRuntimePackage(rec, records); }
@@ -405,6 +411,7 @@ function resolveAutomationState(
       ...(runtimeError ? { runtimeError } : {}),
       sharedWithPlayers,
       hostOnly,
+      ...(panel ? { panel } : {}),
       commands,
       emittedEvents,
     });
@@ -420,6 +427,7 @@ function resolveAutomationState(
       sharedWithPlayers,
       ...(hostOnly ? { hostOnly: true } : {}),
       ...(tokenActions.length > 0 ? { tokenActions: tokenActions.map((action) => ({ ...action })) } : {}),
+      ...(panel ? { panel: { ...panel } } : {}),
       source: runtime?.source ?? aisOwnSource(rec),
       resources: aisRuntimeResources(rec),
       ...(rec.manifest.interconnect.provides?.some((slot) => slot.id === "ui.theme" && slot.mode === "exclusive" && slot.contract === 1)

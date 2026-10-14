@@ -56,7 +56,7 @@ describe("buildAisPlayerProfile — what the GM shares", () => {
       bootModule({ packageId: "private", sharedWithPlayers: false }),
       // D-469: the author's own declaration wins even when the GM never unticked the box.
       bootModule({ packageId: "author-host-only", sharedWithPlayers: true, hostOnly: true }),
-      bootModule({ packageId: "ok", tokenActions: [{ id: "mount", label: "Mount up" }] }),
+      bootModule({ packageId: "ok", tokenActions: [{ id: "mount", label: "Mount up" }], panel: { title: "Mounts", width: 320, height: 200 } }),
     ];
     const body = buildAisPlayerProfile({
       modules, providers: providers("private/light"),
@@ -64,6 +64,7 @@ describe("buildAisPlayerProfile — what the GM shares", () => {
     });
     expect(body.modules.map((m) => m.packageId)).toEqual(["ok"]);
     expect(body.modules[0]?.tokenActions).toEqual([{ id: "mount", label: "Mount up" }]);
+    expect(body.modules[0]?.panel).toEqual({ title: "Mounts", width: 320, height: 200 });
     // A selection whose provider does not travel is dropped: a player cannot act on it.
     expect(body.providers).toEqual({});
   });
