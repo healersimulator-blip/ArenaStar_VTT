@@ -1,30 +1,52 @@
 /** Minimal AIS SDK injected before an independent module's classic-script entry point. */
-export const AIS_MODULE_RUNTIME_SOURCE = `
+import type { Json } from "../core/documents";
+
+export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = null): string {
+  return `
 "use strict";
-(function () {
+(function (bootId, runtimeContext) {
+  var channel = new MessageChannel();
+  var port = channel.port1;
+  var failed = false;
   var nextId = 1;
   var pending = new Map();
   var events = new Map();
   var subscribed = new Set();
   var commands = new Map();
   var ready = false;
+  var initializers = [];
+  var starting = false;
 
-  function post(frame) { parent.postMessage(frame, "*"); }
+  function post(frame) { port.postMessage(frame); }
+  function fail(error) {
+    if (failed) return;
+    failed = true;
+    post({ vttAisRpc: 1, kind: "error", error: String(error && error.message || error).slice(0, 500) });
+  }
+  window.addEventListener("error", function (event) { fail(event.error || event.message); });
+  window.addEventListener("unhandledrejection", function (event) { fail(event.reason); });
+  window.addEventListener("pagehide", function () { port.close(); }, { once: true });
   function rpc(method, args, commandId) {
     return new Promise(function (resolve, reject) {
+      if (failed) { reject(new Error("AIS module has stopped")); return; }
+      if (pending.size >= 32) { reject(new Error("AIS RPC concurrency limit exceeded")); return; }
       var id = nextId++;
-      pending.set(id, { resolve: resolve, reject: reject });
-      post({ vttAisRpc: 1, kind: "request", id: id, method: method,
-        args: args === undefined ? null : args,
-        ...(commandId ? { commandId: commandId } : {}) });
+      var frame = { vttAisRpc: 1, kind: "request", id: id, method: method,
+        args: args === undefined ? {} : args,
+        ...(commandId ? { commandId: commandId } : {}) };
+      if (!boundedJson(frame, 0, new Set()) || byteLength(frame) > 64 * 1024) {
+        reject(new Error("AIS RPC request must be bounded JSON no larger than 64 KiB")); return;
+      }
       // A host-rendered selection can wait for a human. Other calls stay short and bounded.
       var timeout = method === "ui.select" ? 5 * 60 * 1000 : 10000;
-      setTimeout(function () {
+      var timer = setTimeout(function () {
         if (pending.has(id)) {
           pending.delete(id);
           reject(new Error("AIS RPC timed out: " + method));
         }
       }, timeout);
+      pending.set(id, { resolve: resolve, reject: reject, timer: timer });
+      post(frame);
     });
   }
   function subscribe(event) {
@@ -50,6 +72,28 @@ export const AIS_MODULE_RUNTIME_SOURCE = `
         emit: function (eventId, payload) { return call("events.emit", { eventId: eventId, payload: payload }); }
       }),
       scene: Object.freeze({ readVisible: function () { return call("scene.read.visible", {}); } }),
+      resources: Object.freeze({
+        readText: async function (path) {
+          var text = "", offset = 0;
+          for (var page = 0; page < 256; page++) {
+            var chunk = await call("package.resource.read", { path: path, offset: offset });
+            text += chunk.text;
+            if (chunk.next === null) return text;
+            if (chunk.next <= offset) throw new Error("Invalid resource stream");
+            offset = chunk.next;
+          }
+          throw new Error("Resource transfer budget exceeded");
+        }
+      }),
+      sceneTags: Object.freeze({
+        snapshot: function () { return call("scene.tags.snapshot", {}); },
+        update: function (request) { return call("scene.tags.update", request); }
+      }),
+      fx: Object.freeze({
+        play: function (request) { return call("fx.play", request); },
+        list: function () { return call("fx.list", {}); },
+        stop: function (runId) { return call("fx.stop", { runId: runId }); }
+      }),
       actor: Object.freeze({
         readInventory: function (actorId) { return call("actor.inventory.read", { actorId: actorId }); }
       }),
@@ -81,6 +125,7 @@ export const AIS_MODULE_RUNTIME_SOURCE = `
     var valid;
     if (Array.isArray(value)) valid = value.length <= 1024 && value.every(function (item) { return boundedJson(item, depth + 1, seen); });
     else {
+      if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
       var keys = Object.keys(value);
       valid = keys.length <= 1024 && keys.every(function (key) {
         return key !== "__proto__" && key !== "constructor" && boundedJson(value[key], depth + 1, seen);
@@ -97,8 +142,10 @@ export const AIS_MODULE_RUNTIME_SOURCE = `
     post({ vttAisRpc: 1, kind: "command-result", id: id, ok: false, error: String(message).slice(0, 500) });
   }
   function runCommand(data) {
-    if (typeof data.id !== "string" || !/^cmd-[0-9]{1,16}$/.test(data.id) ||
-        typeof data.commandId !== "string" || !commands.has(data.commandId)) return;
+    if (typeof data.id !== "string" || !/^cmd-[0-9]{1,16}$/.test(data.id)) return;
+    if (typeof data.commandId !== "string" || !commands.has(data.commandId)) {
+      failCommand(data.id, "AIS module did not register command " + data.commandId); return;
+    }
     var handler = commands.get(data.commandId);
     var context = data.context && typeof data.context === "object" ? data.context : {};
     var api = createApi(data.id);
@@ -119,10 +166,15 @@ export const AIS_MODULE_RUNTIME_SOURCE = `
       failCommand(data.id, error && error.message ? error.message : error);
     });
   }
-  window.addEventListener("message", function (ev) {
-    if (ev.source !== parent || ev.origin !== "null") return;
+  // Only the document-bound port carries RPCs. Window messages (including forged
+  // replies from siblings or a non-null HTTPS parent) never enter this channel.
+  port.onmessage = function (ev) {
     var data = ev.data;
     if (!data || data.vttAisRpc !== 1) return;
+    if (data.kind === "ping" && data.bootId === bootId) {
+      post({ vttAisRpc: 1, kind: "pong", bootId: bootId });
+      return;
+    }
     if (data.kind === "command") {
       runCommand(data);
       return;
@@ -131,6 +183,7 @@ export const AIS_MODULE_RUNTIME_SOURCE = `
       var waiter = pending.get(data.id);
       if (!waiter) return;
       pending.delete(data.id);
+      clearTimeout(waiter.timer);
       if (data.ok) waiter.resolve(data.result);
       else waiter.reject(new Error(data.error || "AIS RPC failed"));
       return;
@@ -139,13 +192,25 @@ export const AIS_MODULE_RUNTIME_SOURCE = `
       var callbacks = events.get(data.event);
       if (!callbacks) return;
       callbacks.forEach(function (callback) {
-        try { callback(data.payload); } catch (error) { console.error("AIS event callback failed", error); }
+        try { Promise.resolve(callback(data.payload)).catch(fail); } catch (error) { fail(error); }
       });
     }
-  });
+  };
+  port.start();
+  // The host authenticates the source frame, opaque origin and one-use boot ID.
+  // The port belongs to THIS document; navigating the frame cannot inherit it.
+  parent.postMessage({ vttAisRpc: 1, kind: "connect", bootId: bootId }, "*", [channel.port2]);
 
   globalThis.AIS = Object.freeze(Object.assign({}, createApi(undefined), {
     api: "arena.ais/1",
+    runtime: Object.freeze({
+      context: runtimeContext,
+      initialize: function (fn) {
+        if (starting || typeof fn !== "function" || initializers.length >= 8)
+          throw new Error("Invalid or late AIS runtime initializer");
+        initializers.push(fn);
+      }
+    }),
     commands: Object.freeze({
       on: function (commandId, callback) {
         if (typeof commandId !== "string" || !/^[a-z0-9][a-z0-9._:-]{1,127}$/.test(commandId) || typeof callback !== "function")
@@ -155,7 +220,15 @@ export const AIS_MODULE_RUNTIME_SOURCE = `
         return function () { if (commands.get(commandId) === callback) commands.delete(commandId); };
       }
     }),
-    __ready: function () { if (!ready) { ready = true; post({ vttAisRpc: 1, kind: "ready" }); } }
+    __ready: function () {
+      if (starting) return;
+      starting = true;
+      void (async function () {
+        for (var initialize of initializers) await initialize();
+        if (!ready && !failed) { ready = true; post({ vttAisRpc: 1, kind: "ready" }); }
+      })().catch(fail);
+    }
   }));
-})();
+})(${JSON.stringify(bootId)}, ${JSON.stringify(runtimeContext)});
 `;
+}

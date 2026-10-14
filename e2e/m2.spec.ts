@@ -1,5 +1,5 @@
 import { test, expect, type Browser, type Page } from "@playwright/test";
-import { entry, manualFragment, playerCall } from "./lib";
+import { chromeAction, entry, manualFragment, playerCall } from "./lib";
 
 /**
  * M2 acceptance (§19): 10,000 models, 2 players (GM tab + joined player over
@@ -62,7 +62,7 @@ test.describe("M2 acceptance (§19)", () => {
     expect(playerUserId).toBeTruthy();
 
     // ── GM: two factions, four armies of 2,500 (10,000 models) ────────────
-    await host.click("#gm-extras");
+    await chromeAction(host, "gm-extras");
     const win = host.locator('[data-window="gmextras"]');
     await expect(win).toBeVisible();
     await host.fill("#faction-name", "Ironhost");
@@ -90,7 +90,7 @@ test.describe("M2 acceptance (§19)", () => {
     expect(snap.strengths.reduce((a: number, b: number) => a + b, 0)).toBe(10_000);
 
     // ── grant the player OBSERVER on faction 0 via the permissions window ─
-    await host.click("#gm-perms");
+    await chromeAction(host, "gm-perms");
     const perms = host.locator('[data-window="permissions"]');
     await expect(perms).toBeVisible();
     await perms.locator("[data-perm-coll]").selectOption("factions");

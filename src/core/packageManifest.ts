@@ -90,7 +90,7 @@ const AIS_SLOT_RE = /^[a-z0-9][a-z0-9._:-]{1,127}$/;
 
 function validateInterconnect(value: unknown, id: string): Result<AisInterconnectManifest> {
   if (!isRecord(value)) return err(`package ${id}: interconnect must be an object`);
-  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities"]);
+  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities", "runtime", "runtimeProvider"]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));
   if (unknown) return err(`package ${id}: interconnect has unsupported field ${unknown}`);
   if (value.api !== AIS_API_VERSION)
@@ -122,6 +122,39 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
         ...(raw.optional === undefined ? {} : { optional: raw.optional as boolean }),
       });
     }
+  }
+
+  let runtimeProvider: AisInterconnectManifest["runtimeProvider"];
+  let runtime: AisInterconnectManifest["runtime"];
+  if (value.runtimeProvider !== undefined) {
+    const spec = value.runtimeProvider;
+    if (!isRecord(spec) || Array.isArray(spec) ||
+        Object.keys(spec).some((key) => !["contract", "profiles"].includes(key)) || spec.contract !== 1 ||
+        !Array.isArray(spec.profiles) || spec.profiles.length < 1 || spec.profiles.length > 16 ||
+        spec.profiles.some((profile) => typeof profile !== "string" || !AIS_SLOT_RE.test(profile)) ||
+        new Set(spec.profiles).size !== spec.profiles.length)
+      return err(`package ${id}: invalid runtimeProvider contract/profiles`);
+    runtimeProvider = { contract: 1, profiles: [...spec.profiles] as string[] };
+  }
+  if (value.runtime !== undefined) {
+    const spec = value.runtime;
+    if (runtimeProvider || !isRecord(spec) || Array.isArray(spec) ||
+        Object.keys(spec).some((key) => !["provider", "profile", "scripts", "configuration", "resources"].includes(key)) ||
+        typeof spec.provider !== "string" || !ID_RE.test(spec.provider) || spec.provider === id ||
+        typeof spec.profile !== "string" || !AIS_SLOT_RE.test(spec.profile) ||
+        typeof spec.configuration !== "string" || !isSafePackagePath(spec.configuration) ||
+        !Array.isArray(spec.scripts) || spec.scripts.length < 1 || spec.scripts.length > 16 ||
+        spec.scripts.some((path) => typeof path !== "string" || !isSafePackagePath(path) || path === value.entry) ||
+        new Set(spec.scripts).size !== spec.scripts.length)
+      return err(`package ${id}: invalid runtime binding`);
+    if (!requires.some((dependency) => dependency.id === spec.provider && dependency.version && !dependency.optional))
+      return err(`package ${id}: runtime provider needs a required, exact-version dependency`);
+    if (spec.resources !== undefined && (!Array.isArray(spec.resources) || spec.resources.length > 64 ||
+        spec.resources.some((path) => typeof path !== "string" || !isSafePackagePath(path)) ||
+        new Set(spec.resources).size !== spec.resources.length)) return err(`package ${id}: invalid runtime resources`);
+    runtime = { provider: spec.provider, profile: spec.profile,
+      scripts: [...spec.scripts] as string[], configuration: spec.configuration,
+      ...(spec.resources ? { resources: [...spec.resources] as string[] } : {}) };
   }
 
   const provides: AisContributionDeclaration[] = [];
@@ -196,12 +229,20 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
     }
   }
 
+  if (runtime?.resources?.length && !capabilities.includes("package.resources.read"))
+    return err(`package ${id}: declared runtime resources require package.resources.read`);
+  if ((runtimeProvider || runtime) && !capabilities.includes("runtime.execute"))
+    return err(`package ${id}: adapter execution requires the runtime.execute capability marker`);
+  if (runtimeProvider && (commands.length || emits.length || provides.length))
+    return err(`package ${id}: runtime providers do not expose standalone commands, events or contribution slots`);
   if (emits.length > 0 && !capabilities.includes("event.emit"))
     return err(`package ${id}: interconnect.emits requires the event.emit capability`);
 
   return okVal({
     api: AIS_API_VERSION,
     entry: value.entry,
+    ...(runtimeProvider ? { runtimeProvider } : {}),
+    ...(runtime ? { runtime } : {}),
     ...(requires.length ? { requires } : {}),
     ...(provides.length ? { provides } : {}),
     ...(commands.length ? { commands } : {}),

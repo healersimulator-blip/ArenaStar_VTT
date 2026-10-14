@@ -1,0 +1,8 @@
+{
+  "id": "tagger",
+  "version": "1.5.4",
+  "sourceCommit": "e7936bc9ee01e4445624fbc82a11e887e5cd0075",
+  "preparation": "original three executable source files rebundled locally; source manifest preserved verbatim with its upstream build placeholder",
+  "scope": "active-scene visible placeable tags; local pre/post update hooks; GM command execution; native-backed transient FX",
+  "excluded": ["Foundry configuration forms", "keyboard dispatch", "world actors", "other scenes", "native ArenaStar pre-create hooks", "persistent foreign FX", "original Sequencer renderer"]
+}

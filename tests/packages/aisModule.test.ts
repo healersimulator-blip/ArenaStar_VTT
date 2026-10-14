@@ -11,6 +11,12 @@ import type { ActorDocument, SceneDocument } from "../../src/core/documents";
 import { openVttDb } from "../../src/storage/idb";
 
 const allHandlers = (): AisModuleHandlers => ({
+  "package.resource.read": vi.fn(async () => ({ text: "", next: null })),
+  "scene.tags.snapshot": vi.fn(async () => null),
+  "scene.tags.update": vi.fn(async () => ({ ok: true })),
+  "fx.play": vi.fn(async () => ({ ok: true })),
+  "fx.list": vi.fn(async () => []),
+  "fx.stop": vi.fn(async () => ({ stopped: true })),
   "events.subscribe": vi.fn(async () => ({ ok: true })),
   "events.emit": vi.fn(async () => ({ ok: true })),
   "scene.read.visible": vi.fn(() => ({ scene: "scene-1" })),
@@ -325,7 +331,7 @@ describe("AIS host handlers", () => {
         ref: { coll: "tokens", id: "token-1", parent: { coll: "scenes", id: "scene-1" } },
         diff: {
           light: { radius: 800, bright: 400, angle: 360, animation: { type: "torch", speed: 4.1, intensity: 0.32 } },
-          flags: { ais: { "sample-mod": { sourceId: "torch", sourceName: "Torch", sourceItemId: "item-torch", stateIndex: 1, active: true } } },
+          "flags.ais.sample-mod": { sourceId: "torch", sourceName: "Torch", sourceItemId: "item-torch", stateIndex: 1, active: true },
         },
       },
     ]);

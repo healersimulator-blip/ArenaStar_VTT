@@ -5405,7 +5405,13 @@ async function runParitySmoke(): Promise<ParitySmokeResult> {
     });
     await flushMicrotasks();
     offAudio();
-    await new Promise((r) => setTimeout(r, 400)); // lead 120 ms + decode
+    // Lead 120 ms + a data-URI fetch + decode: a fixed 400 ms wait proved CPU-bound (a slow sandbox
+    // took ~330 ms for fetch+decode alone), so poll until the player leaves "loading", up to 3 s.
+    const settledBy = Date.now() + 3000;
+    while (player.state("snd1") === "loading" || player.state("snd1") === null) {
+      if (Date.now() > settledBy) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
     const soundState = player.state("snd1");
     const scheduledDelayMs = player.lastDelays.get("snd1") ?? null;
     for (const fn of cleanup) fn();

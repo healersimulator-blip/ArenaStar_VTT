@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { entry } from "./lib";
+import { chromeAction, entry } from "./lib";
 
 interface GmSnapshot {
   armies: number;
@@ -38,7 +38,7 @@ async function gm(page: import("@playwright/test").Page): Promise<GmSnapshot> {
 test.describe("GM extras + strategic fog (§9A)", () => {
   test("faction editor, mass spawn, casualty, batch orders", async ({ page }) => {
     await page.goto(entry + "?e2e=1");
-    await page.click("#gm-extras");
+    await chromeAction(page, "gm-extras");
     const win = page.locator('[data-window="gmextras"]');
     await expect(win).toBeVisible();
 
@@ -120,7 +120,7 @@ test.describe("GM extras + strategic fog (§9A)", () => {
     await page.waitForTimeout(200);
 
     // open GM extras; create two factions and spawn one army for each
-    await page.click("#gm-extras");
+    await chromeAction(page, "gm-extras");
     const win = page.locator('[data-window="gmextras"]');
     await expect(win).toBeVisible();
     await page.fill("#faction-name", "Obsidian Pact");

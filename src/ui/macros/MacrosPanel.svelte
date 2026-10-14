@@ -358,7 +358,7 @@
           onchange={(e) => assignSlot(m, Number((e.target as HTMLSelectElement).value))}
         >
           <option value={0}>—</option>
-          {#each [1, 2, 3, 4, 5] as s (s)}
+          {#each [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as s (s)}
             <option value={s}>{s}</option>
           {/each}
         </select>
@@ -410,7 +410,7 @@
               onchange={(e) => assignSlot(m, Number((e.target as HTMLSelectElement).value))}
             >
               <option value={0}>—</option>
-              {#each [1, 2, 3, 4, 5] as s (s)}
+              {#each [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as s (s)}
                 <option value={s}>{s}</option>
               {/each}
             </select>

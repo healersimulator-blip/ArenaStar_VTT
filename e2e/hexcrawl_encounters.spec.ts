@@ -17,17 +17,7 @@
  * 4. a second crossing of the same border stays quiet — the cooldown is real play, not a model.
  */
 import { expect, test, type Page } from "@playwright/test";
-import {
-  entry,
-  gmCall,
-  hostCall,
-  importShippedCore,
-  manualFragment,
-  solidPng,
-  surfaceCallArg,
-  surfaceCallArgs,
-  waitForSurface,
-} from "./lib";
+import { entry, gmCall, hostCall, importShippedCore, manualFragment, openSceneNav, solidPng, surfaceCallArg, surfaceCallArgs, waitForSurface } from "./lib";
 
 interface Point {
   x: number;
@@ -92,7 +82,7 @@ async function makeHexcrawlScene(host: Page): Promise<string> {
 
 /** The wizard alone, for a page that is already booted (and may already hold a scene). */
 async function createHexcrawlScene(host: Page): Promise<string> {
-  await host.click("#scene-add");
+  await openSceneNav(host); await host.click("#scene-add");
   await host.click("#scene-new-hexcrawl");
   await host.setInputFiles("[data-hx-map-input]", {
     name: "overland.png",

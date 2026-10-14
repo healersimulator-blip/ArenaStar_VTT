@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { entry, hostCall, waitForSurface } from "./lib";
+import { canvasAction, entry, hostCall, waitForSurface } from "./lib";
 
 /**
  * D-255 — the left canvas toolbar, driven through real pointer gestures.
@@ -157,7 +157,7 @@ test.describe("canvas toolbar (§10, D-255)", () => {
     await bootHost(page);
     await page.locator('[data-canvas-tool="dice"]').click();
     await page.getByLabel("Dice formula").fill("1d20+5");
-    await page.getByRole("button", { name: "Roll" }).click();
+    await page.getByRole("button", { name: "Roll", exact: true }).click();
     await expect(page.locator("#chat-log .rollcard").first()).toContainText("1d20+5");
     await expect(page.locator("#chat-log .rollcard").first()).toContainText(/\d+/);
   });
@@ -174,7 +174,7 @@ test.describe("canvas toolbar (§10, D-255)", () => {
       await page.mouse.up();
     }
     await expect.poll(() => hostCall<unknown[]>(page, "drawings")).toHaveLength(2);
-    await page.locator('[data-canvas-action="erase-all"]').click();
+    await canvasAction(page, "erase-all");
     await expect.poll(() => hostCall<unknown[]>(page, "drawings")).toHaveLength(0);
   });
 });

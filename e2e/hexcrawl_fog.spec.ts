@@ -18,16 +18,7 @@
  *    it.
  */
 import { expect, test, type Page } from "@playwright/test";
-import {
-  entry,
-  hostCall,
-  manualFragment,
-  playerCall,
-  solidPng,
-  surfaceCall,
-  surfaceCallArg,
-  waitForSurface,
-} from "./lib";
+import { entry, hostCall, manualFragment, openSceneNav, playerCall, solidPng, surfaceCall, surfaceCallArg, waitForSurface } from "./lib";
 
 interface Point {
   x: number;
@@ -97,7 +88,7 @@ const playerCells = (page: Page) => playerCall<HexCellRow[]>(page, "hexCells");
 async function makeHexcrawlScene(host: Page): Promise<string> {
   await host.goto(entry + "?e2e=1");
   await waitForSurface(host, "app");
-  await host.click("#scene-add");
+  await openSceneNav(host); await host.click("#scene-add");
   await host.click("#scene-new-hexcrawl");
   await host.setInputFiles("[data-hx-map-input]", {
     name: "overland.png",

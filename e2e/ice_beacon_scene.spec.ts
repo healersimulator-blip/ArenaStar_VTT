@@ -13,7 +13,7 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { entry, gmCall, hostCall, manualFragment, surfaceCall, surfaceCallArg, waitForSurface } from "./lib";
+import { chromeAction, entry, gmCall, hostCall, manualFragment, openSceneNav, surfaceCall, surfaceCallArg, waitForSurface } from "./lib";
 
 const distWorlds = fileURLToPath(new URL("../dist/worlds", import.meta.url));
 const starterZip = (): string | null => {
@@ -31,7 +31,7 @@ const labels = (cues: ReadonlyArray<{ id: string; label: string | null }>) =>
 async function openStarterWorld(page: Page, zipPath: string): Promise<void> {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
-  await page.locator("#close-world").click();
+  await chromeAction(page, "close-world");
   await expect(page.locator("#role-host")).toHaveText(/Host a world|Continue/, { timeout: 30_000 });
   await page.setInputFiles("#role-import", zipPath);
   const dialog = page.locator("[data-open-dialog]");
@@ -66,7 +66,7 @@ test("D-454: the Ice Beacon elevation test, as a tester opens it", async ({ brow
     await openStarterWorld(host, zip as string);
     const rail = host.locator('[data-scene="scene-ice-beacon"]');
     await expect(rail).toContainText("Ice Beacon");
-    await rail.click();
+    await openSceneNav(host); await rail.click();
     await expect.poll(() => hostCall<string | null>(host, "activeSceneId"), { timeout: 30_000 }).toBe("scene-ice-beacon");
 
     // ── GM: four traced/untraced floors, and every label read from the ground ──

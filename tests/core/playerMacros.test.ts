@@ -133,7 +133,7 @@ describe("D-394 personal world-macro draft contract", () => {
     expect(switched.script).toBeUndefined();
     expect(switched.scriptState).toEqual(before.scriptState);
     expect(switched.flags).toEqual({ core: { slot: 2 } });
-    expect(buildPlayerMacro(ref.id, author.id, chat, { ...before, flags: { core: { slot: 6 } } }).flags).toEqual({ core: {} });
+    expect(buildPlayerMacro(ref.id, author.id, chat, { ...before, flags: { core: { slot: 11 } } }).flags).toEqual({ core: {} });
     expect(JSON.stringify(before)).toBe(priorJson);
   });
 

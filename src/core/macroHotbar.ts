@@ -9,7 +9,7 @@
  */
 import type { MacroDocument } from "./documents";
 
-export const MACRO_HOTBAR_SLOT_COUNT = 5;
+export const MACRO_HOTBAR_SLOT_COUNT = 10;
 export const MACRO_HOTBAR_STORAGE_PREFIX = "vtt-macro-hotbar:v1:";
 const MAX_STORED_CHARS = 4096;
 const RUNNABLE_KINDS = new Set<MacroDocument["kind"]>(["chat", "script", "sequence", "automation", "composite"]);
@@ -44,7 +44,7 @@ export function normalizeMacroHotbarPrefs(raw: unknown): MacroHotbarPrefs {
   }) };
 }
 
-/** The five GM-assigned defaults. Duplicate slots keep the existing last-wins rule. */
+/** The ten GM-assigned defaults. Duplicate slots keep the existing last-wins rule. */
 export function macroSlots(macros: readonly MacroDocument[]): Array<MacroDocument | null> {
   const slots: Array<MacroDocument | null> = Array.from({ length: MACRO_HOTBAR_SLOT_COUNT }, () => null);
   for (const macro of macros) {

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { entry, waitForSurface } from "./lib";
+import { chromeAction, entry, waitForSurface } from "./lib";
 
 /**
  * §5A realtime mode end-to-end: GM starts a realtime campaign, the host clock
@@ -59,7 +59,7 @@ test.describe("realtime mode (§5A)", () => {
       .toBe(true);
 
     // ── world: one faction, one army of 12 models ──────────────────────────
-    await page.click("#gm-extras");
+    await chromeAction(page, "gm-extras");
     const win = page.locator('[data-window="gmextras"]');
     await expect(win).toBeVisible();
     await page.fill("#faction-name", "Ironhost");

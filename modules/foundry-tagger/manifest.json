@@ -1,0 +1,29 @@
+{
+  "id": "foundry-tagger",
+  "name": "Original Tagger 1.5.4 — AIS feasibility guest",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Pinned upstream Tagger source, locally bundled without source changes. GM-only scene API demo; no Foundry forms, hotkeys, all-scene or system APIs.",
+  "interconnect": {
+    "api": "arena.ais/1",
+    "entry": "automation/commands.js",
+    "requires": [{ "id": "ais-foundry-v13", "version": "0.1.0" }],
+    "runtime": {
+      "provider": "ais-foundry-v13",
+      "profile": "foundry-v13-scene-tags-fx",
+      "scripts": ["prepared/tagger.js"],
+      "configuration": "compatibility.json"
+    },
+    "capabilities": ["runtime.execute", "scene.tags.read", "scene.tags.write", "fx.play"],
+    "commands": [
+      { "id": "info", "contract": 1 },
+      { "id": "find", "contract": 1 },
+      { "id": "set-tags", "contract": 1 },
+      { "id": "add-tags", "contract": 1 },
+      { "id": "clear-tags", "contract": 1 },
+      { "id": "apply-rules", "contract": 1 },
+      { "id": "veto-test", "contract": 1 },
+      { "id": "fx-demo", "contract": 1 }
+    ]
+  }
+}

@@ -1,0 +1,984 @@
+@import url('https://fonts.googleapis.com/css2?family=Work+Sans:ital,wght@0,300..800;1,300..800&display=swap'); 
+@import url('https://fonts.googleapis.com/css2?family=Quattrocento:wght@400;500;700&display=swap');
+
+/*************
+  Main Theme
+*************/
+/* ---------------------------------------- */
+/*  Typography                              */
+/* ---------------------------------------- */
+@layer variables {
+  body{
+    /* crlngn-fonts */
+    --crlngn-font-family: "Work Sans", Arial, sans-serif;
+    --crlngn-font-titles: "Roboto Slab", Arial, sans-serif;
+    --crlngn-font-journal-body: "Work Sans", Arial, sans-serif;
+    --crlngn-font-journal-title: "Quattrocento", Arial, sans-serif;
+    --crlngn-font-serif: "Quattrocento", Arial, sans-serif;
+    --font-size-22: 1.325rem;
+    --font-size-42: 2.5rem;
+    --font-size-46: 2.625rem;
+    --font-h1-size: var(--font-size-36);
+    --font-h2-size: var(--font-size-22);
+    --font-h3-size: var(--font-size-18);
+    --font-h4-size: var(--font-size-16);
+    --font-h5-size: var(--font-size-15);
+    --font-h6-size: var(--font-size-13);
+  }
+
+  body.crlngn-ui {
+    --card-color-bg: var(--control-bg-color);
+    --input-height: 2.25rem;
+    --color-select-option-bg: var(--background);
+  }
+
+  /* UI Body Font - only when enabled */
+  body.crlngn-ui.cui-font-ui {
+    --font-body: var(--crlngn-font-family);
+    --font-sans: var(--crlngn-font-family);
+    --font-serif: var(--crlngn-font-serif);
+    --font-blockquote: var(--crlngn-font-family);
+    --dnd5e-font-roboto: var(--crlngn-font-family);
+    --font-primary: var(--crlngn-font-family);
+  }
+
+  /* UI Titles Font - only when enabled */
+  body.crlngn-ui.cui-font-t {
+    --dnd5e-font-roboto-slab: var(--crlngn-font-titles);
+    --font-h1: var(--crlngn-font-titles);
+    --font-h2: var(--crlngn-font-titles);
+    --font-h3: var(--crlngn-font-titles);
+    --font-h4: var(--crlngn-font-titles);
+    --font-h5: var(--crlngn-font-titles);
+    --font-h6: var(--crlngn-font-titles);
+  }
+
+  /* Journal Body Font - only when enabled */
+  body.crlngn-ui.cui-font-jrnl {
+    --dnd5e-font-roboto-condensed: var(--crlngn-font-body);
+
+    .journal-sheet-container {
+      --dnd5e-font-roboto-condensed: var(--crlngn-font-journal-body);
+      --font-h5: var(--crlngn-font-journal-body);
+      --font-h6: var(--crlngn-font-journal-body);
+    }
+  }
+
+  /* Journal Titles Font - only when enabled */
+  body.crlngn-ui.cui-font-jrnl-t {
+    --dnd5e-font-modesto: var(--crlngn-font-titles);
+
+    .journal-sheet-container {
+      --dnd5e-font-modesto: var(--crlngn-font-journal-title);
+      --font-h1: var(--crlngn-font-journal-title);
+      --font-h2: var(--crlngn-font-journal-title);
+      --font-h3: var(--crlngn-font-journal-title);
+      --font-h4: var(--crlngn-font-journal-title);
+    }
+  }
+
+  /* ---------------------------------------- */
+  /*  Colors                                  */
+  /* ---------------------------------------- */
+  body.crlngn-ui {
+
+    &.theme-dark .application, &.theme-dark.application {
+      --color-tabs-border: var(--color-cool-4);
+    }
+    
+    &.theme-light .dnd5e2:not(.theme-dark),
+    .dnd5e2.theme-light{
+      --filigree-border-color: rgba(255, 255, 255, 0.5);
+    }
+    &.crlngn-chat :is(.sidebar-content, #sidebar-content){
+      --dnd5e-background-card: rgba(244, 239, 237,0.8);
+      --dnd5e-color-parchment: rgb(244, 239, 237);
+    }
+    --color-bg-button: rgba(237, 242, 244, 0.9);
+    --chat-dark-blue: rgba(24, 32, 38, 1);
+
+    --color-dark-bg-10: rgba(15, 15, 15, 0.1);
+    --color-dark-bg-25: rgba(15, 15, 15, 0.25);
+    --color-dark-bg-50: rgba(15, 15, 15, 0.5);
+    --color-dark-bg-75: rgba(15, 15, 15, 0.75);
+    --color-dark-bg-85: rgba(15, 15, 15, 0.85);
+    --color-dark-bg-90: rgba(15, 15, 15, 0.9);
+    --color-dark-bg-95: rgba(15, 15, 15, 0.95);
+    --color-dark-bg: rgba(15, 15, 15, 1); 
+    --color-light-bg-15: rgba(233, 233, 226, 0.15);
+    --color-light-bg-25: rgba(233, 233, 226, 0.25);
+    --color-light-bg-50: rgba(233, 233, 226, 0.50);
+    --color-light-bg-75: rgba(233, 233, 226, 0.75);
+    --color-light-bg-85: rgba(233, 233, 226, 0.85);
+    --color-light-bg-90: rgba(233, 233, 226, 0.9);
+    --color-light-bg: rgba(233, 233, 226, 1);
+    --color-alt-bg: rgba(21, 21, 21, 0.15);
+  
+    --control-bg-color: rgba(226, 232, 233, 0.98);
+    --control-bg-color-90: var(--color-cool-5-90);
+    --sidebar-background: rgba(226, 232, 233, 0.95);
+
+    --color-border-highlight-alt: rgba(68, 147, 173, 0.9); 
+    --color-border-highlight: rgba(68, 147, 173, 1);
+    --color-shadow-highlight: rgba(90, 120, 150, 0.5); 
+    --color-shadow-primary: rgba(90, 120, 150, 0.5); 
+    --color-border-light-primary: rgba(90,120,150, 0.5);
+    --color-border-light-highlight: rgba(68, 147, 173, 1);
+    --color-underline-header: rgba(68, 147, 173, 1);
+    --color-underline-active: rgba(68, 147, 173, 1);
+    --color-text-hyperlink: rgb(87, 172, 201);
+
+    --color-highlights: rgb(68, 147, 173);
+    --color-highlights-15: rgba(68, 147, 173, 0.15);
+    --color-highlights-25: rgba(68, 147, 173, 0.25);
+    --color-highlights-50: rgba(68, 147, 173, 0.5);
+    --color-highlights-75: rgba(68, 147, 173, 0.75);
+    --color-highlights-90: rgba(68, 147, 173, 0.9);
+
+    --color-scrollbar: var(--color-highlights-75);
+    --color-scrollbar-track: transparent;
+    --color-scrollbar-border: var(--color-highlights-75);
+    --color-shadow-primary: var(--color-highlights-50);
+    --toggle-active-bg-color: var(--color-highlights-50);
+    --toggle-active-border-color: var(--color-highlights-75);
+    --control-active-border-color: var(--color-highlights);
+    --color-text-accent: var(--color-highlights);
+    --color-fieldset-border: var(--color-cool-4);
+
+    --color-ownership-none: var(--color-secondary);
+    --color-ownership-observer: #7a7971;
+    --color-ownership-owner: #b5b3a4;
+    
+    --color-warm-1: rgb(122, 182, 196);
+    --color-warm-2: rgb(78, 139, 158);
+    --color-warm-3: rgb(60, 120, 146);
+
+    --color-secondary: rgba(47, 47, 71, 1);
+    --color-secondary-bright: rgba(122, 122, 148, 1);
+    --color-secondary-bright-50: rgba(122, 122, 148, 0.5);
+    --color-secondary-15: rgba(47, 47, 71, 0.15);
+    --color-secondary-25: rgba(47, 47, 71, 0.25);
+    --color-secondary-50: rgba(47, 47, 71, 0.5);
+    --color-secondary-65: rgba(47, 47, 71, 0.65);
+    --color-secondary-75: rgba(47, 47, 71, 0.75);
+    --color-secondary-90: rgba(47, 47, 71, 0.9);
+    --color-secondary-b: rgba(34, 34, 54, 1);
+    --color-secondary-b-50: rgba(34, 34, 54, 0.5);
+    --color-secondary-b-75: rgba(34, 34, 54, 0.75);
+    --color-secondary-b-90: rgba(34, 34, 54, 0.90);
+    --color-text-secondary: var(--color-light-1);
+    --color-text-primary: var(--color-light-1);
+    --color-text-inverse: var(--color-dark-1);
+    --color-fieldset-border: var(--color-secondary-25);
+    --dnd5e-color-maroon: var(--color-highlights);
+    --dnd5e-shadow-45: rgba(0, 0, 0, 0.25); /* make these shadows more nuanced */
+    --dnd5e-sheet-bg: rgb(244, 239, 237);
+    --dnd5e-tabs-bg: var(--color-warm-2);
+    --dnd5e-color-table-row-odd: var(--color-light-bg-15);
+    --dnd5e-color-table-row-even: transparent;
+    --default-color: var(--color-light-1);
+    --input-background-color: rgba(255, 255, 255, 0.3);
+    --input-border-color: var(--color-secondary);
+    --range-thumb-background-color: var(--color-warm-2);
+
+    .ui-control, .placeable-hud, #measurement .waypoint-label {
+      --toggle-bg-color: var(--control-striped-bg);
+      --toggle-border-color: var(--color-secondary-bright);
+      --toggle-active-bg-color: var(--color-secondary-b);
+      --toggle-active-border-color: var(--color-highlights);
+    }
+    
+    &.stream.theme-light, #interface.theme-light, .sidebar-popout.theme-light, #chat-popout.theme-light, #chat-pins.theme-light{
+      --default-color: var(--color-dark-1);
+    }
+    &.stream.theme-dark, #interface.theme-dark, .sidebar-popout.theme-dark, #chat-popout.theme-dark, #chat-pins.theme-dark{
+      --default-color: var(--color-light-1);
+    }
+
+    &.theme-light,
+    &.theme-light .application:not(.monks-enhanced-journal).theme-light,
+    #interface.theme-light,
+    .sidebar-popout.theme-light,
+    &.theme-light .chat-popout.theme-light,
+    &.theme-dark .sheet.theme-light .form-footer button,
+    &.theme-dark .sheet.theme-light .crlngn-tab-scroll-wrapper,
+    &.theme-light #context-menu:not(.theme-dark),
+    &.theme-light .application.dialog {
+      --color-bg-button: rgba(237, 242, 244,0.9);
+      --color-secondary: rgb(204, 186, 204);
+      --color-secondary-bright: rgba(236, 224, 236, 1);
+      --color-secondary-bright-50: rgba(236, 224, 236, 0.5);
+      --color-secondary-15: rgba(204, 186, 204, 0.15);
+      --color-secondary-25: rgba(204, 186, 204, 0.25);
+      --color-secondary-50: rgba(204, 186, 204, 0.5);
+      --color-secondary-65: rgba(204, 186, 204, 0.65);
+      --color-secondary-75: rgba(204, 186, 204, 0.75);
+      --color-secondary-90: rgba(204, 186, 204, 0.9);
+      --color-secondary-b: rgba(237, 224, 237, 1);
+      --color-secondary-b-25: rgba(237, 224, 237, 0.5);
+      --color-secondary-b-50: rgba(237, 224, 237, 0.5);
+      --color-secondary-b-75: rgba(237, 224, 237, 0.75);
+      --color-secondary-b-90: rgba(237, 224, 237, 0.9);
+      --color-text-secondary: var(--color-light-1);
+      --dnd5e-sheet-bg: rgb(244, 239, 237);
+      --dnd5e-tabs-bg: var(--color-warm-2);
+      --color-alt-bg: rgba(21, 21, 21, 0.15);
+      --control-active-bg-color: rgba(245, 245, 245, 0.75);
+      --color-text-primary: var(--color-dark-1);
+      --color-text-inverted: var(--color-light-1);
+
+      input {
+        --input-text-color: var(--color-text-primary);
+      }
+      
+      .dnd5e2:not(.theme-dark){
+        --filigree-border-color: rgba(158, 138, 138, 0.5);
+      }
+    }
+    &.theme-light .chat-bubble {
+      --color-text-primary: var(--color-dark-1);
+      --background: rgba(226, 232, 233, var(--background-opacity, 0.98));
+      background: var(--background);
+      color: var(--color-text-primary);
+    }
+
+    &.theme-dark .form-footer button,
+    &.theme-light .theme-dark button {
+      --color-bg-button: rgba(32,37,43);
+    }
+    
+    /* dark mode */
+    &.theme-dark .dnd5e2:not(.theme-light){
+      --filigree-border-color: rgba(0, 0, 0, 0.5);
+    }
+
+    &.theme-dark,
+    &.theme-dark .application:not(.monks-enhanced-journal).theme-dark
+    #interface.theme-dark,
+    #interface.theme-dark .app.theme-light,
+    #interface.theme-dark,
+    .sidebar-popout.theme-dark,
+    &.theme-dark .chat-popout.theme-light,
+    /* Context menus are popovers attached to document.body, carrying a theme
+       class copied from the target's nearest .themed ancestor (theme-light for
+       dnd5e chat cards). They inherit --background from the body theme, so the
+       whole var set must follow the body theme too or text and background mix.
+       When the overall theme is dark, all menus are themed dark. */
+    &.theme-dark #context-menu,
+    #context-menu.theme-dark,
+    #interface.theme-dark #context-menu,
+    &.theme-dark .application.dialog {
+      --chat-dark-blue: rgba(24, 32, 38, 1);
+      --input-background-alt: var(--color-dark-bg-50);
+      --color-text-secondary: var(--color-light-1);
+      --color-text-emphatic: var(--color-light-1);
+      --color-text-primary: var(--color-light-1);
+      --color-text-inverse: var(--color-dark-1);
+      --color-text-dark-secondary: var(--color-light-1);
+
+      --crlngn-button-bg: rgba(15, 15, 15, 0.15);
+      --color-bg-button: rgba(32, 37, 43, 1);
+      --dnd5e-border-groove: 1px solid rgba(36, 36, 36, 0.35);
+      --dnd5e-color-groove: var(--dnd5e-color-gold);
+      --dnd5e-sheet-bg: rgb(37, 40, 48);
+      --dnd5e-tabs-bg: transparent;
+      --sidebar-background: var(--control-bg-color, var(--color-cool-5-90));
+      --background: rgba(11, 10, 19, var(--background-opacity, 0.95));
+
+      --color-text-gray-blue: rgb(168, 180, 188, 1);
+      --color-text-gray-blue-b: rgb(138, 155, 168, 1);
+      --chat-button-bg: rgba(32, 37, 43, 1);
+      --chat-button-bg-15: rgba(32, 37, 43, 0.15);
+      --chat-button-bg-25: rgba(32, 37, 43, 0.25);
+      --chat-button-bg-50: rgba(32, 37, 43, 0.5);
+      --chat-button-bg-75: rgba(32, 37, 43, 0.75);
+      --chat-dark-blue: rgba(24, 32, 38, 1);
+      --chat-dark-blue-b: rgb(29, 36, 48, 1); 
+      --chat-dark-bg: rgba(32, 37, 43, 1); 
+      --chat-dark-bg-15: rgba(32, 37, 43, 0.15);
+      --chat-dark-bg-25: rgba(32, 37, 43, 0.25);
+      --chat-dark-bg-50: rgba(32, 37, 43, 0.50); 
+      --chat-dark-bg-75: rgba(32, 37, 43, 0.75); 
+      --chat-dark-bg-90: rgba(32, 37, 43, 0.90); 
+      --color-alt-bg: rgba(238, 238, 238, 0.15);
+      --control-active-bg-color: rgba(32, 37, 43, 0.75);
+      --color-text-primary: var(--color-light-1);
+      --color-text-inverted: var(--color-dark-1);
+
+      --color-input-bg: var(--color-dark-bg-50); 
+    
+      --color-button-bg: rgba(90,120,150,0.5);
+      --button-background-color: rgba(90,120,150,0.5);
+      --button-text-color: var(--color-text-primary);
+      --color-input-border: rgba(90,120,150, 0.5);
+      --color-border-dark-5: rgba(80, 80, 80, 1);
+      --color-sidebar-font: rgba(213, 221, 230, 0.8);
+      --dnd5e-color-beige: rgba(0,0,0,0.2);
+      --dnd5e-background-card: rgb(32, 37, 43);
+      /*--color-text-dark: rgba(235,235,235,1);
+      --color-text-dark-op: rgba(235,235,235,0.6);
+      --color-text-light: rgba(235,235,235,1);*/
+      --input-background-alt: var(--color-cool-5);
+      
+
+      /*pf2e*/
+      --color-pf-alternate: rgba(82, 107, 120, 0.44);
+
+      .journal-entry.theme-light .journal-sidebar input {
+        --color-text-primary: var(--color-light-1);
+      }
+
+      input {
+        --input-text-color: var(--color-text-primary);
+      }
+
+    }
+
+    &.theme-dark .theme-light .chat-bubble {
+      --color-text-primary: var(--color-light-1);
+      --background: rgba(30,20,24, var(--background-opacity, 0.98));
+      background: var(--background);
+      color: var(--color-text-primary);
+    }
+
+    --color-light-1: #f7f4f8;
+    --color-light-2: #e6e6ef;
+    --color-light-3: #dcdce8;
+    --color-light-4: #bbbbca;
+    --color-light-5: #8e8e9e;
+    --color-light-6: #7a7a90;
+    --color-dark-1: #111;
+    --color-dark-2: #222;
+    --color-dark-3: #444;
+    --color-dark-4: #555;
+    --color-dark-5: #666;
+    --color-dark-6: #777;
+
+    --checkbox-checkmark-color: transparent;
+    --control-active-icon-color: var(--color-light-1);
+    --color-text-light-highlight: var(--color-light-1);
+    --color-text-selection: var(--color-dark-1);
+    --color-text-selection-bg: var(--color-highlights-50);
+    --color-level-error: #9e4545;
+    --color-level-error-bg: rgba(108, 39, 45, 0.8);
+    --color-level-error-border: #6a2a2c;
+    --color-level-info: #799fcb;
+    --color-level-info-bg: rgba(47, 80, 132, 0.8);
+    --color-level-info-border: #5c87b9;
+    --color-level-success: #719f50;
+    --color-level-success-bg: rgba(69, 117, 73, 0.8);
+    --color-level-success-border: #719f50;
+    --color-level-warning: rgb(184, 151, 4);
+    --color-level-warning-bg: rgba(141, 116, 0, 0.7);
+    --color-level-warning-border: rgba(141, 116, 0, 1);
+    
+    --input-background-alt: var(--color-cool-5);
+    --input-border-color: transparent;
+    --input-focus-outline-color: var(--color-cool-3);
+    --button-hover-background-color: var(--color-warm-3);
+    --color-text-selection: var(--color-light-1);
+    --color-text-selection-bg: var(--color-highlights-50);
+    --input-background-color: var(--color-cool-4);
+    --input-border-color: var(--color-secondary);
+
+    &.theme-dark .application:not(.monks-enhanced-journal).theme-light,
+    &.theme-light .app.theme-light,
+    &.theme-light,
+    #interface.theme-light,
+    &.theme-light .sidebar-popout:not(.theme-dark),
+    .application:not(.monks-enhanced-journal).theme-light,
+    &.theme-dark #tooltip.application:not(.monks-enhanced-journal).theme-light,
+    .themed.theme-light,
+    &.theme-dark .theme-light .dnd5e,
+    &.theme-dark .theme-light .dnd5e,
+    &.crlngn-chat .chat-log.themed.theme-light {
+      --color-border: rgba(226, 232, 233, 1);
+      /*--control-bg-color: rgba(226, 232, 233, 0.98);*/
+      --crlngn-button-bg: rgba(250, 250, 250, 0.15);
+      --input-background-alt: rgba(226, 232, 233, 1);
+      --color-text-primary: var(--color-dark-1);
+      --color-text-secondary: var(--color-dark-1);
+      --color-text-inverse: var(--color-light-1);
+      --sidebar-background: rgba(226, 232, 233, 0.95);
+      /*--background: var(--control-bg-color);*/
+      --filigree-background-color: transparent !important;
+      --input-background-color: rgba(255, 255, 255, 0.2);
+
+      --button-background-color: rgba(90,120,150,0.5);
+      --button-border-color: rgba(90,120,150,0.5);
+      --button-text-color: var(--color-text-primary);
+      
+    }
+
+    /* The docked chat log lives inside #interface and must follow the INTERFACE theme,
+       not the applications (body) theme. Keying these on body.theme-* broke mixed core
+       setups (e.g. Applications: Dark + Interface: Light), painting dark cards into the
+       light sidebar with unreadable dark text. Scope to #interface so it matches its region. */
+    &.crlngn-chat #interface.theme-dark :is(.sidebar-content, #sidebar-content){
+      --dnd5e-background-card: rgb(32, 37, 43);
+      --dnd5e-color-parchment: rgb(32, 37, 43);
+      --crlngn-button-bg: rgba(15, 15, 15, 0.15);
+      --color-bg-button: rgba(32, 37, 43, 1);
+      --chat-dark-blue: rgba(24, 32, 38, 1);
+      --color-hover-bg: inherit;
+    }
+    &.crlngn-chat #interface.theme-light :is(.sidebar-content, #sidebar-content){
+      --dnd5e-background-card: rgba(244, 239, 237,0.8);
+      --dnd5e-color-parchment: rgb(244, 239, 237);
+      --crlngn-button-bg: rgba(250, 250, 250, 0.15);
+      --color-bg-button: rgba(237, 242, 244,0.9);
+      --chat-dark-blue: rgba(24, 32, 38, 1);
+      --color-hover-bg: inherit;
+    }
+
+    &.theme-light .application:not(.monks-enhanced-journal).theme-dark,
+    .app.theme-dark,
+    &.theme-dark,
+    #interface.theme-dark,
+    #interface.theme-dark .theme-light:not(.chat-log),
+    #interface.theme-dark .app.theme-light
+    &.theme-dark .sidebar-popout:not(.theme-dark),
+    &.theme-dark #mastercrafted-recipeApp,
+    .application:not(.monks-enhanced-journal).theme-dark,
+    &.theme-light #tooltip.application:not(.monks-enhanced-journal).theme-dark,
+    .themed.theme-dark,
+    &.crlngn-chat .chat-log.themed.theme-dark,
+    &.crlngn-chat #interface.theme-dark .chat-log,
+    &.crlngn-chat #interface.theme-dark .chat-log button,
+    &.crlngn-chat #chat-popout.theme-dark,
+    &.crlngn-chat .chat-popout.theme-dark,
+    &.crlngn-chat.theme-dark .chat-popout.theme-light,
+    &.crlngn-chat.theme-dark .chat-popout.theme-light .chat-log button {
+      --color-border: rgba(15, 15, 15, 0.15);
+      --input-background-alt: var(--color-dark-bg-50);
+      --color-text-primary: var(--color-light-1);
+      --color-text-secondary: var(--color-light-1);
+      --color-text-inverse: var(--color-dark-1);
+      --sidebar-background: var(--control-bg-color, var(--color-cool-5-90));
+      --dnd5e-border-groove: 1px solid rgba(36, 36, 36, 0.35);
+      --dnd5e-color-groove: var(--dnd5e-color-gold);
+
+      --button-background-color: rgba(96, 108, 119, 0.5);
+      --button-border-color: rgba(96, 108, 119, 0.5);
+      --button-text-color: var(--color-text-primary);
+      --content-link-background: rgba(96, 108, 119, 0.5);
+    }
+
+    &.stream.theme-light,
+    &.stream.theme-dark {
+      --sidebar-background: transparent;
+      .chat-sidebar {
+        background: transparent;
+      }
+    }
+
+  }
+
+  /*****************/
+  /* PF2e / SF2e */
+  body.crlngn-ui:is(.system-pf2e, .system-sf2e).crlngn-chat {
+    #interface.theme-dark .chat-log.themed.theme-light,
+    #interface.theme-dark .chat-log.themed.theme-dark {
+      --color-text-tertiary: var(--color-light-2);
+      --color-text-dark-input: #878787;
+      --color-text-dark-improved: #26775c;
+      --color-pf-text-critical-success: rgb(50, 146, 107);
+      --color-pf-text-success: rgb(102, 150, 212);
+      --color-pf-text-failure: rgb(217, 92, 86);
+      --color-pf-text-critical-failure: rgb(247, 125, 118);
+      --color-border-divider: #6f6f6f;
+      --color-border-dark-input: #383838;
+      --color-border-medium: rgb(80, 80, 80);
+      --color-bg-size: #3a7b59;
+      --color-bg-trait: #5e0000;
+      --color-border-trait: #646464;
+      --color-text-trait: var(--color-light-2);
+      --color-pf-text-adjusted-higher: rgb(50, 146, 107);
+      --color-pf-text-adjusted-lower: rgb(141, 53, 48);
+      --color-text-physical: var(--color-text-primary);
+      --color-border-physical: var(--color-text-primary);
+      --visibility-gm-bg: rgba(232, 232, 239,0.15);
+      --visibility-owner-bg: rgba(221, 235, 225, 0.15);
+      --content-link-background: rgba(221, 221, 221, 0.15);
+      --content-link-text-color: var(--color-light-2);
+      
+      .damage{
+        --color-border-physical: rgba(232, 232, 239,0.25);
+      }
+      button{
+        --button-text-color: var(--color-light-2);
+      }
+      button[data-action=applyDamage] img {
+        filter: invert(1);
+      }
+    }
+  }
+
+  /****************/
+  /* THEME - MAIN */
+  body.crlngn-ui, body.crlngn-ui.game .app {
+    --color-border-highlight-alt: rgba(68, 147, 173, 0.9); 
+    --color-border-highlight: rgba(68, 147, 173, 1);
+    --color-shadow-highlight: rgba(90, 120, 150, 0.5); 
+    --color-shadow-primary: rgba(87, 183, 214, 0.8);
+    --color-border-light-primary: rgba(90,120,150, 0.5);
+    --color-border-light-highlight: rgba(68, 147, 173, 1);
+    --color-underline-header: rgba(68, 147, 173, 1);
+    --color-underline-active: rgba(68, 147, 173, 1);
+    --color-text-hyperlink: rgb(87, 172, 201);
+
+    --color-highlights: rgb(68, 147, 173);
+    --color-highlights-15: rgba(68, 147, 173, 0.15);
+    --color-highlights-25: rgba(68, 147, 173, 0.25);
+    --color-highlights-50: rgba(68, 147, 173, 0.5);
+    --color-highlights-75: rgba(68, 147, 173, 0.75);
+    --color-highlights-90: rgba(68, 147, 173, 0.9);
+
+    --color-scrollbar: var(--color-highlights-75);
+    --color-scrollbar-track: transparent;
+    --color-scrollbar-border: var(--color-highlights-75);
+    --color-shadow-primary: var(--color-highlights-50);
+    --toggle-active-bg-color: var(--color-highlights-50);
+    --toggle-active-border-color: var(--color-highlights-75);
+    --control-active-border-color: var(--color-highlights);
+    --color-text-accent: var(--color-highlights);
+    --color-fieldset-border: var(--color-cool-4);
+
+    --color-ownership-none: var(--color-secondary);
+    --color-ownership-observer: #7a7971;
+    --color-ownership-owner: #b5b3a4;
+    
+    --color-warm-1: rgb(122, 182, 196);
+    --color-warm-2: rgb(78, 139, 158);
+    --color-warm-3: rgb(60, 120, 146);
+
+    &.theme-dark,
+    #interface.theme-dark,
+    #chat-popout.theme-dark,
+    .chat-popout.theme-dark,
+    &.theme-dark .chat-popout.theme-light,
+    #chat-pins.theme-dark,
+    .chat-log.themed.theme-dark,
+    .sidebar-popout.theme-dark {
+      .application:not(.monks-enhanced-journal){
+        --color-fieldset-border: var(--color-cool-4);
+      }
+
+      --color-secondary: rgba(47, 47, 71, 1);
+      --color-secondary-bright: rgba(122, 122, 148, 1);
+      --color-secondary-bright-50: rgba(122, 122, 148, 0.5);
+      --color-secondary-15: rgba(47, 47, 71, 0.15);
+      --color-secondary-25: rgba(47, 47, 71, 0.25);
+      --color-secondary-50: rgba(47, 47, 71, 0.5);
+      --color-secondary-65: rgba(47, 47, 71, 0.65);
+      --color-secondary-75: rgba(47, 47, 71, 0.75);
+      --color-secondary-90: rgba(47, 47, 71, 0.9);
+      --color-secondary-b: rgba(34, 34, 54, 1);
+      --color-secondary-b-50: rgba(34, 34, 54, 0.5);
+      --color-secondary-b-75: rgba(34, 34, 54, 0.75);
+      --color-secondary-b-90: rgba(34, 34, 54, 0.90);
+      --color-text-secondary: var(--color-light-1);
+      --color-text-primary: var(--color-light-1);
+      --color-text-inverse: var(--color-dark-1);
+      --control-bg-color: var(--color-cool-5-90);
+
+      --color-cool-3: rgb(83, 71, 107);
+      --color-cool-4: rgb(54, 48, 59); 
+      --color-cool-5: rgb(11, 10, 19);   
+      --color-cool-5-0: rgba(11, 10, 19, 0);
+      --color-cool-5-25: rgba(11, 10, 19, 0.25);
+      --color-cool-5-50: rgba(11, 10, 19, 0.5);
+      --color-cool-5-75: rgba(11, 10, 19, 0.75);
+      --color-cool-5-90: rgba(11, 10, 19, 0.95);
+  
+      --control-bg-color-90: var(--color-cool-5-90);
+    }
+
+    &.theme-light
+    .chat-log.themed.theme-light,
+    #interface.theme-light,
+    #chat-popout.theme-light,
+    .chat-popout.theme-light,
+    &.theme-light .chat-popout.theme-dark,
+    #chat-pins.theme-light,
+    .sidebar-popout.theme-light {
+      --color-secondary: rgba(196, 196, 223, 1);
+      --color-secondary-bright: rgba(244, 244, 255, 1);
+      --color-secondary-bright-50: rgba(244, 244, 255, 0.5);
+      --color-secondary-15: rgba(196, 196, 223, 0.15);
+      --color-secondary-25: rgba(196, 196, 223, 0.25);
+      --color-secondary-50: rgba(196, 196, 223, 0.5);
+      --color-secondary-65: rgba(196, 196, 223, 0.65);
+      --color-secondary-75: rgba(196, 196, 223, 0.75);
+      --color-secondary-90: rgba(196, 196, 223, 0.9);
+      --color-secondary-b: rgba(202, 202, 229, 1);
+      --color-secondary-b-50: rgba(202, 202, 229, 0.5);
+      --color-secondary-b-75: rgba(202, 202, 229, 0.75);
+      --color-secondary-b-90: rgba(202, 202, 229, 0.90);
+      --color-text-secondary: var(--color-dark-1);
+      --color-text-primary: var(--color-dark-1);
+      --color-text-inverse: var(--color-light-1);
+      --control-bg-color: rgba(226, 232, 233, 0.98);
+      --color-cool-5-0: rgba(226, 232, 233, 0);
+      --color-cool-5-25: rgba(226, 232, 233, 0.25);
+      --color-cool-5-50: rgba(226, 232, 233, 0.5);
+      --color-cool-5-75: rgba(226, 232, 233, 0.75);
+      --color-cool-5-90: rgba(226, 232, 233, 0.97);
+    }
+    /* journal should not change in light mode */
+    &.theme-light .sheet.journal-entry {
+      --color-cool-5: rgb(11, 10, 19);   
+      --color-cool-5-0: rgba(11, 10, 19, 0);
+      --color-cool-5-25: rgba(11, 10, 19, 0.25);
+      --color-cool-5-50: rgba(11, 10, 19, 0.5);
+      --color-cool-5-75: rgba(11, 10, 19, 0.75);
+      --color-cool-5-90: rgba(11, 10, 19, 0.95);
+    }
+
+    #interface {
+      --control-striped-bg: repeating-linear-gradient(-45deg, var(--color-secondary-b-50) 0px, var(--color-secondary-b-50) 1px, var(--color-secondary-b-75) 2px, var(--color-secondary-b-75) 3px);
+      --control-striped-bg-2: repeating-linear-gradient(-45deg, var(--color-secondary-b) 0px, var(--color-secondary-b) 1px, var(--color-secondary-b-75) 2px, var(--color-secondary-b-75) 3px);
+      --striped-bg: repeating-linear-gradient(-45deg, var(--color-secondary-50) 0px, var(--color-secondary-50) 1px, var(--color-secondary-25) 2px, var(--color-secondary-25) 3px);
+      --striped-bg-2: repeating-linear-gradient( -45deg, rgba(235, 235, 215, 0.3) 0px, rgba(235, 235, 215, 0.3) 1px, rgba(240,240,240,0.3) 2px, rgba(240,240,240,0.3) 3px);  
+    }
+
+    #interface.theme-dark{
+      --striped-bg: repeating-linear-gradient( -45deg, var(--color-secondary-25) 0px, var(--color-secondary-25) 1px, color-mix(in srgb, var(--color-secondary) 40%, transparent) 2px, color-mix(in srgb, var(--color-secondary) 40%, transparent) 3px);
+      --striped-bg-2: repeating-linear-gradient( -45deg, rgba(0,0,0,0.5) 0px, rgba(0,0,0,0.5) 1px, rgba(0, 0, 0, 0.75) 2px, rgba(0, 0, 0, 0.75) 3px);
+    }
+
+    #interface.theme-light {
+      --striped-bg: repeating-linear-gradient(-45deg,var(--color-secondary-50) 0px,var(--color-secondary-50) 1px,var(--color-secondary-25) 2px,var(--color-secondary-25) 3px);
+      --striped-bg-2: repeating-linear-gradient( -45deg, rgba(125, 125, 115, 0.3) 0px, rgba(125, 125, 115, 0.3) 1px, rgba(105,105,95,0.2) 2px, rgba(105,105,95,0.2) 3px);  
+    }
+  }
+
+  body.crlngn-ui.theme-light .sheet.journal-entry,
+  body.crlngn-ui .application.theme-light.sheet.journal-entry {
+    --color-cool-3: rgb(83, 71, 107);
+    --color-cool-4: rgb(54, 48, 59); 
+    --color-cool-5: rgb(11, 10, 19);   
+    --color-cool-5-0: rgba(11, 10, 19, 0);
+    --color-cool-5-25: rgba(11, 10, 19, 0.25);
+    --color-cool-5-50: rgba(11, 10, 19, 0.5);
+    --color-cool-5-75: rgba(11, 10, 19, 0.75);
+    --color-cool-5-90: rgba(11, 10, 19, 0.95);
+  }
+
+}
+
+/* THEME - GRASS AND STONE */ 
+body.crlngn-ui.crlngn-theme-grass-stone,
+body.crlngn-ui.crlngn-theme-grass-stone.game .app {
+  --color-highlights: rgba(122, 161, 69, 1);
+  --color-highlights-15: rgba(122, 161, 69, 0.15);
+  --color-highlights-25: rgba(122, 161, 69, 0.25);
+  --color-highlights-50: rgba(122, 161, 69, 0.5);
+  --color-highlights-75: rgba(122, 161, 69, 0.75);
+  --color-highlights-90: rgba(122, 161, 69, 0.9);
+  --color-scrollbar: rgba(122, 161, 69, 0.7);
+  --color-border-highlight-alt: rgba(108, 145, 68, 0.9); 
+	--color-border-highlight: rgba(108, 145, 68, 1);
+  --color-shadow-highlight: rgba(96, 126, 54, 0.5); 
+	--color-shadow-primary: rgba(96, 126, 54, 0.8);
+  --color-border-light-primary: rgba(96, 126, 54, 0.5);
+  --color-border-light-highlight: rgba(108, 145, 68, 1);
+  --color-underline-header: rgb(108, 145, 68);
+  --color-underline-active: rgb(108, 145, 68);
+	--color-text-hyperlink: rgb(108, 145, 68);
+
+  &.theme-dark,
+  #interface.theme-dark{
+    --color-secondary: rgb(47, 48, 48);
+    --color-secondary-bright: rgb(147, 156, 154);
+    --color-secondary-bright-50: rgba(147, 156, 154, 0.5);
+    --color-secondary-15: rgba(47, 48, 48, 0.15);
+    --color-secondary-25: rgba(47, 48, 48, 0.25);
+    --color-secondary-50: rgba(47, 48, 48, 0.5);
+    --color-secondary-65: rgba(47, 48, 48, 0.65);
+    --color-secondary-75: rgba(47, 48, 48, 0.75);
+    --color-secondary-90: rgba(47, 48, 48, 0.9);
+    --color-secondary-b: rgb(29, 31, 31);
+    --color-secondary-b-25: rgba(29, 31, 31, 0.25);
+    --color-secondary-b-50: rgba(29, 31, 31, 0.5);
+    --color-secondary-b-75: rgba(29, 31, 31, 0.75);
+    --color-secondary-b-90: rgba(29, 31, 31, 0.90);
+    --color-text-secondary: var(--color-light-1);
+  }
+  --color-warm-1: rgb(166, 207, 109);
+  --color-warm-2: rgba(122, 161, 69, 1);
+  --color-warm-3: rgba(96, 126, 54, 1);
+  
+  &.theme-light,
+  #interface.theme-light {
+    --color-secondary: rgb(178, 182, 182);
+    --color-secondary-bright: rgba(245, 229, 215, 1);
+    --color-secondary-bright-50: rgba(245, 229, 215, 0.5);
+    --color-secondary-15: rgba(178, 182, 182, 0.15);
+    --color-secondary-25: rgba(178, 182, 182, 0.25);
+    --color-secondary-50: rgba(178, 182, 182, 0.5);
+    --color-secondary-65: rgba(178, 182, 182, 0.65);
+    --color-secondary-75: rgba(178, 182, 182, 0.75);
+    --color-secondary-90: rgba(178, 182, 182, 0.9);
+    --color-secondary-b: rgb(210, 214, 215);
+    --color-secondary-b-50: rgba(210, 214, 215, 0.5);
+    --color-secondary-b-75: rgba(210, 214, 215, 0.75);
+    --color-secondary-b-90: rgba(210, 214, 215, 0.90);
+    --color-text-secondary: var(--color-dark-1);
+  }
+
+}
+
+
+/* THEME - GOLD */ 
+body.crlngn-ui.crlngn-theme-gold-chocolate,
+body.crlngn-ui.crlngn-theme-gold-chocolate.game .app {
+  --color-highlights: rgb(164, 138, 51);
+  --color-highlights-15: rgba(164, 138, 51, 0.15);
+  --color-highlights-25: rgba(164, 138, 51, 0.25);
+  --color-highlights-50: rgba(164, 138, 51, 0.5);
+  --color-highlights-75: rgba(164, 138, 51, 0.75);
+  --color-highlights-90: rgba(164, 138, 51, 0.9);
+  --color-scrollbar: rgba(164, 138, 51, 0.7);
+  --color-border-highlight-alt: rgba(164, 138, 51, 0.9); 
+	--color-border-highlight: rgba(164, 138, 51, 1);
+  --color-shadow-highlight: rgba(164, 138, 51, 0.5); 
+	--color-shadow-primary: rgba(142, 121, 54, 0.8);
+  --color-border-light-primary: rgba(142, 121, 54, 0.5);
+  --color-border-light-highlight: rgba(164, 138, 51, 1);
+  --color-underline-header: rgba(164, 138, 51, 1);
+  --color-underline-active: rgba(164, 138, 51, 1);
+	--color-text-hyperlink: rgb(172, 141, 40);
+
+  &.theme-dark,
+  #interface.theme-dark{
+    --color-secondary: rgb(34, 25, 25);
+    --color-secondary-bright: rgba(125, 109, 109, 1);
+    --color-secondary-bright-50: rgba(125, 109, 109, 0.5);
+    --color-secondary-15: rgba(34, 25, 25, 0.15);
+    --color-secondary-25: rgba(34, 25, 25, 0.25);
+    --color-secondary-50: rgba(34, 25, 25, 0.5);
+    --color-secondary-65: rgba(34, 25, 25, 0.65);
+    --color-secondary-75: rgba(34, 25, 25, 0.75);
+    --color-secondary-90: rgba(34, 25, 25, 0.9);
+    --color-secondary-b: rgba(34, 34, 54, 1);
+    --color-secondary-b-25: rgba(34, 34, 54, 0.25);
+    --color-secondary-b-50: rgba(34, 34, 54, 0.5);
+    --color-secondary-b-75: rgba(34, 34, 54, 0.75);
+    --color-secondary-b-90: rgba(34, 34, 54, 0.90);
+    --color-text-secondary: var(--color-light-1);
+  }
+  --color-warm-1: rgb(213, 190, 116);
+  --color-warm-2: rgb(192, 165, 77);
+  --color-warm-3: rgb(184, 153, 54);
+  
+  &.theme-light,
+  #interface.theme-light {
+    --color-secondary: rgb(215, 196, 177);
+    --color-secondary-bright: rgba(245, 229, 215, 1);
+    --color-secondary-bright-50: rgba(245, 229, 215, 0.5);
+    --color-secondary-15: rgba(215, 196, 177, 0.15);
+    --color-secondary-25: rgba(215, 196, 177, 0.25);
+    --color-secondary-50: rgba(215, 196, 177, 0.5);
+    --color-secondary-65: rgba(215, 196, 177, 0.65);
+    --color-secondary-75: rgba(215, 196, 177, 0.75);
+    --color-secondary-90: rgba(215, 196, 177, 0.9);
+    --color-secondary-b: rgba(215, 205, 225, 1);
+    --color-secondary-b-50: rgba(215, 205, 225, 0.5);
+    --color-secondary-b-75: rgba(215, 205, 225, 0.75);
+    --color-secondary-b-90: rgba(215, 205, 225, 0.90);
+    --color-text-secondary: var(--color-dark-1);
+  }
+
+}
+
+/* THEME - DARK SORCERY */
+body.crlngn-ui.crlngn-theme-dark-sorcery,
+body.crlngn-ui.crlngn-theme-dark-sorcery.game .app {
+  --color-highlights: rgb(126, 100, 165);
+  --color-highlights-15: rgba(126, 100, 165, 0.15);
+  --color-highlights-25: rgba(126, 100, 165, 0.25);
+  --color-highlights-50: rgba(126, 100, 165, 0.5);
+  --color-highlights-75: rgba(126, 100, 165, 0.75);
+  --color-highlights-90: rgba(126, 100, 165, 0.9);
+  --color-scrollbar: rgba(126, 100, 165, 0.7);
+  --color-border-highlight-alt: rgba(126, 100, 165, 0.9); 
+	--color-border-highlight: rgba(126, 100, 165, 1);
+  --color-shadow-highlight: rgba(126, 100, 165, 0.5); 
+	--color-shadow-primary: rgba(126, 100, 165, 0.8);
+  --color-border-light-primary: rgba(126, 100, 165, 0.5);
+  --color-border-light-highlight: rgba(126, 100, 165, 1);
+  --color-underline-header: rgba(126, 100, 165, 1);
+  --color-underline-active: rgba(126, 100, 165, 1);
+	--color-text-hyperlink: rgb(175, 145, 202);
+
+  &.theme-dark,
+  #interface.theme-dark{
+    --color-secondary: rgb(31, 47, 49);
+    --color-secondary-bright: rgba(97, 121, 123, 1);
+    --color-secondary-bright-50: rgba(97, 121, 123, 0.5);
+    --color-secondary-15: rgba(31, 47, 49, 0.15);
+    --color-secondary-25: rgba(31, 47, 49, 0.25);
+    --color-secondary-50: rgba(31, 47, 49, 0.5);
+    --color-secondary-65: rgba(31, 47, 49, 0.65);
+    --color-secondary-75: rgba(31, 47, 49, 0.75);
+    --color-secondary-90: rgba(31, 47, 49, 0.9);
+    --color-secondary-b: rgba(24, 34, 36, 0.5);
+    --color-secondary-b-25: rgba(24, 34, 36, 0.25);
+    --color-secondary-b-50: rgba(24, 34, 36, 0.5);
+    --color-secondary-b-75: rgba(24, 34, 36, 0.75);
+    --color-secondary-b-90: rgba(24, 34, 36, 0.9);
+    --color-text-secondary: var(--color-light-1);
+  }
+  
+  --color-warm-1: rgb(140, 125, 165);
+  --color-warm-2: rgb(126, 100, 165);
+  --color-warm-3: rgb(106, 72, 136);
+
+  &.theme-light,
+  #interface.theme-light {
+    --color-secondary: rgb(236, 224, 237);
+    --color-secondary-bright: rgba(236, 224, 237, 1);
+    --color-secondary-bright-50: rgba(236, 224, 237, 0.5);
+    --color-secondary-15: rgba(236, 224, 237, 0.15);
+    --color-secondary-25: rgba(236, 224, 237, 0.25);
+    --color-secondary-50: rgba(236, 224, 237, 0.5);
+    --color-secondary-65: rgba(236, 224, 237, 0.65);
+    --color-secondary-75: rgba(236, 224, 237, 0.75);
+    --color-secondary-90: rgba(236, 224, 237, 0.9);
+    --color-secondary-b: rgba(237, 224, 237, 0.5);
+    --color-secondary-b-25: rgba(237, 224, 237, 0.25);
+    --color-secondary-b-50: rgba(237, 224, 237, 0.5);
+    --color-secondary-b-75: rgba(237, 224, 237, 0.75);
+    --color-secondary-b-90: rgba(237, 224, 237, 0.9);
+    --color-text-secondary: var(--color-dark-1);
+  }
+
+}
+
+/* THEME - pumpkin patch */ 
+body.crlngn-ui.crlngn-theme-pumpkin-patch,
+body.crlngn-ui.crlngn-theme-pumpkin-patch.game .app {
+  --color-highlights: rgb(220, 120, 43);
+  --color-highlights-15: rgba(220, 120, 43, 0.15);
+  --color-highlights-25: rgba(220, 120, 43, 0.25);
+  --color-highlights-50: rgba(220, 120, 43, 0.5);
+  --color-highlights-75: rgba(220, 120, 43, 0.75);
+  --color-highlights-90: rgba(220, 120, 43, 0.9);
+  --color-scrollbar: rgba(220, 120, 43, 0.7);
+  --color-border-highlight-alt: rgba(173, 112, 66, 0.9); 
+	--color-border-highlight: rgba(220, 120, 43, 1);
+  --color-shadow-highlight: rgba(173, 112, 66, 0.5); 
+	--color-shadow-primary: rgba(220, 120, 43, 0.8);
+  --color-border-light-primary: rgba(220, 120, 43, 0.5);
+  --color-border-light-highlight: rgba(220, 120, 43, 1);
+  --color-underline-header: rgba(220, 120, 43, 1);
+  --color-underline-active: rgba(220, 120, 43, 1);
+	--color-text-hyperlink: rgb(220, 120, 43);
+
+  &.theme-dark,
+  #interface.theme-dark{
+    --color-secondary: rgb(40, 31, 49);
+    --color-secondary-bright: rgba(126, 113, 138, 1);
+    --color-secondary-bright-50: rgba(126, 113, 138, 0.5);
+    --color-secondary-15: rgba(40, 31, 49, 0.15);
+    --color-secondary-25: rgba(40, 31, 49, 0.25);
+    --color-secondary-50: rgba(40, 31, 49, 0.5);
+    --color-secondary-65: rgba(40, 31, 49, 0.65);
+    --color-secondary-75: rgba(40, 31, 49, 0.75);
+    --color-secondary-90: rgba(40, 31, 49, 0.9);
+    --color-secondary-b: rgba(20, 17, 25, 1);
+    --color-secondary-b-25: rgba(20, 17, 25, 0.25);
+    --color-secondary-b-50: rgba(20, 17, 25, 0.5);
+    --color-secondary-b-75: rgba(20, 17, 25, 0.75);
+    --color-secondary-b-90: rgba(20, 17, 25, 0.9);
+    --color-text-secondary: var(--color-light-1);
+  }
+  
+  --color-warm-1: rgb(221, 155, 104);
+  --color-warm-2: rgb(220, 120, 43);
+  --color-warm-3: rgb(161, 86, 29);
+
+  &.theme-light,
+  #interface.theme-light {
+    --color-secondary: rgb(200, 198, 206);
+    --color-secondary-bright: rgba(200, 198, 206, 1);
+    --color-secondary-bright-50: rgba(200, 198, 206, 0.5);
+    --color-secondary-15: rgba(200, 198, 206, 0.15);
+    --color-secondary-25: rgba(200, 198, 206, 0.25);
+    --color-secondary-50: rgba(200, 198, 206, 0.5);
+    --color-secondary-65: rgba(200, 198, 206, 0.65);
+    --color-secondary-75: rgba(200, 198, 206, 0.75);
+    --color-secondary-90: rgba(200, 198, 206, 0.9);
+    --color-secondary-b: rgba(240, 238, 246, 1);
+    --color-secondary-b-25: rgba(240, 238, 246, 0.25);
+    --color-secondary-b-50: rgba(240, 238, 246, 0.5);
+    --color-secondary-b-75: rgba(240, 238, 246, 0.75);
+    --color-secondary-b-90: rgba(240, 238, 246, 0.9);
+    --color-text-secondary: var(--color-dark-1);
+  }
+}
+
+/* THEME - GAMBIT'S BLUE */
+body.crlngn-ui.crlngn-theme-gambits-blue,
+body.crlngn-ui.crlngn-theme-gambits-blue.game .app {
+  --color-highlights: rgb(45, 126, 207);
+  --color-highlights-15: rgba(45, 126, 207, 0.15);
+  --color-highlights-25: rgba(45, 126, 207, 0.25);
+  --color-highlights-50: rgba(45, 126, 207, 0.5);
+  --color-highlights-75: rgba(45, 126, 207, 0.75);
+  --color-highlights-90: rgba(45, 126, 207, 0.9);
+  --color-scrollbar: rgba(45, 126, 207, 0.7);
+  --color-border-highlight-alt: rgba(45, 126, 207, 0.9); 
+	--color-border-highlight: rgba(45, 126, 207, 1);
+  --color-shadow-highlight: rgba(45, 126, 207, 0.5); 
+	--color-shadow-primary: rgba(45, 126, 207, 0.8);
+  --color-border-light-primary: rgba(45, 126, 207, 0.5);
+  --color-border-light-highlight: rgba(45, 126, 207, 1);
+  --color-underline-header: rgba(45, 126, 207, 1);
+  --color-underline-active: rgba(45, 126, 207, 1);
+	--color-text-hyperlink: rgb(175, 145, 202);
+
+  &.theme-dark,
+  #interface.theme-dark{
+    --color-secondary: rgb(40, 31, 49);
+    --color-secondary-bright: rgba(123, 111, 133, 1);
+    --color-secondary-bright-50: rgba(123, 111, 133, 0.5);
+    --color-secondary-15: rgba(40, 31, 49, 0.15);
+    --color-secondary-25: rgba(40, 31, 49, 0.25);
+    --color-secondary-50: rgba(40, 31, 49, 0.5);
+    --color-secondary-65: rgba(40, 31, 49, 0.65);
+    --color-secondary-75: rgba(40, 31, 49, 0.75);
+    --color-secondary-90: rgba(40, 31, 49, 0.9);
+    --color-secondary-b: rgba(20, 17, 25, 1);
+    --color-secondary-b-25: rgba(20, 17, 25, 0.5);
+    --color-secondary-b-50: rgba(20, 17, 25, 0.5);
+    --color-secondary-b-75: rgba(20, 17, 25, 0.75);
+    --color-secondary-b-90: rgba(20, 17, 25, 0.9);
+    --color-text-secondary: var(--color-light-1);
+  }
+  
+  --color-warm-1: rgb(103, 158, 212);
+  --color-warm-2: rgb(45, 126, 207);
+  --color-warm-3: rgb(36, 101, 167);
+
+  &.theme-light,
+  #interface.theme-light {
+    --color-secondary: rgb(204, 186, 204);
+    --color-secondary-bright: rgba(236, 224, 236, 1);
+    --color-secondary-bright-50: rgba(236, 224, 236, 0.5);
+    --color-secondary-15: rgba(204, 186, 204, 0.15);
+    --color-secondary-25: rgba(204, 186, 204, 0.25);
+    --color-secondary-50: rgba(204, 186, 204, 0.5);
+    --color-secondary-65: rgba(204, 186, 204, 0.65);
+    --color-secondary-75: rgba(204, 186, 204, 0.75);
+    --color-secondary-90: rgba(204, 186, 204, 0.9);
+    --color-secondary-b: rgba(237, 224, 237, 1);
+    --color-secondary-b-25: rgba(237, 224, 237, 0.5);
+    --color-secondary-b-50: rgba(237, 224, 237, 0.5);
+    --color-secondary-b-75: rgba(237, 224, 237, 0.75);
+    --color-secondary-b-90: rgba(237, 224, 237, 0.9);
+    --color-text-secondary: var(--color-dark-1);
+  }
+
+}

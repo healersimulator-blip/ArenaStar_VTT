@@ -211,10 +211,9 @@ test.describe("apply / heal from a roll card (§2.2/G-20)", () => {
     expect((await lastRoll(host))?.applied["a-orc"]).toBeUndefined();
 
     // ── no target, no verb: an empty-canvas click takes the row away again ──
-    await player.mouse.click(
-      (await canvasBox(player)).x + 40,
-      (await canvasBox(player)).y + 40,
-    );
+    // (the bottom-right corner: the workspace layouts float the tool rail over the top-left, D-464)
+    const emptyBox = await canvasBox(player);
+    await player.mouse.click(emptyBox.x + emptyBox.width - 40, emptyBox.y + emptyBox.height - 40);
     await expect(player.locator(`[data-apply-message="${playerCard.id}"]`)).toHaveCount(0);
 
     expect(errors).toEqual([]);

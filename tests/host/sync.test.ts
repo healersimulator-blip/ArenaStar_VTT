@@ -11756,10 +11756,9 @@ describe("structured action cards and pending resolution", () => {
     expect((h.hostStore.get("messages", unverifiedPending._id) as MessageDocument).system.action)
       .toMatchObject({ targets: [{ state: "pending", provenance: "reported" }] });
     await h.gm.rollPending(unverifiedPending._id, "roll-one");
-    await flushMicrotasks();
-    await flushMicrotasks();
-    await flushMicrotasks();
-    expect((h.hostStore.get("messages", unverifiedPending._id) as MessageDocument).system.action)
+    // Sending the request is not completion of the asynchronous cryptographic roll.
+    // Observe the same required outcome rather than guessing three event-loop turns.
+    await expect.poll(() => (h.hostStore.get("messages", unverifiedPending._id) as MessageDocument).system.action)
       .toMatchObject({ targets: [{ state: "resolved", provenance: "reported" }] });
 
     const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");

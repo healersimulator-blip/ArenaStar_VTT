@@ -8,7 +8,7 @@
  * the DOM between each one, on the GM's shell and on a joined player's.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { applySidebarMap, entry, gmCall, hostCall, manualFragment, playerCall, waitForSurface } from "./lib";
+import { applySidebarMap, canvasAction, chromeAction, entry, gmCall, hostCall, manualFragment, playerCall, waitForSurface } from "./lib";
 
 const TINY_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -39,7 +39,7 @@ test.describe("first-run onboarding (§2.3, G-41)", () => {
     // The host auto-entry is a returning/test world. Its setup panel is available
     // from the top bar rather than consuming the board by default.
     await expect(host.locator("[data-session-panel]")).toHaveCount(0);
-    await host.click("#session-open");
+    await chromeAction(host, "session-open");
 
     // ── a fresh checklist: the list is open, and nothing in it is done ──
     const panel = host.locator("[data-onboarding]");
@@ -80,7 +80,7 @@ test.describe("first-run onboarding (§2.3, G-41)", () => {
     await host.click('[data-canvas-tool="dice"]');
     await host.click('[data-canvas-die="20"]');
     await expect.poll(() => host.locator("#chat-log .line").count(), { timeout: 20_000 }).toBeGreaterThan(0);
-    await host.click("#session-open");
+    await chromeAction(host, "session-open");
     // Remounting a finished checklist folds it by default unless the GM asks
     // to see the steps again; don't keep completed setup open in the dock.
     if ((await panel.getAttribute("data-onboarding-open")) === "false")
@@ -136,7 +136,7 @@ test.describe("first-run onboarding (§2.3, G-41)", () => {
       "true",
     );
     // ── the player's help window shows the player's steps and the same links ──
-    await player.click('[data-canvas-action="help"]');
+    await canvasAction(player, "help");
     const playerHelp = player.locator("[data-help-panel]");
     await expect(playerHelp).toBeVisible();
     await expect(playerHelp.locator('[data-help-step="token"]')).toHaveCount(1);
@@ -147,7 +147,7 @@ test.describe("first-run onboarding (§2.3, G-41)", () => {
     );
 
     // ── the GM's help window: the same ordered steps under their own heading ──
-    await host.click('[data-canvas-action="help"]');
+    await canvasAction(host, "help");
     const help = host.locator("[data-help-panel]");
     await expect(help).toBeVisible();
     for (const step of ["map", "tokens", "invite", "fog", "play"]) {
@@ -166,7 +166,7 @@ test.describe("first-run onboarding (§2.3, G-41)", () => {
     await waitForSurface(host, "app");
     await waitForSurface(host, "gm");
     await expect(host.locator("[data-session-panel]")).toHaveCount(0);
-    await host.click("#session-open");
+    await chromeAction(host, "session-open");
     await expect(host.locator("[data-onboarding]")).toHaveCount(1);
     await expect(host.locator("[data-onboarding]")).toHaveAttribute("data-onboarding-open", "false");
     // the label is the hydration signal: a click before the pane is live would land on nothing

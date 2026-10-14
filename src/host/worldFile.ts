@@ -51,12 +51,13 @@ import { LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE, fogLevelIdError, fogEpochEr
 import { DRAFT_LEVELS_FEATURE, LEVEL_SCOPES_FEATURE, LEVEL_LIGHTING_FEATURE, LEVEL_AMBIENT_FEATURE, requiredWorldFeatures } from "../core/capabilities";
 import { OPENING_SIGHT_FEATURE, openingSightWorldDataError } from "../core/openingSightPolicy";
 import {
-  AIS_WORLD_FEATURE,
+  AIS_WORLD_FEATURE, AIS_RUNTIME_FEATURE,
   emptyAisProfile,
   resolveAisProfile,
   validateAisActivationProfile,
   type AisActivationProfile,
 } from "../core/automationInterconnect";
+import { aisRuntimePackage } from "../packages/aisRuntimePackage";
 import { packageContentHash } from "../packages/packageHash";
 import { sceneLevelsError } from "../core/levels";
 import { sceneRegionsError } from "../core/regionValidation";
@@ -106,10 +107,10 @@ import type { AssetId, DocId, WorldId } from "../core/ids";
 import type { HostPersister } from "../storage/persistence";
 import { buildPackageFromFiles } from "../packages/packageLoader";
 
-/** Base export format. AIS package profiles use format 4 and an explicit feature marker. */
+/** Base export format. AIS profiles use format 4; adapter runtimes use format 5, both explicitly marked. */
 export const WORLD_FILE_FORMAT = 2;
 /** Formats `importWorldZip` accepts (older exports keep importing). */
-export const WORLD_FILE_FORMATS_READ: readonly number[] = [1, 2, 3, 4];
+export const WORLD_FILE_FORMATS_READ: readonly number[] = [1, 2, 3, 4, 5];
 export { DRAFT_LEVELS_FEATURE } from "../core/capabilities";
 
 /** Id of the built-in strategic ruleset — mirrors `BUILTIN_SYSTEM_ID` in hostBoot. */
@@ -274,19 +275,21 @@ function validateWorldMeta(value: unknown): WorldFileMeta {
     throw new Error("world file: world.json must be an object");
   if (!Number.isSafeInteger(value.format) || typeof value.format !== "number")
     throw new Error("world file: world.json has an invalid format");
-  if (value.format === 3 || value.format === 4) {
+  if (value.format === 3 || value.format === 4 || value.format === 5) {
     // Every capability the exporter can declare (`requiredWorldFeatures`), stairwells,
     // opening sight and AIS included: archives must not silently shed a declared policy.
     const supported = [DRAFT_LEVELS_FEATURE, LEVEL_SCOPES_FEATURE, LEVEL_FOG_FEATURE, LEVEL_LIGHTING_FEATURE,
       LEVEL_AMBIENT_FEATURE, LEVEL_FOG_RESET_FEATURE, LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE,
-      OPENING_SIGHT_FEATURE, AIS_WORLD_FEATURE];
+      OPENING_SIGHT_FEATURE, AIS_WORLD_FEATURE, AIS_RUNTIME_FEATURE];
     if (!Array.isArray(value.requiredFeatures) || !value.requiredFeatures.includes(DRAFT_LEVELS_FEATURE) ||
         new Set(value.requiredFeatures).size !== value.requiredFeatures.length ||
         value.requiredFeatures.some((f) => typeof f !== "string" || !supported.includes(f)) ||
-        (value.format === 4 && !value.requiredFeatures.includes(AIS_WORLD_FEATURE)) ||
+        (value.format >= 4 && !value.requiredFeatures.includes(AIS_WORLD_FEATURE)) ||
+        (value.format === 5 && !value.requiredFeatures.includes(AIS_RUNTIME_FEATURE)) ||
+        (value.format !== 5 && value.requiredFeatures.includes(AIS_RUNTIME_FEATURE)) ||
         (value.format === 3 && value.requiredFeatures.includes(AIS_WORLD_FEATURE)))
       throw new Error(`world file: unsupported format ${value.format} required features`);
-  } else if (value.requiredFeatures !== undefined) throw new Error("world file: required features need format 3 or 4");
+  } else if (value.requiredFeatures !== undefined) throw new Error("world file: required features need format 3, 4 or 5");
   if (typeof value.worldId !== "string" || !WORLD_ID_RE.test(value.worldId))
     throw new Error("world file: world.json has an invalid worldId");
   if (typeof value.name !== "string" || value.name.length > 256)
@@ -324,7 +327,7 @@ function validateWorldMeta(value: unknown): WorldFileMeta {
       );
   }
   if (value.automation !== undefined) {
-    if (value.format !== 4 || !value.requiredFeatures?.includes(AIS_WORLD_FEATURE))
+    if (value.format < 4 || !value.requiredFeatures?.includes(AIS_WORLD_FEATURE))
       throw new Error("world file: AIS automation profile requires format 4 and its feature marker");
     const profile = validateAisActivationProfile(value.automation);
     if (!profile.ok) throw new Error(`world file: invalid AIS profile — ${profile.error}`);
@@ -673,12 +676,14 @@ export async function collectWorldArchive(
     if (blockers.length > 0)
       throw new Error(`world file: invalid AIS profile — ${blockers.map((issue) => issue.message).join("; ")}`);
   }
-  // Format 3/4 retain the draft-level marker for forward-compatible scene/profile checks.
+  // Formats 3–5 retain the draft-level marker for forward-compatible scene/profile checks.
   if (requiredFeatures.length && !requiredFeatures.includes(DRAFT_LEVELS_FEATURE))
     requiredFeatures.push(DRAFT_LEVELS_FEATURE);
+  const hasRuntimePackages = packages.some((pkg) => pkg.manifest.interconnect?.runtime || pkg.manifest.interconnect?.runtimeProvider);
+  if (hasRuntimePackages) requiredFeatures.push(AIS_RUNTIME_FEATURE);
   const hasSceneFeatures = requiredFeatures.some((feature) => feature !== AIS_WORLD_FEATURE);
   const hasAisFeature = requiredFeatures.includes(AIS_WORLD_FEATURE);
-  const format = hasAisFeature ? 4 : hasSceneFeatures ? 3 : WORLD_FILE_FORMAT;
+  const format = hasRuntimePackages ? 5 : hasAisFeature ? 4 : hasSceneFeatures ? 3 : WORLD_FILE_FORMAT;
   const meta: WorldFileMeta = {
     format,
     ...(requiredFeatures.length ? { requiredFeatures } : {}),
@@ -1245,11 +1250,14 @@ export async function importWorldZip(
   }
 
   const hasAisPackages = packageRecords.some((pkg) => pkg.type === "module");
-  if (hasAisPackages && (meta.format !== 4 || !meta.requiredFeatures?.includes(AIS_WORLD_FEATURE)))
-    throw new Error("world file: AIS modules require format 4 and its feature marker");
-  const archiveAutomationProfile = meta.format === 4 ? (meta.automation ?? emptyAisProfile()) : emptyAisProfile();
+  if (hasAisPackages && (meta.format < 4 || !meta.requiredFeatures?.includes(AIS_WORLD_FEATURE)))
+    throw new Error("world file: AIS modules require format 4+ and its feature marker");
+  if (packageRecords.some((pkg) => pkg.manifest.interconnect?.runtime || pkg.manifest.interconnect?.runtimeProvider) &&
+      (meta.format !== 5 || !meta.requiredFeatures?.includes(AIS_RUNTIME_FEATURE)))
+    throw new Error("world file: adapter-backed AIS packages require format 5 and the runtime feature marker");
+  const archiveAutomationProfile = meta.format >= 4 ? (meta.automation ?? emptyAisProfile()) : emptyAisProfile();
   let resolvedAutomationModuleIds = new Set<string>();
-  if (meta.format === 4) {
+  if (meta.format >= 4) {
     const candidates = packageRecords.map((pkg) => ({
       id: pkg.id,
       version: pkg.version,
@@ -1271,7 +1279,7 @@ export async function importWorldZip(
   const activeRulesPackage = carriesPackages
     ? archiveActive
     : (existing?.activeRulesPackage ?? null);
-  const automationProfile = meta.format === 4
+  const automationProfile = meta.format >= 4
     ? archiveAutomationProfile
     : carriesPackages
       ? emptyAisProfile()
@@ -1284,6 +1292,9 @@ export async function importWorldZip(
   for (const [id, grant] of Object.entries(previousAisGrants)) {
     const samePackage = packageHashes.get(id);
     const importedLock = importedLocks.get(id);
+    const importedPackage = packageRecords.find((pkg) => pkg.id === id);
+    if (importedPackage?.manifest.interconnect?.runtime &&
+        aisRuntimePackage(importedPackage, packageRecords)?.hash !== grant.runtimeHash) continue;
     if (!carriesPackages || (
       samePackage && samePackage === grant.hash && importedLock?.hash === samePackage && resolvedAutomationModuleIds.has(id)
     )) automationGrants[id] = structuredClone(grant);

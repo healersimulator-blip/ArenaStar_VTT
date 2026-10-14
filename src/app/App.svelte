@@ -105,10 +105,17 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { refusalNotifier, type RefusalNotifier } from "../client/moveRefusals";
   import { createVisionComputer } from "../workers/visionComputer";
   import { ModuleIframe } from "../packages/moduleIframe";
-  import { AisModuleIframe } from "../packages/aisModuleIframe";
-  import { createAisModuleHandlers, projectAisTokenLight, type AisModuleSelectRequest } from "../packages/aisModuleHandlers";
-  import { aisTokenLightChanges } from "../core/automationInterconnect";
-  import type { AisCapability, AisEventName, AisEventPayloads } from "../core/automationInterconnect";
+  import { AisAppearance, type AppearanceState } from "./aisAppearance";
+  import { DEFAULT_UI_PREFERENCES, uiThemeVariables } from "../core/uiTheme";
+  import AppearancePanel from "../ui/settings/AppearancePanel.svelte";
+  import WorkspacePicker from "../ui/workspace/WorkspacePicker.svelte";
+  import WorkspaceChrome from "../ui/workspace/WorkspaceChrome.svelte";
+  import WorkspaceTabs from "../ui/workspace/WorkspaceTabs.svelte";
+  import WorkspaceDirectory, { type DirectoryItem } from "../ui/workspace/WorkspaceDirectory.svelte";
+  import { workspaceUi, setWorkspacePanel, resetWorkspaceUi } from "../ui/workspace/state";
+  import { workspaceTabLabel, workspaceToolInset } from "../core/workspaceUi";
+  import { AisRuntime, type AisRuntimeStatuses } from "./aisRuntime";
+  import type { AisModuleSelectRequest } from "../packages/aisModuleHandlers";
   import { dice3dStats, diceInfoFromRecord, showDice3D } from "../dice/dice3d";
   import { verifyCommitRoll } from "../dice/commitReveal";
   import { PoolInterpolator } from "../sim/interpolate";
@@ -146,7 +153,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     type ModuleHost,
   } from "../packages/moduleHandlers";
   import type { ModuleHookName } from "../core/moduleApi";
-  import { getFog, getSetting, getWorld } from "../storage/idb";
+  import { getFog, getSetting } from "../storage/idb";
   import { viewAsOptions, viewAsUser, withoutHiddenTokens } from "../core/viewAs";
   import { can } from "../core/permissions";
   import { tileContainsPoint } from "../core/automation";
@@ -323,12 +330,14 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     app = null,
     bootError = null,
     initialSetup = false,
+    initialAppearance = false,
     onExit = null,
   }: {
     app?: HostApp | null;
     bootError?: string | null;
     /** New-world entry only: give the GM a guided setup surface, not permanent clutter. */
     initialSetup?: boolean;
+    initialAppearance?: boolean;
     /**
      * D-249 "Close world": the host (Root) closes the HostApp and returns to the start
      * screen, where worlds are listed, opened, imported, exported and deleted. Null hides
@@ -412,22 +421,56 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   let player = $state<AudioPlayer | null>(null);
   // 56 px: the canvas tool rail. Windows open and drag to its right, never under it (the rail's
   // icons and a window's title would otherwise fight for the same pixels).
-  const wm = new WindowManager({ width: 900, height: 700, leftInset: 56 });
+  const wm = new WindowManager({ width: 900, height: 700, leftInset: workspaceToolInset($workspaceUi.profile) });
   (globalThis as unknown as { __wm?: WindowManager }).__wm = wm;
   /** Bumped on every store ops/snapshot so non-panel reads re-render. */
   let storeVersion = $state(0);
   let wmVersion = $state(0);
-  const TABS: Array<{ id: string; label: string }> = [
-    { id: "chat", label: "Chat" },
-    { id: "combat", label: "Combat" },
-    { id: "scenes", label: "Scenes" },
-    { id: "images", label: "Images" },
-    { id: "journals", label: "Journals" },
-    { id: "tables", label: "Tables" },
-    { id: "playlists", label: "Playlists" },
-    { id: "actors", label: "Actors" },
-    { id: "compendia", label: "Compendia" },
-  ];
+  const TABS = ["chat", "combat", "scenes", "images", "journals", "tables", "playlists", "actors", "compendia", "placeables", "macros", "settings"];
+  function selectContent(id: string): void { activeTab = id; setWorkspacePanel(true); }
+  const directoryItems = $derived.by((): DirectoryItem[] => {
+    void storeVersion;
+    if (!app) return [];
+    if (activeTab === "macros") return app.gm.client.store.getAll("macros").map((macro) => ({ id: macro._id, name: macro.name, kind: macro.kind }));
+    const scene = activeScene();
+    if (!scene) return [];
+    return (["tokens", "walls", "lights", "tiles", "drawings", "templates", "notes", "sounds", "regions"] as const).flatMap((kind) =>
+      (scene[kind] ?? []).map((doc) => ({ id: `${kind}:${doc._id}`, name: doc.name || kind, kind,
+        hidden: (doc as { hidden?: boolean }).hidden === true })));
+  });
+  function directoryAction(action: string, id?: string): void {
+    if (action === "settings" || action === "packages") openWindow("settings", "Settings", "settings");
+    else if (action === "macros") openWindow("macros", "Macros", "macros");
+    else if (action === "permissions") openWindow("permissions", "Permissions", "permissions");
+    else if (action === "help") openWindow("help", "Help", "help");
+    else if (action === "session") openSession();
+    else if (action === "export") void exportWorld();
+    else if (action === "scenes") selectContent("scenes");
+    else if (action === "focus" && id) {
+      const split = id.indexOf(":"), kind = id.slice(0, split), docId = id.slice(split + 1);
+      const scene = activeScene();
+      if (!scene) return;
+      if (kind === "tokens") { const token = scene.tokens.find((entry) => entry._id === docId); if (token) focusRosterToken(token); }
+      else {
+        const rows = (scene as unknown as Record<string, unknown>)[kind];
+        if (!Array.isArray(rows)) return;
+        const item = rows.find((row) => row._id === docId) as { x?: number; y?: number } | undefined;
+        if (stage && Number.isFinite(item?.x) && Number.isFinite(item?.y)) {
+          const size = canvasHost?.getBoundingClientRect();
+          stage.setCamera({ ...stage.camera, x: (item?.x ?? 0) - (size?.width ?? 600) / 2 / stage.camera.scale,
+            y: (item?.y ?? 0) - (size?.height ?? 500) / 2 / stage.camera.scale });
+        }
+      }
+    }
+  }
+  function assignGmHotbar(index: number, id: string): void {
+    if (!app || index < 0 || index >= 10 || !app.gm.client.store.get("macros", id)) return;
+    const ops: Op[] = app.gm.client.store.getAll("macros").filter((macro) =>
+      macro._id !== id && (macro.flags.core as Record<string, unknown> | undefined)?.slot === index + 1)
+      .map((macro) => ({ kind: "update", ref: { coll: "macros", id: macro._id }, diff: { "-=flags.core.slot": null } }));
+    ops.push({ kind: "update", ref: { coll: "macros", id }, diff: { "flags.core.slot": index + 1 } });
+    app.gm.client.submit(ops);
+  }
   let canvasError = $state<string | null>(null);
   let imagePreferences = $state<ImageHandlingPreferences>(imageHandlingPreferencesOf(DEFAULT_IMAGE_HANDLING_PREFERENCES));
   let imageDialogSources = $state<ImageSource[]>([]);
@@ -887,6 +930,11 @@ const WALL_PICK_RADIUS = 12;
   }
   /** The rail's non-tool buttons (zoom, windows, fog-all, erase-last). */
   function runCanvasAction(action: CanvasAction) {
+    if (action === "character-sheet") {
+      const actorId = activeScene()?.tokens.find((token) => tokenSelection.ids.includes(token._id))?.actorId;
+      if (actorId) openActorSheet(actorId);
+      return;
+    }
     const view = stage;
     switch (action) {
       case "zoom-in":
@@ -919,7 +967,7 @@ const WALL_PICK_RADIUS = 12;
         openWindow("settings", "Settings", "settings");
         break;
       case "help":
-        activeTab = "chat";
+        selectContent("chat");
         openWindow("help", "Keyboard shortcuts", "help");
         break;
       case "hex-party":
@@ -962,7 +1010,7 @@ const WALL_PICK_RADIUS = 12;
     if (!current || !scene) return;
     const selected = tokenSelection.sceneId === scene._id ? tokenSelection.ids : [];
     if (selected.length === 0) {
-      activeTab = "combat";
+      selectContent("combat");
       return;
     }
     let combat = activeCombat();
@@ -991,7 +1039,7 @@ const WALL_PICK_RADIUS = 12;
       });
       if (result.ops.length > 0) current.gm.client.submit(result.ops);
     }
-    activeTab = "combat";
+    selectContent("combat");
   }
   /** Open a pin's linked handout in its own window (§10 window host, kind "journal"). */
   function openJournalFromPin(pin: NoteDocument) {
@@ -1190,17 +1238,28 @@ const WALL_PICK_RADIUS = 12;
     request.resolve(value);
   }
 
-  const aisModuleHosts = new SvelteMap<string, AisModuleIframe>();
-  const aisModuleChecks = new SvelteMap<string, () => Promise<void>>();
-  function emitAisEvent<K extends AisEventName>(event: K, payload: AisEventPayloads[K]): void {
-    for (const host of aisModuleHosts.values()) host.emit(event, payload);
-  }
-  function emitAisModuleEvent(packageId: string, eventId: string, payload: import("../core/documents").Json): void {
-    const event: AisEventPayloads["module.event"] = { packageId, eventId, payload };
-    for (const [recipientId, host] of aisModuleHosts.entries()) {
-      if (recipientId !== packageId) host.emit("module.event", event);
+  let aisRuntime: AisRuntime | null = null;
+  let appearance = $state.raw<AisAppearance | null>(null);
+  // The embedded appearance demo opens its interface selector once (D-463); the workspace
+  // picker is one click away from the chrome and the main menu in every layout (D-464).
+  let appearanceOpen = $state(untrack(() => initialAppearance));
+  let workspaceOpen = $state(false);
+  let pagesOpen = $state(false);
+  const rulesStatusLabel = $derived(app?.rulesBoot
+    ? `strategic rules: ${app.rulesBoot.source === "package" ? `${app.rulesBoot.packageId} v${app.rulesBoot.version}` : `built-in v${app.rulesBoot.version ?? "?"}`}`
+    : "");
+  const contentOpen = $derived($workspaceUi.panels[$workspaceUi.profile]);
+  let appearanceState = $state.raw<AppearanceState>({ themes: [], preferences: DEFAULT_UI_PREFERENCES,
+    active: null, spec: null, images: {}, busy: false, error: null });
+  let offAppearance: (() => void) | null = null;
+  const appearanceStyle = $derived(uiThemeVariables($workspaceUi.profile === "modern" ? appearanceState.spec : null, appearanceState.preferences,
+    $workspaceUi.profile === "modern" ? appearanceState.images : {}));
+  function emergencyAppearance(event: KeyboardEvent): void {
+    if (event.ctrlKey && event.altKey && event.code === "Digit0") {
+      event.preventDefault(); resetWorkspaceUi(); void appearance?.reset().catch(() => {});
     }
   }
+  let aisRuntimeStatuses = $state.raw<AisRuntimeStatuses>({});
 
   /** The active encounter of the active scene (null before any is activated). */
   function activeCombat(): CombatDocument | null {
@@ -2421,43 +2480,19 @@ const WALL_PICK_RADIUS = 12;
   }
 
   function tokenLightActionsFor(token: TokenDocument) {
-    const provider = app?.automationBoot.resolution.providers.find((row) => row.slotId === "scene.token.light.action");
-    if (!provider) return undefined;
-    const selectedId = provider.selected?.split("/", 1)[0] ?? null;
-    const ais = token.flags.ais as Record<string, unknown> | undefined;
-    const state = selectedId && ais ? ais[selectedId] as Record<string, unknown> | undefined : undefined;
-    let reason: string | null = null;
-    if (!selectedId) reason = "Select one token-light provider in Settings → Packages.";
-    else if (!aisModuleHosts.has(selectedId)) reason = "Enable the module and approve its exact code and capabilities in Settings → Packages.";
-    return {
-      enabled: reason === null,
-      reason,
-      active: state?.active === true,
-      sourceName: typeof state?.sourceName === "string" ? state.sourceName : null,
-    };
+    // A menu already on screen must update when a module starts, fails or is revoked.
+    void aisRuntimeStatuses;
+    return aisRuntime?.tokenLightState(token);
   }
 
-  /** Send a UI intent only to the explicitly selected AIS provider for token lighting. */
+  /** Send a UI intent only to the current, explicitly selected AIS light provider. */
   function runTokenLightMenuEntry(entryId: string): void {
-    if (!tokenMenu || !app) return;
-    const scene = activeScene();
-    const token = scene?.tokens.find((row) => row._id === tokenMenu?.tokenId);
-    const provider = app.automationBoot.resolution.providers.find((row) => row.slotId === "scene.token.light.action");
-    const packageId = provider?.selected?.split("/", 1)[0];
-    const host = packageId ? aisModuleHosts.get(packageId) : undefined;
-    if (!scene || !token || !packageId || !host) {
-      notifyLog = [...notifyLog.slice(-49), {
-        message: "Token lighting is not ready. Enable the PF1e Torch module and approve its requested capabilities in Settings → Packages.",
-        level: "warn",
-      }];
-      closeTokenMenu();
-      return;
-    }
+    if (!tokenMenu) return;
     const action = entryId === "token-light-toggle" ? "toggle"
       : entryId === "token-light-next" ? "next"
         : entryId === "token-light-select" ? "select"
           : entryId === "token-light-off" ? "off" : "settings";
-    host.emit("ui.token.action", { sceneId: scene._id, tokenId: token._id, action });
+    aisRuntime?.tokenLightAction(tokenMenu.tokenId, action);
     closeTokenMenu();
   }
 
@@ -2764,7 +2799,7 @@ const WALL_PICK_RADIUS = 12;
     data?: Record<string, string>,
   ): void {
     const hostEl = canvasHost?.getBoundingClientRect();
-    if (hostEl) wm.setBounds({ width: hostEl.width, height: hostEl.height });
+    if (hostEl) wm.setBounds({ width: hostEl.width, height: hostEl.height, leftInset: workspaceToolInset($workspaceUi.profile) });
     wm.open({
       id,
       title,
@@ -3923,10 +3958,11 @@ const WALL_PICK_RADIUS = 12;
       agents?.dispose();
       agents = null;
       moduleHost?.dispose();
-      app?.host.setAisMacroModuleInvoker(null);
-      for (const host of aisModuleHosts.values()) host.dispose();
-      aisModuleHosts.clear();
-      aisModuleChecks.clear();
+      globalThis.removeEventListener("keydown", emergencyAppearance);
+      offAppearance?.(); offAppearance = null;
+      appearance?.dispose(); appearance = null;
+      aisRuntime?.dispose();
+      aisRuntime = null;
       if (rtSampleTimer !== null) globalThis.clearInterval(rtSampleTimer);
       offSimBus?.();
       if (fogTimer !== null) globalThis.clearInterval(fogTimer);
@@ -4953,114 +4989,18 @@ const WALL_PICK_RADIUS = 12;
             }),
           );
         }
-        for (const module of current.automationBoot.modules) {
-          const checkModuleConsent = async (capability?: AisCapability): Promise<void> => {
-            const world = await getWorld(current.db, current.worldId);
-            const lock = world?.automationProfile?.modules.find((entry) =>
-              entry.id === module.packageId && entry.version === module.version && entry.hash === module.hash,
-            );
-            const grant = world?.automationGrants?.[module.packageId];
-            if (!lock || grant?.hash !== module.hash || !Array.isArray(grant.capabilities))
-              throw new Error(`AIS code approval is not currently active for ${module.packageId}`);
-            if (capability && !grant.capabilities.includes(capability))
-              throw new Error(`AIS capability ${capability} is not currently approved for ${module.packageId}`);
-          };
-          const assertModuleActive = (): Promise<void> => checkModuleConsent();
-          const assertCapability = (capability: AisCapability): Promise<void> => checkModuleConsent(capability);
-          aisModuleChecks.set(module.packageId, assertModuleActive);
-          const handlers = createAisModuleHandlers({
-            worldId: current.worldId,
-            packageId: module.packageId,
-            emittedEvents: module.emittedEvents,
-            db: current.db,
-            user: () => ({
-              id: current.gm.client.user?.id ?? "gm",
-              name: current.gm.client.user?.name ?? "GM",
-            }),
-            activeScene: () => activeScene(),
-            actorById: (id) => current.gm.client.store.get("actors", id) as ActorDocument | undefined,
-            select: (request) => requestAisChoice(module.packageId, request),
-            submit: (ops) => current.gm.client.submit(ops),
-            notify: (message, level) => {
-              notifyLog = [...notifyLog.slice(-49), { message, level }];
-            },
-            emitModuleEvent: (eventId, payload) => emitAisModuleEvent(module.packageId, eventId, payload),
-            newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID().slice(0, 8)}`,
-            assertCapability,
-          });
-          const frame = new AisModuleIframe({
-            packageId: module.packageId,
-            source: module.source,
-            grantedCapabilities: module.capabilities,
-            handlers,
-            commands: module.commands,
-            isModuleCurrentlyActive: assertModuleActive,
-            isCapabilityCurrentlyGranted: async (capability) => {
-              try {
-                await assertCapability(capability);
-                return true;
-              } catch {
-                return false;
-              }
-            },
-          });
-          aisModuleHosts.set(module.packageId, frame);
-        }
-        current.host.setAisMacroModuleInvoker(async (invocation) => {
-          if (!invocation.isActive()) throw new Error("Script action was cancelled");
-          const moduleBoot = current.automationBoot.modules.find((candidate) => candidate.packageId === invocation.moduleId);
-          const moduleHost = aisModuleHosts.get(invocation.moduleId);
-          const checkModuleActive = aisModuleChecks.get(invocation.moduleId);
-          if (!moduleBoot || !moduleHost || !checkModuleActive)
-            throw new Error(`AIS module ${invocation.moduleId} is not enabled and locally approved on this host`);
-          await checkModuleActive();
-          if (!invocation.isActive()) throw new Error("Script action was cancelled");
-          return moduleHost.invokeCommand(invocation.commandId, invocation.input, {
-            sceneId: invocation.sceneId,
-            callerId: invocation.callerId,
-            requestId: invocation.requestId,
-            runAs: invocation.runAs,
-            isActive: invocation.isActive,
-          });
+        aisRuntime = new AisRuntime({
+          app: current,
+          activeSceneId: () => activeScene()?._id ?? null,
+          select: requestAisChoice,
+          cancelChoice: (packageId) => { if (pendingAisChoice?.packageId === packageId) finishAisChoice(null); },
+          notify: (message, level) => { notifyLog = [...notifyLog.slice(-49), { message, level }]; },
+          onStatus: (statuses) => { aisRuntimeStatuses = statuses; },
         });
-        current.gm.bus.on("snapshot", (message) => {
-          emitAisEvent("world.snapshot", { seq: message.seq });
-        });
-        current.gm.bus.on("ops", (message) => {
-          emitAisEvent("world.ops.committed", {
-            seq: message.envelope.seq,
-            operationCount: message.envelope.ops.length,
-          });
-          const scene = activeScene();
-          if (!scene) return;
-          for (const change of aisTokenLightChanges(message.envelope.ops)) {
-            if (change.sceneId !== scene._id) continue;
-            const token = scene.tokens.find((candidate) => candidate._id === change.tokenId && !candidate.hidden);
-            if (!token) continue;
-            emitAisEvent("scene.token.light.changed", {
-              sceneId: scene._id,
-              tokenId: token._id,
-              light: projectAisTokenLight(token),
-            });
-          }
-        });
-        current.gm.bus.on("turnPhase", (message) => {
-          emitAisEvent("turn.phase.changed", {
-            turnId: message.turnId,
-            phase: message.phase,
-            ...(message.mode === "stepwise" || message.mode === "realtime" || message.mode === "simultaneous"
-              ? { mode: message.mode }
-              : {}),
-            ...(message.paused === undefined ? {} : { paused: message.paused }),
-          });
-        });
-        current.gm.bus.on("turnReport", (message) => {
-          emitAisEvent("turn.report.committed", {
-            turnId: message.turnId,
-            turn: message.report.turn,
-            rulesVersion: message.report.rulesVersion,
-          });
-        });
+        appearance = new AisAppearance(current, aisRuntime);
+        offAppearance = appearance.subscribe((state) => { appearanceState = state; });
+        globalThis.addEventListener("keydown", emergencyAppearance);
+        void appearance.restore().catch((error) => { notifyLog = [...notifyLog.slice(-49), { level: "warn", message: String(error) }]; });
         const offSim = current.gm.bus.on("sim", () => {
           const pool = current.gm.client.simReplica;
           if (pool) rtInterp.push(pool, performance.now());
@@ -5500,39 +5440,30 @@ const WALL_PICK_RADIUS = 12;
 
 <svelte:window ondragenter={onWindowDragEnter} ondragleave={onWindowDragLeave} ondragover={onWindowDragOver} ondrop={onWindowDrop} onpaste={onWindowPaste} />
 
-<main class="vtt-ui gm-app">
-  <header class="app-header">
-    <div class="brand-badge" aria-hidden="true">✦</div>
-    <div class="header-identity">
-      <p class="eyebrow">ARENASTAR <span> / GM TABLE</span></p>
-      <h1 title={worldName}>{worldName}</h1>
-    </div>
-    <div id="status" class="header-status" aria-live="polite">
-      <span class="status-connected" title="Local game master"><span class="status-indicator"></span> GM online</span>
-      <span class="status-world"><strong class="sr-only">{worldName}.</strong> seq {seq} · tokens {tokenCount}</span>
-      <span data-rules-status title="Strategic ruleset — applies to strategic-scale scenes; tactical scenes are heroes only">strategic rules: {app?.rulesBoot?.source === "package" ? `${app.rulesBoot.packageId} v${app.rulesBoot.version}` : `built-in v${app?.rulesBoot.version ?? "?"}`}</span>
-    </div>
-    <div class="header-actions" aria-label="Game master actions">
-      <label class="header-icon file-control" title="Import map" aria-label="Import map">
-        <Icon name="mapImport" /><span class="sr-only">Import map</span>
-        <input id="map-input" type="file" accept="image/*,video/webm,video/mp4" onchange={importMap} hidden />
-      </label>
-      <button data-icon-button id="add-token" class="header-icon" aria-label="Add token" title="Add token" onclick={addToken}><Icon name="addToken" /></button>
-      <span class="header-separator" aria-hidden="true"></span>
-      <button data-icon-button id="gm-undo" class="header-icon" aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)" onclick={undo}><Icon name="undo" /></button>
-      <button data-icon-button id="gm-redo" class="header-icon" aria-label="Redo (Ctrl+Y)" title="Redo (Ctrl+Y)" onclick={redo}><Icon name="redo" /></button>
-      <button data-icon-button id="gm-macros" class="header-icon" aria-label="Macros" title="Macros" onclick={() => openWindow("macros", "Macros", "macros")}><Icon name="macro" /></button>
-      <button data-icon-button id="gm-settings" class="header-icon" aria-label="World settings" title="World settings" onclick={() => openWindow("settings", "Settings", "settings")}><Icon name="settings" /></button>
-      <span class="header-separator" aria-hidden="true"></span>
-      <button data-icon-button id="export-world" class="header-icon optional-action" aria-label="Export world" title="Export world" onclick={exportWorld}><Icon name="export" /></button>
-      <button data-icon-button id="close-world" class="header-icon optional-action" aria-label="Close world" title="Close world" disabled={closingWorld} onclick={closeWorldSafely}><Icon name="close" /></button>
-      <button data-icon-button id="session-open" class="header-icon session-trigger" bind:this={sessionTrigger} data-session-trigger
-        aria-label="Session & world" aria-expanded={sessionOpen} title="Session & world" onclick={openSession}><Icon name="sliders" /></button>
-      <button id="share" class="invite-trigger" title={share ? "Open session & invitation" : "Invite players"}
-        aria-label={share ? "Open session & invitation" : "Invite players"}
-        onclick={() => { openSession(); if (!share) void beginShare(); }}><Icon name="share" size={18} /><span>{share ? "Session" : "Invite"}</span></button>
-    </div>
-  </header>
+<main class="vtt-ui gm-app workspace" style={appearanceStyle}
+  data-ui-profile={$workspaceUi.profile} data-ui-scheme={$workspaceUi.profile === "roll20" ? $workspaceUi.roll20Scheme : "dark"}
+  data-sidebar-open={contentOpen ? "true" : "false"} data-pages-open={pagesOpen ? "true" : "false"}
+  data-ais-theme={$workspaceUi.profile === "modern" ? appearanceState.active ?? undefined : undefined} data-ui-density={appearanceState.preferences.density}>
+  <input id="map-input" type="file" accept="image/*,video/webm,video/mp4" onchange={importMap} hidden />
+  <WorkspaceChrome {worldName} sceneName={activeScene()?.name ?? ""} {seq} {tokenCount} rulesStatus={rulesStatusLabel}
+    onLayout={() => { workspaceOpen = true; }} onPages={() => { pagesOpen = !pagesOpen; }}
+    onAppearance={appearance ? () => { appearanceOpen = true; } : null}
+    onInvite={() => { openSession(); if (!share) void beginShare(); }}
+    actions={[
+      { id: "add-token", label: "Add token", icon: "addToken", run: () => addToken() },
+      { id: "gm-undo", label: "Undo (Ctrl+Z)", icon: "undo", run: undo },
+      { id: "gm-redo", label: "Redo (Ctrl+Y)", icon: "redo", run: redo },
+      { id: "gm-macros", label: "Macros", icon: "macro", run: () => openWindow("macros", "Macros", "macros") },
+      { id: "gm-settings", label: "World settings", icon: "settings", run: () => openWindow("settings", "Settings", "settings") },
+      { id: "export-world", label: "Export world", icon: "export", run: () => { void exportWorld(); } },
+      { id: "import-map-action", label: "Import map", icon: "images", run: () => document.getElementById("map-input")?.click() },
+      { id: "session-open", label: "Session & world", icon: "share", run: openSession },
+      { id: "gm-perms", label: "Permissions", icon: "permissions", run: () => openWindow("permissions", "Permissions", "permissions") },
+      { id: "gm-extras", label: "GM extras", icon: "extras", run: () => openWindow("gmextras", "GM Extras", "gmextras") },
+      { id: "gm-armies", label: "Armies", icon: "armies", run: () => openWindow("armies", "Armies", "armies") },
+      { id: "gm-tables", label: "Tables", icon: "tables", run: () => openTablesWindow() },
+      { id: "close-world", label: "Close world", icon: "close", disabled: closingWorld, run: () => { void closeWorldSafely(); } }
+    ]} />
   {#if saveError}
     <div class="save-warning" role="alert" data-save-warning>
       <span>Saving needs attention. Keep this world open and check available storage. {saveError}</span>
@@ -5545,14 +5476,21 @@ const WALL_PICK_RADIUS = 12;
   {#if app}
     <section class="shell" aria-label="Game table">
       <div class="canvas-col">
-        <div class="scene-bar">
+        <div class="players workspace-presence" aria-label="Players">
+          {#each playerUsers as u (u._id)}
+            <span class="player" data-player={u._id}
+              >{u.name} <small>{u.role}</small></span
+            >
+          {/each}
+        </div>
+        <div class="scene-bar" data-workspace-scene-menu>
         <nav class="scenenav" aria-label="Scenes" data-testid="scene-nav">
           {#each scenes as sc (sc._id)}
             <button
               type="button"
               class:active={activeScene()?._id === sc._id}
               data-scene={sc._id}
-              onclick={() => activateScene(sc._id)}
+              onclick={() => { activateScene(sc._id); pagesOpen = false; }}
             >
               {sc.name}
             </button>
@@ -5589,13 +5527,7 @@ const WALL_PICK_RADIUS = 12;
             </div>
           {/if}
         </nav>
-        <div class="players" aria-label="Players">
-          {#each playerUsers as u (u._id)}
-            <span class="player" data-player={u._id}
-              >{u.name} <small>{u.role}</small></span
-            >
-          {/each}
-        </div>
+
         </div>
         <div class="dice3d-host" bind:this={dice3dHost}></div>
         <div class="board" style="position: relative;">
@@ -5649,7 +5581,7 @@ const WALL_PICK_RADIUS = 12;
             </div>
           {/if}
           <div class="toolrail">
-            <CanvasToolbar
+            <CanvasToolbar onPanel={selectContent}
               bind:active={canvasTool}
               bind:collapsed={canvasToolbarCollapsed}
               bind:layer={canvasLayer}
@@ -6106,6 +6038,7 @@ const WALL_PICK_RADIUS = 12;
           onBackupFolder={typeof globalThis.showDirectoryPicker === "function" ? exportToFolder : null}
           packages={app.packages}
           rulesBoot={app.rulesBoot}
+          {aisRuntimeStatuses}
           {agents}
           bindings={DEFAULT_BINDINGS}
           isGM={true}
@@ -6201,32 +6134,17 @@ const WALL_PICK_RADIUS = 12;
           {/each}
         </div>
       </div>
+      <div class="workspace-bottom">
+        <MacroHotbar slots={hotbarSlots} onRun={runSlot} onArrange={() => openWindow("macros", "Macros", "macros")} onAssign={assignGmHotbar} />
+        {#if app && quickbarActor}<QuickbarRow client={app.gm.client} actor={quickbarActor} targets={quickbarTargets} onAimSpell={requestQuickbarSpellAim} />{/if}
+      </div>
       <aside class="sidebar" data-gm-dock aria-label="Game content">
-        <div class="dock-heading">
-          <div><span class="dock-eyebrow">YOUR TABLE</span><h2>{TABS.find((tab) => tab.id === activeTab)?.label ?? "Game content"}</h2></div>
-          <div class="dock-actions" aria-label="GM libraries">
-            <button data-icon-button id="gm-perms" type="button" aria-label="Permissions" title="Permissions" onclick={() => openWindow("permissions", "Permissions", "permissions")}><Icon name="permissions" size={18} /></button>
-            <button data-icon-button id="gm-extras" type="button" aria-label="GM extras" title="GM extras" onclick={() => openWindow("gmextras", "GM Extras", "gmextras")}><Icon name="extras" size={18} /></button>
-            <button data-icon-button id="gm-armies" type="button" aria-label="Armies" title="Armies" onclick={() => openWindow("armies", "Armies", "armies")}><Icon name="armies" size={18} /></button>
-            <button data-icon-button id="gm-tables" type="button" aria-label="Tables" title="Tables" onclick={() => openTablesWindow()}><Icon name="tables" size={18} /></button>
-          </div>
-        </div>
-        <nav class="tabs" aria-label="Sidebar tabs">
-          {#each TABS as t (t.id)}
-            <button
-              type="button"
-              class:active={activeTab === t.id}
-              data-tab={t.id}
-              aria-label={t.label}
-              title={t.label}
-              onclick={() => (activeTab = t.id)}
-            >
-              <Icon name={t.id} size={19} /><span>{t.label}</span>
-            </button>
-          {/each}
-        </nav>
+        <WorkspaceTabs active={activeTab} onSelect={selectContent} tabs={TABS} />
+        <div class="dock-heading"><h2>{workspaceTabLabel($workspaceUi.profile, activeTab)}</h2><button data-icon-button type="button" aria-label="Collapse content panel" onclick={() => setWorkspacePanel(false)}><Icon name="chevronRight" size={16}/></button></div>
         <div class="tabbody" data-active-tab={activeTab}>
-          {#if activeTab === "chat"}
+          {#if ["settings", "placeables", "macros"].includes(activeTab)}
+            <WorkspaceDirectory kind={activeTab} items={directoryItems} onAction={directoryAction} onLayout={() => { workspaceOpen = true; }} />
+          {:else if activeTab === "chat"}
             <ChatPanel
               client={app.gm.client}
               bus={app.gm.bus}
@@ -6290,17 +6208,6 @@ const WALL_PICK_RADIUS = 12;
           {:else if activeTab === "compendia"}
             <CompendiaPanel client={app.gm.client} packages={app.packages} />
           {/if}
-        </div>
-        <div class="dock-footer">
-        <MacroHotbar slots={hotbarSlots} onRun={runSlot} />
-        {#if app}
-          <QuickbarRow
-            client={app.gm.client}
-            actor={quickbarActor}
-            targets={quickbarTargets}
-            onAimSpell={requestQuickbarSpellAim}
-          />
-        {/if}
         </div>
       </aside>
     </section>
@@ -6479,6 +6386,13 @@ const WALL_PICK_RADIUS = 12;
     onDismiss={() => (sharedImageAnnouncement = null)}
   />
 {/if}
+{#if workspaceOpen}
+  <WorkspacePicker onClose={() => { workspaceOpen = false; }} onColors={appearance ? () => { appearanceOpen = true; } : null} />
+{/if}
+{#if appearanceOpen && appearance}
+  <AppearancePanel controller={appearance} onClose={() => { appearanceOpen = false; }} />
+{/if}
+
 <style>
   .ais-choice-backdrop { position: fixed; inset: 0; z-index: 6000; display: grid; place-items: center; padding: 20px; background: #050810bb; backdrop-filter: blur(3px); }
   .ais-choice-dialog { position: static; margin: 0; width: min(480px, 100%); max-height: min(80vh, 720px); overflow: auto; display: grid; gap: 12px; padding: 20px; border: 1px solid #7893b4; border-radius: 14px; background: #141b26; color: #e8edf6; box-shadow: 0 18px 70px #000b; }
@@ -6569,7 +6483,7 @@ const WALL_PICK_RADIUS = 12;
   }
   /* The table is the product's home, not a card under a landing-page header. */
   main.gm-app {
-    --gm-dock-width: clamp(312px, 25vw, 376px);
+    --gm-dock-width: var(--vtt-sidebar-width, clamp(312px, 25vw, 376px));
     width: 100%;
     height: 100dvh;
     min-height: 480px;
@@ -6580,120 +6494,7 @@ const WALL_PICK_RADIUS = 12;
     overflow: hidden;
     background: #0c141d;
   }
-  .app-header {
-    flex: 0 0 70px;
-    min-height: 70px;
-    display: flex;
-    align-items: center;
-    gap: 13px;
-    padding: 0 16px;
-    border-bottom: 1px solid #344352;
-    background: #17222e;
-    box-shadow: 0 2px 16px #0004;
-    z-index: 23;
-  }
-  .brand-badge {
-    flex: 0 0 36px;
-    width: 36px;
-    height: 36px;
-    display: grid;
-    place-items: center;
-    border-radius: 11px;
-    background: linear-gradient(145deg, #8be8d0, #459d99);
-    color: #142933;
-    font-size: 1.55rem;
-    line-height: 1;
-    box-shadow: 0 3px 16px #47d1aa22;
-  }
-  .header-identity { flex: 0 1 190px; min-width: 95px; overflow: hidden; }
-  .eyebrow {
-    margin: 0 0 2px;
-    color: #7ce3ca;
-    font-size: .63rem;
-    font-weight: 800;
-    letter-spacing: .13em;
-    white-space: nowrap;
-  }
-  .eyebrow span { color: #96aaaF; font-weight: 650; }
-  h1 {
-    margin: 0;
-    overflow: hidden;
-    color: #f5fafb;
-    font-size: 1.12rem;
-    font-weight: 750;
-    line-height: 1.2;
-    letter-spacing: -.018em;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-  #status {
-    flex: 1 1 auto;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    color: #b6c7d0;
-    font-size: .76rem;
-    font-variant-numeric: tabular-nums;
-  }
-  #status strong { color: #e9f1f3; font-weight: 600; }
-  #status [data-rules-status] { overflow: hidden; text-overflow: ellipsis; color: #9daebb; font-size: .73rem; }
-  .status-connected {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    padding: 6px 9px;
-    border: 1px solid #335850;
-    border-radius: 20px;
-    background: #1a3537;
-    color: #b8e9d9;
-    font-size: .72rem;
-    font-weight: 650;
-  }
-  .status-indicator { width: 7px; height: 7px; border-radius: 50%; background: #66dbc0; box-shadow: 0 0 7px #6cebd28c; }
-  .status-world { flex: 0 0 auto; }
-  .header-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 3px; }
-  .header-actions .header-icon,
-  .header-actions .invite-trigger {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    min-width: 36px;
-    height: 36px;
-    min-height: 36px;
-    padding: 0;
-    border: 1px solid transparent;
-    border-radius: 9px;
-    background: transparent;
-    color: #bacbd3;
-    cursor: pointer;
-    text-align: center;
-  }
-  .header-actions .header-icon:hover { background: #2a3c4b; color: #f7fffd; border-color: #466270; }
-  .header-actions .session-trigger { color: #a5e7d9; }
   .header-actions .session-trigger[aria-expanded="true"] { border-color: #48877e; background: #244b49; }
-  .header-actions .invite-trigger {
-    gap: 8px;
-    width: auto;
-    min-width: 87px;
-    padding: 0 12px;
-    margin-left: 5px;
-    border-color: #529e90;
-    background: #255a56;
-    color: #eafff9;
-    font-size: .85rem;
-    font-weight: 700;
-  }
-  .header-actions .invite-trigger:hover { background: #306f65; border-color: #7adac4; }
-  .header-separator { width: 1px; height: 23px; margin-inline: 5px; background: #41515e; }
-  .file-control { position: relative; }
-  .file-control input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .error { margin: 0; padding: 8px 16px; color: #ffb7ae; background: #372020; font-size: .85rem; }
   .shell {
     flex: 1 1 auto;
@@ -6788,8 +6589,8 @@ const WALL_PICK_RADIUS = 12;
     background: #16222e;
   }
   .dock-heading {
-    flex: 0 0 60px;
-    min-height: 60px;
+    flex: 0 0 var(--vtt-dock-heading, 60px);
+    min-height: var(--vtt-dock-heading, 60px);
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -6798,57 +6599,6 @@ const WALL_PICK_RADIUS = 12;
   }
   .dock-eyebrow { color: #81d4c5; font-size: .64rem; font-weight: 800; letter-spacing: .13em; }
   .dock-heading h2, .session-heading h2 { margin: 1px 0 0; font-size: .98rem; font-weight: 700; color: #f0f8f9; }
-  .dock-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 1px; }
-  .dock-actions button {
-    flex: 0 0 32px;
-    display: grid;
-    place-items: center;
-    width: 32px;
-    min-width: 32px;
-    height: 32px;
-    min-height: 32px;
-    padding: 0;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    background: transparent;
-    color: #aabdc6;
-    cursor: pointer;
-  }
-  .dock-actions button:hover { border-color: #527a7b; background: #293f49; color: #edfbf8; }
-  .tabs {
-    flex: 0 0 auto;
-    display: flex;
-    flex-wrap: nowrap;
-    gap: 2px;
-    min-height: 46px;
-    max-width: 100%;
-    overflow-x: auto;
-    overflow-y: hidden;
-    white-space: nowrap;
-    padding: 0 10px;
-    border-bottom: 1px solid #3b4b59;
-    scrollbar-width: thin;
-    scrollbar-color: #56737b transparent;
-  }
-  .tabs button {
-    flex: 1 0 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: auto;
-    min-width: 39px;
-    min-height: 44px;
-    padding: 7px;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
-    background: transparent;
-    color: #a8b9c4;
-    cursor: pointer;
-  }
-  .tabs button span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .tabs button:hover { color: #effcfa; background: #243440; }
-  .tabs button.active { border-bottom-color: #74d9c5; background: #1b3037; color: #b9f7e4; }
   .tabbody {
     flex: 1 1 auto;
     min-height: 0;
@@ -6861,17 +6611,6 @@ const WALL_PICK_RADIUS = 12;
   }
   .tabbody :global(.chat) { min-height: 100%; height: 100%; }
   .tabbody :global(#chat-log) { flex: 1 1 auto; max-height: none; min-height: 120px; border-color: #344957; background: #101a24; }
-  .dock-footer {
-    flex: 0 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    max-height: 190px;
-    overflow-y: auto;
-    padding: 8px 10px;
-    border-top: 1px solid #3a4b59;
-    background: #192834;
-  }
   .board { flex: 1 1 auto; display: flex; min-width: 0; min-height: 0; }
   .toolrail { flex: 0 0 auto; display: flex; min-height: 0; }
   .canvas-host { flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; background: #0d151e; }
@@ -6934,32 +6673,14 @@ const WALL_PICK_RADIUS = 12;
   .rules-boot-error { margin: 0; }
   button { display: block; width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 9px; border: 1px solid #465d6c; background: #243543; color: #f2f8f8; cursor: pointer; text-align: center; }
   button:hover:not(:disabled) { background: #30505c; border-color: #78c9b8; }
-  @media (max-width: 1220px) {
-    #status [data-rules-status] { display: none; }
-    .app-header { gap: 9px; padding-inline: 12px; }
-    .header-identity { flex-basis: 150px; }
-  }
   @media (max-width: 1100px) {
     /* Narrow tables keep the full board in view while setup is open. */
     .session-panel { right: 0; width: min(440px, 100vw); }
   }
   @media (max-width: 930px) {
     main.gm-app { --gm-dock-width: 306px; }
-    .header-status .status-world { display: none; }
-    .header-actions { gap: 0; }
-    .header-separator { margin-inline: 2px; }
   }
   @media (max-width: 710px) {
-    .app-header { flex-basis: 60px; min-height: 60px; gap: 6px; padding-inline: 8px; }
-    .brand-badge { display: none; }
-    .header-identity { flex: 0 0 94px; min-width: 0; }
-    .header-identity .eyebrow span { display: none; }
-    .header-status { display: none !important; }
-    .header-actions { flex: 1 1 auto; min-width: 0; justify-content: flex-end; overflow-x: auto; scrollbar-width: none; }
-    .header-actions::-webkit-scrollbar { display: none; }
-    .header-actions .header-icon { width: 32px; min-width: 32px; }
-    .header-actions .invite-trigger { min-width: 40px; padding-inline: 9px; }
-    .header-actions .invite-trigger span { display: none; }
     .shell { flex-direction: column; }
     .canvas-col { flex: 1 1 auto; min-height: 0; }
     .players { max-width: 30%; }
@@ -6969,7 +6690,6 @@ const WALL_PICK_RADIUS = 12;
     .session-panel { top: 60px; width: min(440px, 100vw); }
     .tabbody { padding: 9px 12px; }
     .tabbody :global(#chat-log) { min-height: 80px; }
-    .dock-footer { display: flex; max-height: 80px; overflow-y: auto; padding: 4px 10px; }
   }
   .invite-panel {
     display: flex;

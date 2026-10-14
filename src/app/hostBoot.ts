@@ -10,6 +10,7 @@ import {
   type AisPackageCandidate,
   type AisResolution,
 } from "../core/automationInterconnect";
+import { aisOwnSource, aisRuntimePackage, aisRuntimeResources } from "../packages/aisRuntimePackage";
 import { packageContentHash } from "../packages/packageHash";
 import { CloudBackupController } from "../storage/cloud/cloudBackup";
 import { acquireWorldLock } from "../storage/worldLock";
@@ -131,6 +132,10 @@ export interface PackageSummary {
   hash: string | null;
   requestedCapabilities: AisCapability[];
   grantedCapabilities: AisCapability[];
+  runtimeProvider?: boolean;
+  runtimeProviderId?: string;
+  runtimeHash?: string;
+  runtimeError?: string;
   /** Manifest-declared callable entry points; these are not arbitrary string dispatch. */
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
@@ -151,6 +156,13 @@ export interface HostAutomationModuleBoot {
   version: string;
   hash: string;
   source: string;
+  resources?: Record<string, string>;
+  appearance?: boolean;
+  runtimeProvider?: boolean;
+  runtimeHash?: string;
+  runtimeContext?: import("../core/documents").Json;
+  runtimeDependencies?: Array<{ packageId: string; version: string; hash: string; capabilities: AisCapability[] }>;
+  blockedReason?: string;
   capabilities: AisCapability[];
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
@@ -173,6 +185,10 @@ export interface HostAutomationModuleSummary {
   approved: boolean;
   requestedCapabilities: AisCapability[];
   grantedCapabilities: AisCapability[];
+  runtimeProvider?: boolean;
+  runtimeProviderId?: string;
+  runtimeHash?: string;
+  runtimeError?: string;
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
 }
@@ -235,9 +251,13 @@ export interface HostPackages {
   compendia(): Promise<Array<{ packageId: string; packFile: string; pack: CompendiumPack }>>;
   /** Current AIS profile, module approvals and provider diagnostics. */
   automation(): Promise<HostAutomationState>;
+  /** Host-local explicit activation; never exposes code/resources to player RPC. */
+  runtimePlan(): Promise<HostAutomationBoot>;
+  /** Local runtime invalidation. Package edits do not hot-load newly approved code. */
+  onAutomationChanged(listener: () => void | Promise<void>): () => void;
   /** Bounded, text-only view of an entry file so local approval can be informed. */
   previewAutomationModule(id: string): Promise<
-    | { ok: true; entry: string; source: string; truncated: boolean }
+    | { ok: true; entry: string; source: string; truncated: boolean; hash: string; runtimeHash?: string }
     | { ok: false; error: string }
   >;
   /** Add an exact version/hash lock to the world-shared profile; code consent is separate. */
@@ -246,7 +266,7 @@ export interface HostPackages {
   /** Choose a declared exclusive provider, enabling that provider if needed. */
   selectAutomationProvider(slotId: string, providerRef: string): Promise<{ ok: true } | { ok: false; error: string }>;
   /** Replace this package's local capability allow-list (hash-bound to installed bytes). */
-  grantAutomationCapabilities(id: string, capabilities: AisCapability[]): Promise<{ ok: true } | { ok: false; error: string }>;
+  grantAutomationCapabilities(id: string, capabilities: AisCapability[], reviewedHash?: string, reviewedRuntimeHash?: string): Promise<{ ok: true } | { ok: false; error: string }>;
   /** Clear this package's local code/capability approval. */
   revokeAutomationApproval(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
 }
@@ -343,7 +363,12 @@ function resolveAutomationState(
     const lock = profile.modules.find((entry) => entry.id === rec.id);
     const enabled = lock?.version === rec.version && lock.hash === hash;
     const savedGrant = world?.automationGrants?.[rec.id];
-    const approved = savedGrant?.hash === hash && Array.isArray(savedGrant.capabilities);
+    let runtime: ReturnType<typeof aisRuntimePackage> = null;
+    let runtimeError: string | undefined;
+    try { runtime = aisRuntimePackage(rec, records); }
+    catch (error) { runtimeError = error instanceof Error ? error.message : String(error); }
+    const approved = savedGrant?.hash === hash && Array.isArray(savedGrant.capabilities) &&
+      (!rec.manifest.interconnect.runtime || (!!runtime && runtime.hash === savedGrant.runtimeHash));
     const grantedCapabilities = approved
       ? savedGrant.capabilities.filter((capability) => requestedCapabilities.includes(capability))
       : [];
@@ -356,6 +381,10 @@ function resolveAutomationState(
       approved,
       requestedCapabilities,
       grantedCapabilities,
+      ...(rec.manifest.interconnect.runtimeProvider ? { runtimeProvider: true } : {}),
+      ...(rec.manifest.interconnect.runtime ? { runtimeProviderId: rec.manifest.interconnect.runtime.provider } : {}),
+      ...(runtime ? { runtimeHash: runtime.hash } : {}),
+      ...(runtimeError ? { runtimeError } : {}),
       commands,
       emittedEvents,
     });
@@ -367,7 +396,27 @@ function resolveAutomationState(
       packageId: rec.id,
       version: rec.version,
       hash,
-      source: rec.files[rec.manifest.interconnect.entry] ?? "",
+      source: runtime?.source ?? aisOwnSource(rec),
+      resources: aisRuntimeResources(rec),
+      ...(rec.manifest.interconnect.provides?.some((slot) => slot.id === "ui.theme" && slot.mode === "exclusive" && slot.contract === 1)
+        ? { appearance: true } : {}),
+      ...(rec.manifest.interconnect.runtimeProvider ? { runtimeProvider: true } : {}),
+      ...(runtime ? {
+        runtimeHash: runtime.hash,
+        runtimeContext: { profile: rec.manifest.interconnect.runtime?.profile ?? "",
+          configuration: runtime.configuration, packageId: rec.id,
+          providerId: runtime.provider.id, sourceHash: hash, runtimeHash: runtime.hash },
+        runtimeDependencies: [{ packageId: runtime.provider.id, version: runtime.provider.version,
+          hash: packageContentHash(runtime.provider.files),
+          capabilities: world?.automationGrants?.[runtime.provider.id]?.capabilities ?? [] }],
+        ...(!(world?.automationGrants?.[runtime.provider.id]?.hash === packageContentHash(runtime.provider.files) &&
+          profile.modules.some((lock) => lock.id === runtime.provider.id && lock.hash === packageContentHash(runtime.provider.files)))
+          ? { blockedReason: `Enable and locally approve runtime provider ${runtime.provider.id}, then reload` } : {}),
+      } : {}),
+      ...((rec.manifest.interconnect.runtimeProvider || runtime) &&
+          (!grantedCapabilities.includes("runtime.execute") || (runtime &&
+            !world?.automationGrants?.[runtime.provider.id]?.capabilities.includes("runtime.execute")))
+        ? { blockedReason: "Enable and locally approve runtime provider and guest with runtime.execute, then reload" } : {}),
       capabilities: grantedCapabilities,
       commands,
       emittedEvents,
@@ -883,6 +932,7 @@ async function bootHostAppLocked(
   saves.addDomain(() => assets.saveWork.drain());
   saves.addDomain(() => channel.saveState());
   const packageWork = new SaveWork();
+  const automationListeners = new Set<() => void | Promise<void>>();
   saves.addDomain(() => packageWork.drain());
   const removeLifecycle = installHostLifecycle(saves);
 
@@ -907,6 +957,10 @@ async function bootHostAppLocked(
       hash: module?.hash ?? null,
       requestedCapabilities: module?.requestedCapabilities ?? [],
       grantedCapabilities: module?.grantedCapabilities ?? [],
+      ...(module?.runtimeProvider ? { runtimeProvider: true } : {}),
+      ...(module?.runtimeProviderId ? { runtimeProviderId: module.runtimeProviderId } : {}),
+      ...(module?.runtimeHash ? { runtimeHash: module.runtimeHash } : {}),
+      ...(module?.runtimeError ? { runtimeError: module.runtimeError } : {}),
       commands: module?.commands ?? [],
       emittedEvents: module?.emittedEvents ?? [],
       approved: module?.approved ?? false,
@@ -1101,19 +1155,33 @@ async function bootHostAppLocked(
     async automation() {
       return automationState();
     },
+    async runtimePlan() {
+      const [records, world] = await Promise.all([listPackages(db, meta.worldId), getWorld(db, meta.worldId)]);
+      return resolveAutomationState(records, world).boot;
+    },
+    onAutomationChanged(listener) {
+      automationListeners.add(listener);
+      return () => { automationListeners.delete(listener); };
+    },
     async previewAutomationModule(id) {
       const rec = await getPackage(db, meta.worldId, id);
       if (!rec || rec.type !== "module" || !rec.manifest.interconnect)
         return { ok: false, error: `AIS module not imported: ${id}` };
       const entry = rec.manifest.interconnect.entry;
-      const source = rec.files[entry];
-      if (source === undefined) return { ok: false, error: `AIS entry ${entry} is missing` };
+      let source: string;
+      let runtime: ReturnType<typeof aisRuntimePackage>;
+      try {
+        source = aisOwnSource(rec);
+        runtime = aisRuntimePackage(rec, await listPackages(db, meta.worldId));
+      } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
       const limit = 120_000;
       return {
         ok: true,
         entry,
         source: source.slice(0, limit),
         truncated: source.length > limit,
+        hash: packageContentHash(rec.files),
+        ...(runtime ? { runtimeHash: runtime.hash } : {}),
       };
     },
     async enableAutomationModule(id) {
@@ -1199,11 +1267,17 @@ async function bootHostAppLocked(
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
     },
-    async grantAutomationCapabilities(id, capabilities) {
+    async grantAutomationCapabilities(id, capabilities, reviewedHash, reviewedRuntimeHash) {
       try {
         const rec = await getPackage(db, meta.worldId, id);
         if (!rec || rec.type !== "module" || !rec.manifest.interconnect)
           return { ok: false, error: `AIS module not imported: ${id}` };
+        const hash = packageContentHash(rec.files);
+        if (reviewedHash !== undefined && reviewedHash !== hash)
+          return { ok: false, error: "Package changed after the source preview. Review the new code before approving it." };
+        const runtime = aisRuntimePackage(rec, await listPackages(db, meta.worldId));
+        if (runtime && runtime.hash !== reviewedRuntimeHash)
+          return { ok: false, error: "Runtime composition changed or was not reviewed. Preview guest and adapter code before approval." };
         const requested = rec.manifest.interconnect.capabilities ?? [];
         const grants = [...new Set(capabilities)];
         const unsupported = grants.filter((capability) => !requested.includes(capability));
@@ -1211,7 +1285,7 @@ async function bootHostAppLocked(
           return { ok: false, error: `module did not request ${unsupported.join(", ")}` };
         const world = await getWorld(db, meta.worldId);
         const next = { ...(world?.automationGrants ?? {}) };
-        next[id] = { hash: packageContentHash(rec.files), capabilities: grants };
+        next[id] = { hash, capabilities: grants, ...(runtime ? { runtimeHash: runtime.hash } : {}) };
         await persister.patchWorld({ automationGrants: next });
         return { ok: true };
       } catch (error) {
@@ -1267,19 +1341,35 @@ async function bootHostAppLocked(
     },
   };
 
+  // Serialize package read/modify/write operations, then invalidate running modules before
+  // acknowledging the edit. SaveWork also covers the invalidation barrier.
+  let packageTail: Promise<unknown> = Promise.resolve();
+  const mutatePackage = <T>(work: () => Promise<T>): Promise<T> => packageWork.run(() => {
+    const next = packageTail.then(async () => {
+      try { return await work(); }
+      finally {
+        for (const listener of automationListeners) {
+          try { await listener(); }
+          catch (error) { console.error("AIS runtime invalidation failed", error); }
+        }
+      }
+    });
+    packageTail = next.catch(() => {});
+    return next;
+  });
   const packages: HostPackages = {
     ...packageImpl,
-    importZip: (bytes) => packageWork.run(() => packageImpl.importZip(bytes)),
-    activate: (id) => packageWork.run(() => packageImpl.activate(id)),
-    deactivate: () => packageWork.run(() => packageImpl.deactivate()),
-    grantTrust: (id) => packageWork.run(() => packageImpl.grantTrust(id)),
-    revokeTrust: (id) => packageWork.run(() => packageImpl.revokeTrust(id)),
+    importZip: (bytes) => mutatePackage(() => packageImpl.importZip(bytes)),
+    activate: (id) => mutatePackage(() => packageImpl.activate(id)),
+    deactivate: () => mutatePackage(() => packageImpl.deactivate()),
+    grantTrust: (id) => mutatePackage(() => packageImpl.grantTrust(id)),
+    revokeTrust: (id) => mutatePackage(() => packageImpl.revokeTrust(id)),
     automation: () => packageWork.run(() => packageImpl.automation()),
-    enableAutomationModule: (id) => packageWork.run(() => packageImpl.enableAutomationModule(id)),
-    disableAutomationModule: (id) => packageWork.run(() => packageImpl.disableAutomationModule(id)),
-    selectAutomationProvider: (slotId, providerRef) => packageWork.run(() => packageImpl.selectAutomationProvider(slotId, providerRef)),
-    grantAutomationCapabilities: (id, capabilities) => packageWork.run(() => packageImpl.grantAutomationCapabilities(id, capabilities)),
-    revokeAutomationApproval: (id) => packageWork.run(() => packageImpl.revokeAutomationApproval(id)),
+    enableAutomationModule: (id) => mutatePackage(() => packageImpl.enableAutomationModule(id)),
+    disableAutomationModule: (id) => mutatePackage(() => packageImpl.disableAutomationModule(id)),
+    selectAutomationProvider: (slotId, providerRef) => mutatePackage(() => packageImpl.selectAutomationProvider(slotId, providerRef)),
+    grantAutomationCapabilities: (id, capabilities, reviewedHash, reviewedRuntimeHash) => mutatePackage(() => packageImpl.grantAutomationCapabilities(id, capabilities, reviewedHash, reviewedRuntimeHash)),
+    revokeAutomationApproval: (id) => mutatePackage(() => packageImpl.revokeAutomationApproval(id)),
   };
   const cloudBackups = new CloudBackupController({
     worldId: meta.worldId,

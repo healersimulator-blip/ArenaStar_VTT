@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
-import { entry } from "./lib";
+import { chromeAction, entry, openSceneNav } from "./lib";
 
 test.describe("window manager + GM tools (§10)", () => {
   test("windows open, drag, resize, z-order", async ({ page }) => {
     await page.goto(entry + "?e2e=1");
-    await page.click("#gm-perms");
+    await chromeAction(page, "gm-perms");
     const win = page.locator('[data-window="permissions"]');
     await expect(win).toBeVisible();
     const before = await win.boundingBox();
@@ -91,8 +91,7 @@ test.describe("window manager + GM tools (§10)", () => {
     // The GM toolbar's Armies button opens the armies tab inside the standard
     // window manager chrome — the same chrome Permissions/Macros/Settings use.
     // Before M14 this surface only existed via the e2eHook harness.
-    await expect(page.locator("#gm-armies")).toBeVisible();
-    await page.click("#gm-armies");
+    await chromeAction(page, "gm-armies");
     const win = page.locator('[data-window="armies"]');
     await expect(win).toBeVisible();
     await expect(win.locator(".armies")).toBeVisible();
@@ -121,11 +120,11 @@ test.describe("window manager + GM tools (§10)", () => {
       )
       .toBe(77);
 
-    await page.click("#scene-add");
+    await openSceneNav(page); await page.click("#scene-add");
     await page.click("#scene-new-blank");
     await expect(page.locator(".scenenav [data-scene]")).toHaveCount(2);
     const second = page.locator(".scenenav [data-scene]").nth(1);
-    await second.click();
+    await openSceneNav(page); await second.click();
     await expect
       .poll(() =>
         page.evaluate(() => {
@@ -142,7 +141,7 @@ test.describe("window manager + GM tools (§10)", () => {
 
   test("permissions window lists users; journal popout opens in a window", async ({ page }) => {
     await page.goto(entry + "?e2e=1");
-    await page.click("#gm-perms");
+    await chromeAction(page, "gm-perms");
     await expect(page.locator("[data-perm-users] tbody tr")).toHaveCount(1); // the GM
     await page.click("[data-window-close]");
 
@@ -158,7 +157,7 @@ test.describe("window manager + GM tools (§10)", () => {
     page,
   }) => {
     await page.goto(entry + "?e2e=1");
-    await page.click("#gm-perms");
+    await chromeAction(page, "gm-perms");
     const win = page.locator('[data-window="permissions"]');
     await expect(win).toBeVisible();
 

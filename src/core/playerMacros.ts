@@ -96,7 +96,7 @@ export function buildPlayerMacro(
   id: string, userId: string, draft: PlayerMacroDraft, previous?: MacroDocument,
 ): MacroDocument {
   const core = previous?.flags.core;
-  const slot = record(core) && typeof core.slot === "number" && Number.isInteger(core.slot) && core.slot >= 1 && core.slot <= 5
+  const slot = record(core) && typeof core.slot === "number" && Number.isInteger(core.slot) && core.slot >= 1 && core.slot <= 10
     ? core.slot : null;
   return { _id: id, type: "macro", kind: draft.kind, name: draft.name, command: draft.command,
     ownership: { default: 0, [userId]: 3 }, flags: { core: {

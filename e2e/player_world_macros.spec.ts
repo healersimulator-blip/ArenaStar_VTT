@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import { strFromU8, unzipSync } from "fflate";
 import type { MacroDocument, UserDocument } from "../src/core/documents";
 import type { WorldFileDocuments } from "../src/host/worldFile";
-import { entry, hostCall, manualFragment, playerCall, waitForSurface } from "./lib";
+import { chromeAction, entry, hostCall, manualFragment, playerCall, waitForSurface } from "./lib";
 
 test.use({ actionTimeout: 15_000 });
 const mine = (page: Page) => page.locator("[data-my-world-macros]");
@@ -37,7 +37,7 @@ async function optIn(host: Page, playerId: string, enabled: boolean): Promise<Lo
   // Close the reviewed source window through its normal UI so it cannot cover Permissions.
   const macroWindow = host.locator('[data-window="macros"]');
   if (await macroWindow.isVisible()) await macroWindow.locator("[data-window-close]").click();
-  await host.locator("#gm-perms").click();
+  await chromeAction(host, "gm-perms");
   const checkbox = permissions(host).locator(`[data-perm-users] tr[data-user="${playerId}"] [data-perm-macro-save]`);
   await expect(checkbox).toBeVisible();
   await checkbox.setChecked(enabled);
@@ -80,7 +80,7 @@ test.describe("GM-enabled personal world macro saving", () => {
       await player.locator("[data-player-macros]").click();
       await expect(player.locator("[data-my-world-macros-tab]")).toHaveCount(0);
       await expect(mine(player).locator("[data-my-macro-save]")).toBeDisabled();
-      await page.locator("#gm-perms").click();
+      await chromeAction(page, "gm-perms");
       const checkbox = permissions(page).locator(`[data-perm-users] tr[data-user="${playerId}"] [data-perm-macro-save]`);
       await expect(checkbox).not.toBeChecked();
       await checkbox.check();
@@ -130,7 +130,7 @@ test.describe("GM-enabled personal world macro saving", () => {
       await expect(myRow(player, "Personal initiative")).toHaveCount(0);
       await expect.poll(async () => (await docs(page)).some((doc) => doc._id === macroId)).toBe(false);
       await player.close(); await other.close();
-      await page.locator("#close-world").click();
+      await chromeAction(page, "close-world");
       await expect(page.locator("[data-world-list]")).toBeVisible();
       await page.locator("#role-import").setInputFiles(zipPath);
       const dialog = page.locator("[data-open-dialog]");
@@ -140,7 +140,7 @@ test.describe("GM-enabled personal world macro saving", () => {
       expect(await hostCall<string>(page, "worldId")).toBe(worldId);
       await expect.poll(async () => (await docs(page)).find((doc) => doc._id === macroId)?.command).toBe("/roll 2d20");
       expect((await docs(page)).find((doc) => doc._id === macroId)?.playerAuthoring).toEqual(archived.playerAuthoring);
-      await page.locator("#gm-perms").click();
+      await chromeAction(page, "gm-perms");
       await expect(permissions(page).locator(`[data-perm-users] tr[data-user="${playerId}"] [data-perm-macro-save]`)).toBeChecked();
     } finally { if (!player.isClosed()) await player.close(); if (!other.isClosed()) await other.close(); }
   });

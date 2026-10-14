@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/Xbozon/rpg-styled-ui",
+  "commit": "ec9d193e145603c163aeeb6411de7ab26fbc9e0e",
+  "mode": "bounded-appearance-adaptation",
+  "files": {
+    "module.json": "b652a85aac064fb92785a05b56bda31e6642951f8d3ebd8abf729150a71863b9",
+    "README.md": "02ff4864e8f6e84c4bc673ad3efa160ce2bcdfcca55e382bda37e9890ebf9ea4",
+    "scripts/rpg-ui.js": "cad63cecd2dbeb3b215fa81522a12564a4c216a51fe125d01bba0e87396add6d",
+    "css/rpg-ui.css": "80c2f791253bedd1b7765b4ab2b9673e6285242e7ed34bfbb9ff93dfde0ec644",
+    "css/compatibility.css": "d51852534908acbc16998f0d9df0dce5fadc92d33750a56cd7ef52dddcd0bd5f",
+    "lang/en.json": "25471a7e78f637cb662dca7c6698830c2b029dec270431c50cc7ceb2a425319a",
+    "ui/frames/chat-background.webp": "06006c45b610e8bf25e211930360cc15512e0c5df29fc8bb09131b2169d4fa8a",
+    "ui/frames/header.webp": "023b54d2db177e9a6551025e9fbae4aee01f238a2bec3c6023fe511a68ab158e",
+    "ui/buttons/button-bg.webp": "d9a0d345ff3a763e68e8d23051caf287ce8bc6ae73012f5f436a8c9577675bff"
+  }
+}

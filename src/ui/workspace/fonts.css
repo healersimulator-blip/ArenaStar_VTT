@@ -1,0 +1,8 @@
+/* Locally bundled open fonts; woff2-only avoids shipping duplicate formats. */
+@font-face { font-family:Inter; font-style:normal; font-weight:400; font-display:swap; src:url('@fontsource/inter/files/inter-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family:Inter; font-style:normal; font-weight:500; font-display:swap; src:url('@fontsource/inter/files/inter-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family:Inter; font-style:normal; font-weight:600; font-display:swap; src:url('@fontsource/inter/files/inter-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family:'Roboto Condensed'; font-style:normal; font-weight:400; font-display:swap; src:url('@fontsource/roboto-condensed/files/roboto-condensed-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family:'Roboto Condensed'; font-style:normal; font-weight:600; font-display:swap; src:url('@fontsource/roboto-condensed/files/roboto-condensed-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family:Roboto; font-style:normal; font-weight:400; font-display:swap; src:url('@fontsource/roboto/files/roboto-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family:Roboto; font-style:normal; font-weight:500; font-display:swap; src:url('@fontsource/roboto/files/roboto-latin-500-normal.woff2') format('woff2'); }

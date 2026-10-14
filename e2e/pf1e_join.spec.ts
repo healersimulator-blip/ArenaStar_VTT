@@ -2,7 +2,7 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { entry, manualFragment } from "./lib";
+import { chromeAction, entry, manualFragment } from "./lib";
 
 /**
  * N01/N02 (PF1e_Unified_TODO §2) — the browser half of the multiplayer gate.
@@ -216,7 +216,7 @@ test.describe("PF1e multiplayer join (N01/N02)", () => {
       expect(plInfo?.version).toBe(gmInfo?.version);
 
       // ── GM: two factions + armies, grant the player vision, start ────────
-      await host.click("#gm-extras");
+      await chromeAction(host, "gm-extras");
       const win = host.locator('[data-window="gmextras"]');
       await expect(win).toBeVisible();
       await host.fill("#faction-name", "Ironhost");
@@ -241,7 +241,7 @@ test.describe("PF1e multiplayer join (N01/N02)", () => {
         )
         .toBe(2);
 
-      await host.click("#gm-perms");
+      await chromeAction(host, "gm-perms");
       const perms = host.locator('[data-window="permissions"]');
       await expect(perms).toBeVisible();
       await perms.locator("[data-perm-coll]").selectOption("factions");

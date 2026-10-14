@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/wand-and-widgets/your-flavor",
+  "commit": "fb0bbc87e9a6bb30b7fca8c5a042f15a1eec9b5b",
+  "mode": "bounded-appearance-adaptation",
+  "files": {
+    "module.json": "7f21bafe56ad562fc9756304dc678390bc8a67955fc86dc865872663a20b6155",
+    "README.md": "79f814898cedb8f533f5011f56af76f491e27a794773f086b861fecef565622c",
+    "LICENSE": "b61a2fab34b5539f3d1317e42480a0a7ff05e431abe378a1ba00b8e416bde9ec",
+    "scripts/style-tokens.js": "df222b877beb1b666723348b1876b866c95913a07da957569f38ead407ea8244",
+    "scripts/constants.js": "7f583bb8fd79a52e6e73ba86713e3f65ea7052f92160adf72dd91ad6684ce561",
+    "scripts/config-normalizer.js": "cc96042011767ebd73699125b2b6e90cce5a7eccee4c51dff8db498db4c56b97",
+    "scripts/icon-registry.js": "012594d1e76db4bfacb1a8ea8c28961c7439cd38d0ae89c2fa25ae9ef96ca9f6"
+  }
+}

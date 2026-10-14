@@ -24,7 +24,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { strFromU8, unzipSync } from "fflate";
-import { entry, manualFragment } from "./lib";
+import { chromeAction, entry, manualFragment } from "./lib";
 
 const distPackages = fileURLToPath(
   new URL("../dist/packages", import.meta.url),
@@ -445,7 +445,7 @@ test.describe("V05 — two-peer mass-battle acceptance", () => {
       expect(plInfo?.version).toBe(gmInfo?.version);
 
       // ── a real campaign both peers can see ───────────────────────────────
-      await host.click("#gm-extras");
+      await chromeAction(host, "gm-extras");
       const win = host.locator('[data-window="gmextras"]');
       await expect(win).toBeVisible();
       await host.fill("#faction-name", "Ironhost");
@@ -472,7 +472,7 @@ test.describe("V05 — two-peer mass-battle acceptance", () => {
       // ownership on — without this grant the campaign resolves entirely on the
       // host and the joiner's replica never advances, which is a silent
       // replication gap rather than a visible failure.
-      await host.click("#gm-perms");
+      await chromeAction(host, "gm-perms");
       const perms = host.locator('[data-window="permissions"]');
       await expect(perms).toBeVisible();
       await perms.locator("[data-perm-coll]").selectOption("factions");

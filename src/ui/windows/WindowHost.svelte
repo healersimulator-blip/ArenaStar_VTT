@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { AisRuntimeStatuses } from "../../app/aisRuntime";
   import type { CloudBackupController } from "../../storage/cloud/cloudBackup";
   import type { SaveCoordinator } from "../../storage/saveCoordinator";
   /**
@@ -52,6 +53,7 @@
     onRedo,
     packages = null,
     rulesBoot = null,
+    aisRuntimeStatuses = {},
     agents = null,
     saves = null,
     cloud = null,
@@ -95,6 +97,7 @@
     packages?: HostPackages | null;
     /** Which strategic ruleset booted (Settings → ruleset section status line). */
     rulesBoot?: HostRulesBoot | null;
+    aisRuntimeStatuses?: AisRuntimeStatuses;
     /** §3.2 the connector's agent desk (GM only; null hides the Agents section). */
     agents?: AgentManager | null;
     /** §10 keybinding map for the help window (D-256). */
@@ -310,6 +313,7 @@
             {onRedo}
             {packages}
             {rulesBoot}
+            {aisRuntimeStatuses}
             {agents}
           />
         {:else if win.kind === "journal" && win.data}

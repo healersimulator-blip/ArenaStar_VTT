@@ -25,16 +25,7 @@
  * Two contexts and a real join handshake, like `hexcrawl_fog.spec.ts` — this is a slow spec.
  */
 import { expect, test, type Browser, type Page } from "@playwright/test";
-import {
-  entry,
-  hostCall,
-  manualFragment,
-  playerCall,
-  solidPng,
-  surfaceCallArg,
-  surfaceCallArgs,
-  waitForSurface,
-} from "./lib";
+import { entry, hostCall, manualFragment, openSceneNav, playerCall, solidPng, surfaceCallArg, surfaceCallArgs, waitForSurface } from "./lib";
 
 interface Point {
   x: number;
@@ -67,7 +58,7 @@ const playerCells = (page: Page) => playerCall<CellRow[]>(page, "hexCells");
 async function makeHexcrawlScene(host: Page): Promise<string> {
   await host.goto(entry + "?e2e=1");
   await waitForSurface(host, "app");
-  await host.click("#scene-add");
+  await openSceneNav(host); await host.click("#scene-add");
   await host.click("#scene-new-hexcrawl");
   await host.setInputFiles("[data-hx-map-input]", {
     name: "overland.png",

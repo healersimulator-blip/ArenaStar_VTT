@@ -7,6 +7,7 @@
   import { onMount, untrack } from "svelte";
   import App from "./App.svelte";
   import JoinApp from "./JoinApp.svelte";
+  import { openEmbeddedDemo, parseEmbeddedDemo } from "./embeddedDemo";
   import { bootHostApp, type HostApp } from "./hostBoot";
   import NewWorldWizard from "../ui/start/NewWorldWizard.svelte";
   import StartScreen from "../ui/start/StartScreen.svelte";
@@ -24,13 +25,15 @@
   } = $props();
 
   // Initial value only — `autoHost` is a boot-time switch, not a live prop.
-  let mode = $state<Mode>(untrack(() => autoHost) ? "hosting" : "picker");
+  const embedded = document.getElementById("arena-demo-world")?.textContent ?? null;
+  let mode = $state<Mode>(untrack(() => autoHost) || embedded ? "hosting" : "picker");
   let app = $state<HostApp | null>(null);
   let bootError = $state<string | null>(null);
   let wizardPackage = $state<Uint8Array | null>(null);
   // A newly created campaign opens the setup surface once. Returning to an
   // existing world goes directly to the board; Session & world stays available.
   let initialSetup = $state(false);
+  let initialAppearance = $state(false);
 
   async function host(worldId: string | null, fresh = false): Promise<void> {
     initialSetup = fresh;
@@ -61,7 +64,15 @@
   }
 
   onMount(() => {
-    if (autoHost) void host(null);
+    if (embedded) {
+      void (async () => {
+        try {
+          const demo = await openEmbeddedDemo(parseEmbeddedDemo(embedded));
+          initialAppearance = demo.fresh;
+          await host(demo.worldId);
+        } catch (error) { bootError = error instanceof Error ? error.message : String(error); }
+      })();
+    } else if (autoHost) void host(null);
     // Teardown only: nothing replaces the world rows here, so the final flush
     // does not have to be awaited (D-179) — but it must not be left implicit.
     return () => { void app?.close().catch(error => console.error("World close failed", error)); };
@@ -90,7 +101,7 @@
     <!-- App wires its canvas, bus listeners and status in onMount from the `app` prop, so it
          must not mount before the boot has produced one (mounting on null left a dead shell:
          no canvas, status "—" — found by the D-248 picker-import e2e). -->
-    <App {app} {bootError} {initialSetup} onExit={closeWorld} />
+    <App {app} {bootError} {initialSetup} {initialAppearance} onExit={closeWorld} />
   {:else}
     <main class="vtt-ui">
       <p class="sub" role="status" data-booting>Starting world…</p>

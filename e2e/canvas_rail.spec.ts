@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { entry, hostCall, manualFragment, playerCall, surfaceCallArg, waitForSurface } from "./lib";
+import { canvasAction, entry, hostCall, manualFragment, playerCall, surfaceCallArg, waitForSurface } from "./lib";
 
 /**
  * D-256 — the rail's Roll20 parity features, driven through the real UI: draw shapes and
@@ -25,7 +25,10 @@ const bootHost = async (page: Page): Promise<void> => {
   await expect.poll(() => hostCall<unknown>(page, "camera")).not.toBeNull();
 };
 
-const pick = (page: Page, selector: string) => page.locator(selector).click();
+const pick = (page: Page, selector: string) => {
+  const action = /^\[data-canvas-action="([a-z-]+)"\]$/.exec(selector)?.[1];
+  return action ? canvasAction(page, action) : page.locator(selector).click();
+};
 
 test.describe("canvas rail — tools (§10, D-256)", () => {
   test("draw shapes: rectangle, Alt-ellipse and a snapped drag land as documents", async ({

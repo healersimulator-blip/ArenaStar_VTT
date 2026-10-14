@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { AisRuntimeStatuses } from "../../app/aisRuntime";
   import type { CloudBackupController } from "../../storage/cloud/cloudBackup";
   import SavesPanel from "./SavesPanel.svelte";
   import type { SaveCoordinator } from "../../storage/saveCoordinator";
@@ -88,6 +89,7 @@
     onRedo,
     packages = null,
     rulesBoot = null,
+    aisRuntimeStatuses = {},
     agents = null,
     saves = null,
     cloud = null,
@@ -105,6 +107,7 @@
     /** §12 host package surface (GM only; null hides the ruleset section). */
     packages?: HostPackages | null;
     rulesBoot?: HostRulesBoot | null;
+    aisRuntimeStatuses?: AisRuntimeStatuses;
     /**
      * §3.2 the connector's agent desk (GM only; null hides the Agents section). The window holds
      * no transport handles of its own: sessions, grants and bridges are the manager's.
@@ -429,7 +432,7 @@
     <SavesPanel {saves} {cloud} {onBackup} onFolder={onBackupFolder} />
   {/if}
   {#if packages}
-    <RulesetSection {packages} {rulesBoot} />
+    <RulesetSection {packages} {rulesBoot} {aisRuntimeStatuses} />
   {/if}
   {#if agents}
     <AgentsSection

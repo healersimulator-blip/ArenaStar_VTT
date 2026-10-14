@@ -4,7 +4,7 @@ import { strToU8, zipSync } from "fflate";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { entry } from "./lib";
+import { chromeAction, entry } from "./lib";
 
 /**
  * §12 package loader e2e: import a package ZIP through the GM UI
@@ -185,7 +185,7 @@ test.describe("Package loader (§12)", () => {
         .toEqual({ source: "package", packageId: "probe-rules", version: "9.9.9", error: null });
 
       // ── campaign under package rules ─────────────────────────────────────
-      await page.click("#gm-extras");
+      await chromeAction(page, "gm-extras");
       const win = page.locator('[data-window="gmextras"]');
       await expect(win).toBeVisible();
       await page.fill("#faction-name", "Probes");
@@ -693,7 +693,7 @@ test.describe("Package loader (§12)", () => {
       ).toBeNull();
 
       // create an army with a unit in the OLD format (no stats.drill)
-      await page.click("#gm-extras");
+      await chromeAction(page, "gm-extras");
       const win = page.locator('[data-window="gmextras"]');
       await expect(win).toBeVisible();
       await page.fill("#faction-name", "Migrate");

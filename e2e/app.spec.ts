@@ -104,7 +104,7 @@ test.describe("GM tab app shell (§2, §14 M1)", () => {
     await page.locator('[data-canvas-tool="dice"]').click();
     await expect(page.getByLabel("Dice formula")).toHaveValue("1d20");
     await page.getByLabel("Dice formula").fill("1d20+5");
-    await expect(page.getByRole("button", { name: "Roll" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Roll", exact: true })).toBeVisible();
     await page.locator("[data-canvas-toolbar] .collapse").click();
     await expect(page.locator("[data-canvas-toolbar]")).toHaveClass(/collapsed/);
   });

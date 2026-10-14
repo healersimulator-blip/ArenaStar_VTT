@@ -1,0 +1,5 @@
+# Preserve the byte-pinned upstream feasibility fixture, including original CRLF files.
+modules/foundry-tagger/upstream/** -text
+
+# Preserve audited upstream UI bytes; derived resources are built separately.
+modules/foundry-ui-*/upstream/** -text

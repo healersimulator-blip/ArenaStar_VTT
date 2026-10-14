@@ -4,14 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Browser, type Page } from "@playwright/test";
-import {
-  entry,
-  hostCall,
-  manualFragment,
-  playerCall,
-  surfaceCallArg,
-  waitForSurface,
-} from "./lib";
+import { chromeAction, entry, hostCall, manualFragment, openSceneNav, playerCall, surfaceCallArg, waitForSurface } from "./lib";
 
 const distWorlds = fileURLToPath(new URL("../dist/worlds", import.meta.url));
 const starterZip = (): string => {
@@ -126,9 +119,10 @@ test.describe("JungleEntrance2 spell demo in the browser", () => {
       // empty table first so the real archive can be imported through the visible start screen.
       await host.goto(entry + "?e2e=1");
       await waitForSurface(host, "app");
-      await host.click("#close-world");
+      await chromeAction(host, "close-world");
       await importStarter(host);
       const demoScene = host.locator('[data-scene="scene-jungle"]');
+      await openSceneNav(host);
       await expect(demoScene).toBeVisible();
       await demoScene.click();
       await expect(demoScene).toHaveClass(/active/);

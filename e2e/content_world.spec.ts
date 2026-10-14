@@ -15,7 +15,7 @@ import { expect, test } from "@playwright/test";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { entry, gmCall, hostCall, waitForSurface } from "./lib";
+import { chromeAction, entry, gmCall, hostCall, waitForSurface } from "./lib";
 
 const distWorlds = fileURLToPath(new URL("../dist/worlds", import.meta.url));
 const testerZip = (): string | null => {
@@ -39,7 +39,7 @@ test.describe("converted content world (G-44)", () => {
     // downloaded zip. Every step below is the taster's own path: import → dialog → open.
     await page.goto(entry + "?e2e=1");
     await waitForSurface(page, "app");
-    await page.locator("#close-world").click();
+    await chromeAction(page, "close-world");
     // the button becomes "Continue “<world>”" while a local world exists — either state means the
     // start screen is up, which is what matters here
     await expect(page.locator("#role-host")).toHaveText(/Host a world|Continue/, { timeout: 30_000 });

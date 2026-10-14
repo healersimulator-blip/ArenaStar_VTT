@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { fileURLToPath } from "node:url";
+import { openSceneNav } from "./lib";
 
 const entry = "file://" + fileURLToPath(new URL("../dist/index.html", import.meta.url));
 
@@ -90,15 +91,15 @@ test("encounters retain progress independently and follow the active scene", asy
   await select.selectOption(first);
   await expect(page.locator(".combat .round")).toContainText("Turn 2/2");
   // The "+" is a menu now (blank scene / hexcrawl wizard); the tests take the blank one.
-  await page.click("#scene-add");
+  await openSceneNav(page); await page.click("#scene-add");
   await page.click("#scene-new-blank");
-  await page.locator(".scenenav [data-scene]").nth(1).click();
+  await openSceneNav(page); await page.locator(".scenenav [data-scene]").nth(1).click();
   await expect(select.locator("option")).toHaveCount(1);
   await expect(page.locator("#combat-start")).toBeDisabled();
   await page.click("#add-token");
   await page.click("#combat-start");
   await expect(page.locator(".combat .round")).toContainText("Turn 1/1");
-  await page.locator(".scenenav [data-scene]").first().click();
+  await openSceneNav(page); await page.locator(".scenenav [data-scene]").first().click();
   await expect(select).toHaveValue(first);
   await expect(page.locator(".combat .round")).toContainText("Turn 2/2");
   await select.selectOption(second);

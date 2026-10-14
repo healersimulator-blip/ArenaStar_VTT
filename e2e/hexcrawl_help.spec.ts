@@ -15,19 +15,13 @@
  *    window on the wrong scene is worse than a key that does nothing).
  */
 import { expect, test, type Page } from "@playwright/test";
-import {
-  entry,
-  hostCall,
-  solidPng,
-  surfaceCallArg,
-  waitForSurface,
-} from "./lib";
+import { canvasAction, entry, hostCall, openSceneNav, solidPng, surfaceCallArg, waitForSurface } from "./lib";
 
 /** The same wizard every hexcrawl spec starts from (D-270), party token included. */
 async function bootHexcrawl(page: Page): Promise<string> {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
-  await page.click("#scene-add");
+  await openSceneNav(page); await page.click("#scene-add");
   await page.click("#scene-new-hexcrawl");
   await page.setInputFiles("[data-hx-map-input]", {
     name: "overland.png",
@@ -62,7 +56,7 @@ test.describe("hexcrawl help & keys (§8 Phase 7, D-276)", () => {
     const partyKey = await bootHexcrawl(page);
 
     // ── 1. the help window's hexcrawl section (plan §7.2's "two hint lines", grown up) ──
-    await page.click('[data-canvas-action="help"]');
+    await canvasAction(page, "help");
     const help = page.locator("[data-help-panel]");
     await expect(help).toBeVisible();
     const sheet = help.locator("[data-help-hexcrawl]");
@@ -147,7 +141,7 @@ test.describe("hexcrawl help & keys (§8 Phase 7, D-276)", () => {
     await page.waitForTimeout(300);
     await expect(page.locator("[data-hex-window]")).toHaveCount(0);
     // …and the help sheet is still there for a GM who has not made a hexcrawl scene yet.
-    await page.click('[data-canvas-action="help"]');
+    await canvasAction(page, "help");
     await expect(
       page.locator("[data-help-panel]").locator("[data-help-hexcrawl]"),
     ).toHaveCount(1);

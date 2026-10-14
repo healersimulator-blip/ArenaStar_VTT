@@ -1,3 +1,4 @@
+import { aisTagSnapshot, parseAisTagUpdate } from "../core/aisScene";
 import type { IDBPDatabase } from "idb";
 import type {
   ActorDocument,
@@ -8,7 +9,7 @@ import type {
   TokenDocument,
 } from "../core/documents";
 import type { AisCapability, AisEventName, AisTokenLightSnapshot } from "../core/automationInterconnect";
-import type { AisModuleCallContext } from "./aisModuleIframe";
+import type { AisModuleRequestContext } from "./aisModuleIframe";
 import type { Op } from "../core/ops";
 import { parseLightAnimation } from "../core/lightAnimation";
 import { getAllSettings, getSetting, putSetting } from "../storage/idb";
@@ -54,12 +55,35 @@ export interface AisModuleHandlerContext {
   actorById: (id: string) => ActorDocument | undefined;
   /** Opens a host-rendered, text-only choice dialog; null means the user cancelled. */
   select: (request: AisModuleSelectRequest) => Promise<string | null>;
-  submit: (ops: Op[]) => string;
+  /** Resolve only after a host commit; a rejected transaction must reject the RPC. */
+  submit: (ops: Op[]) => string | Promise<string>;
+  /** Shared by this world's module hosts so inventory read/modify/commit is serialized. */
+  mutate?: AisMutationQueue;
+  sequence?: () => number;
+  resources?: Readonly<Record<string, string>>;
+  updateSceneTags?: (input: Record<string, unknown>) => { seq: number; tags: string[] };
+  fx?: {
+    play(input: Record<string, unknown>): unknown;
+    list(): unknown;
+    stop(runId: string): unknown;
+  };
   notify: (message: string, level: "info" | "warn" | "error") => void;
   emitModuleEvent: (eventId: string, payload: Json) => void;
   newId: (prefix: string) => string;
   /** Re-checks the exact profile lock and local hash-bound consent on each host request. */
   assertCapability: (capability: AisCapability) => Promise<void>;
+}
+
+export type AisMutationQueue = <T>(job: () => Promise<T>) => Promise<T>;
+
+/** One failed request never poisons later work. Admission/grants are checked INSIDE the queue. */
+export function createAisMutationQueue(): AisMutationQueue {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(job: () => Promise<T>): Promise<T> => {
+    const next = tail.then(job);
+    tail = next.catch(() => {});
+    return next;
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -88,6 +112,7 @@ function boundedJson(value: unknown, depth = 0, seen = new Set<object>()): value
   if (Array.isArray(value)) {
     valid = value.length <= 1024 && value.every((item) => boundedJson(item, depth + 1, seen));
   } else {
+    if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
     const record = value as Record<string, unknown>;
     const keys = Object.keys(record);
     valid = keys.length <= 1024 && keys.every((key) =>
@@ -138,7 +163,7 @@ export function projectAisTokenLight(token: Pick<TokenDocument, "light">): AisTo
   };
 }
 
-function assertCommandActive(context?: AisModuleCallContext): void {
+function assertCommandActive(context?: AisModuleRequestContext): void {
   context?.assertActive();
 }
 
@@ -215,7 +240,58 @@ function lightSpec(args: Record<string, unknown>): {
 
 /** Capability-checked AIS APIs shared by all approved module iframes. */
 export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModuleHandlers {
+  const mutate = ctx.mutate ?? createAisMutationQueue();
   return {
+    "package.resource.read": async (args, lifetime) => {
+      await ctx.assertCapability("package.resources.read");
+      assertCommandActive(lifetime);
+      if (Object.keys(args).some((key) => !["path", "offset"].includes(key)) ||
+          typeof args.path !== "string" || !ctx.resources || !Object.hasOwn(ctx.resources, args.path) ||
+          !Number.isSafeInteger(args.offset) || Number(args.offset) < 0)
+        throw new Error("Undeclared or invalid package resource");
+      const text = ctx.resources[args.path] ?? "";
+      const offset = Number(args.offset);
+      if (offset > text.length) throw new Error("Invalid resource offset");
+      const next = offset + 8192;
+      return { text: text.slice(offset, next), next: next < text.length ? next : null };
+    },
+    "scene.tags.snapshot": async (_args, lifetime) => {
+      await ctx.assertCapability("scene.tags.read");
+      assertCommandActive(lifetime);
+      const scene = ctx.activeScene();
+      if (!scene || !ctx.sequence) throw new Error("AIS scene-tag service is unavailable");
+      return aisTagSnapshot(scene, ctx.sequence());
+    },
+    "scene.tags.update": (args, lifetime) => mutate(async () => {
+      await ctx.assertCapability("scene.tags.write");
+      assertCommandActive(lifetime);
+      const request = parseAisTagUpdate(args);
+      if (ctx.activeScene()?._id !== request.sceneId || !ctx.updateSceneTags)
+        throw new Error("AIS tag scene is no longer active");
+      // No await between the host's revision check and its normal validated commit.
+      return ctx.updateSceneTags(args);
+    }),
+    "fx.play": async (args, lifetime) => {
+      await ctx.assertCapability("fx.play");
+      assertCommandActive(lifetime);
+      if (!ctx.fx) throw new Error("AIS FX service is unavailable");
+      return ctx.fx.play(args);
+    },
+    "fx.list": async (args, lifetime) => {
+      await ctx.assertCapability("fx.play");
+      assertCommandActive(lifetime);
+      if (Object.keys(args).length) throw new Error("AIS FX list takes no arguments");
+      if (!ctx.fx) throw new Error("AIS FX service is unavailable");
+      return ctx.fx.list();
+    },
+    "fx.stop": async (args, lifetime) => {
+      await ctx.assertCapability("fx.play");
+      assertCommandActive(lifetime);
+      if (Object.keys(args).some((key) => key !== "runId") || typeof args.runId !== "string" || args.runId.length > 128)
+        throw new Error("Invalid AIS FX handle");
+      if (!ctx.fx) throw new Error("AIS FX service is unavailable");
+      return ctx.fx.stop(args.runId);
+    },
     "events.subscribe": async ({ event }, commandContext) => {
       await ctx.assertCapability("action.observe");
       assertCommandActive(commandContext);
@@ -267,8 +343,9 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       await ctx.assertCapability("actor.inventory.read");
       assertCommandActive(commandContext);
       const actorId = safeId(rawActorId, "actorId");
-      const actor = ctx.actorById(actorId);
-      if (!actor) throw new Error(`unknown actor ${actorId}`);
+      const linked = ctx.activeScene()?.tokens.some((token) => !token.hidden && token.actorId === actorId);
+      const actor = linked ? ctx.actorById(actorId) : undefined;
+      if (!actor) throw new Error("inventory actor is not linked to a visible token in the active scene");
       return {
         actorId: actor._id,
         actorName: actor.name,
@@ -279,7 +356,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         })),
       };
     },
-    "scene.token.light.apply": async (args, commandContext) => {
+    "scene.token.light.apply": (args, commandContext) => mutate(async () => {
       await ctx.assertCapability("scene.token.light.manage");
       assertCommandActive(commandContext);
       const sceneId = safeId(args.sceneId, "sceneId");
@@ -293,23 +370,27 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       const light = lightSpec(args);
       if (args.active !== (light.radius > 0))
         throw new Error("active must match whether the token light radius is non-zero");
-      const scene = ctx.activeScene();
-      if (!scene || scene._id !== sceneId) throw new Error("light action scene is no longer active");
-      const token = scene.tokens.find((row) => row._id === tokenId && !row.hidden);
-      if (!token) throw new Error("light action token is not visible in the active scene");
       const sourceItemId = args.sourceItemId === undefined || args.sourceItemId === null
         ? undefined
         : safeId(args.sourceItemId, "sourceItemId");
       const consumeItemId = args.consumeItemId === undefined || args.consumeItemId === null
         ? undefined
         : safeId(args.consumeItemId, "consumeItemId");
+      if (consumeItemId) {
+        await ctx.assertCapability("actor.inventory.consume");
+        await ctx.assertCapability("scene.token.light.manage");
+        assertCommandActive(commandContext);
+      }
+      // Re-read AFTER all asynchronous consent checks, inside the shared mutation queue.
+      const scene = ctx.activeScene();
+      if (!scene || scene._id !== sceneId) throw new Error("light action scene is no longer active");
+      const token = scene.tokens.find((row) => row._id === tokenId && !row.hidden);
+      if (!token) throw new Error("light action token is not visible in the active scene");
       if (consumeItemId && (!sourceItemId || sourceItemId !== consumeItemId || !token.actorId))
         throw new Error("a consumed light source must be the selected item on the token's linked actor");
 
       const ops: Op[] = [];
       if (consumeItemId) {
-        await ctx.assertCapability("actor.inventory.consume");
-        assertCommandActive(commandContext);
         const actor = token.actorId ? ctx.actorById(token.actorId) : undefined;
         const item = actor?.items.find((row) => row._id === consumeItemId);
         if (!actor || !item) throw new Error("consumable light source is no longer in the token's inventory");
@@ -329,9 +410,6 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         active: args.active,
         ...(sourceItemId ? { sourceItemId } : {}),
       } as unknown as Json;
-      const flags = structuredClone(token.flags) as unknown as Record<string, Json>;
-      const ais = asRecord(flags.ais) as Record<string, Json> | null;
-      flags.ais = { ...(ais ?? {}), [ctx.packageId]: state };
       ops.push({
         kind: "update",
         ref: { coll: "tokens", id: token._id, parent: { coll: "scenes", id: scene._id } },
@@ -344,22 +422,24 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
             angle: light.angle,
             animation: light.animation as unknown as Json,
           },
-          flags,
+          [`flags.ais.${ctx.packageId}`]: state,
         },
       });
       assertCommandActive(commandContext);
-      const txId = ctx.submit(ops);
+      const txId = await ctx.submit(ops);
+      assertCommandActive(commandContext);
       return { ok: true, txId, active: args.active, sourceName: args.sourceName, stateIndex: Number(args.stateIndex) };
-    },
+    }),
     "module.storage.get": async ({ key: rawKey }, commandContext) => {
       await ctx.assertCapability("module.storage.read");
       assertCommandActive(commandContext);
       const key = storageKey(rawKey);
       const setting = await getSetting(ctx.db, storageScope(ctx), key);
+      await ctx.assertCapability("module.storage.read");
       assertCommandActive(commandContext);
       return setting?.value ?? null;
     },
-    "module.storage.set": async ({ key: rawKey, value }, commandContext) => {
+    "module.storage.set": ({ key: rawKey, value }, commandContext) => mutate(async () => {
       await ctx.assertCapability("module.storage.write");
       assertCommandActive(commandContext);
       const key = storageKey(rawKey);
@@ -367,6 +447,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         throw new Error(`module storage values are limited to ${MAX_STORAGE_VALUE_BYTES} bytes of JSON`);
       const scope = storageScope(ctx);
       const existing = await getAllSettings(ctx.db, scope);
+      await ctx.assertCapability("module.storage.write");
       assertCommandActive(commandContext);
       if (!existing.some((row) => row.key === key) && existing.length >= MAX_STORAGE_KEYS)
         throw new Error(`module storage is limited to ${MAX_STORAGE_KEYS} keys`);
@@ -375,8 +456,9 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       if (total > MAX_STORAGE_BYTES) throw new Error(`module storage is limited to ${MAX_STORAGE_BYTES} bytes per module`);
       assertCommandActive(commandContext);
       await putSetting(ctx.db, { scope, key, value });
+      assertCommandActive(commandContext);
       return { ok: true };
-    },
+    }),
     "chat.post": async ({ content }, commandContext) => {
       await ctx.assertCapability("chat.post");
       assertCommandActive(commandContext);
@@ -398,7 +480,8 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         flavor: `AIS module ${ctx.packageId}`,
       };
       assertCommandActive(commandContext);
-      const txId = ctx.submit([{ kind: "create", coll: "messages", data: doc }]);
+      const txId = await ctx.submit([{ kind: "create", coll: "messages", data: doc }]);
+      assertCommandActive(commandContext);
       return { id, txId };
     },
     "ui.notify": async ({ message, level }, commandContext) => {
@@ -412,9 +495,12 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
     },
     "ui.select": async (args, commandContext) => {
       await ctx.assertCapability("ui.interaction");
-      if (commandContext) throw new Error("ui.select cannot be used inside a script-macro command");
+      assertCommandActive(commandContext);
+      if (commandContext?.commandId) throw new Error("ui.select cannot be used inside a script-macro command");
       const request = selectRequest(args);
       const selected = await ctx.select(request);
+      await ctx.assertCapability("ui.interaction");
+      assertCommandActive(commandContext);
       if (selected === null) return { selected: null };
       if (!request.options.some((option) => option.value === selected))
         throw new Error("host returned a choice not present in the request");

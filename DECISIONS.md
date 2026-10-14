@@ -13405,3 +13405,368 @@ workflow/mechanics pipeline, no theme/UI slot system, no player hydration; exact
 requirements only). It adds no `DECISIONS.md` entries of its own — the design doc carries its
 rationale — so the landing is recorded here. The six PF1e failures are untouched by this patch and
 still need their own repair pass (the manual-AoO prompt and the pre-area-flow Entangle spec).
+
+## D-461 — Make AIS v1 a real-browser-tested foundation (2026-10-13)
+
+**Priority.** Stabilize the shipped AIS v1 surface as an enabler for subsequent module work; do not
+claim to deliver the larger scheduler/proposal/theme/player-hydration design in this pass.
+
+**Reproduced failures.** The previous iframe's outbound guard read the opaque sandbox's
+`contentWindow.location.origin`, which throws `SecurityError` and silently drops replies. A
+real Chromium command therefore timed out even though the frame reported ready. The SDK also
+required the parent's origin to be `"null"`, excluding HTTPS. Separately, `App.svelte` supplied an
+async void-returning consent assertion where the bridge expected a boolean; the new real-UI
+regression first failed with “no longer enabled and locally approved” on an approved module.
+Mocked dispatcher tests did not exercise any of these boundaries.
+
+**Bridge and lifecycle.** Each original document creates a MessageChannel and transfers one port
+in a one-use boot-ID handshake authenticated by exact frame source and opaque origin. RPCs,
+commands, replies and events then use only that port; the script-only sandbox is unchanged.
+A post-load ping proves that the original document is still present before declaring readiness
+(including navigation before the first iframe load). Startup is bounded to five seconds; entry
+errors, unhandled callback errors, navigation and disposal close the port/frame and settle pending
+commands. Settings shows starting/ready/failed/stopped separately from exact-hash approval.
+Commands reserve their one-at-a-time slot before async consent/readiness, retain the eight-second
+execution deadline, recheck consent on results, and fail promptly for unregistered handlers.
+
+**Typed host composition.** `src/app/aisRuntime.ts` replaces the inline App wiring and uses an
+explicit assertion callback, so normal TypeScript checking covers this boundary. It owns event
+subscriptions, macro invocation, status and teardown. Package mutations are serialized and notify
+local runtime listeners before acknowledging the edit. Disablement, replacement, revocation and
+capability changes stop old instances immediately; new code/grants remain reload-only. Event
+subscriptions are installed only after authorization, new snapshot subscribers get the current
+sequence, and token menus use the current provider selection. Ordinary RPCs as well as commands
+carry instance liveness through awaited/queued operations. A stopped module's open choice is
+cancelled. This cannot undo a host transaction that was already submitted.
+
+**Writes and approval.** Successful light/inventory and chat calls now wait for an actual host
+commit through `gm.client.submitAndWait`, not just a generated intent ID. AIS light/storage
+mutations share a queue, re-read authoritative state after consent awaits, preserve unrelated
+flag namespaces and enforce storage quotas without concurrent-write races. Inventory projections
+require a visible linked token in the active scene. Replayed RPC IDs and non-JSON arguments are
+rejected; response-envelope overflow produces an error rather than a lost reply. Source previews
+carry the content hash; replacement clears cached review state and the approval API can reject a
+hash that changed after review. Imports, world profiles and local consent remain distinct.
+
+**Verification.** `test:e2e:ais` is one new bounded batch (one worker, no retries, 15-minute cap),
+covering `e2e/ais_modules.spec.ts` exactly once. **12/12 passed in 4.6 minutes**: actual package
+import/enable/review/approval/reload, RPCs and reviewed macro commands on file and HTTPS origins,
+typed events, scoped storage across reload, capability denial, forged Window commands,
+revocation, cross-module event identity, cached-source replacement, startup/entry failures,
+early/later navigation, command timeout/recovery, simultaneous command admission and grant edits.
+The shipped PF1e Torch module passes native menus, actual committed consumption, host selection,
+persisted settings and macro commands on both origins, not just a rewritten test module.
+
+Adjacent production browser regressions (`script_macros`, `worldfile`, `app`, `smoke`) also pass:
+**19/19, no retries, 2.9 minutes**. Together with the AIS batch, this pass ran 31 browser tests;
+it did not rerun the entire browser suite.
+
+Full units: **5,681 passed / 12 skipped**, 425 passing files (+22 tests, +1 file), 87.46 s.
+Typecheck: 92 Svelte components, zero blocking issues (the existing ReplayPanel advisory remains).
+Lint, single-file app, system packages and standard starter-world builds pass. Size:
+**5,305,166 raw bytes / 1,515,338 gzip bytes**, below the 6 MiB raw gate. The optional content tester
+starter was not built without its external content dataset.
+
+**Named limits.** This is a working AIS v1 foundation, not all of the target design. No general
+mechanics proposal/reducer pipeline, theme/UI-slot system, player hydration, package signing,
+semver ranges or CPU/infinite-loop enforcement was added. Chromium file/HTTPS coverage is not a
+cross-browser sandbox audit; approval still means reviewing code, not proving it harmless.
+Previously recorded unrelated PF1e browser failures are not fixed or claimed green here.
+
+## D-462 — Demonstrate a world-packaged Foundry guest through AIS, reusing native FX (2026-10-13)
+
+**Requested scope.** Implement a feasibility slice of the adapter proposal, with legal review
+kept as a separate workstream. This is not a general Foundry runtime or a completion of the
+broader AIS workflow plan. Existing notices and source provenance are retained; no Foundry-core
+implementation is bundled and no legal approval status is changed.
+
+**What actually runs.** `modules/foundry-tagger/upstream/scripts/` contains the three original
+Tagger 1.5.4 source files pinned to `e7936bc9ee01e4445624fbc82a11e887e5cd0075`. The preparation
+script verifies their SHA-256 digests and locally bundles them without source edits. The original
+source-tree manifest, including its build-time version placeholder, is retained; this is explicitly
+source-preserving/rebundled, not an unchanged downloaded release ZIP. Searches, edits and tag-rule
+expansion call the actual upstream `Tagger` class. Our native tag-query implementation does not
+stand in for it. ArenaStar command bindings are separately identified.
+
+**Adapter, not bypass.** The separately enabled/approved `ais-foundry-v13` package supplies a
+small local hook/collection/document facade inside the guest's opaque iframe. A closed
+`runtimeProvider`/`runtime` contract declares the exact provider dependency, profile, prepared
+scripts and bounded configuration. Providers have no standalone execution or callable commands.
+Guest approval also binds to the combined provider/guest hashes and profile; changing the adapter
+invalidates dependent consent and stale previews. Effective capabilities are the intersection of
+both grants. `runtime.execute` is mandatory on both packages: besides controlling execution, this
+is an explicit downgrade fence because older kernels reject the unknown capability even when
+opening an already-imported world from shared IndexedDB. Runtime packages use world ZIP format 5
+and `arena.ais.runtime/1`; formats 1–4 remain readable and ordinary native AIS worlds stay format 4.
+This is an additive experimental extension of AIS 1, not the full proposed AIS 2 protocol.
+
+**Host operations.** New narrow services project IDs/names/tags/limited positions for non-hidden
+placeables in the active scene (256-object cap), accept tag-only proposals and reuse native FX.
+Local pre-update hooks may alter a draft or veto it. The host independently checks the global
+snapshot sequence and proposal schema, validates and commits synchronously, then the adapter
+updates its mirror and delivers the local post-hook. The normal op/persistence/undo path is used;
+stale/conflicting proposals refuse rather than overwrite a concurrent edit. Adapter-backed
+commands are restricted to the local GM and currently viewed scene, not player delegation.
+
+**FX reuse.** A bounded Sequence-style builder converts text/image/sound sections, basic timing,
+anchors and transforms to the existing native `FxSequence` scheduler and renderer. Dynamic
+transient programs are validated without creating hidden Macro documents. Module-owned handles
+cannot stop another island's FX, and stopping a module cancels its remaining transient runs.
+This is an API substitute, NOT the upstream Sequencer implementation; Tagger itself does not
+require Sequencer. The extra `fx-demo` binding is explicitly our demonstration code. Persistent
+foreign FX and broad Sequencer semantics are outside this profile.
+
+**Build and try it.** `corepack pnpm build:ais-demo` produces both package ZIPs and
+`dist/worlds/ais-foundry-feasibility-0.1.0.zip` (29,636 bytes on the verified build).
+`test:fx:prepare` and the full `test:e2e` preparation include it. The build is offline and executes
+neither upstream build scripts nor guest entry points. `AIS_FOUNDRY_FEASIBILITY.md` gives the
+review/reload/macro walkthrough. Archives contain requested activation, never local approvals.
+
+**Verification.** Final full unit run: **5,705 passed / 12 skipped**, 426 passing files / 2 skipped,
+96.47 s; +24 tests in `tests/app/aisAdapter.test.ts`. Typecheck and lint pass; the existing
+ReplayPanel advisory is unchanged. App/system/starter/demo builds pass. Main file:
+**5,319,995 raw bytes / 1,519,421 gzip bytes** (5.074 MiB raw, under the 6 MiB cap).
+The optional content tester remains unbuilt without its external dataset.
+
+The final bounded `test:e2e:ais` run is **15/15 passed, no retries, 7.7 minutes**: all 12 native AIS
+regressions plus three adapter cases. Real UI approval/import/macro execution is exercised on
+`file://` and HTTPS. Tests check actual host tags, upstream validation errors, pre-hook veto,
+hidden-target refusal, successfully drawn native Pixi FX, no hidden saved FX macro, export/reimport
+in a clean context, separate consent, capability intersection and revoking/disabling the provider.
+Earlier in this implementation pass, adjacent script/world-file/app/smoke checks also passed
+**19/19 in 2.9 minutes**, plus **2/2** native FX rendering/cancellation checks in 18.5 s.
+
+One full unit run exposed a timing-sensitive existing pending-roll assertion in `tests/host/sync`:
+three fixed event-loop flushes sometimes observed pending rather than resolved while crypto was
+still running. The isolated case passed. The test now waits for the SAME required resolved/
+reported state with `expect.poll`, rather than weakening the assertion or changing production rolls.
+The subsequent full run above passed.
+
+**Named limits.** No arbitrary Foundry ZIP loader, runtime ES-module/VFS resolver, binary package
+resources, Foundry applications/settings, keyboard dispatch, actors/system emulation, player
+runtime, all-scene reads, original Sequencer renderer, persistent foreign FX or global AIS
+pre-create/prepare/commit scheduler is claimed. This remains reviewed-code iframe execution,
+not an infinite-loop or complete sandbox audit. A guest timeout destroys its realm instead of
+reusing potentially live stale closures. Already-committed writes are not rolled back by revocation.
+Next work should generalize supported native intake stages and expand profiles against another
+real module, not relax authority or pretend unsupported APIs succeeded.
+
+## D-463 — Make the preview usable and connect three upstream appearance profiles (2026-10-13)
+
+**User correction.** A bare app plus a ZIP in the workspace was not a usable tester experience.
+The new live preview serves `dist/preview/index.html`, a self-contained app with an inert embedded
+world. It imports a verified copy, remembers it, opens the appearance selector once, and preserves
+existing campaigns. No file picker, local ZIP, test-only auto-host flag or pre-approved code is
+needed. `dist/ui-demo.html` provides the same offline route; ordinary `dist/index.html` still uses
+the normal world picker. Alderwatch includes a newly AI-generated courtyard, original token
+portraits, actors and example chat rather than an empty table.
+
+**What was connected, honestly.** Your Flavor at `fb0bbc87e9a6bb30b7fca8c5a042f15a1eec9b5b`
+runs its original pure token engine, normalizer and preset data (269 tokens), not its Studio or
+Foundry DOM controller. Carolingian at `d179e8ab044fc03dffe0a24404e5f686b1c60c56` supplies its
+original theme-variable CSS cascade; its much larger sidebar/taskbar/carousel JavaScript is not
+executed. RPG Styled UI at `ec9d193e145603c163aeeb6411de7ab26fbc9e0e` runs its original startup,
+settings and compact-mode hooks, with selected original shell CSS/artwork. Its legacy navigation
+binding is supplied by an explicit private-scope preparation recipe, without altering the pinned
+source file. System sheets, full navigation reflow, combat carousel and remote fonts are excluded.
+The native selector displays these modes/exclusions; no look-alike is presented as full parity.
+
+**Host boundary.** The separate `ais-foundry-ui` package computes appearance inside the existing
+opaque AIS guest frame. An explicit runtime resource list and `package.resources.read` capability
+expose only owned UTF-8 resources, in 8192-character chunks. Prepared CSS drops external imports,
+font loads and URL-bearing declarations; originals remain available for inspection. Reused WebP
+art is encoded in package text resources, decoded and pixel-budget checked by the host, and
+exposed only through owned Blob URLs. This is not a general binary package loader.
+
+The `ui.theme` contract contains only a closed palette, font category, bounded radius/density,
+declared images and evidence. It does not accept selectors, HTML, arbitrary CSS, positioning or
+hidden-control commands. Host-owned styling consumes these tokens on known surfaces. Basic text
+contrast is checked. Live-start is limited to explicitly reviewed appearance-only modules; all
+world-edit/data capabilities remain outside the quick selector, and the two-package intersection
+and composition hash checks remain intact. Results recheck consent, liveness and the selected
+provider before application. Generation checks prevent stale jobs resurrecting a reset theme.
+
+**UI.** A palette button opens a native, keyboard-trapped modal with three selectable profiles,
+upstream palette variants, compact/comfortable density and sidebar-width controls. Compact mode
+reduces the 70 px header to 50 px and form controls to 32 px, while keeping a comfortable option.
+Themed raster panels and chrome are supported without copying module CSS into the parent page.
+Review/reset controls remain outside module styling; Native appearance and Ctrl+Alt+0 are escape
+paths. Settings persist in a normal world document; a copied world requests its theme but carries
+no local grants. Revocation removes active styling. Native dialog focus and capture-phase Escape
+handling also cover the case where a focused approval button disappears after activation.
+
+**Verification.** Final unit run: **5,721 passed / 12 skipped**, 427 passing files / 2 skipped,
+87.96 s (+16 appearance tests). Typecheck and lint pass: 93 Svelte components, no blocking issues;
+the existing ReplayPanel advisory remains. App/system/starter/Tagger/UI-demo builds pass. Main app:
+**5,355,180 raw bytes / 1,530,129 gzip bytes**, below 6 MiB. The UI world archive is **442,108 bytes**;
+the main app does not statically bundle the optional upstream theme engines/resources.
+
+The new bounded `test:e2e:ui-adapters` batch passed **3/3, no retries, 1.2 minutes**, opening the
+actual self-starting tester route on file and HTTPS origins. It checks each source mode, palette
+changes, the original RPG compact-mode hook, raster styling, persistence, focus/recovery,
+revocation and clean-context ZIP import consent. The existing AIS batch passed **15/15 in
+5.5 minutes**, and adjacent UI/windows/app/smoke/world-file checks passed **20/20 in 1.4 minutes**.
+Screenshots of the real themed canvas were inspected; missing token portraits and unthemed chat
+surfaces were corrected before verification.
+
+A full run exposed an existing timing-sensitive audio-list test: a fixed 160 ms wait sometimes
+observed the pre-fader value in the throttled list, though the audio element had already changed.
+The isolated case passed. That assertion now polls the same required element/list gains instead
+of guessing a timer interval. No production audio behavior or assertion was weakened.
+
+**Limits.** This is a GM appearance adapter and an initial decluttering pass, not a complete UI
+redesign or full Foundry UI compatibility. No whole Studio/carousel/taskbar, arbitrary DOM patching,
+player-side hydration or CPU-loop containment is claimed. Upstream notices/provenance are retained;
+the separately deferred legal workstream and its approval statuses are unchanged.
+
+## D-464 — Patch 141026 lands, and the three-layout workspace it left half-built is finished (2026-10-14)
+
+**What landed.** `patches/01a13465-f430-7667-a943-52bd8591487f_141026.patch` — the D-463
+appearance work (`ais-foundry-ui`, the three pinned upstream appearance profiles, the self-opening
+`dist/ui-demo.html` / `dist/preview/index.html` tester route, `AppearancePanel`, `uiTheme`,
+`aisAppearance`, `embeddedDemo`, `buildUiDemo`) **plus** a second, undocumented slice the authoring
+session did not get to finish before it ran out of context: a GM/player **workspace** rewrite with
+three layouts (`src/core/workspaceUi.ts`, `src/ui/workspace/*`, `workspace.css`, `fonts.css`,
+`referenceIcons.ts`, the 10-slot hotbar, the modern `CanvasToolbar`). The user confirmed the second
+slice is the intent — **Modern** (clean, laconic), **Foundry-like** and **Roll20-like** shells over
+one world — and asked for it to be checked and continued, not parked.
+
+**How it was applied.** All text hunks verbatim with `git apply`, CRLF Tagger files preserved by
+the patch's own `.gitattributes`. The patch is a text diff: its 19 binary files were stubs. The
+three it needs (`modules/foundry-ui-rpg-styled-ui/upstream/ui/{frames/chat-background,frames/header,
+buttons/button-bg}.webp`) were recovered byte-identically from the pinned upstream commit
+`ec9d193e…` — `git hash-object` matches the patch index ids and all 25 `PROVENANCE.json` hashes
+verify. `Examples/ais-ui-courtyard.jpg` could not be recovered and was **regenerated** (an AI
+top-down courtyard map, 1408×768, 371,886 bytes — a replacement, not the author's bytes). The
+author's `image-search/*` research screenshots are gone; fresh public references were fetched for
+this continuation and are kept out of the repository. Three lint `{#each}` keys and three unit
+tests (5→10 hotbar slots, the patch's deliberate change) were the only scuffs in the text.
+
+**What the slice did and did not have.** It had the picker, the chrome, the tab rail, the
+directory, the per-profile CSS and local persistence, and it compiled. It had no decision record, no
+unit or browser tests, and the modern shell hid behind menus the controls that 65 of the 141 e2e
+specs reach for directly (`compendia` and four other tabs in an overflow menu, six GM actions only in
+the main menu, the scene strip only as a popover, no `[data-rules-status]`, five GM canvas tools and
+the table actions in a "more" menu, a drawer closed by default and toggled by re-clicking a tab, the
+tool-options popover over the map's left half, `#gm-appearance` re-pointed at the layout picker). The
+first `test:e2e:core` on the applied tree was 14 passed / 11 failed / 23 unrun at the cap, and
+`test:e2e:ui-adapters` 0/3.
+
+**Decisions, control by control.** The rule is the one D-079 set: *the ids, tabs, tools and actions
+are the product's contract; a layout may rearrange them, never make them unreachable.*
+- **Document tabs.** All twelve are one click away in the modern rail and the Foundry column. Only
+  the Roll20 strip keeps its reference seven tabs plus an overflow menu, because that *is* the
+  reference. Re-clicking the open tab no longer collapses the drawer (the chevron does); selecting a
+  tab always shows it.
+- **Content dock.** Open by default in every layout, showing chat, as every tabletop does; the
+  collapse state is remembered per layout on the device. "Quiet" is not "hidden".
+- **GM actions.** The modern command bar keeps the per-minute six (add token, undo, redo, macros,
+  settings, export) and the invite; permissions, session, extras, armies, tables, import map and
+  close world stay in the main menu with their ids. Specs say *what* they do through
+  `chromeAction(page, id)` in `e2e/lib.ts`, which clicks the visible button or opens the menu —
+  so the suite is layout-agnostic rather than pinned to one arrangement. Controls meet the standing
+  readability floor (32 px targets, 14 px invite label; `ui.spec.ts`).
+- **Scenes.** Modern keeps the author's crumb → popover design; Foundry pins the pills to the
+  canvas; Roll20 opens a pages drawer. `openSceneNav(page)` makes the strip interactable. The
+  popover sits above floating windows (z 90 over the window band's 80) so "new scene" is clickable
+  with a settings window open.
+- **Canvas tools.** Every tactical tool is on the modern rail, grouped by hairline gaps (navigate ·
+  author · scene · dice) instead of hiding walls, lighting and fog in a menu; table actions (zoom,
+  fit, turn order, settings, help, erase) stay behind "More tools" and `canvasAction(page, id)`.
+  The modern rail and the Roll20 toolbox are **in flow** — their own column, the board starts to
+  their right — not floated over the board as the slice had them. A floating rail covers the
+  scene's top-left corner: the first grid cells, where small maps, the starter scenes and a third
+  of the browser specs put their tokens (`pf1e_movement`, `pf1e_firearms`, the hexcrawl
+  right-click and the roll-card "empty canvas" click all failed under it). Foundry's controls
+  still float, as the reference does. The modern card look is unchanged; the board's left edge
+  moves right by 62 px.
+  The GM **layer switch** (map · tokens · GM · lighting) is a compact group at the foot of the
+  modern rail rather than an entry in that menu: a GM must be able to *see* which layer takes the
+  next click, and the sixteen `[data-canvas-layer]` clicks in eight specs keep working unchanged.
+  The tool-options popover returns to the dock side of the table (D-256), so the map's left half
+  stays drag-able in every layout.
+- **Stacking.** The modern command bar is a stacking context, so its main menu and command palette
+  now out-rank the floating-window band (95 over 80); before, a GM Extras window swallowed the
+  Permissions click. The tool rail is one stacking context at 24 — above the board and the zoom
+  pill (lowered to 15, since the dock-side options popover shares its corner), below the session
+  panel (70) and windows (80) — the legacy order the onboarding and workspace specs encode (dice
+  options never cover the setup checklist; a window stays above tool options). A rail with no
+  z-index at all paints *under* the board (DOM order), and a rail above windows let the dice
+  options bury the checklist; both were tried and failed their specs. Known cost: a window dragged
+  over the top-left corner covers the "More tools" menu.
+- **Phones (≤ 760 px).** The slice floated an 80 %-wide drawer over the board. The legacy shell's
+  arrangement returns in every layout: the dock stacks under the board (42 dvh, at most 360 px),
+  the tab column becomes a horizontally scrolling strip across the dock's top with the collapse
+  chevron pinned at its end, the options popover hugs the right edge. `workspace.spec` and
+  `zoom.spec` at 390 × 844 encode this (board above dock, no page scroll, zoom pill on screen).
+- **Vocabulary.** The modern actors tab is labelled **Actors** again, not "Characters": it is the
+  product's own word (onboarding copy, sheet lists, three specs by accessible name). Layout-specific
+  renames stay where the reference actually renames (Roll20 *My pages*, *Collections*; Foundry
+  *Rollable tables*, *Audio playlists*).
+- **Players strip.** The legacy header strip was `height:100%`; once absolutely positioned at the
+  foot of the table it became a full-height transparent column over the canvas that swallowed drops
+  the moment a player connected (`sheets.spec` "owned PF1e token" hung on `dragTo` for 120 s). It is
+  now content-sized and pointer-transparent outside its pills. An overlay audit (every absolute/fixed
+  element intersecting the canvas by more than 15,000 px²) now lists only the rail, the Foundry scene
+  strip, the hotbar and the dock in each layout.
+- **Hotbar contract.** The ten-slot hotbar keeps the legacy slot contract the macro specs encode:
+  a slot's `title` is the macro name alone (the key number is the visible corner glyph, not part
+  of the name), and an empty slot is `disabled` rather than a second way to open "Arrange" —
+  keyboard users should not tab through ten dead buttons. Specs that address slots by label now
+  say `exact: true`, since "slot 1" otherwise also matches "slot 10".
+- **Small fixes found by the specs and screenshots.** Roll20's collapse tab needs a selector that
+  out-ranks the strip's generic button rule, or it flows into the strip and covers "More panels";
+  the dock is `overflow:visible` so that tab and the modern overflow menu can protrude; Roll20's
+  appearance trigger joins the assistive-only set (its 32 px box left a blank band above the
+  canvas — the ≡ menu carries Interface appearance, Workspace layout and Invite); the Foundry zoom
+  pill moves to the bottom-right corner, above the hotbar, instead of under the dock heading.
+  `chromeAction` measures the direct button (≥ 8 px) before clicking, because a 1×1 clipped
+  assistive-only control is "visible" to Playwright but cannot take a pointer; it then takes the
+  menu entry by label. One pre-existing scuff surfaced on the way: the parity smoke in
+  `e2eHook.ts` slept a fixed 400 ms for "lead 120 ms + decode", and a slower sandbox needed
+  ~330 ms for the data-URI fetch and decode alone; it now polls the sound state (≤ 3 s).
+- **Status.** `#status` carries the GM/connection chip, the strategic-rules chip
+  (`[data-rules-status]`) and the screen-reader seq/token line (`.sr-only` is now actually defined).
+- **Appearance vs. layout.** `#gm-appearance` (palette) opens the AIS interface selector again, as
+  D-463 and its batch define; the layout picker is `#gm-workspace` / `#player-workspace`, also in
+  the main menu. The embedded demo opens the appearance selector once; the picker is a click away.
+- **Fidelity pass.** Foundry: the v13/v14 look from the public v13 preview — cool near-black
+  panels, warm border for the active control group, indigo fill for the active tool, scene pill with
+  an active dot, the tab column on the sidebar's canvas edge, parchment chat cards, dark user pill,
+  10-slot dock; the zoom control clears the tab column. Roll20: 56 px toolbox, nowrap
+  TOOLS/LAYERS captions, green active layer, magenta/purple accents per scheme, bottom tab
+  indicator, pages crumb clear of the zoom control. These are approximations drawn from
+  screenshots; the picker says so. Pixel parity is not certified and remote fonts are not loaded.
+
+**Tests.** `tests/core/workspaceUi.test.ts` (9): preference parsing and repair, the twelve-tab
+invariant per layout, labels, store persistence under the versioned device key only, corrupt and
+absent storage. `e2e/workspace_profiles.spec.ts` (2, in `test:e2e:ui-adapters`): default modern
+shell with every tab/tool/action reachable, menu-held actions, the scene popover; Foundry and
+Roll20 rearrangements, overflow tabs, scheme switch, `seq` unchanged (presentation never writes to
+the world), reload persistence, back to modern from the main menu. 35 specs were adapted to the
+three helpers (`chromeAction`, `openSceneNav`, `canvasAction`) plus `exact: true` on the one
+`Roll` button lookup that now also matched chat's "Prepare a dice roll"; none had its intent
+weakened — each still opens the same window or lands the same document.
+
+**Verification.** On the finished tree: `typecheck` 0 blocking (97 components), `lint` clean,
+unit **5,730 passed / 12 skipped across 428 files**, `dist/index.html` **5,653,072 B
+(5.391 MiB of 6; gzip 1,712,927 B)**, `build:systems`, `build:worlds`, `build:ais-demo`,
+`build:ui-demo` all pass. Browser: the targeted probes that drove the fixes above ended at
+35 passed / 5 failed (app Roll strictness, canvas_rail layer-in-menu, m2 menu-under-window,
+sheets players-strip drop, workspace_profiles Roll20 toggle), and all five pass after the fixes.
+A first full chain then exposed the floating rail (roll_apply, pf1e_movement, pf1e_firearms,
+hexcrawl_player_fields) and the hotbar contract (macro_hotbar, macro_item_args, canvas_toolbar
+Roll strictness); after those fixes the whole nine-batch chain (451 tests in 142 files, ≈ 68
+minutes) finished with core **48/48**, ui-adapters **5/5**, ais **15/15**, table **39/39**,
+hexcrawl **16/16**, images **30 / 1 skipped**, net **4/4**, pf1e-combat 64 passed / the 6
+documented pre-existing failures, pf1e-sheets 23 passed / the 5 documented pre-existing failures
+(their error signatures are unchanged: refused walk commits, `file://` console error, missing FX,
+opportunity prompt, entangle cue). `realtime.spec.ts:46` missed its 10 Hz tick budget once
+(7 < 10) under load and passed on the immediate rerun; it is recorded in `E2E_BATCHES.md`.
+
+**Limits.** The compatibility layouts are reference-based arrangements of ArenaStar's own
+controls — not the original products, not their system sheets, windows or module ecosystems, and
+not pixel parity. Signika/Proxima are not bundled; Roboto Condensed and Roboto stand in. The
+Foundry layout has no equivalent of the modern "More tools" menu (help, turn order and settings are
+reached through the sidebar there). The Roll20 light scheme keeps the scene's own table colour;
+presentation preferences never repaint world content.

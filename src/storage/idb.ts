@@ -65,7 +65,7 @@ export interface WorldsRecord {
   /** AIS world-shared activation/provider profile; does not carry local code approval. */
   automationProfile?: AisActivationProfile;
   /** AIS per-device consent, bound to the exact package hash. Never written to world ZIPs. */
-  automationGrants?: Record<string, { hash: string; capabilities: AisCapability[] }>;
+  automationGrants?: Record<string, { hash: string; capabilities: AisCapability[]; runtimeHash?: string }>;
 }
 
 export interface DocumentsRecord {

@@ -17,6 +17,9 @@ export default tseslint.config(
       // Pinned Foundry checkouts for the content converter (gitignored; they carry
       // their own eslint config, which must never be linted or even discovered)
       "tools/content/vendor/**",
+      // Byte-pinned upstream code: verified by buildAisDemo, never auto-formatted or rewritten.
+      "modules/foundry-tagger/upstream/**",
+      "modules/foundry-ui-*/upstream/**",
     ],
   },
   eslint.configs.recommended,
@@ -32,6 +35,11 @@ export default tseslint.config(
   {
     files: ["scripts/**/*.mjs", "tools/**/*.mjs", "vite.config.ts", "playwright.config.ts", "e2e/**/*.ts"],
     languageOptions: { globals: { ...globals.node } },
+  },
+  {
+    files: ["modules/ais-foundry-v13/runtime/*.js", "modules/foundry-tagger/automation/*.js", "modules/ais-foundry-ui/runtime/*.js"],
+    languageOptions: { globals: { ...globals.browser, AIS: "readonly", Hooks: "readonly",
+      FoundryAdapter: "readonly", Tagger: "readonly", game: "readonly", Sequence: "readonly", UpstreamFlavor: "readonly" } },
   },
   prettier,
   ...svelte.configs["flat/prettier"],

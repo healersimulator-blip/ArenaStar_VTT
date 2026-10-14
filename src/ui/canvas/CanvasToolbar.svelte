@@ -6,6 +6,8 @@
    * but its own UI state: the shells hold the tool settings object and act on
    * `vtt-canvas-tool` / `vtt-canvas-action` events.
    */
+  import { workspaceUi } from "../workspace/state";
+  import { tick } from "svelte";
   import { isTypingTarget } from "../../core/keys";
   import { hexTravel } from "../../core/hexcrawl/strings";
   import Icon from "../icons/Icon.svelte";
@@ -44,7 +46,8 @@
     | "hide-all"
     | "delete-last-placement"
     /** D-276: Shift+H — open the hex the party is standing in (plan §8 Phase 7's keyboard row). */
-    | "hex-party";
+    | "hex-party"
+    | "character-sheet";
   export type RollMode = "roll" | "gmroll" | "blindroll" | "selfroll";
 
   let {
@@ -57,6 +60,7 @@
     fogStrokes = 0,
     bindings = {},
     onAction = () => {},
+    onPanel = () => {},
     onChooseTool = () => {},
     onRoll = () => {},
     onEraseAll = () => {},
@@ -74,6 +78,7 @@
     /** action → combo overrides from the settings/keybinding layer (§10). */
     bindings?: Readonly<Record<string, string>>;
     onAction?: (action: CanvasAction) => void;
+    onPanel?: (id: string) => void;
     /** The shell can dismiss setup before showing this tool's contextual options. */
     onChooseTool?: (tool: CanvasTool) => void;
     onRoll?: (formula: string, mode: RollMode) => void;
@@ -94,6 +99,36 @@
   let rollMode = $state<RollMode>("roll");
   let history = $state<Array<{ formula: string; mode: RollMode }>>([]);
   let optionsOpen = $state(false);
+  let extraOpen = $state(false);
+  let controlSet = $state("tokens");
+  const controls = [
+    { id: "tokens", label: "Token controls", icon: "tokens", tool: "select" as CanvasTool, gm: false },
+    { id: "templates", label: "Measurement controls", icon: "measure", tool: "measure" as CanvasTool, gm: false },
+    { id: "tiles", label: "Map and tile controls", icon: "map", tool: "select" as CanvasTool, gm: true },
+    { id: "drawings", label: "Drawing controls", icon: "draw", tool: "draw" as CanvasTool, gm: false },
+    { id: "walls", label: "Wall controls", icon: "wall", tool: "wall" as CanvasTool, gm: true },
+    { id: "lights", label: "Lighting controls", icon: "light", tool: "light" as CanvasTool, gm: true },
+    { id: "audio", label: "Audio playlists", icon: "playlists", tool: null, gm: true },
+    { id: "notes", label: "Note controls", icon: "pin", tool: "pin" as CanvasTool, gm: true },
+    { id: "regions", label: "Region and elevation tools", icon: "placeables", tool: null, gm: true },
+  ];
+  const setTools = $derived(visibleTools.filter((tool) => {
+    const sets: Record<string, readonly string[]> = { tokens: ["select", "pan", "dice"], templates: ["measure"], tiles: ["select", "pan"],
+      drawings: ["draw", "text"], walls: ["wall"], lights: ["light", "fog"], notes: ["pin"], regions: ["raised", "stairs", "path"] };
+    return (sets[controlSet] ?? []).includes(tool.id);
+  }));
+  // Every tool stays one click away in every layout (D-464): the modern rail groups them with
+  // hairline gaps (navigate · author · GM scene tools · dice) instead of hiding GM tools in a menu.
+  const primaryTools = $derived(visibleTools);
+  const toolGroup = (id: string): string => ["select", "pan"].includes(id) ? "navigate" : ["draw", "text", "measure"].includes(id) ? "author" : id === "dice" ? "dice" : "scene";
+  function chooseSet(id: string): void {
+    controlSet = id; extraOpen = false;
+    const control = controls.find((entry) => entry.id === id);
+    if (id === "tiles") layer = "map"; else if (id === "walls" || id === "lights") layer = "lighting"; else layer = "tokens";
+    if (control?.tool) choose(control.tool);
+    if (id === "audio") onPanel("playlists");
+    if (id === "regions") onPanel("placeables");
+  }
   const HAS_OPTIONS = new Set<CanvasTool>(["draw", "text", "measure", "dice", "fog", "wall", "light", "pin", "path", "stairs", "raised"]);
   let toolDice = [4, 6, 8, 10, 12, 20] as const;
   let drawShapes = [
@@ -160,6 +195,7 @@
   function choose(toolId: CanvasTool) {
     optionsOpen = HAS_OPTIONS.has(toolId) && (toolId !== active || !optionsOpen);
     active = toolId;
+    extraOpen = false;
     onChooseTool(toolId);
     globalThis.dispatchEvent(new CustomEvent("vtt-canvas-tool", { detail: toolId }));
   }
@@ -182,6 +218,14 @@
     if (isTypingTarget(event.target)) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     const key = event.key.toLowerCase();
+    if ($workspaceUi.profile === "foundry") {
+      if (event.shiftKey && key === "c") { event.preventDefault(); onPanel("chat"); void tick().then(() => document.getElementById("chat-input")?.focus()); }
+      else if (!event.shiftKey && key === "c") { event.preventDefault(); act("character-sheet"); }
+      // Foundry movement/target letters must not accidentally select ArenaStar drawing tools.
+      return;
+    }
+    if (key === "y") { event.preventDefault(); act("turn-order"); return; }
+    if (key === "u") { event.preventDefault(); act("add-turn"); return; }
     for (const [action, combo] of Object.entries(bindings)) {
       if (combo.toLowerCase() === key) {
         event.preventDefault();
@@ -221,8 +265,6 @@
       q: "measure",
       m: "measure",
       r: "dice",
-      u: "turn-order",
-      y: "turn-order",
     };
     if (key === "x" && active === "measure") {
       event.preventDefault();
@@ -248,92 +290,70 @@
 
 <svelte:window onkeydown={onKey} />
 <div class:collapsed class="canvas-toolbar" role="toolbar" aria-label="Canvas tools" data-canvas-toolbar>
-  <div class="rail-scroll">
-  <button data-icon-button
-    class="collapse"
-    type="button"
-    aria-label={collapsed ? "Expand toolbar" : "Collapse toolbar"}
-    title={collapsed ? "Expand toolbar" : "Collapse toolbar"}
-    onclick={() => (collapsed = !collapsed)}><Icon name={collapsed ? "chevronRight" : "chevronLeft"} /></button
-  >
-  {#if !collapsed}
-    {#if isGM}
-      <div class="group" role="group" aria-label="Layers">
-        <span class="group-label">Layer</span>
-        <div class="layers">
-          {#each layers as entry (entry.id)}
-            <button data-icon-button
-              type="button"
-              class:active={layer === entry.id}
-              aria-pressed={layer === entry.id}
-              title={`${entry.label} (${entry.key})`}
-              aria-label={entry.label}
-              data-canvas-layer={entry.id}
-              onclick={() => (layer = entry.id)}
-            >
-              <span class="icon"><Icon name={entry.id} /></span>
-              <span class="label">{entry.label.split(" ")[0]}</span>
-            </button>
-          {/each}
-        </div>
+  {#if $workspaceUi.profile === "foundry"}
+    <div class="foundry-controls" data-foundry-controls>
+      <div class="control-sets" role="group" aria-label="Scene control groups">
+        {#each controls.filter((item) => isGM || !item.gm) as control (control.id)}
+          <button data-icon-button type="button" data-foundry-control={control.id} class:active={controlSet === control.id}
+            aria-pressed={controlSet === control.id} title={control.label} aria-label={control.label} onclick={() => chooseSet(control.id)}><Icon name={control.icon} size={19}/></button>
+        {/each}
       </div>
-    {/if}
-
-    <div class="group" role="group" aria-label="Tools">
-      {#each visibleTools as tool (tool.id)}
-        <button data-icon-button
-          type="button"
-          class:active={active === tool.id}
-          aria-pressed={active === tool.id}
-          title={tool.shortcut ? `${tool.label} (${tool.shortcut})` : tool.label}
-          aria-label={tool.label}
-          data-canvas-tool={tool.id}
-          onclick={() => choose(tool.id)}
-        >
-          <span class="icon"><Icon name={tool.id} /></span><span class="label">{tool.label}</span>
-        </button>
-      {/each}
+      <div class="control-tools" role="group" aria-label="Selected layer tools">
+        {#each setTools as tool (tool.id)}
+          <button data-icon-button type="button" data-canvas-tool={tool.id} class:active={active === tool.id} aria-pressed={active === tool.id}
+            title={tool.label} aria-label={tool.label} onclick={() => choose(tool.id)}><Icon name={tool.id} size={18}/></button>
+        {/each}
+        {#if controlSet === "templates"}
+          {#each measureShapes as shape (shape.id)}<button type="button" title={shape.label} aria-label={shape.label} data-canvas-measure-shape={shape.id}
+            class:active={settings.measureShape === shape.id} onclick={() => { choose("measure"); settings.measureShape = shape.id; }}><Icon name={shape.id === "line" ? "measure" : "placeables"} size={17}/></button>{/each}
+        {/if}
+      </div>
     </div>
-
-    <div class="group" role="group" aria-label="View">
-      <button data-icon-button type="button" title="Zoom in" aria-label="Zoom in" data-canvas-action="zoom-in" onclick={() => act("zoom-in")}>
-        <span class="icon"><Icon name="zoomIn" /></span><span class="label">Zoom in</span>
-      </button>
-      <button data-icon-button type="button" title="Zoom out" aria-label="Zoom out" data-canvas-action="zoom-out" onclick={() => act("zoom-out")}>
-        <span class="icon"><Icon name="zoomOut" /></span><span class="label">Zoom out</span>
-      </button>
-      <button data-icon-button type="button" title="Fit scene to view" aria-label="Fit scene" data-canvas-action="zoom-fit" onclick={() => act("zoom-fit")}>
-        <span class="icon"><Icon name="fit" /></span><span class="label">Fit</span>
-      </button>
-      <button data-icon-button type="button" title="Turn order (Y)" aria-label="Turn order" data-canvas-action="turn-order" onclick={() => act("turn-order")}>
-        <span class="icon"><Icon name="turn" /></span><span class="label">Turn order</span>
-      </button>
-      <button data-icon-button type="button" title="Add the selection to the turn order (U)" aria-label="Add to turn order" data-canvas-action="add-turn" onclick={() => act("add-turn")}>
-        <span class="icon"><Icon name="addTurn" /></span><span class="label">Add turn</span>
-      </button>
-      <button data-icon-button type="button" title="Settings" aria-label="Settings" data-canvas-action="settings" onclick={() => act("settings")}>
-        <span class="icon"><Icon name="settings" /></span><span class="label">Settings</span>
-      </button>
-      <button data-icon-button type="button" title="Keyboard shortcuts and help" aria-label="Help" data-canvas-action="help" onclick={() => act("help")}>
-        <span class="icon"><Icon name="help" /></span><span class="label">Help</span>
-      </button>
+  {:else}
+    <div class="rail-scroll">
+      {#if $workspaceUi.profile === "modern"}
+        <button data-icon-button class="collapse" type="button" title={collapsed ? "Expand tools" : "Collapse tools"} aria-label={collapsed ? "Expand toolbar" : "Collapse toolbar"} onclick={() => collapsed = !collapsed}><Icon name={collapsed ? "chevronRight" : "chevronLeft"} size={16}/></button>
+      {/if}
+      {#if !collapsed || $workspaceUi.profile === "roll20"}
+        <div class="group main-tools" role="group" aria-label="Tools">
+          {#each primaryTools as tool, index (tool.id)}
+            {#if $workspaceUi.profile === "modern" && index > 0 && toolGroup(tool.id) !== toolGroup(primaryTools[index - 1].id)}<i class="rail-gap" aria-hidden="true"></i>{/if}
+            <button data-icon-button type="button" class:active={active === tool.id} aria-pressed={active === tool.id} title={tool.shortcut ? `${tool.label} (${tool.shortcut})` : tool.label}
+              aria-label={tool.label} data-canvas-tool={tool.id} data-tool-group={toolGroup(tool.id)} onclick={() => choose(tool.id)}><Icon name={tool.id} size={19}/><span class="label">{tool.label}</span></button>
+          {/each}
+          <button data-icon-button type="button" class:active={extraOpen} title="More tools and layers" aria-label="More tools and layers" aria-expanded={extraOpen}
+            data-workspace-more-tools onclick={() => { extraOpen = !extraOpen; optionsOpen = false; }}><Icon name="more" size={19}/></button>
+        </div>
+        {#if $workspaceUi.profile === "modern" && isGM}
+          <div class="group layer-switch" role="group" aria-label="Layers">
+            {#each layers as entry (entry.id)}
+              <button data-icon-button type="button" class:active={layer === entry.id} aria-pressed={layer === entry.id} title={`${entry.label} layer`} aria-label={entry.label}
+                data-canvas-layer={entry.id} onclick={() => layer = entry.id}><Icon name={entry.id} size={16}/></button>
+            {/each}
+          </div>
+        {/if}
+        {#if $workspaceUi.profile === "roll20" && isGM}
+          <div class="group layer-dock" role="group" aria-label="Layers"><span class="layer-caption">LAYERS</span>
+            {#each [layers[1], layers[2], layers[0], layers[3]] as entry (entry.id)}
+              <button data-icon-button type="button" class:active={layer === entry.id} aria-pressed={layer === entry.id} title={entry.label} aria-label={entry.label}
+                data-canvas-layer={entry.id} onclick={() => layer = entry.id}><Icon name={entry.id} size={21}/><span>{entry.id === "tokens" ? "TOKENS" : entry.id === "lighting" ? "LIGHT" : entry.id.toUpperCase()}</span></button>
+            {/each}
+          </div>
+        {/if}
+      {/if}
     </div>
-
-    {#if isGM}
-      <div class="group" role="group" aria-label="Drawings">
-        <button data-icon-button
-          type="button"
-          class="danger"
-          aria-label="Erase all drawings"
-          title="Erase all drawings in this scene"
-          data-canvas-action="erase-all"
-          onclick={onEraseAll}><span class="icon"><Icon name="trash" /></span><span class="label">Erase drawings</span></button
-        >
+    {#if extraOpen}
+      <div class="tool-extra-menu" data-workspace-tools-menu role="menu" aria-label="More canvas tools">
+        <span class="menu-caption">Table actions</span>
+        {#each [{ id: "zoom-in", label: "Zoom in", icon: "zoomIn" }, { id: "zoom-out", label: "Zoom out", icon: "zoomOut" }, { id: "zoom-fit", label: "Fit scene", icon: "fit" }, { id: "turn-order", label: "Turn order", icon: "turn" },
+          { id: "add-turn", label: "Add to turn order", icon: "addTurn" }, { id: "settings", label: "Settings", icon: "settings" }, { id: "help", label: "Help", icon: "help" }] as action (action.id)}
+          <button role="menuitem" data-canvas-action={action.id} onclick={() => { extraOpen = false; act(action.id as CanvasAction); }}><Icon name={action.icon} size={17}/>{action.label}</button>
+        {/each}
+        {#if isGM}<button role="menuitem" data-canvas-action="erase-all" onclick={() => { extraOpen = false; onEraseAll(); }}><Icon name="trash" size={17}/>Erase drawings</button>{/if}
       </div>
     {/if}
   {/if}
-  </div>
-  {#if !collapsed && optionsOpen && HAS_OPTIONS.has(active)}
+  {#if ($workspaceUi.profile === "foundry" || !collapsed) && optionsOpen && HAS_OPTIONS.has(active)}
     <div class="tool-popover" data-tool-options={active}>
       <div class="popover-heading">
         <div><span class="popover-kicker">CANVAS TOOL</span><strong>{tools.find((tool) => tool.id === active)?.label}</strong></div>
@@ -716,7 +736,7 @@
   }
   .rail-scroll::-webkit-scrollbar { display: none; }
   .rail-scroll .group { display: flex; flex-direction: column; gap: 3px; width: 100%; border-top: 1px solid #293846; padding-top: 9px; }
-  .rail-scroll .group-label, .rail-scroll .label {
+  .rail-scroll .label {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -724,7 +744,6 @@
     clip-path: inset(50%);
     white-space: nowrap;
   }
-  .layers { display: flex; flex-direction: column; gap: 3px; }
   .rail-scroll button {
     flex: 0 0 42px;
     width: 42px;
@@ -754,7 +773,6 @@
   .canvas-toolbar.collapsed .rail-scroll { padding-inline: 1px; }
   .canvas-toolbar.collapsed .collapse { width: 40px; }
   .icon { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; }
-  .danger { color: #e6a7a5 !important; }
   .tool-popover {
     /* A flyout on the table side of the chat dock: it sits over the map's right edge and never
        over the dock, and the map's left side (where the rail's tools are drawn) stays clickable. */

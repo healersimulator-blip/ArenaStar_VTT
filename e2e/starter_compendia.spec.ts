@@ -4,7 +4,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { strFromU8, unzipSync } from "fflate";
-import { entry, gmCall, waitForSurface } from "./lib";
+import { chromeAction, entry, gmCall, waitForSurface } from "./lib";
 
 /**
  * The companion of `content_world.spec.ts`: that spec proves the *converted* 25,376-entry corpus
@@ -91,7 +91,7 @@ test.describe("shipped starter world compendia (G-45)", () => {
     // taster's own path: import → dialog → open as a copy.
     await page.goto(entry + "?e2e=1");
     await waitForSurface(page, "app");
-    await page.locator("#close-world").click();
+    await chromeAction(page, "close-world");
     await expect(page.locator("#role-host")).toHaveText(/Host a world|Continue/, { timeout: 30_000 });
     await page.setInputFiles("#role-import", zipPath as string);
     const dialog = page.locator("[data-open-dialog]");

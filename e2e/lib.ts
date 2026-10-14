@@ -219,3 +219,61 @@ export async function applySidebarMap(page: Page): Promise<void> {
   await dialog.getByRole("button", { name: "Apply to image" }).click();
   await expect(dialog).toHaveCount(0);
 }
+
+/**
+ * Runs a GM or player chrome action by its element id (`close-world`, `gm-perms`, `session-open`, …).
+ *
+ * The workspace shells (D-464) keep only the per-minute actions as visible buttons; the rest live
+ * in the main menu (modern) or the hidden command bar (Foundry/Roll20 compatibility layouts). The
+ * action ids and behaviour are unchanged, so specs state *what* they do and this helper finds the
+ * reachable control in whichever layout is active.
+ */
+export async function chromeAction(page: Page, id: string): Promise<void> {
+  await page.locator("[data-workspace-chrome]").waitFor();
+  const direct = page.locator(`#${id}`);
+  // Foundry/Roll20 keep a few command-bar buttons for assistive tech only (1×1, clipped); those
+  // count as "visible" to Playwright but cannot take a pointer, so measure instead of asking.
+  const box = (await direct.isVisible()) ? await direct.boundingBox() : null;
+  if (box && box.width >= 8 && box.height >= 8) {
+    await direct.click();
+    return;
+  }
+  const panel = page.locator("[data-workspace-menu-panel]");
+  if (!(await panel.isVisible())) await page.locator("[data-workspace-menu]").click();
+  const menuLabel: Record<string, string> = {
+    share: "Invite players",
+    "gm-workspace": "Workspace layout",
+    "player-workspace": "Workspace layout",
+    "gm-appearance": "Interface appearance",
+    "player-appearance": "Interface appearance",
+  };
+  const label = menuLabel[id];
+  if (label) await panel.getByRole("menuitem", { name: label }).click();
+  else await panel.locator(`#${id}`).click();
+}
+
+/**
+ * Makes the scene strip (`[data-testid="scene-nav"]`, `#scene-add`, `[data-scene]`) interactable.
+ * The modern workspace shows it as a popover under the scene crumb; the Foundry layout pins it to
+ * the canvas; Roll20 opens it from its pages button (D-464).
+ */
+export async function openSceneNav(page: Page): Promise<void> {
+  const bar = page.locator("[data-workspace-scene-menu]");
+  if (!(await bar.isVisible())) await page.locator("[data-workspace-pages]").click();
+  await expect(bar).toBeVisible();
+}
+
+/**
+ * Runs a canvas rail action (`help`, `settings`, `turn-order`, `zoom-in`, `erase-all`, …). The
+ * modern rail keeps table actions behind its "More tools" button (D-464); the ids are unchanged.
+ */
+export async function canvasAction(page: Page, id: string): Promise<void> {
+  const direct = page.locator(`[data-canvas-action="${id}"]`);
+  if (await direct.isVisible()) {
+    await direct.click();
+    return;
+  }
+  const menu = page.locator("[data-workspace-tools-menu]");
+  if (!(await menu.isVisible())) await page.locator("[data-workspace-more-tools]").click();
+  await menu.locator(`[data-canvas-action="${id}"]`).click();
+}
