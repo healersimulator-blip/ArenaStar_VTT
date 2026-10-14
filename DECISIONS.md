@@ -13959,3 +13959,18 @@ justifies a "content-aware guest" profile; R-01…R-11 are its requirement list 
 wanted, and the next kernel slice remains P3. No `sources.json` pins (GitLab is unreachable from
 this sandbox's build shell; C-10 asks the owner to choose GitLab pins vs. controlled mirrors). No
 converter code. No gates re-run: the change is three Markdown files.
+
+**Correction (same day, after owner review).** Two sentences in the first version of this entry
+and of the document overclaimed: "ArenaStar *is* the PF1e implementation" (true of the architectural
+role — ArenaStar owns the actor model and rules pipeline — false as a statement of depth: L01–L07 in
+`PF1e_Unified_TODO.md` remain open, and the Foundry `pf1` package has far more mechanics than the
+native engine), and "out of scope by design" (the proposal *scopes out* full system execution as a
+separate project; it does not forbid making `pf1` a target — that is the owner's call). The document
+now says so, and gains **§3.1a**, which sizes that project from the mirror (125 distinct `foundry.*`
+APIs, 20 data models / 108 `prepare*Data` sites, 185 Handlebars templates, 50 document-CRUD sites,
+no headless mode upstream — `pf1`'s own tests are Quench batches inside a live Foundry) and lists
+the three forms in which `pf1` can still be the target: **oracle** fixtures exported from a live
+Foundry + `pf1` session (cheap, recommended), **data as the mechanics carrier** (`changes[]` /
+`actions[]` / class associations — `itemChanges.ts` from D-259 already evaluates pf1-shaped
+changes; highest leverage, maps onto L01/L02/L04), and the **runtime** (the separate project).
+

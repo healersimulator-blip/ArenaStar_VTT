@@ -29,14 +29,18 @@ the adapter. **E says nothing about the value of the repository**; that is rated
 > **Terminology.** "pf1 system" below always means the *Foundry VTT package* `pf1` — the
 > JavaScript implementation of Pathfinder 1e for Foundry. It never means Pathfinder 1e the game.
 > PF1e is ArenaStar's native base system (`src/packages/pf1e`, 79 files / 36 k LOC, plus sheets,
-> combat, builder, 188 unit-test files and 72 e2e specs). The question this document asks about
-> repo 1 is therefore not "do we support PF1e" but "do we run Foundry's PF1e *code*" (no — we are
-> the PF1e code) and "do we use Foundry's PF1e *data and rules text*" (yes — it is already the
-> primary source, and more of it should be).
+> combat, builder, 188 unit-test files and 72 e2e specs) — **with partial depth**: the repo's own
+> backlog leaves class progression/feature automation, broader class and feat mechanics, the full
+> spell catalog with metamagic, non-combat skills and crafting/pricing open (`PF1e_Unified_TODO.md`
+> L01–L07). Foundry's `pf1` package has all of that and a decade of polish; the question is not
+> whether it has something to offer (it has a great deal) but **in what form it can be received**:
+> by *running* its code under the adapter (§3.1a sizes that), by using it as a *test oracle*, or by
+> consuming its *data*, which carries most of its mechanics (`changes[]`, `actions[]`, class
+> associations). The E in row 1 answers only the first form, and only for the adapter *as proposed*.
 
 | # | Repo | AIS/adapter today | Best route | Already in place | What is lacking (summary; detail in §3–§4) |
 |---|---|---|---|---|---|
-| 1 | pf1 system (Foundry's `pf1` *code package*) | **E** for the code — the adapter never hosts a game-system implementation (proposal §7.4; adapter README); ArenaStar *is* the PF1e implementation, so this repo is a data + reference source, not something to run | **C** for packs + **D** for rules (INVENTORY row 2, clean-room T1–T6) | 13 of 24 system packs converted (D-253); the native PF1e sheet/rules exist in-repo | 11 system packs not converted (incl. `class-abilities`, 4,710 entries — the largest pack); no plan to run 103 k LOC of GPLv3 system code, and none should be made |
+| 1 | pf1 system (Foundry's `pf1` *code package*) | **E** for the code *under the adapter as proposed* — P0–P6 never reach system execution (proposal §7.4/§9); the package is written against Foundry **core** (125 distinct `foundry.*` APIs, see §3.1a), not against a hook facade. Making it a target is a Foundry-core-compatible runtime: a separate project the owner can open, sized in §3.1a | **C** for packs + **D** for rules (INVENTORY row 2, clean-room T1–T6) | 13 of 24 system packs converted (D-253); the native PF1e sheet/rules exist in-repo | 11 system packs not converted (incl. `class-abilities`, 4,710 entries — the largest pack); no plan to run 103 k LOC of GPLv3 system code, and none should be made |
 | 2 | pf1-content | **E** for the script (it only redirects UUIDs and registers sources with the pf1 registry); irrelevant to the value | **C** | 15 packs converted from a **2023 pin** (`baileymh/pf1e-content@baf5232c`) | 21 of today's 35 packs never converted; upstream layout/renames drifted since the pin; actors arrive without their embedded items |
 | 3 | pf1e-archetypes | **E** for the script (SBC integration only) | **C**, then a product decision on archetype UX (**D**) | Nothing — not pinned, not converted | New source + YAML walker; `@Embed` enricher reduction; `links.supplements` consumer; archetype/prestige affordance in the builder |
 | 4 | statblock-library | **E** for the sheet (a `JournalPageSheet` subclass + `DocumentSheetConfig.registerSheet` + jQuery + SBC's `api.openSBCDialog`); none of that exists in the adapter | **C** for the text + **D** for the one feature (Import) — the native `importStatblock()` (D-267) already exists | The journal mapper, the compendium reader (proven at 25,376 entries, D-266), the native statblock reader | New source; `.yml` walker; custom page subtype rule; an "Import as actor" action behind the compendium reader; opt-in packaging (size), licence posture (Paizo CUP) |
@@ -131,12 +135,13 @@ items/combat` and `CONFIG.Item.collection` at init. Packs are authored as **11,3
 49, `roll-tables` 24, `basic-monsters` 15, `racial-hd` 13, `companion-features` 11, `rules` 10,
 `macros` 9, `mythic-paths` 6) and compiled to LevelDB by its Vite build.
 
-**AIS/adapter today: E — for the code, not for PF1e.** PF1e is ArenaStar's base system and is
-implemented natively; what is not a candidate is loading Foundry's `pf1.mjs` and its 358 files as a
-*guest* of the adapter and letting it provide the rules. Everything that package is — document data
-models, derived-data preparation, 69 applications, canvas subclasses, settings, sockets, chat
-message types — is on the adapter's explicit "unsupported" list, and the proposal (§7.4) rules it
-out: "Full Foundry system
+**AIS/adapter today: E — for the code under the adapter as proposed, not for PF1e.** PF1e is
+ArenaStar's base system, implemented natively with the depth gaps listed in §0's terminology note.
+What the adapter cannot do, in any phase the proposal describes, is load Foundry's `pf1.mjs` and
+its 358 files as a *guest* and let it provide the rules. Everything that package is — document
+data models, derived-data preparation, 69 applications, canvas subclasses, settings, sockets, chat
+message types — is on the adapter's explicit "unsupported" list, and the proposal (§7.4) scopes it
+out (scopes, not forbids — the owner decides whether to open that project; §3.1a gives the numbers): "Full Foundry system
 execution is a separate project and not proposed here." Nothing changes that verdict; a system is
 also the one thing that could not be loaded as a *guest* of an adapter that pretends to be its
 host. The system additionally targets Foundry **v14** APIs at master (`foundry.canvas.placeables.*`,
@@ -158,6 +163,53 @@ stages* of PF1 action events if AIS ever grows the P6 "PF1 action/effect/roll se
 (`pf1PreActorRollSave` → `pf1ActorRollSave`, `pf1PreAttackRoll` → `pf1AttackRoll`,
 `pf1PreDamageRoll`, `pf1ApplyDamage`, `pf1ToggleActorBuff/Condition`, `pf1ActorRest`). Reading hook
 names is not code transfer.
+
+### 3.1a If the `pf1` package were made the adapter's target — what that costs, measured
+
+The proposal calls full system execution "a separate project". That is a scoping statement, not
+a prohibition, so here is the project's size from the mirror (`681929d1`, `module/` only), so the
+decision can be taken on numbers:
+
+| What `pf1` is written against | Distinct uses in `module/` | What the adapter has today |
+|---|---:|---|
+| `foundry.<namespace>.<Class>` (abstract DataModel/TypeDataModel, documents, applications.api, applications.handlebars, applications.ux, dice.terms, canvas.*, helpers) | **125** | — |
+| `foundry.utils.*` helpers | 26 | 6 |
+| `foundry.data.fields.*` field types (schemas for 20 `TypeDataModel` subclasses; 108 `prepare*Data` sites) | 19 | — |
+| `game.*` services (`i18n settings user packs system time items combat users scenes actors tooltip messages dice clipboard socket …`) | 25 | `modules`, `scenes.get` (active only), `keybindings.register` (recorded) |
+| `CONFIG.*` registries | 21 | — |
+| `canvas.*` members (placeables, perception, `DetectionMode` subclasses) | 30 | — |
+| `ui.*` | 9 | — |
+| Handlebars templates / `HandlebarsApplicationMixin` subclasses | 185 / 33 | — (AIS UI is CSS-token theming) |
+| Roll engine (`RollPF`, `d20roll`, `damage-roll`, custom terms + functions over `foundry.dice.terms`) | 1 subsystem | native dice only, no Foundry `Roll` |
+| Document CRUD (`create/update/deleteDocuments`, `…EmbeddedDocuments`) — socket-backed DB writes | 50 sites | none (AIS has no document writes) |
+| Source size | 4.4 MB `module/` + 1.1 MB templates | app budget: 6 MiB total, 579 KiB headroom |
+
+Three consequences follow, independent of any document's opinion:
+
+1. **The target is Foundry core, not `pf1`.** `pf1` does not carry its own document, data-model,
+   roll, application or compendium layers — it calls Foundry's. Foundry's client is proprietary
+   and cannot be embedded, so "run `pf1`" means a clean-room, Foundry-core-compatible runtime
+   (documents + DataModel + preparation lifecycle, `Roll`, Applications + Handlebars, compendium
+   collections, settings, i18n, canvas placeables). That is the separate project. It cannot be
+   approached incrementally through `pf1` itself: `pf1` has no headless mode even upstream — its
+   own tests are 21 Quench batches that run *inside* a live Foundry world.
+2. **Two world models.** If it ran, `pf1` would produce pf1 documents replicated by Foundry's
+   socket DB semantics; ArenaStar's world is a typed 74-message host-authoritative protocol with
+   its own actor model. Either the two are reconciled permanently (a bidirectional mapping for
+   every mechanic `pf1` owns) or ArenaStar's actor model is replaced by `pf1`'s — at which point
+   the product is a Foundry re-implementation hosting `pf1`. A legitimate product; not the one in
+   the spec, and not one that fits one 6 MiB file.
+3. **Licence is a different question from INVENTORY row 2.** Row 2's clean-room rule forbids
+   copying GPLv3 code *into* ArenaStar. Running GPLv3 code as a separately-installed guest is a
+   plugin / combined-work question that this document does not settle; it is for the owner.
+
+**Three forms in which `pf1` can still be the target** (not mutually exclusive):
+
+| Form | What it gives | What it costs | Verdict |
+|---|---|---|---|
+| **Oracle** — `pf1`-prepared actor JSON as test fixtures for `derivePF1eActor` and the combat kernel | SRD-correct expected numbers for every class/feature/buff combination, with `pf1` as the reference | Export fixtures *from* a live Foundry + `pf1` session (no runtime needed); a fixture-loader test. Running `pf1`'s preparation headless instead would need the core stub above | **Cheap, recommended**; the fixture content is derived numbers, not `pf1` code |
+| **Data as the mechanics carrier** — `changes[]`, `actions[]`, `links.classAssociations`, `learnedAt`, `contextNotes` already present in the YAML packs | Feature automation (4,710 class abilities), spell attack/damage/save automation (3,037 spells), buff stacking — i.e. L01/L02/L04 — with `pf1`'s schema as the target *format* | Converter already carries `actions`/`learnedAt`/`changes` raw; `src/packages/pf1e/itemChanges.ts` (D-259) already evaluates pf1-shaped `changes[]`. Work = extend the evaluator + the converter mappers per field | **Highest leverage**; OGL/CUP data, documented semantics |
+| **Runtime** — `pf1` code executing under a Foundry-core-compatible runtime | Everything `pf1` does, unchanged | Consequences 1–3 above | Separate project; owner's call |
 
 ### 3.2 `pf1-content` — the content module
 
@@ -439,10 +491,11 @@ kernel slice.
 
 1. **Do not load Foundry's `pf1` code package under the adapter** or anywhere else in the app:
    103 k LOC of GPLv3, Foundry v14 APIs, canvas and document subclasses, and a 6 MiB app budget
-   with 579 KiB of headroom. The project's rules boundary (INVENTORY row 2: *data via converter,
-   logic via clean-room transcription*) is already the right decision; this reading only confirms
-   it. This is not a statement about PF1e support — PF1e is the native base system, and the same
-   repository remains its primary data source and parity reference.
+   with 579 KiB of headroom. The project's standing boundary (INVENTORY row 2: *data via converter,
+   logic via clean-room transcription*) is the current decision; §3.1a sizes the alternative so it
+   can be reopened on numbers rather than on this document's say-so. This is not a statement about
+   PF1e support — PF1e is the native base system, and the same repository remains its primary data
+   source and the best available oracle for the native rules.
 2. **Do not build a "compendium read" adapter profile to make pf1-content / archetypes /
    statblock-library "load".** Their scripts do nothing a user would notice; their value is data,
    and the converter already turns that data into packs the native reader browses faster than
