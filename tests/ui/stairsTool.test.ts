@@ -7,7 +7,7 @@ function harness(grid: { type: "square" | "gridless"; size: number } | null) {
   const previews: Array<ShapePreview | null> = [];
   const tool = new ToolInteractionController({
     nextId: () => "id", userId: "gm", grid: () => (grid ? { ...grid, diagonals: "555" } : null), options: () => DEFAULT_TOOL_OPTIONS,
-    createDrawing: () => {}, createWall: () => {}, createLight: () => {}, createNote: () => {}, promptText: () => {},
+    createDrawing: () => {}, createWall: () => {}, createLight: () => undefined, createNote: () => {}, promptText: () => {},
     measurePreview: () => {}, shapePreview: (p) => previews.push(p), broadcastMeasure: () => {}, fogPaint: () => {},
     createStairs: (area) => areas.push(area),
   });
@@ -47,7 +47,7 @@ test("D-453: the Raised area tool drags the same snapped rectangle and hands it 
   const previews: Array<ShapePreview | null> = [];
   const tool = new ToolInteractionController({
     nextId: () => "id", userId: "gm", grid: () => ({ type: "square", size: 100, diagonals: "555" }), options: () => DEFAULT_TOOL_OPTIONS,
-    createDrawing: () => {}, createWall: () => {}, createLight: () => {}, createNote: () => {}, promptText: () => {},
+    createDrawing: () => {}, createWall: () => {}, createLight: () => undefined, createNote: () => {}, promptText: () => {},
     measurePreview: () => {}, shapePreview: (p) => previews.push(p), broadcastMeasure: () => {}, fogPaint: () => {},
     createStairs: (area) => stairs.push(area), createRaised: (area) => raised.push(area),
   });

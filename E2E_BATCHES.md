@@ -23,7 +23,7 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 - **`--global-timeout` caps every batch** (15–20 minutes). A cap fails the command; it never counts
   unfinished tests as passing.
 - **A spec belongs to exactly one batch**, and `tests/scripts/e2eBatchCoverage.test.ts` asserts it at
-  unit-test speed: all 142 files / 451 tests covered, no duplicates, no batch over the cap. Add a
+  unit-test speed: all 143 files / 457 tests covered, no duplicates, no batch over the cap. Add a
   spec without a batch and that test fails.
 
 ## The batches
@@ -34,7 +34,7 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 | `test:e2e:table` | 19 | 39 | 20 min | 10.5 min | **39 passed** |
 | `test:e2e:hexcrawl` | 8 | 16 | 15 min | 8.2 min | **16 passed** |
 | `test:e2e:images` | 10 | 31 | 15 min | 4.9 min | **30 passed / 1 skipped** |
-| `test:e2e:net` | 3 | 4 | 15 min | 0.5 min | **4 passed** |
+| `test:e2e:net` | 4 | 5 | 15 min | 0.5 min | **4 passed** (+ `players_roster`, D-465) |
 | `test:e2e:ais` | 2 | 15 | 15 min | 6.6 min | **15 passed** |
 | `test:e2e:ui-adapters` | 2 | 5 | 15 min | 1.6 min | **5 passed** |
 | `test:e2e:pf1e-combat` | 16 | 70 | 20 min | 12.7 min | 64 passed / **6 pre-existing failures** |
@@ -114,6 +114,15 @@ images **30 passed / 1 skipped**, net **4/4**, ais **15/15**, ui-adapters **5/5*
 failures below — no regressions. The only non-listed failure seen during the chain was
 `e2e/realtime.spec.ts:46` once counting 7 ticks instead of ≥ 10 in its 1.5 s window at 10 Hz
 (a timing budget on a loaded 2-CPU sandbox); the batch passed 4/4 when rerun immediately after.
+
+## Testers' UI fixes (D-465, 2026-10-14)
+
+Six new browser tests and one new spec: `canvas_rail.spec.ts` (+2, lights editable; solid ruler
+with right-click waypoints), `background_layer.spec.ts` (+1, grid by square count / octave / fit),
+`windows.spec.ts` (+2, players roster; Scene settings window) and `players_roster.spec.ts` (new,
+`test:e2e:net`: a real joined player online, token grant reaching the replica, Disconnect). The
+suite is now 143 files / 457 tests; the per-batch measurements below this line are from D-464 and
+were re-run only for the affected batches (see D-465's verification paragraph).
 
 ## Known pre-existing failures (not regressions)
 

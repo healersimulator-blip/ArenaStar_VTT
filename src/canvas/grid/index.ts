@@ -71,7 +71,51 @@ export {
 /** Any scene grid (§9); gridless scenes carry `{ type: "gridless" }`. */
 export type GridSpec = SquareGrid | HexGridSpec | { type: "gridless" };
 
+/** D-465: how the grid layer strokes its lines (scene-configurable colour and opacity). */
+export interface GridStyle {
+  /** 0xRRGGBB */
+  color: number;
+  /** 0..1 */
+  alpha: number;
+}
+
+export const DEFAULT_GRID_STYLE: Readonly<GridStyle> = { color: 0x5c6672, alpha: 0.35 };
+export const DEFAULT_GRID_COLOR_CSS = "#5c6672";
+
+/** `#rgb` / `#rrggbb` → 0xRRGGBB, or null when the string is not a colour. */
+export function parseGridColor(value: string | undefined | null): number | null {
+  if (typeof value !== "string") return null;
+  const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value.trim());
+  if (!m || !m[1]) return null;
+  const hex = m[1].length === 3 ? m[1].split("").map((c) => c + c).join("") : m[1];
+  return Number.parseInt(hex, 16);
+}
+
+/** The stroke style a scene grid asks for; missing or malformed fields fall back to the default. */
+export function gridStyleFromScene(grid: { color?: string; alpha?: number } | null | undefined): GridStyle {
+  const color = parseGridColor(grid?.color) ?? DEFAULT_GRID_STYLE.color;
+  const alpha =
+    typeof grid?.alpha === "number" && Number.isFinite(grid.alpha)
+      ? Math.min(1, Math.max(0, grid.alpha))
+      : DEFAULT_GRID_STYLE.alpha;
+  return { color, alpha };
+}
+
+/**
+ * The geometry spec the stage draws for a scene grid (one definition for every shell, so a
+ * player sees the same hex grid the GM does and a gridless scene clears the lines).
+ */
+export function gridSpecFromScene(
+  grid: { type: "square" | "hex" | "gridless"; size: number; hexLayout: HexLayout } | null | undefined,
+): GridSpec | null {
+  if (!grid || !(grid.size > 0)) return null;
+  if (grid.type === "square") return { type: "square", size: grid.size };
+  if (grid.type === "hex") return { type: "hex", size: grid.size, layout: grid.hexLayout };
+  return { type: "gridless" };
+}
+
 import type { HexGridSpec } from "./hex";
+import type { HexLayout } from "../../core/documents";
 import { hexCenter, hexFromPixel } from "./hex";
 
 /**

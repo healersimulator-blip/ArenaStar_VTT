@@ -10,6 +10,7 @@
    * and module sections land when their consumers do (D-079).
    */
   import { onMount } from "svelte";
+  import PermissionsPanel, { type PlayerPresence } from "../permissions/PermissionsPanel.svelte";
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
@@ -95,7 +96,16 @@
     cloud = null,
     onBackup = null,
     onBackupFolder = null,
+    presence = null,
+    onOpenPlayers = null,
+    onOpenSceneSettings = null,
   }: {
+    /** D-465: live connections (host only) for the embedded player roster. */
+    presence?: PlayerPresence | null;
+    /** D-465: opens the full Players & permissions window (document ownership lives there). */
+    onOpenPlayers?: (() => void) | null;
+    /** D-465: opens the Scene settings window (size, grid colour/opacity, fit by grid count). */
+    onOpenSceneSettings?: (() => void) | null;
     saves?: SaveCoordinator | null;
     cloud?: CloudBackupController | null;
     onBackup?: (() => Promise<void>) | null;
@@ -461,7 +471,22 @@
       }}
     />
   {/if}
+  <h4>Players</h4>
+  <!-- D-465: "world options" is where testers looked for player management, so the roster lives
+       here too; the window adds per-document ownership. -->
+  <PermissionsPanel {client} {bus} {presence} compact={true} />
+  {#if onOpenPlayers}
+    <div class="row">
+      <button type="button" data-settings-open-players onclick={() => onOpenPlayers?.()}>Players &amp; permissions window (document ownership)…</button>
+    </div>
+  {/if}
   <h4>Scene grid</h4>
+  {#if onOpenSceneSettings}
+    <p class="hint">
+      Size, grid colour and opacity, and fitting the map by its square count are in
+      <button type="button" class="link" data-settings-open-scene onclick={() => onOpenSceneSettings?.()}>Scene settings</button>.
+    </p>
+  {/if}
   {#if grid}
     <div class="row">
       <label>
@@ -1312,6 +1337,7 @@
     font-size: 0.875rem;
     border-bottom: 1px solid #262e3a;
   }
+  button.link { padding: 0 2px; color: #8fb8ff; background: transparent; border: 0; text-decoration: underline; cursor: pointer; font: inherit; }
   .hint {
     margin: 0;
     font-size: 0.8125rem;

@@ -614,6 +614,29 @@ describe("HostSync ⇄ ClientSync over InMemoryTransport (§2, §5, §6.4)", () 
     void client;
   });
 
+  test("D-465: onlineUserIds lists live sessions, kickUser drops a user by id, unban lifts a ban", async () => {
+    const h = await setup();
+    const { bus } = await h.addPlayer(PLAYER_ID, "Rex");
+    const kicks: string[] = [];
+    bus.on("kick", (k) => kicks.push(k.reason));
+    expect(h.host.onlineUserIds().sort()).toEqual([GM_ID, PLAYER_ID].sort());
+
+    expect(h.host.kickUser("nobody")).toBe(0);
+    expect(h.host.kickUser(PLAYER_ID)).toBe(1);
+    await flushMicrotasks();
+    expect(kicks).toEqual(["disconnected by the GM"]);
+    expect(h.host.onlineUserIds()).toEqual([GM_ID]);
+    expect(h.host.isBanned(PLAYER_ID)).toBe(false); // a kick is not a ban: they may rejoin
+
+    h.host.ban(PLAYER_ID, "griefing");
+    expect(h.host.isBanned(PLAYER_ID)).toBe(true);
+    h.host.unban(PLAYER_ID);
+    expect(h.host.isBanned(PLAYER_ID)).toBe(false);
+    const back = await h.addPlayer(PLAYER_ID, "Rex");
+    expect(back.client.user?.id).toBe(PLAYER_ID);
+    expect(h.host.onlineUserIds().sort()).toEqual([GM_ID, PLAYER_ID].sort());
+  });
+
   test("undo applies inverse ops as a fresh envelope broadcast to all (§8)", async () => {
     const h = await setup();
     const { client } = await h.addPlayer(PLAYER_ID, "Rex");

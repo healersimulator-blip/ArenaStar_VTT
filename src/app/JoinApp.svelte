@@ -26,6 +26,7 @@
   import { sightBlockedBetween, type CrosshairPlacement } from "../core/crosshair";
   import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
   import { displayDistance } from "../canvas/grid/measure";
+  import { gridSpecFromScene, gridStyleFromScene } from "../canvas/grid";
   import { rulerLabel } from "../canvas/ephemera";
   import CanvasToolbar, {
     type CanvasAction,
@@ -106,6 +107,7 @@
   import FxViewPrefsPanel from "../ui/macros/FxViewPrefsPanel.svelte";
   import { fogMaskLog } from "../core/fogMask";
   import { drawingBounds } from "../canvas/layers/drawingGeometry";
+  import { canDeleteDrawing } from "../core/drawingPermissions";
   import { createVisionComputer } from "../workers/visionComputer";
   import { buildChatMessage, parseChatCommand } from "../core/chat";
   import { tokenHpBarsMap } from "../packages/pf1e/tokenHpBars";
@@ -409,6 +411,15 @@
       { kind: "create", coll: "drawings", parent: { coll: "scenes", id: scene._id }, data: drawing },
     ]);
   }
+  /** D-465: delete one of the player's own drawings (Alt-click erase, the label editor's Delete). */
+  function deleteOwnDrawing(id: string): void {
+    const scene = activeScene();
+    const me = app?.client.user;
+    const drawing = scene?.drawings.find((entry) => entry._id === id);
+    if (!scene || !me || !drawing || !canDeleteDrawing(drawing, me.id, me.role)) return;
+    app?.client.submit([{ kind: "delete", ref: { coll: "drawings", id, parent: { coll: "scenes", id: scene._id } } }]);
+    if (textDraft?.editingId === id) textDraft = null;
+  }
   /** Double-clicking a label re-opens it in the editor (Roll20's double-click to edit). */
   function editTextAt(world: { x: number; y: number }): boolean {
     const scene = activeScene();
@@ -468,7 +479,8 @@
         toolController?.recall();
         break;
       case "escape":
-        if (!toolController || toolController.current() === null) canvasTool = "select";
+        // D-465: dismiss what is armed first; with nothing armed Escape returns to Select.
+        if (!toolController || !toolController.hasPendingGesture()) canvasTool = "select";
         else toolController.dismissGesture();
         break;
       default:
@@ -1224,8 +1236,10 @@
     const fetcher = current.fetcher;
     if (fetcher) sceneBackground.sync(scene?.img ?? null, client.store.world.assetManifest,
       (hash, priority) => fetcher.request(hash, priority), view, scene);
-    const grid = squareGrid(scene?.grid);
-    if (grid) view.setGrid(grid);
+    // D-465: players see the scene's grid as the GM configured it — hex grids too, the scene's
+    // line colour/opacity, and no stale lines after a switch to a gridless scene.
+    view.setGrid(gridSpecFromScene(scene?.grid));
+    view.setGridStyle(gridStyleFromScene(scene?.grid));
   }
 
   /** Overlay coordinates are the canvas's own screen space (stage root = top-left origin). */
@@ -1422,6 +1436,23 @@
           createWall: () => undefined,
           createLight: () => undefined,
           createNote: () => undefined,
+          // D-465: Alt-click with the Draw tool erases a drawing the player may delete (their own).
+          drawingEditing: {
+            hit: (world) => {
+              const sc = activeScene();
+              const me = client.user;
+              if (!sc || !me) return null;
+              const slack = 4 / (view.camera.scale || 1);
+              for (let index = sc.drawings.length - 1; index >= 0; index--) {
+                const drawing = sc.drawings[index];
+                if (!drawing || !canDeleteDrawing(drawing, me.id, me.role)) continue;
+                const box = drawingBounds(drawing);
+                if (world.x >= box.x - slack && world.x <= box.x + box.width + slack && world.y >= box.y - slack && world.y <= box.y + box.height + slack) return { id: drawing._id, x: 0, y: 0 };
+              }
+              return null;
+            },
+            remove: (id) => deleteOwnDrawing(id),
+          },
           measurePreview: (value) => { measurePreview = value; },
           shapePreview: (value) => { shapePreview = value; },
           broadcastMeasure: (points) => {
@@ -1434,6 +1465,7 @@
         const toolPointer = (e: PointerEvent) => ({
           world: toWorld(e),
           button: e.button,
+          buttons: e.buttons,
           ctrlKey: e.ctrlKey,
           shiftKey: e.shiftKey,
           altKey: e.altKey,
@@ -1442,6 +1474,8 @@
         const toolMove = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController.pointerMove(toolPointer(e)); };
         const toolUp = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController.pointerUp(toolPointer(e)); };
         const onToolContext = (e: MouseEvent) => {
+          // The ruler's right button is a waypoint (pointerdown); never a menu over the canvas.
+          if (canvasTool === "measure") { e.preventDefault(); return; }
           if (canvasTool !== "draw") return;
           e.preventDefault();
           toolController.finishPoly();
@@ -1449,7 +1483,9 @@
         const onToolKey = (e: KeyboardEvent) => {
           if (e.key !== "Escape" || isTypingTarget(e.target)) return;
           closeHexMenu(); // D-271: the hex menu dismisses like every other canvas menu
-          if (GESTURE_TOOLS.has(canvasTool)) toolController.finishPoly();
+          if (e.defaultPrevented) return; // the rail's key layer already took this Escape
+          e.preventDefault();
+          runCanvasAction("escape");
         };
         const onTextEdit = (e: MouseEvent) => {
           if (canvasTool !== "text" || e.button !== 0) return;
@@ -1896,12 +1932,14 @@
             {@const tail = pts.at(-1) ?? null}
             {@const areaPts = measurePreview.area ? templateOutline(measurePreview.area).map(measurePoint) : null}
             <svg class="measure-preview" aria-label={`Measurement ${measureReadout(measurePreview.distance)}`}>
-              <polyline points={pts.map((p) => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#f4c95d" stroke-width="3" stroke-dasharray="8 5" />
-              {#if measurePreview.radiusPx && pts[0]}
+              <polyline points={pts.map((p) => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#f4c95d" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" />
+              {#each pts.slice(1, -1) as pivot, index (index)}
+                <circle class="waypoint" cx={pivot.x} cy={pivot.y} r="4" fill="#f4c95d" stroke="#111" stroke-width="1" />
+              {/each}
+              {#if measurePreview.shape === "circle" && measurePreview.radiusPx && pts[0]}
                 <circle cx={pts[0].x} cy={pts[0].y} r={measurePreview.radiusPx * (stage?.camera.scale ?? 1)} fill="#f4c95d22" stroke="#f4c95d" stroke-width="2" />
-              {/if}
-              {#if areaPts && areaPts.length > 1}
-                <polygon points={areaPts.map((p) => `${p.x},${p.y}`).join(" ")} fill="#f4c95d1a" stroke="#f4c95d" stroke-width="2" stroke-dasharray="4 4" />
+              {:else if areaPts && areaPts.length > 1}
+                <polygon points={areaPts.map((p) => `${p.x},${p.y}`).join(" ")} fill="#f4c95d1a" stroke="#f4c95d" stroke-width="2" />
               {/if}
               {#if tail}
                 <text x={tail.x + 8} y={tail.y - 8} fill="#fff" stroke="#111" stroke-width="3" paint-order="stroke">{measureReadout(measurePreview.distance)}</text>
@@ -1946,7 +1984,10 @@
               ></textarea>
               <div class="text-editor-actions">
                 <button type="button" data-text-commit onclick={() => commitTextDraft()}>Done</button>
-                <button type="button" onclick={() => (textDraft = null)}>Cancel</button>
+                <button type="button" data-text-cancel onclick={() => (textDraft = null)}>Cancel</button>
+                {#if textDraft.editingId}
+                  <button type="button" data-text-delete onclick={() => { if (textDraft?.editingId) deleteOwnDrawing(textDraft.editingId); }}>Delete</button>
+                {/if}
               </div>
             </div>
           {/if}

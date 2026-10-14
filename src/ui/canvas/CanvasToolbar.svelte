@@ -67,6 +67,9 @@
     pathTool = false,
     stairsTool = false,
     raisedTool = false,
+    selectedLight = null,
+    onLightChange = () => {},
+    onLightDelete = () => {},
   }: {
     active?: CanvasTool;
     collapsed?: boolean;
@@ -92,6 +95,10 @@
     /** G-14 (D-450): the scene has floors, so stairwells can be drawn. */
     stairsTool?: boolean;
     raisedTool?: boolean;
+    /** D-465: the light the Light tool has selected; its options edit that light, not the next one. */
+    selectedLight?: { id: string; dim: number; bright: number; color: string } | null;
+    onLightChange?: (patch: { dim?: number; bright?: number; color?: string }) => void;
+    onLightDelete?: () => void;
   } = $props();
 
   let formula = $state("1d20");
@@ -124,7 +131,9 @@
   function chooseSet(id: string): void {
     controlSet = id; extraOpen = false;
     const control = controls.find((entry) => entry.id === id);
-    if (id === "tiles") layer = "map"; else if (id === "walls" || id === "lights") layer = "lighting"; else layer = "tokens";
+    // Walls are drawn and edited on the GM-info layer (the overlay only shows there, D-465);
+    // lights live on the dynamic-lighting layer.
+    if (id === "tiles") layer = "map"; else if (id === "walls") layer = "gm"; else if (id === "lights") layer = "lighting"; else layer = "tokens";
     if (control?.tool) choose(control.tool);
     if (id === "audio") onPanel("playlists");
     if (id === "regions") onPanel("placeables");
@@ -195,6 +204,9 @@
   function choose(toolId: CanvasTool) {
     optionsOpen = HAS_OPTIONS.has(toolId) && (toolId !== active || !optionsOpen);
     active = toolId;
+    // D-465: the Wall tool is blind off the GM-info layer (existing walls and endpoint edits
+    // only show there), so picking it moves the GM onto that layer.
+    if (toolId === "wall" && isGM && layer !== "gm") layer = "gm";
     extraOpen = false;
     onChooseTool(toolId);
     globalThis.dispatchEvent(new CustomEvent("vtt-canvas-tool", { detail: toolId }));
@@ -279,16 +291,27 @@
       choose(tool.id);
     }
     // Escape is gesture-aware: the shell decides whether it cancels a pending polygon
-    // (Roll20) or returns to Select when nothing is armed.
+    // (Roll20) or returns to Select when nothing is armed. An open "More tools" menu closes
+    // first, and the canvas key layer may already have taken the same Escape (D-465).
     if (event.key === "Escape") {
+      if (extraOpen) { event.preventDefault(); extraOpen = false; return; }
+      if (event.defaultPrevented) return;
       event.preventDefault();
       act("escape");
     }
   }
 
+  /** D-465: a click anywhere outside the rail's "More tools" menu dismisses it. */
+  function onWindowPointerDown(event: PointerEvent) {
+    if (!extraOpen) return;
+    const target = event.target as Element | null;
+    if (target?.closest("[data-workspace-tools-menu], [data-workspace-more-tools]")) return;
+    extraOpen = false;
+  }
+
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} onpointerdown={onWindowPointerDown} />
 <div class:collapsed class="canvas-toolbar" role="toolbar" aria-label="Canvas tools" data-canvas-toolbar>
   {#if $workspaceUi.profile === "foundry"}
     <div class="foundry-controls" data-foundry-controls>
@@ -466,7 +489,7 @@
             >{settings.measureBroadcast ? "Shown to others" : "Hidden from others"}</span
           >
         </button>
-        <p class="hint">Ctrl+click adds a waypoint · X recalls the last measurement</p>
+        <p class="hint">Right-click while measuring (or Ctrl+click) adds a waypoint · X recalls the last measurement</p>
       {:else if active === "dice"}
         <div class="swatches">
           {#each toolDice as die (die)}
@@ -647,33 +670,67 @@
           <p class="hint">Click a plain wall to split · doors/windows and prefab walls are protected · one undo per edit</p>
         {/if}
       {:else if active === "light"}
-        <div class="swatches">
-          {#each [1, 2, 3, 6] as cells (cells)}
-            <button
-              type="button"
-              class:active={settings.lightRadius === cells * cellSize}
-              aria-pressed={settings.lightRadius === cells * cellSize}
-              title={`${cells} grid cell(s) of light`}
-              data-canvas-light-radius={cells}
-              onclick={() => (settings.lightRadius = cells * cellSize)}
-            >
-              <span class="label">{cells}□</span>
+        {#if selectedLight}
+          {@const light = selectedLight}
+          <!-- D-465: a placed light stays editable — radius swatches, colour and Delete act on it. -->
+          <p class="hint" data-light-selected={light.id}>Selected light · {Math.round(light.dim / cellSize * 10) / 10}□ radius</p>
+          <div class="swatches">
+            {#each [1, 2, 3, 6] as cells (cells)}
+              <button
+                type="button"
+                class:active={light.dim === cells * cellSize}
+                aria-pressed={light.dim === cells * cellSize}
+                title={`${cells} grid cell(s) of light`}
+                data-canvas-light-radius={cells}
+                onclick={() => onLightChange({ dim: cells * cellSize, bright: Math.max(1, Math.round((cells * cellSize) / 2)) })}
+              >
+                <span class="label">{cells}□</span>
+              </button>
+            {/each}
+          </div>
+          <div class="style-row">
+            <input
+              type="color"
+              aria-label="Light colour"
+              title="Light colour"
+              data-canvas-light-color
+              value={light.color}
+              onchange={(event) => onLightChange({ color: event.currentTarget.value })}
+            />
+            <button type="button" data-canvas-light-delete onclick={() => onLightDelete()}>
+              <span class="label">Delete light</span>
             </button>
-          {/each}
-        </div>
-        <div class="style-row">
-          <input
-            type="color"
-            aria-label="Light colour"
-            title="Light colour"
-            data-canvas-light-color
-            bind:value={settings.lightColor}
-          />
-          <button type="button" data-canvas-action="delete-last-placement" onclick={() => act("delete-last-placement")}>
-            <span class="label">Erase last</span>
-          </button>
-        </div>
-        <p class="hint">Click the map to place a light</p>
+          </div>
+          <p class="hint">Drag the marker to move it · Alt-click or Delete removes it · Esc deselects</p>
+        {:else}
+          <div class="swatches">
+            {#each [1, 2, 3, 6] as cells (cells)}
+              <button
+                type="button"
+                class:active={settings.lightRadius === cells * cellSize}
+                aria-pressed={settings.lightRadius === cells * cellSize}
+                title={`${cells} grid cell(s) of light`}
+                data-canvas-light-radius={cells}
+                onclick={() => (settings.lightRadius = cells * cellSize)}
+              >
+                <span class="label">{cells}□</span>
+              </button>
+            {/each}
+          </div>
+          <div class="style-row">
+            <input
+              type="color"
+              aria-label="Light colour"
+              title="Light colour"
+              data-canvas-light-color
+              bind:value={settings.lightColor}
+            />
+            <button type="button" data-canvas-action="delete-last-placement" onclick={() => act("delete-last-placement")}>
+              <span class="label">Erase last</span>
+            </button>
+          </div>
+          <p class="hint">Click the map to place a light · click a placed light to select, drag or delete it</p>
+        {/if}
       {:else if active === "stairs"}
         <p class="hint" data-stairs-hint>
           Drag over the stairs on the map. They join the floor you are viewing and the next one up; change the floors, directions or name under Scenes → Floor play &amp; stairs.

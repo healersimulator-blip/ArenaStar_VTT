@@ -1123,6 +1123,28 @@ export class HostSync {
     return this.banned.has(userId);
   }
 
+  /** D-465: disconnect every session of a user without banning them (they may rejoin). */
+  kickUser(userId: UserId, reason = "disconnected by the GM"): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (session.user?.id === userId) {
+        this.kick(session.peerId, reason);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /** D-465: lift a ban so the user can be approved again. */
+  unban(userId: UserId): void {
+    this.banned.delete(userId);
+  }
+
+  /** D-465: ids of the users with a live session (the roster's "online" dot). */
+  onlineUserIds(): UserId[] {
+    return this.sessionUsers().map((user) => user.id);
+  }
+
   get sessionCount(): number {
     return this.sessions.size;
   }

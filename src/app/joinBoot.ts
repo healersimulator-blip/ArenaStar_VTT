@@ -177,6 +177,12 @@ export async function bootPlayerApp(options: PlayerAppOptions): Promise<PlayerAp
     welcomed = true;
     resolveReady();
   });
+  // D-465: a kick closes the *session*, not just the sync transport — otherwise the player's own
+  // peer state never changes (closing a local RTCPeerConnection fires no state event), the shell
+  // keeps saying "connected", and §6.5 would try to reconnect to a host that just removed us.
+  bus.on("kick", ({ reason }) => {
+    session.close(`kicked: ${reason}`);
+  });
   session.onClosed = (reason) => {
     if (!welcomed) rejectReady(new Error(`connection closed before welcome: ${reason}`));
     app.onDisconnected?.(reason);

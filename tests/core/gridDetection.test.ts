@@ -115,6 +115,35 @@ describe("detectMapGrid — synthetic grids", () => {
     });
   }
 
+  test("D-465: the result says how many squares the map has, so a wrong octave is obvious", () => {
+    const rgba = gridImage(2250, 2250, 75, 75, 0, 0, { noise: 4, art: true });
+    const result = detectMapGrid(accumulate(rgba, 2250, 2250));
+    expect(result.found).toBe(true);
+    if (!result.found) return;
+    expect(result.squares).toEqual({ columns: 30, rows: 30 });
+  });
+
+  test("D-465 octave defence: bold lines every other square still measure the fine grid", () => {
+    // A 40 px grid whose every second line is drawn three pixels wide (a "10 ft" emphasis):
+    // the strong 80 px peak must not win over the fine grid the map actually has.
+    const width = 1600;
+    const height = 1200;
+    const base = gridImage(width, height, 40, 40, 5, 11, { noise: 3, art: true });
+    for (let k = 0; k < 50; k++) {
+      for (const dx of [-1, 1]) {
+        const x = 5 + k * 80 + dx;
+        if (x >= 0 && x < width) for (let y = 0; y < height; y++) for (let c = 0; c < 3; c++) base[(y * width + x) * 4 + c] = 40;
+        const y = 11 + k * 80 + dx;
+        if (y >= 0 && y < height) for (let x2 = 0; x2 < width; x2++) for (let c = 0; c < 3; c++) base[(y * width + x2) * 4 + c] = 40;
+      }
+    }
+    const result = detectMapGrid(accumulate(base, width, height));
+    expect(result.found).toBe(true);
+    if (!result.found) return;
+    expect(Math.abs(result.grid.sizeX - 40)).toBeLessThan(0.2);
+    expect(result.squares).toEqual({ columns: 40, rows: 30 });
+  });
+
   test("a stretched grid (different X and Y pitch) reports both sizes", () => {
     const rgba = gridImage(1600, 1400, 50, 62, 12, 9, { noise: 4, art: true });
     const result = detectMapGrid(accumulate(rgba, 1600, 1400));

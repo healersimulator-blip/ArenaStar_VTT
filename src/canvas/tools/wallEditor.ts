@@ -23,6 +23,8 @@ export class WallEditorController {
     private readonly preview: (walls: WallDocument[] | null) => void,
     private readonly nextId: () => string) {}
   cancel(): void { this.drag = null; this.preview(null); }
+  /** D-465: an endpoint/split drag is in flight (Escape cancels it instead of leaving the tool). */
+  get busy(): boolean { return this.drag !== null; }
   down(point: WallPoint, mode: WallEditMode, joined: boolean): void {
     this.cancel();
     if (mode === "draw") return;

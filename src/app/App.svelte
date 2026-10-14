@@ -29,6 +29,8 @@
     type MapGridEstimate,
     type NaturalSize,
   } from "../core/backgroundTransform";
+  import { fitSceneToGridCount, gridCountOfMap, mapGridFromCount, rescaleMapGrid, type GridCount } from "../core/sceneFit";
+  import type { PlayerPresence } from "../ui/permissions/PermissionsPanel.svelte";
   import { onMount, untrack } from "svelte";
   import { detectCapabilities } from "./capabilities";
   import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
@@ -267,6 +269,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { DEFAULT_BINDINGS, actionForCombo, comboOf, isTypingTarget } from "../core/keys";
   import { globalHooks } from "../core/events";
   import type { GridSpec } from "../canvas/grid";
+  import { gridSpecFromScene, gridStyleFromScene } from "../canvas/grid";
   import type { AssetId } from "../core/ids";
   import { TablesPanel } from "../ui/tables";
   import { PlaylistsPanel } from "../ui/playlists";
@@ -281,6 +284,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     AssetManifestEntry,
     CellFeature,
     CombatDocument,
+    DrawingDocument,
     JournalDocument,
     LightDocument,
     NoteDocument,
@@ -442,6 +446,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     if (action === "settings" || action === "packages") openWindow("settings", "Settings", "settings");
     else if (action === "macros") openWindow("macros", "Macros", "macros");
     else if (action === "permissions") openWindow("permissions", "Permissions", "permissions");
+    else if (action === "scene-settings") openSceneSettings();
     else if (action === "help") openWindow("help", "Help", "help");
     else if (action === "session") openSession();
     else if (action === "export") void exportWorld();
@@ -601,12 +606,21 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   let fogMask = $state<FogMaskOp[]>([]);
   /** D-256: the last wall/light the rail placed, for "erase last". */
   let lastPlacement = $state<{ kind: "wall" | "light"; id: string } | null>(null);
+  /** D-465: the light the Light tool has selected (markers, options popover, Delete). */
+  let selectedLightId = $state<string | null>(null);
   /** Screen-pixel pick radius for a map pin (the marker is drawn at a constant size). */
   const PIN_PICK_RADIUS = 16;
+  /** D-465: screen-space reach for picking a light source marker with the Light tool. */
+  const LIGHT_PICK_RADIUS = 16;
 /** Wall pick tolerance in screen pixels (D-257). */
 const WALL_PICK_RADIUS = 12;
   const sceneBackground = new SceneBackgroundPlayer();
   const levelPreviewScene = $derived.by(() => { void storeVersion; return activeScene(); });
+  /** D-465: the scene whose lights the Light tool draws as markers — re-read on every store change. */
+  const lightMarkerScene = $derived.by(() => {
+    void storeVersion;
+    return canvasTool === "light" && !viewingAs ? activeScene() : null;
+  });
   let levelPreview = $state<{ sceneId: string; levelId: string } | null>(null);
   function previewLevel(scene: SceneDocument | null): string | undefined {
     if (viewingAs || !scene || levelPreview?.sceneId !== scene._id ||
@@ -777,9 +791,9 @@ const WALL_PICK_RADIUS = 12;
     ]);
     lastPlacement = { kind: "wall", id };
   }
-  function createLight(light: { x: number; y: number; radius: number; color: string }) {
+  function createLight(light: { x: number; y: number; radius: number; color: string }): string | undefined {
     const scene = activeScene();
-    if (!scene) return;
+    if (!scene) return undefined;
     const id = nextId("light");
     const doc: LightDocument = {
       _id: id,
@@ -799,6 +813,63 @@ const WALL_PICK_RADIUS = 12;
       { kind: "create", coll: "lights", parent: { coll: "scenes", id: scene._id }, data: doc },
     ]);
     lastPlacement = { kind: "light", id };
+    return id;
+  }
+  /** D-465: edit a placed light (position, radii, colour) — one update op = one undo step. */
+  function updateLight(id: string, patch: Partial<Pick<LightDocument, "x" | "y" | "dim" | "bright" | "color" | "alpha">>): void {
+    const scene = activeScene();
+    if (!scene || !scene.lights.some((light) => light._id === id)) return;
+    app?.gm.client.submit([{ kind: "update", ref: { coll: "lights", id, parent: { coll: "scenes", id: scene._id } }, diff: patch }]);
+  }
+  function deleteLight(id: string): void {
+    const scene = activeScene();
+    if (!scene || !scene.lights.some((light) => light._id === id)) return;
+    app?.gm.client.submit([{ kind: "delete", ref: { coll: "lights", id, parent: { coll: "scenes", id: scene._id } } }]);
+    if (lastPlacement?.kind === "light" && lastPlacement.id === id) lastPlacement = null;
+    if (selectedLightId === id) selectedLightId = null;
+  }
+  /** The light under a world point, within a screen-sized pick radius (nearest wins). */
+  function lightAt(world: { x: number; y: number }): LightDocument | null {
+    const scene = activeScene();
+    if (!scene) return null;
+    const reach = LIGHT_PICK_RADIUS / (stage?.camera.scale || 1);
+    let best: LightDocument | null = null;
+    let bestDistance = Infinity;
+    for (const light of scene.lights) {
+      const distance = Math.hypot(light.x - world.x, light.y - world.y);
+      if (distance <= reach && distance < bestDistance) { best = light; bestDistance = distance; }
+    }
+    return best;
+  }
+  const selectedLight = $derived.by((): LightDocument | null => {
+    void storeVersion; // the light lands (and changes radius/colour) through the store
+    const id = selectedLightId;
+    return id ? activeScene()?.lights.find((light) => light._id === id) ?? null : null;
+  });
+  function deletePin(id: string): void {
+    const scene = activeScene();
+    if (!scene || !scene.notes.some((note) => note._id === id)) return;
+    app?.gm.client.submit([{ kind: "delete", ref: { coll: "notes", id, parent: { coll: "scenes", id: scene._id } } }]);
+    if (pinTooltip?.id === id) pinTooltip = null;
+  }
+  function deleteDrawing(id: string): void {
+    const scene = activeScene();
+    if (!scene || !scene.drawings.some((drawing) => drawing._id === id)) return;
+    app?.gm.client.submit([{ kind: "delete", ref: { coll: "drawings", id, parent: { coll: "scenes", id: scene._id } } }]);
+    if (textDraft?.editingId === id) textDraft = null;
+  }
+  /** The topmost drawing whose bounds contain the point (Alt-click erase, D-465). */
+  function drawingAt(world: { x: number; y: number }): DrawingDocument | null {
+    const scene = activeScene();
+    if (!scene) return null;
+    const slack = 4 / (stage?.camera.scale || 1);
+    for (let index = scene.drawings.length - 1; index >= 0; index--) {
+      const drawing = scene.drawings[index];
+      if (!drawing) continue;
+      const box = drawingBounds(drawing);
+      if (world.x >= box.x - slack && world.x <= box.x + box.width + slack && world.y >= box.y - slack && world.y <= box.y + box.height + slack) return drawing;
+    }
+    return null;
   }
   /** D-256 map pin: hidden by default (Roll20), visible = `ownership.default = LIMITED`. */
   /** G-14 (D-450): the Stairs tool's rectangle becomes a stairwell joining the viewed floor and the next one. */
@@ -993,7 +1064,10 @@ const WALL_PICK_RADIUS = 12;
           leavePathMode();
           break;
         }
-        if (!toolController || toolController.current() === null) canvasTool = "select";
+        // D-465: Escape dismisses what is armed (stroke, measurement on screen, selected light,
+        // endpoint drag); with nothing armed it returns to Select — so every placement tool has
+        // a keyboard way out, as the rail's hint promises.
+        if (!toolController || !toolController.hasPendingGesture()) canvasTool = "select";
         else toolController.dismissGesture();
         break;
     }
@@ -2806,12 +2880,32 @@ const WALL_PICK_RADIUS = 12;
       kind,
       x: 40 + (wm.list().length % 5) * 24,
       y: 40 + (wm.list().length % 5) * 24,
-      width: kind === "hexcrawl-wizard" ? 520 : kind === "macros" ? 560 : 380,
+      width: kind === "hexcrawl-wizard" ? 520 : kind === "macros" || kind === "permissions" ? 560 : kind === "scene-settings" ? 460 : 380,
       // Settings carries the ruleset section on top of the scene options (D-249): taller;
       // the hexcrawl wizard has three steps and a readout to show at once (D-270).
-      height: kind === "settings" ? 560 : kind === "hexcrawl-wizard" || kind === "macros" ? 580 : 420,
+      height: kind === "settings" || kind === "scene-settings" ? 560 : kind === "hexcrawl-wizard" || kind === "macros" ? 580 : 420,
       ...(data ? { data } : {}),
     });
+  }
+
+  /**
+   * D-465: what the roster knows that documents do not — who is connected, and the host's
+   * kick/ban. Built once per world; the panel polls `online()` while it is open.
+   */
+  const playerPresence = $derived.by((): PlayerPresence | null => {
+    const host = app?.host;
+    if (!host) return null;
+    return {
+      online: () => host.onlineUserIds(),
+      banned: (userId) => host.isBanned(userId),
+      kick: (userId) => { host.kickUser(userId); },
+      ban: (userId) => host.ban(userId, "banned by the GM"),
+      unban: (userId) => host.unban(userId),
+    };
+  });
+  /** D-465: the Scene settings window for a scene (default: the active one). */
+  function openSceneSettings(sceneId: string | null = activeScene()?._id ?? null): void {
+    openWindow("scene-settings", "Scene settings", "scene-settings", sceneId ? { sceneId } : undefined);
   }
 
   function openActorSheet(actorId: string, tab?: string): void {
@@ -3189,6 +3283,36 @@ const WALL_PICK_RADIUS = 12;
     if (!scene || !grid || !measured) return;
     commitBackground(matchMapToGrid(backgroundTransformOf(scene.background), measured, grid));
   }
+  /** D-465: the detector measured every second (or every half) line — rescale, keep the phase. */
+  function scaleMapGrid(factor: 0.5 | 2): void {
+    const scene = activeScene();
+    const measured = backgroundMapGrid(scene);
+    if (!scene?.img || !measured) return;
+    patchBackground({ mapGrid: { image: scene.img, ...rescaleMapGrid(measured, factor) } });
+  }
+  /** D-465: the GM states the map's square count; that *is* the map grid (no detection needed). */
+  function setMapGridFromCount(count: GridCount): void {
+    const scene = activeScene();
+    if (!scene?.img || !backgroundNatural) return;
+    const next = mapGridFromCount(backgroundNatural, count);
+    if (!next) return;
+    patchBackground({ mapGrid: { image: scene.img, ...next } });
+    backgroundDetection = { status: "found", confidence: 1 };
+  }
+  /**
+   * D-465: match the map to the grid *and* size the scene to the map's squares, so an imported
+   * background neither hangs over the edge nor leaves an empty margin.
+   */
+  function fitSceneToMap(): void {
+    const scene = activeScene();
+    const measured = backgroundMapGrid(scene);
+    const grid = backgroundGridSize(scene);
+    if (!scene?.img || !measured || !grid || !backgroundNatural) return;
+    const count = gridCountOfMap(backgroundNatural, measured);
+    const fit = fitSceneToGridCount({ natural: backgroundNatural, count, gridSize: grid, type: "square", mapGrid: measured });
+    if (!fit) return;
+    commitBackground(fit.transform, { width: fit.width, height: fit.height });
+  }
   function useSquaresAsGrid(): void {
     const scene = activeScene();
     const measured = backgroundMapGrid(scene);
@@ -3198,11 +3322,7 @@ const WALL_PICK_RADIUS = 12;
   }
 
   function sceneGridSpec(grid: SceneGrid | undefined): GridSpec | null {
-    if (!grid || grid.size <= 0) return null;
-    if (grid.type === "square") return { type: "square", size: grid.size };
-    if (grid.type === "hex")
-      return { type: "hex", size: grid.size, layout: grid.hexLayout };
-    return { type: "gridless" };
+    return gridSpecFromScene(grid);
   }
 
   const massBattle = createMassBattleBasic();
@@ -3530,6 +3650,7 @@ const WALL_PICK_RADIUS = 12;
     sceneBackground.sync(shown?.img ?? null, current.gm.client.store.world.assetManifest,
       (hash, priority) => current.gm.fetcher.request(hash, priority), view, shown);
     view.setGrid(sceneGridSpec(scene?.grid));
+    view.setGridStyle(gridStyleFromScene(scene?.grid));
     syncBackgroundEditor();
   }
 
@@ -4085,6 +4206,39 @@ const WALL_PICK_RADIUS = 12;
           createWall: (wall) => createWall(wall),
           createLight: (light) => createLight(light),
           createNote: (at) => createPin(at),
+          // D-465: what the placement tools may do to what they placed (testers could add
+          // lights but never select, move or delete them again).
+          lightEditing: {
+            hit: (world) => {
+              if (viewingAs) return null;
+              const light = lightAt(world);
+              return light ? { id: light._id, x: light.x, y: light.y, radius: light.dim } : null;
+            },
+            move: (id, at) => updateLight(id, { x: at.x, y: at.y }),
+            remove: (id) => deleteLight(id),
+            select: (id) => { selectedLightId = id; },
+          },
+          noteEditing: {
+            hit: (world) => {
+              if (viewingAs) return null;
+              const pin = view.getNotesLayer().pinAt(world, PIN_PICK_RADIUS / (view.camera.scale || 1));
+              return pin ? { id: pin._id, x: pin.x, y: pin.y } : null;
+            },
+            move: (id, at) => {
+              const sc = activeScene();
+              if (!sc) return;
+              current.gm.client.submit([{ kind: "update", ref: { coll: "notes", id, parent: { coll: "scenes", id: sc._id } }, diff: { x: at.x, y: at.y } }]);
+              if (pinTooltip?.id === id) pinTooltip = { ...pinTooltip, x: at.x, y: at.y };
+            },
+            remove: (id) => deletePin(id),
+          },
+          drawingEditing: {
+            hit: (world) => {
+              const drawing = drawingAt(world);
+              return drawing ? { id: drawing._id, x: 0, y: 0 } : null;
+            },
+            remove: (id) => deleteDrawing(id),
+          },
           measurePreview: (value) => { measurePreview = value; },
           shapePreview: (value) => { shapePreview = value; },
           broadcastMeasure: (points) => {
@@ -4101,6 +4255,7 @@ const WALL_PICK_RADIUS = 12;
         const toolPointer = (e: PointerEvent) => ({
           world: toWorld(e),
           button: e.button,
+          buttons: e.buttons,
           ctrlKey: e.ctrlKey,
           shiftKey: e.shiftKey,
           altKey: e.altKey,
@@ -4127,22 +4282,27 @@ const WALL_PICK_RADIUS = 12;
         canvas.addEventListener("pointercancel", onToolCancel);
         canvas.addEventListener("lostpointercapture", onToolCancel);
         globalThis.addEventListener("blur", onToolCancel);
-        // Right-click / Escape finish a multi-click gesture instead of opening a menu.
+        // Right-click / Escape finish a multi-click gesture instead of opening a menu; with the
+        // ruler, the right button is a waypoint (handled on pointerdown), so no menu either.
         const onToolContext = (e: MouseEvent) => {
           if (!GESTURE_TOOLS.has(canvasTool)) return;
+          if (canvasTool === "measure") { e.preventDefault(); return; }
           if (canvasTool !== "draw" && canvasTool !== "fog") return;
           e.preventDefault();
           toolController?.finishPoly();
         };
         const onToolKey = (e: KeyboardEvent) => {
-          if (e.key !== "Escape" || isTypingTarget(e.target)) return;
-          // D-275: Esc gives up the route being drawn (plan §5.7). Path mode also ends here.
-          if (canvasTool === "path") {
-            leavePathMode();
+          if (isTypingTarget(e.target)) return;
+          // D-465: Delete/Backspace removes the selected light (the Light tool's selection).
+          if ((e.key === "Delete" || e.key === "Backspace") && canvasTool === "light" && !viewingAs) {
+            if (toolController?.deleteSelected()) e.preventDefault();
             return;
           }
-          if (!GESTURE_TOOLS.has(canvasTool)) return;
-          toolController?.finishPoly();
+          if (e.key !== "Escape" || e.defaultPrevented) return;
+          // One Escape decision for the canvas and the rail's key layer (whichever listener
+          // runs first marks the event handled): dismiss what is armed, else back to Select.
+          e.preventDefault();
+          runCanvasAction("escape");
         };
         canvas.addEventListener("pointerdown", onToolDown);
         canvas.addEventListener("pointermove", onToolMove);
@@ -5455,10 +5615,11 @@ const WALL_PICK_RADIUS = 12;
       { id: "gm-redo", label: "Redo (Ctrl+Y)", icon: "redo", run: redo },
       { id: "gm-macros", label: "Macros", icon: "macro", run: () => openWindow("macros", "Macros", "macros") },
       { id: "gm-settings", label: "World settings", icon: "settings", run: () => openWindow("settings", "Settings", "settings") },
+      { id: "gm-scene-settings", label: "Scene settings", icon: "map", run: () => openSceneSettings() },
       { id: "export-world", label: "Export world", icon: "export", run: () => { void exportWorld(); } },
       { id: "import-map-action", label: "Import map", icon: "images", run: () => document.getElementById("map-input")?.click() },
       { id: "session-open", label: "Session & world", icon: "share", run: openSession },
-      { id: "gm-perms", label: "Permissions", icon: "permissions", run: () => openWindow("permissions", "Permissions", "permissions") },
+      { id: "gm-perms", label: "Players & permissions", icon: "permissions", run: () => openWindow("permissions", "Players & permissions", "permissions") },
       { id: "gm-extras", label: "GM extras", icon: "extras", run: () => openWindow("gmextras", "GM Extras", "gmextras") },
       { id: "gm-armies", label: "Armies", icon: "armies", run: () => openWindow("armies", "Armies", "armies") },
       { id: "gm-tables", label: "Tables", icon: "tables", run: () => openTablesWindow() },
@@ -5503,6 +5664,15 @@ const WALL_PICK_RADIUS = 12;
             aria-label="New scene"
             aria-expanded={sceneMenu}>+</button
           >
+          {#if activeScene()}
+            <button
+              id="scene-settings-open"
+              type="button"
+              data-scene-settings
+              title="Scene settings — name, size, grid, background"
+              aria-label="Scene settings"
+              onclick={() => { sceneMenu = false; openSceneSettings(); }}><Icon name="settings" size={16} /></button>
+          {/if}
           {#if sceneMenu}
             <div class="scene-menu" data-scene-menu role="menu" aria-label="New scene">
               <button
@@ -5592,6 +5762,9 @@ const WALL_PICK_RADIUS = 12;
               onEraseAll={eraseAllDrawings}
               onRoll={rollFromToolbar}
               onAction={runCanvasAction}
+              selectedLight={selectedLight ? { id: selectedLight._id, dim: selectedLight.dim, bright: selectedLight.bright, color: selectedLight.color } : null}
+              onLightChange={(patch) => { if (selectedLight) updateLight(selectedLight._id, patch); }}
+              onLightDelete={() => { if (selectedLight) deleteLight(selectedLight._id); }}
               onChooseTool={() => { sessionOpen = false; }}
               pathTool={pathToolAvailable}
               stairsTool={stairsToolAvailable}
@@ -5693,17 +5866,38 @@ const WALL_PICK_RADIUS = 12;
               </div>
             </div>
           {/if}
+          {#if lightMarkerScene}
+            <!-- D-465: light sources are invisible once placed; the Light tool shows them so they
+                 can be picked (click), dragged, and deleted (Alt-click, Delete, the popover). -->
+            <svg class="light-markers" aria-label="Light sources" data-light-markers>
+              {#each lightMarkerScene.lights as light (light._id)}
+                {@const at = measurePoint(light)}
+                {@const selected = light._id === selectedLightId}
+                <g data-light-marker={light._id} data-selected={selected ? "true" : undefined} transform={`translate(${at.x} ${at.y})`}>
+                  {#if selected}
+                    <circle r={light.dim * (stage?.camera.scale ?? 1)} fill={`${light.color}14`} stroke={light.color} stroke-width="1.5" stroke-dasharray="6 4" />
+                    <circle r={light.bright * (stage?.camera.scale ?? 1)} fill="none" stroke={light.color} stroke-width="1" stroke-dasharray="2 4" />
+                    <circle r="14" fill="none" stroke="#ffd479" stroke-width="2" />
+                  {/if}
+                  <circle r="9" fill={light.color} stroke="#111" stroke-width="1.5" />
+                  <circle r="3" fill="#fff8e1" />
+                </g>
+              {/each}
+            </svg>
+          {/if}
           {#if measurePreview}
             {@const pts = measurePreview.points.map(measurePoint)}
             {@const tail = pts.at(-1) ?? null}
             {@const areaPts = measurePreview.area ? templateOutline(measurePreview.area).map(measurePoint) : null}
             <svg class="measure-preview" aria-label={`Measurement ${measureReadout(measurePreview.distance)}`}>
-              <polyline points={pts.map((p) => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#f4c95d" stroke-width="3" stroke-dasharray="8 5" />
-              {#if measurePreview.radiusPx && pts[0]}
+              <polyline points={pts.map((p) => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#f4c95d" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" />
+              {#each pts.slice(1, -1) as pivot, index (index)}
+                <circle class="waypoint" cx={pivot.x} cy={pivot.y} r="4" fill="#f4c95d" stroke="#111" stroke-width="1" />
+              {/each}
+              {#if measurePreview.shape === "circle" && measurePreview.radiusPx && pts[0]}
                 <circle cx={pts[0].x} cy={pts[0].y} r={measurePreview.radiusPx * (stage?.camera.scale ?? 1)} fill="#f4c95d22" stroke="#f4c95d" stroke-width="2" />
-              {/if}
-              {#if areaPts && areaPts.length > 1}
-                <polygon points={areaPts.map((p) => `${p.x},${p.y}`).join(" ")} fill="#f4c95d1a" stroke="#f4c95d" stroke-width="2" stroke-dasharray="4 4" />
+              {:else if areaPts && areaPts.length > 1}
+                <polygon points={areaPts.map((p) => `${p.x},${p.y}`).join(" ")} fill="#f4c95d1a" stroke="#f4c95d" stroke-width="2" />
               {/if}
               {#if tail}
                 <text x={tail.x + 8} y={tail.y - 8} fill="#fff" stroke="#111" stroke-width="3" paint-order="stroke">{measureReadout(measurePreview.distance)}</text>
@@ -5739,6 +5933,12 @@ const WALL_PICK_RADIUS = 12;
                 {@const b = measurePoint(preview.to)}
                 <rect x={Math.min(a.x, b.x)} y={Math.min(a.y, b.y)} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)} fill="#ff9a5c22" stroke="#ff9a5c" stroke-width="2" stroke-dasharray="8 4" />
                 <text x={Math.min(a.x, b.x) + 6} y={Math.min(a.y, b.y) + 16} fill="#fff3e6" stroke="#1b1408" stroke-width="3" paint-order="stroke" font-size="12">Raised area · {toolOptions.raisedHeight} {activeScene()?.grid.units ?? "ft"} · {toolOptions.raisedSolid ? "solid" : "open"}</text>
+              {:else if preview.kind === "placeable"}
+                {@const at = measurePoint(preview.at)}
+                {#if preview.tool === "light" && preview.radius > 0}
+                  <circle cx={at.x} cy={at.y} r={preview.radius * (stage?.camera.scale ?? 1)} fill="#ffd47914" stroke="#ffd479" stroke-width="1.5" stroke-dasharray="6 4" />
+                {/if}
+                <circle cx={at.x} cy={at.y} r="9" fill="#ffd479" stroke="#111" stroke-width="1.5" />
               {:else if preview.kind === "wallEdit"}
                 {#each preview.walls as wall (wall._id)}
                   {@const a = measurePoint({ x: wall.c[0], y: wall.c[1] })}
@@ -5770,7 +5970,10 @@ const WALL_PICK_RADIUS = 12;
               ></textarea>
               <div class="text-editor-actions">
                 <button type="button" data-text-commit onclick={() => commitTextDraft()}>Done</button>
-                <button type="button" onclick={() => (textDraft = null)}>Cancel</button>
+                <button type="button" data-text-cancel onclick={() => (textDraft = null)}>Cancel</button>
+                {#if textDraft.editingId}
+                  <button type="button" data-text-delete onclick={() => { if (textDraft?.editingId) deleteDrawing(textDraft.editingId); }}>Delete</button>
+                {/if}
               </div>
             </div>
           {/if}
@@ -5798,7 +6001,10 @@ const WALL_PICK_RADIUS = 12;
               {#if activeScene()?.notes.find((n) => n._id === pinTooltip?.id)?.journalId}
                 <button type="button" data-pin-open-journal onclick={() => { const pin = activeScene()?.notes.find((n) => n._id === pinTooltip?.id); if (pin) openJournalFromPin(pin); }}>Open handout</button>
               {/if}
-              <button type="button" data-pin-close onclick={() => (pinTooltip = null)}>Close</button>
+              <div class="pin-tooltip-actions">
+                <button type="button" data-pin-delete onclick={() => { if (pinTooltip) deletePin(pinTooltip.id); }}>Delete pin</button>
+                <button type="button" data-pin-close onclick={() => (pinTooltip = null)}>Close</button>
+              </div>
             </div>
           {/if}
           {#if tokenMenu && activeScene()}
@@ -6007,11 +6213,18 @@ const WALL_PICK_RADIUS = 12;
               onAlignToGrid={alignMapToGrid}
               onUseSquaresAsGrid={useSquaresAsGrid}
               onForgetMapGrid={() => patchBackground({ mapGrid: null })}
+              onMapGridScale={scaleMapGrid}
+              onMapGridCount={setMapGridFromCount}
+              onFitSceneToMap={fitSceneToMap}
+              onOpenSceneSettings={() => openSceneSettings()}
               onClose={() => (backgroundPanelOpen = false)}
             />
           {/if}
           </div>
         <WindowHost
+          backgroundNatural={backgroundNatural}
+          onOpenBackground={() => { canvasLayer = "map"; backgroundPanelOpen = true; }}
+          presence={playerPresence}
           manager={wm}
           windows={wmWindows}
           client={app.gm.client}
@@ -6950,6 +7163,8 @@ const WALL_PICK_RADIUS = 12;
   .measure-preview { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; overflow: visible; }
   /* D-256: draw/fog/wall gesture previews and the in-canvas editors */
   .shape-preview { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 11; overflow: visible; }
+  .light-markers { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; overflow: visible; }
+  .pin-tooltip-actions { display: flex; gap: 4px; }
   .text-editor { position: absolute; z-index: 12; display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px solid #4c5b7d; border-radius: 5px; background: #111827f2; }
   .text-editor textarea { width: 220px; height: 62px; padding: 5px; color: #fff; background: #0c111b; border: 1px solid #3a455e; border-radius: 3px; resize: both; }
   .text-editor-actions { display: flex; gap: 4px; }

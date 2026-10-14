@@ -270,6 +270,103 @@ test.describe("canvas rail — tools (§10, D-256)", () => {
     })).toBeGreaterThan(10);
   });
 
+  test("D-465: placed lights stay editable — click selects, drag moves, Alt-click and Delete remove", async ({ page }) => {
+    await bootHost(page);
+    const box = await canvasBox(page);
+    const lights = () => hostCall<Array<{ id: string; x: number; y: number }>>(page, "lights");
+    const camera = await hostCall<{ x: number; y: number; scale: number }>(page, "camera");
+    // Placement snaps to grid corners, so aim at where the light actually landed.
+    const screenOf = (world: { x: number; y: number }) => ({
+      x: box.x + (world.x - camera.x) * camera.scale,
+      y: box.y + (world.y - camera.y) * camera.scale,
+    });
+    await pick(page, '[data-canvas-tool="light"]');
+    await page.mouse.click(box.x + 300, box.y + 260);
+    await expect.poll(lights).toHaveLength(1);
+    const [first] = await lights();
+    if (!first) throw new Error("light missing");
+    const firstScreen = screenOf(first);
+    // The light just placed is the selection: a marker is drawn and the options edit it.
+    const selected = page.locator('[data-light-marker][data-selected="true"]');
+    await expect(selected).toHaveAttribute("data-light-marker", first.id);
+    await expect(page.locator("[data-light-selected]")).toBeVisible();
+    // Escape deselects first and keeps the tool armed; a second Escape returns to Select.
+    await page.keyboard.press("Escape");
+    await expect(selected).toHaveCount(0);
+    await expect(page.locator('[data-canvas-tool="light"]')).toHaveAttribute("aria-pressed", "true");
+    // A click on empty map still places; a click on the first marker selects it instead.
+    await page.mouse.click(box.x + 560, box.y + 260);
+    await expect.poll(lights).toHaveLength(2);
+    const second = (await lights()).find((l) => l.id !== first.id);
+    if (!second) throw new Error("second light missing");
+    await page.mouse.click(firstScreen.x, firstScreen.y);
+    await expect(selected).toHaveAttribute("data-light-marker", first.id);
+    expect(await lights()).toHaveLength(2);
+    // Dragging the marker moves the light (one update), the radius swatch edits it in place.
+    await page.mouse.move(firstScreen.x, firstScreen.y);
+    await page.mouse.down();
+    await page.mouse.move(firstScreen.x + 40, firstScreen.y + 40, { steps: 4 });
+    await page.mouse.move(firstScreen.x + 90, firstScreen.y + 90, { steps: 4 });
+    await page.mouse.up();
+    await expect.poll(async () => (await lights()).find((l) => l.id === first.id)?.x ?? 0).toBeGreaterThan(first.x);
+    expect(await lights()).toHaveLength(2);
+    const cellSize = (await hostCall<number | null>(page, "gridSize")) ?? 100;
+    await pick(page, '[data-canvas-light-radius="3"]');
+    await expect.poll(async () => (await hostCall<Array<{ id: string; dim: number }>>(page, "lights")).find((l) => l.id === first.id)?.dim).toBe(cellSize * 3);
+    // Delete removes the selection; Alt-click removes the other one without placing anything.
+    await page.keyboard.press("Delete");
+    await expect.poll(lights).toHaveLength(1);
+    const secondScreen = screenOf(second);
+    await page.keyboard.down("Alt");
+    await page.mouse.click(secondScreen.x, secondScreen.y);
+    await page.keyboard.up("Alt");
+    await expect.poll(lights).toHaveLength(0);
+    await expect(page.locator("[data-light-marker]")).toHaveCount(0);
+    // Nothing armed: Escape leaves the tool.
+    await page.keyboard.press("Escape");
+    await expect(page.locator('[data-canvas-tool="select"]')).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("D-465: the ruler is solid, a right-click while measuring adds a waypoint, and only the circle draws a circle", async ({ page }) => {
+    await bootHost(page);
+    const box = await canvasBox(page);
+    await pick(page, '[data-canvas-tool="measure"]');
+    await pick(page, '[data-canvas-measure-shape="line"]');
+    const svg = page.locator("svg.measure-preview");
+    await page.mouse.move(box.x + 200, box.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 300, box.y + 200, { steps: 4 });
+    await expect(svg).toBeVisible();
+    await expect(svg.locator("polyline")).not.toHaveAttribute("stroke-dasharray", /.+/);
+    await expect(svg.locator("circle:not(.waypoint)")).toHaveCount(0);
+    // Right button pressed while the left is held: a turn point, no context menu, no end.
+    await page.mouse.down({ button: "right" });
+    await page.mouse.up({ button: "right" });
+    await page.mouse.move(box.x + 300, box.y + 300, { steps: 4 });
+    await expect(svg.locator("circle.waypoint")).toHaveCount(1);
+    const points = await svg.locator("polyline").getAttribute("points");
+    expect(points?.trim().split(/\s+/).length).toBe(3);
+    await page.mouse.up();
+    expect(await hostCall<unknown[]>(page, "drawings")).toHaveLength(0);
+    await page.keyboard.press("Escape");
+    await expect(svg).toBeHidden();
+    // A cone shows its polygon only; the circle shape shows the circle.
+    await pick(page, '[data-canvas-measure-shape="cone"]');
+    await page.mouse.move(box.x + 200, box.y + 400);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 320, box.y + 400, { steps: 4 });
+    await expect(svg.locator("polygon")).toBeVisible();
+    await expect(svg.locator("circle:not(.waypoint)")).toHaveCount(0);
+    await page.mouse.up();
+    await page.keyboard.press("Escape");
+    await pick(page, '[data-canvas-measure-shape="circle"]');
+    await page.mouse.move(box.x + 200, box.y + 400);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 320, box.y + 400, { steps: 4 });
+    await expect(svg.locator("circle:not(.waypoint)")).toHaveCount(1);
+    await page.mouse.up();
+  });
+
   test("map pins: hidden by default, visible pins lose their ownership gate", async ({ page }) => {
     await bootHost(page);
     const box = await canvasBox(page);
@@ -294,6 +391,10 @@ test.describe("canvas rail — tools (§10, D-256)", () => {
       .toEqual([
         expect.objectContaining({ visible: true, ownershipDefault: 1, text: "Old gate" }),
       ]);
+    // D-465: a placed pin can be removed again from its own tooltip.
+    await page.locator("[data-pin-delete]").click();
+    await expect.poll(() => hostCall<unknown[]>(page, "notes")).toHaveLength(0);
+    await expect(tooltip).toBeHidden();
   });
 
   test("view actions: zoom in/out moves the camera, fit restores it, windows open", async ({

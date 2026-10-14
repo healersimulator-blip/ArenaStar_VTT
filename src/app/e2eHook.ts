@@ -1105,6 +1105,8 @@ export interface PlayerSurface {
   sceneImg(): string | null;
   tokenCount(): number;
   tokenPos(): { x: number; y: number } | null;
+  /** D-465: this player's own ownership level on a token of the active scene (null = none). */
+  myTokenLevel(tokenId: string): number | null;
   /** D-255: drawings the player shell sees (its Draw tool writes these). */
   drawings(): Array<{ id: string; kind: string; createdBy: string | null }>;
   /** D-256: the pins that reached this player (hidden pins never leave the host). */
@@ -1809,6 +1811,13 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
     tokenPos: () => {
       const token = scene()?.tokens[0];
       return token ? { x: token.x, y: token.y } : null;
+    },
+    myTokenLevel: (tokenId) => {
+      const me = client()?.user?.id;
+      const token = scene()?.tokens.find((t) => t._id === tokenId);
+      if (!me || !token) return null;
+      const level = token.ownership[me];
+      return typeof level === "number" ? level : null;
     },
     drawings: () =>
       (scene()?.drawings ?? []).map((d) => ({

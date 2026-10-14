@@ -139,6 +139,22 @@ tab and tool keeps its id in every layout — the e2e suite uses `chromeAction`,
 compatibility layouts are approximations drawn from public screenshots, not the original products
 and not certified pixel parity.
 
+### Scene settings, grid fit and the players roster (D-465)
+
+**Scene settings** (main menu → *Scene settings*, the scene directory, or the background panel)
+sets a scene's size in pixels (shown as whole cells), its grid type, cell size, **grid line colour
+and opacity**, distance, units and diagonal rule. For an imported map, open **Map & background**
+(Shift+M) and either let *Detect map grid* measure the squares — it reports the map's total square
+count and offers "twice / half as many" when a bold every-second-line fooled it — or simply type
+the count you can read off the map (e.g. 48 × 64), then **Fit scene to the map**: the image is
+scaled so its squares equal the grid and the scene becomes exactly that many cells. **Players &
+permissions** (main menu, or embedded in World settings) is the roster: who is connected, their
+colour and role, the character they play, which tokens on the current scene they control (tick a
+token to hand it over), per-player macro saving, and Disconnect / Ban / Unban / Remove. On the
+canvas, a right-click while dragging the ruler pins a turn point (Ctrl+click too); placed lights
+can be clicked, dragged, re-sized and deleted again with the Light tool; Escape always dismisses
+what is armed first and only then returns to Select.
+
 ## World files, rulesets and content packs (§8, §12)
 
 A GM handles **one file per campaign**: the world file. Everything else travels inside it

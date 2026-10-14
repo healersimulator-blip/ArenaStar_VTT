@@ -13770,3 +13770,102 @@ not pixel parity. Signika/Proxima are not bundled; Roboto Condensed and Roboto s
 Foundry layout has no equivalent of the modern "More tools" menu (help, turn order and settings are
 reached through the sidebar there). The Roll20 light scheme keeps the scene's own table colour;
 presentation preferences never repaint world content.
+
+## D-465 — Testers' UI complaints before `main`: ruler, placeables, scene settings, grid fit, players (2026-10-14)
+
+**Why.** Before the three-layout workspace (D-464) opens against `main`, the testers' list from
+the preview build had to be closed out. Six complaints, three of them about things the UI *let you
+start but never finish*: the ruler drew a dashed line and only Ctrl+click turned a corner; a circle
+appeared under the cone and ray templates; a placed light could be added but never selected, moved
+or deleted again; a scene had no place to set its size, grid size, grid colour or opacity; an
+imported map's grid was often measured at twice its real pitch and nothing let the GM say "this map
+is 48 × 64 squares"; and the GM had no view of who was connected, nor a way to hand a player a
+character or a token. Each is a small decision; together they are the difference between a demo
+and a table.
+
+**1. Ruler.** The measurement preview is drawn solid (`polyline`, no `stroke-dasharray`); the
+dashes had read as "provisional" to testers. A waypoint is pinned by **the right button while the
+left is held** (the request) — and Ctrl+click stays as the keyboard alternative. The detail that
+mattered: browsers do not fire `pointerdown` for a chorded button; a second button pressed while
+another is held arrives as a `pointermove` whose `button` is 2 and whose `buttons` mask gains bit 2
+(the release is the same move without the bit). `ToolPointer` therefore carries `buttons`, and
+`ToolController.pointerMove` reads the press from it (`rulerWaypointFromRightButton`); a true
+`pointerdown` with button 2 still works for the no-other-button case. The shell suppresses
+`contextmenu` for the measure tool so no menu opens over the ruler. Pivots render as
+`circle.waypoint`.
+
+**2. Circle under other templates.** `MeasurePreview.radiusPx` was emitted for every AoE shape; the
+overlay drew a circle whenever it was set. It is now set for the **circle** shape only; the cone
+and ray draw their polygon, the ruler nothing but the line (`tests/ui/canvasTools.test.ts`).
+
+**3. Placeables that could not be touched again — a sweep, not a patch.** The controller gained one
+small port, `PlaceableEditPort { hit, move?, remove, select? }`, offered per tool as
+`ToolCallbacks.lightEditing / noteEditing / drawingEditing`. With a port present, a pointerdown on
+an existing placeable **selects** it (lights), **drags** it (one `update` op on release = one undo
+step, previewed as a `ShapePreview { kind: "placeable" }`), or **Alt-click removes** it;
+`createLight` returns the new id and the light just placed becomes the selection; `deleteSelected()`
+answers Delete/Backspace; `hasPendingGesture()` lets one Escape rule stand for the whole canvas:
+*dismiss what is armed (a selection, a half-drawn shape, an open editor), else back to Select.*
+Lights are invisible once placed, so the Light tool now draws **markers** (`svg.light-markers`,
+`[data-light-marker=id]`, `data-selected`) with the dim/bright rings on the selected one; the tool
+options show the selection and its radius swatches / colour / Delete act on it
+(`[data-light-selected]`, `[data-canvas-light-radius]`, `[data-canvas-light-delete]`). Pins got
+a Delete button in their tooltip (`[data-pin-delete]`), the in-place text editor Cancel/Delete
+(`[data-text-cancel]`, `[data-text-delete]`), and the Foundry layout now sets the right layer when
+a GM tool is chosen (walls → GM, lights → lighting) so the tool is never armed on a layer that
+ignores it. Two shell details found by the browser tests: the markers and the selected-light
+derivation must read `storeVersion`, because `activeScene()` is a plain store read and the light
+lands asynchronously after `createLight` returns.
+
+**4. Scene settings.** A `scene-settings` window (`SceneSettingsPanel`, 460 × 560; opened from the
+≡ menu `gm-scene-settings`, the `#scene-settings-open` button, the scene directory, the background
+panel and World settings) edits name, background colour, darkness, **width/height in pixels (read
+back as whole cells)**, grid type/size/hex layout, **line colour and opacity**, distance, units and
+diagonals, plus a "Default look" reset. `SceneGrid` gained optional `color` (`#rrggbb`) and
+`alpha` — plain document fields, so they travel through the world file, the projection and the
+player shell unchanged (no schema anywhere rejects unknown grid keys; verified across `sync.ts`,
+`hostBoot`, `foundryImport`, `automation`, `levelPlay`, the agents' readers). `DEFAULT_GRID_STYLE`
+is `0x5c6672 @ 0.35`; `gridStyleFromScene` / `parseGridColor` feed `stage.setGridStyle` in both
+shells.
+
+**5. Grid fit by the map's square count.** The user's diagnosis was right in effect though not in
+cause: on `Cove3.jpg` (2250², 30 × 30 at 75 px) the detector's autocorrelation locked onto the bold
+every-second-line and reported 150 px. Rather than trust corners, the detector now takes the
+profile-domain **octave defence** `hasHalfPeriodLines` (a line response at every half period,
+±2 px slack, demotes the pitch by one octave; synthetic 40 px map with every 80th line bold → 40.004;
+Cove3 → 75.05 px, 30 × 30, confidence 0.993) and reports `squares { columns, rows }`. More
+important, the GM can state the count directly: `src/core/sceneFit.ts` (`normalizeGridCount`,
+`cellSizeForCount`, `mapGridFromCount`, `gridCountOfMap`, `rescaleMapGrid`,
+`fitSceneToGridCount`) turns "15 × 10" into a map grid with no detection at all, the background
+panel offers the two octave corrections ("it has twice / half as many"), and **Fit scene to the
+map** both scales the image so its squares equal the grid and sizes the scene to exactly that
+many cells (Cove3 at 100 px → 3000², scale 4/3). Scales stay exact; only offsets are rounded.
+
+**6. Players.** `src/core/players.ts` is the pure core: `playerRows` (GM → ASSISTANT → TRUSTED →
+PLAYER, then name; presence, colour, character, the active scene's tokens with how each is
+controlled — `controlsToken` is "token" for an explicit grant, "actor" when it follows the linked
+actor, and always "token" for GM/ASSISTANT), `assignCharacterOps` (sets `users.character` and
+grants OWNER on the actor if below it), `setTokenControlOps` (idempotent OWNER grant/removal on a
+scene token), `setPlayerColorOps` (hex only), `removeUserOps` (offline non-GM only). The host
+gained `kickUser(userId)`, `unban(userId)` and `onlineUserIds()` next to the existing peer-level
+`kick`/`ban`. `PermissionsPanel` is now a roster — online dot, colour, role, character select,
+"tokens here" expander with per-token control, macro saving, Disconnect / Ban / Unban / Remove
+(with confirmation) — and keeps the per-document ownership editor below it; presence is not a
+document, so the panel polls `presence.online()` every 1.5 s while open, and the host's own user
+counts as online. World settings embeds the compact roster with a link to the full window
+(`[data-settings-open-players]`). The player shell shows the same roster without presence.
+
+**Tests.** Unit: `tests/ui/canvasTools.test.ts` (waypoint by chorded right button and by
+pointerdown, no duplicate pivot, radius only for the circle, placeable select/drag/Alt-remove,
+Escape order), `tests/core/gridDetection.test.ts` (octave defence, square counts),
+`tests/core/sceneFit.test.ts` (8), `tests/core/players.test.ts` (5). Browser:
+`canvas_rail.spec.ts` (+2: lights select/drag/radius/Delete/Alt-click/Escape; solid ruler,
+right-click waypoint, cone without circle, circle with; pin Delete in the pin test),
+`background_layer.spec.ts` (+1: typed count → map grid, octave both ways, Fit → 15 × 10 cells),
+`windows.spec.ts` (+2 and the GM row's presence: roster assigns a character and a token, removes an
+offline player, World settings embeds it; Scene settings edits size/grid/colour/opacity),
+`players_roster.spec.ts` (new, in `test:e2e:net`: a real joined player shows online, a granted
+token reaches the player's replica as OWNER via `myTokenLevel`, Disconnect drops the session and
+the row turns offline).
+
+**Verification.** _(filled in below once the runs finish)_
