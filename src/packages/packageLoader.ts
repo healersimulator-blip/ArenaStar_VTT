@@ -80,6 +80,15 @@ export function buildPackageFromFiles(rawFiles: Record<string, string>): Result<
       return err(`package ${manifest.value.id}: rules entry is empty`);
     }
   }
+  if (manifest.value.ui) {
+    const uiEntry = files[manifest.value.ui.entry];
+    if (uiEntry === undefined) {
+      return err(`package ${manifest.value.id}: ui entry ${manifest.value.ui.entry} is missing`);
+    }
+    if (uiEntry.trim().length === 0) {
+      return err(`package ${manifest.value.id}: ui entry is empty`);
+    }
+  }
   if (manifest.value.module) {
     const modEntry = files[manifest.value.module.entry];
     if (modEntry === undefined) {

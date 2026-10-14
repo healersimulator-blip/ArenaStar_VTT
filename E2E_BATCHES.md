@@ -31,7 +31,7 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 | script | specs | tests | cap | measured | result |
 | --- | --- | --- | --- | --- | --- |
 | `test:e2e:core` | 19 | 48 | 20 min | 9.0 min | **48 passed** |
-| `test:e2e:table` | 19 | 39 | 20 min | 10.5 min | **39 passed** |
+| `test:e2e:table` | 20 | 40 | 20 min | 10.5 min (19 specs) | **39 passed** (+ `package_ui`, D-475, not yet run) |
 | `test:e2e:hexcrawl` | 8 | 16 | 15 min | 8.2 min | **16 passed** |
 | `test:e2e:images` | 10 | 31 | 15 min | 4.9 min | **30 passed / 1 skipped** |
 | `test:e2e:net` | 4 | 5 | 15 min | 0.5 min | **4 passed** (+ `players_roster`, D-465) |

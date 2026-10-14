@@ -183,7 +183,9 @@ A GM handles **one file per campaign**: the world file. Everything else travels 
   (e.g. `systems/pf1e-mass-battles`). It drives **strategic** scenes only
   (heroes + units, Settings → Scale); tactical scenes (heroes only) never touch it,
   so one world can mix both kinds. It is chosen in **New world…** and pinned once the
-  first strategic turn is resolved.
+  first strategic turn is resolved. A ruleset may also ship `ui.js` (D-475) — window
+  components compiled against this build's Svelte runtime (the PF1e battle-analysis
+  view today) — which both the GM's and the players' shells load with the rules.
 - **Content pack** — a `manifest.json` with `type: "data"` and packs (e.g.
   `systems/pf1e-core`); its entries appear under Compendia. Chosen in **New world…** or
   added any time under Settings → *Strategic ruleset & content*.

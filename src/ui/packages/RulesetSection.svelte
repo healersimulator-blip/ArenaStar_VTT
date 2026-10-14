@@ -343,6 +343,13 @@
       rules: {rulesBoot.error}
     </p>
   {/if}
+  {#if rulesBoot && typeof rulesBoot.ui === "object"}
+    <!-- D-475: a package UI that did not evaluate is shown, not swallowed; the rules still run. -->
+    <p class="error" data-pkg-ui-error>
+      {rulesBoot.packageId ?? "The pinned ruleset"} ships window components that did not load —
+      its windows fall back to the shell's own views: {rulesBoot.ui.error}
+    </p>
+  {/if}
   {#each pkgList as p (p.id)}
     <div class="row" data-pkg-row data-pkg-id={p.id} data-pkg-type={p.type}>
       <span

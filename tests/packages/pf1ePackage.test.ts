@@ -40,6 +40,8 @@ import { allocModel, createModelPool } from "../../src/sim/pool";
 import { XoshiroPRNG } from "../../src/sim/prng";
 import { FakeCodec, settle } from "../app/fakes";
 import { bootHostApp, type HostApp } from "../../src/app/hostBoot";
+import { exposeSvelteRuntime, SVELTE_RUNTIME_GLOBAL } from "../../src/app/svelteRuntime";
+import { importUiModule } from "../../src/packages/uiModuleLoader";
 import { openVttDb } from "../../src/storage/idb";
 import { MemDirHandle } from "../../src/storage/opfs";
 import { InlineSimRunner } from "../../src/workers/simWorkerClient";
@@ -70,6 +72,7 @@ interface PackManifest {
   dependencies?: string[];
   rules?: { entry: string; modelColumns: Record<string, string> };
   module?: { entry: string };
+  ui?: { entry: string };
   packs?: Array<{ name: string; type: string; file: string }>;
 }
 
@@ -79,6 +82,7 @@ const battlesManifest = readJson<PackManifest>(
 );
 
 let rulesSource = "";
+let uiSource = "";
 
 beforeAll(() => {
   execFileSync(
@@ -87,6 +91,7 @@ beforeAll(() => {
     { cwd: repoRoot, encoding: "utf8", timeout: 120_000, stdio: "pipe" },
   );
   rulesSource = readFileSync(join(outDir, "pf1e-mass-battles", "rules.js"), "utf8");
+  uiSource = readFileSync(join(outDir, "pf1e-mass-battles", "ui.js"), "utf8");
 }, 120_000);
 
 afterAll(() => {
@@ -446,12 +451,49 @@ describe("the built rules.js (D-086 single-file constraint)", () => {
   });
 });
 
+describe("the built ui.js (D-475 — package components against the shell's Svelte runtime)", () => {
+  test("is one expression that imports nothing: every svelte specifier was rewritten to the shell's global", () => {
+    expect(uiSource.startsWith("export default (() => {")).toBe(true);
+    expect(uiSource.slice(1).match(/^\s*(import|export)\b/m)).toBeNull();
+    expect(uiSource).toContain(SVELTE_RUNTIME_GLOBAL);
+    // The styles travel inside the component (injected on mount); nothing else is emitted.
+    expect(uiSource).toContain(".pf1e-analysis");
+    expect(battlesManifest.ui?.entry).toBe("ui.js");
+    expect(uiSource.length).toBeLessThan(40_000);
+  });
+
+  test("without an exposed runtime it refuses to evaluate with the contract's own message", async () => {
+    const target = globalThis as unknown as Record<string, unknown>;
+    const saved = target[SVELTE_RUNTIME_GLOBAL];
+    target[SVELTE_RUNTIME_GLOBAL] = undefined;
+    try {
+      // Node caches a data: module by URL even when its evaluation threw, so this negative probe
+      // must not share bytes with the positive import below (browsers use one-shot blob URLs).
+      const loaded = await importUiModule(`${uiSource}\n// probe: runtime withheld\n`);
+      expect(loaded.ok).toBe(false);
+      if (!loaded.ok) expect(loaded.error).toContain("the shell has not exposed its Svelte runtime");
+    } finally {
+      target[SVELTE_RUNTIME_GLOBAL] = saved;
+    }
+  });
+
+  test("with the shell's runtime exposed it evaluates to the arena.ui/1 contract with the battleAnalysis slot filled", async () => {
+    exposeSvelteRuntime();
+    const loaded = await importUiModule(uiSource);
+    expect(loaded.ok ? null : loaded.error).toBeNull();
+    if (!loaded.ok) return;
+    expect(loaded.value.api).toBe("arena.ui/1");
+    expect(loaded.value.components.battleAnalysis).toBeTypeOf("function");
+  });
+});
+
 describe("installing the built zips", () => {
   test("readZipPackage accepts both PF1e packages", async () => {
     const battles = await readZipPackage(zipFolder("pf1e-mass-battles"));
     expect(battles.ok ? null : battles.error).toBeNull();
     if (!battles.ok) return;
     expect(battles.value.files["rules.js"]?.length).toBeGreaterThan(1000);
+    expect(battles.value.files["ui.js"]?.length).toBeGreaterThan(1000);
     expect(battles.value.files["manifest.json"]).toBeDefined();
 
     const core = await readZipPackage(zipFolder("pf1e-core"));
@@ -483,6 +525,7 @@ describe("installing the built zips", () => {
 
 describe("activating PF1e in a world (§1.1 acceptance, no browser)", () => {
   test("import both zips → activate → reload boots the package, and its packs are compendia", async () => {
+    exposeSvelteRuntime(); // what main.ts does before either shell mounts (D-475)
     const app = await bootWithRunner();
     const worldId = app.worldId;
 
@@ -536,6 +579,7 @@ describe("activating PF1e in a world (§1.1 acceptance, no browser)", () => {
       version: "1.0.0",
       error: null,
       inPage: "package",
+      ui: "package",
     });
     // `version` above is echoed from the loaded module's own schema, not the manifest — so it
     // proves the bundle loaded, not just that a record existed.
@@ -555,7 +599,7 @@ describe("activating PF1e in a world (§1.1 acceptance, no browser)", () => {
     // names it. Its size is the whole strategic ruleset with its exclusive dependencies — the bytes
     // that left the main bundle in D-471 now travel in 32 KB chunks on the assets channel.
     const published = second.host.publishedArtifacts();
-    expect(published).toHaveLength(1);
+    expect(published).toHaveLength(2);
     // D-473: the hash the build writes into `systems/.first-party/index.json` (sha256 of the
     // rules.js *file bytes*) must be the hash the host publishes (sha256 of the re-encoded text
     // read back from the zip) — that equality is what lets a player shell recognise the
@@ -566,6 +610,12 @@ describe("activating PF1e in a world (§1.1 acceptance, no browser)", () => {
     expect(artifact?.hash).toBe(published[0]);
     expect(artifact?.name).toBe("Pathfinder 1e Mass Battles Engine");
     expect(artifact?.size).toBeGreaterThan(200_000);
+    // D-475: the package's window components are the second artifact — the real compiled
+    // BattleAnalysis evaluated against the runtime main.ts exposes — hash-pinned the same way.
+    const uiFileHash = createHash("sha256").update(readFileSync(join(outDir, "pf1e-mass-battles", "ui.js"))).digest("hex");
+    expect(published[1]).toBe(uiFileHash);
+    expect(second.gm.client.simInfo?.ui).toEqual({ hash: uiFileHash, size: Buffer.byteLength(uiSource), name: "Pathfinder 1e Mass Battles Engine" });
+    expect(second.uiModule?.components.battleAnalysis).toBeTypeOf("function");
     await second.persister.drain();
     second.close();
   });

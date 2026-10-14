@@ -16,9 +16,13 @@ declare const __FIRST_PARTY_PACKAGES__:
       type: string;
       dependencies: readonly string[];
       rulesSha256: string | null;
+      uiSha256?: string | null;
       zipBase64: string;
     }>
   | undefined;
+
+/** D-475: the Svelte internals a package `ui.js` is compiled against; no typings ship for the path. */
+declare module "svelte/internal/client";
 
 // Allow .ts entry modules (e.g. main.ts) to import Svelte components under tsc.
 // Deep .svelte typechecking is performed by the build (vite-plugin-svelte compiles

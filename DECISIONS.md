@@ -14460,3 +14460,91 @@ one fewer PF1e import and the player device runs the same importer the GM does. 
 that actually shrinks the download is T2's dispatch contract (12 modules / 79 symbols, Appendix D),
 after which the sheets' copies of `actor`, `consumables`, `inventory`, `skills` can follow the
 importers into the package.
+
+## D-475 — P2b: first-party component packages — `ui.js`, the shell's Svelte runtime as the contract, one consent for both artifacts (2026-10-15)
+
+**Context.** P3's next tier was to be T2, the tactical dispatch contract (12 modules / 79 symbols,
+Appendix D). Before cutting it, the import graph was surveyed per module, and the answer settles the
+order of work: **every PF1e tactical module the host imports is also imported by shell UI** —
+`afflictions` by `agentBridge`, `e2eHook`, `host/sync`, `PF1eAttackEditor`, `pf1eResolveFlow`;
+`spellEffects` by `host/sync` and seven sheet/combat components; `conditionApplications`,
+`rollApply`, `targeting`, `movement`, `rollLedger`/`pendingRoll` likewise; only `automationHealth`
+is host-only. A logic-only seam (a host-authority `RulesModule.tactical`) would therefore move
+nothing out of the download: the shell keeps bundling the same modules for its sheets, and the
+package carries a second copy — exactly D-474's duplication, scaled up to ≈324 KB. Moving UI first
+is no better: `PF1eActorSheet.svelte` has 23 exclusive files (439,740 B) but shares a 60-file /
+1,298,476 B tactical core with the shell, so a `ui.js` built around it duplicates that core until
+T2 lands. Only a **coordinated T2 + T3 move** shrinks bytes, and T3 has no mechanism yet: the
+shells had no way to load a Svelte component from a package. This entry builds that mechanism
+with the smallest honest payload — the per-army battle-analysis view, whose exclusive closure is
+two files / 11,333 B and whose only importer is `ArmyWindow` — so that the big move can be made
+as one step against a proven loader.
+
+**Decision.**
+
+1. **A system package may ship `ui.js` beside `rules.js`.** Manifest `ui: { entry }` (system
+   packages only; data packages are refused; path-guarded like the other entries; the loader
+   requires the file to exist and be non-empty). The module evaluates to `{ api: "arena.ui/1",
+   components: { <slot>: Component } }`; the shell mounts a component only through a slot it
+   knows (`PackageUiSlot`, today `battleAnalysis`), unknown keys are ignored, a non-function in a
+   known slot fails the shape gate (`src/packages/uiModuleLoader.ts`, same blob→data-URL import as
+   `importRulesModule`, `Result`-returning).
+2. **The shell's Svelte runtime is the contract, not a second copy.** `ui.js` is Svelte's compiled
+   output with every `svelte*` import rewritten by the build
+   (`scripts/buildSystemPackages.mjs` → `rewriteSvelteRuntimeImports`) into reads from
+   `globalThis.__ARENASTAR_SVELTE__`, which `main.ts` publishes before either shell mounts
+   (`src/app/svelteRuntime.ts`: `svelte`, `svelte/internal/client`, `svelte/store`; the
+   side-effect `disclose-version` import is dropped; any other import fails the build by name).
+   A package component is therefore a real citizen of the shell's tree — same signals and
+   scheduler, same context and stores — and styles are injected on mount (`css: "injected"`),
+   so no CSS pipeline is needed in the shell. The flip side is binding: a `ui.js` is built against
+   the shell it ships with (first-party, hash-pinned by D-473); a module compiled by another
+   Svelte version may not evaluate, and the loader reports that as the package's error. The
+   `svelte/no-svelte-internal` lint rule is disabled on that one import with the reason inline.
+3. **One consent covers both artifacts.** The host imports `ui.js` in-page after `rules.js`
+   (`HostApp.uiModule`, `rulesBoot.ui: "package" | "none" | { error }`), publishes it under its
+   sha256 **only when it evaluated**, and names it in the welcome as `sim.ui` beside
+   `sim.artifact`. A UI that fails is the package's error to show (Settings → Packages
+   `data-pkg-ui-error`), never a reason to drop its rules. The player side (`PlayerRulesPackage`)
+   treats the pair as one offer: `size` counts both, the consent record stores `uiHash`, an allow
+   covers the exact pair (a new `ui.js` beside the same rules re-prompts as an *update* — the
+   already-allowed rules keep running, the un-allowed components are withheld), first-party means
+   **both** hashes are in this build's list (`isFirstPartyArtifact` matches `rulesSha256` or
+   `uiSha256`), and a `ui.js` that fails its gate after consent leaves the rules `ready` with a
+   `uiError`. Both shells hand the module to `WindowHost` → `ArmyWindow ui=`; the analysis tab
+   mounts `ui.components.battleAnalysis` and otherwise says the ruleset ships no analysis view.
+4. **The first payload.** `src/ui/armies/PF1eBattleAnalysis.svelte` → `src/packages/pf1e/ui/BattleAnalysis.svelte`,
+   `src/packages/pf1e/uiEntry.ts` is the package's UI entry, `systems/pf1e-mass-battles/manifest.json`
+   declares `ui.entry: "ui.js"`, the first-party index carries `uiSha256`. The shell no longer
+   bundles the component (`grep "PF1e Battle Analysis (High Fidelity)" dist/index.html` → 0).
+5. **Proofs.** `tests/packages/pf1ePackage.test.ts` evaluates the **built** `ui.js` against the
+   exposed runtime in-page (refuses without it, by the contract's message), boots the package and
+   checks both published hashes, the welcome's `sim.ui` and the filled slot; `hostPackages` covers
+   a probe `ui.js` and a broken one (rules still run, nothing published); `playerRulesPackage`
+   covers the paired offer, consent record, UI-only update, non-fatal UI failure and the
+   both-hashes-trusted rule; `packageLoader` / `firstPartyPackages` cover manifest, loader and
+   trust; `tests/scripts/buildSystemPackages.test.ts` pins the rewrite rules;
+   `e2e/package_ui.spec.ts` (new hook `packageUiSmoke`) mounts the built component in the real
+   bundle — typecheck/lint only here, a run is owed.
+
+**Measured.** `ui.js` **9,790 B** (unminified single expression). `dist/index.html`
+**5,857,329 → 5,902,756 B (+45,427 B raw; gzip 1,865,673 → 1,883,914 B, +18,241 B)**; headroom
+388,700 B. Attribution by rebuilding with the namespaces stubbed: exposing `svelte/internal/client`
+as a whole namespace costs **38,978 B** (internals the shell's own components had tree-shaken
+away — transitions, legacy bindings, media helpers — now retained because a package may use them),
+`svelte` + `svelte/store` 1,177 B, the embedded zip +3,073 B (→ ≈4.1 KB base64), the rest ≈1.2 KB
+net of loader/consent/e2e-hook code minus the moved component. This is a **fixed, one-time cost of
+the mechanism**, paid now so that T3's ≈310 KB of PF1e UI can leave the shell without carrying a
+runtime; if headroom gets tight before then, the build can shrink the exposed surface to the names
+the first-party `ui.js` actually reads (at the price of refusing third-party components that need
+more). Gates: `tsc` 0, `eslint` 0, svelte check 0 blocking, vitest **5,818 passed / 12 skipped
+(5,830)**, `node scripts/size.mjs` OK.
+
+**What it does not do yet.** No GM "share this UI package" switch — the package's UI travels with
+its rules under the same consent, because today's only component is a view of data the player
+already receives; a per-package switch belongs with the sheet slot (T3). No third-party `ui.js`
+story beyond "prompts like any stranger and must match this shell's Svelte": the isolation tiers
+of the design still route foreign UI through P2a's sandboxed panels. Next: **T2 + T3 as one
+move** — the tactical dispatch contract and the PF1e sheets/combat UI leave together through
+`rules.js` + `ui.js` (actor-sheet slot next to `battleAnalysis`), which is the step that removes
+D-474's duplicated helpers and finally shrinks the download.

@@ -167,6 +167,18 @@ module and offer nothing when it has no seam. Measured: `rules.js` +110,457 B, o
 PF1e helpers the sheets still bundle — the duplication T2 has to remove before the single file
 shrinks again.
 
+**P2b (D-475)** built the component-package mechanism the UI tiers need, ahead of T2 because the
+import survey showed every host-imported tactical module is also a UI import (a logic-only seam
+moves no bytes). A system package may ship `ui.js` next to `rules.js` (`manifest.ui.entry`): Svelte's
+compiled output with the runtime externalised to the shell's copy — `main.ts` publishes
+`globalThis.__ARENASTAR_SVELTE__` (`svelte`, `svelte/internal/client`, `svelte/store`) and the build
+rewrites the package's imports into reads from it — evaluating to `{ api: "arena.ui/1", components }`.
+The host imports it in-page (`HostApp.uiModule`), publishes it as a second sha256 artifact (`sim.ui`)
+and both shells mount its components through slots they know (`battleAnalysis` first, the actor
+sheet next). The player's one consent record covers the rules/ui pair (`uiHash`); first-party trust
+needs both hashes. This is first-party-only by construction — a `ui.js` is bound to the shell's
+Svelte build — and sits beside, not instead of, P2a's sandboxed panels for third-party UI.
+
 ## 1. Goals and non-goals
 
 ### Goals

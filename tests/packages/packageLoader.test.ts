@@ -176,6 +176,19 @@ describe("validatePackageManifest (§12)", () => {
     expect(dataModule.error).toContain("module block");
   });
 
+  test("D-475: system packages may declare a ui entry (window components); data may not", () => {
+    const withUi = validatePackageManifest(systemManifest({ ui: { entry: "ui.js" } }));
+    expect(withUi.ok ? null : withUi.error).toBeNull();
+    if (withUi.ok) expect(withUi.value.ui?.entry).toBe("ui.js");
+    expect(validatePackageManifest(systemManifest({ ui: { entry: "../ui.js" } })).ok).toBe(false);
+    expect(validatePackageManifest(systemManifest({ ui: { entry: "" } })).ok).toBe(false);
+    expect(validatePackageManifest(systemManifest({ ui: "ui.js" })).ok).toBe(false);
+    const dataUi = validatePackageManifest(systemManifest({ type: "data", rules: undefined, ui: { entry: "ui.js" } }));
+    expect(dataUi.ok).toBe(false);
+    if (dataUi.ok) return;
+    expect(dataUi.error).toContain("ui block");
+  });
+
   test("module.trusted is a validated boolean request flag", () => {
     const trusted = validatePackageManifest(
       systemManifest({ module: { entry: "m.js", trusted: true } }),
@@ -319,6 +332,28 @@ describe("readZipPackage / buildPackageFromFiles (§12)", () => {
       }),
     );
     expect(good.ok).toBe(true);
+  });
+
+  test("D-475: a declared ui entry must ship in the zip and be non-empty", async () => {
+    const missing = await readZipPackage(
+      zipOf({ "manifest.json": JSON.stringify(systemManifest({ ui: { entry: "ui.js" } })), "rules.js": RULES_JS }),
+    );
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error).toContain("ui entry ui.js is missing");
+    const empty = await readZipPackage(
+      zipOf({ "manifest.json": JSON.stringify(systemManifest({ ui: { entry: "ui.js" } })), "rules.js": RULES_JS, "ui.js": "   " }),
+    );
+    expect(empty.ok).toBe(false);
+    if (!empty.ok) expect(empty.error).toContain("ui entry is empty");
+    const good = await readZipPackage(
+      zipOf({
+        "manifest.json": JSON.stringify(systemManifest({ ui: { entry: "ui.js" } })),
+        "rules.js": RULES_JS,
+        "ui.js": "export default { api: 'arena.ui/1', components: {} };",
+      }),
+    );
+    expect(good.ok ? null : good.error).toBeNull();
+    if (good.ok) expect(good.value.manifest.ui?.entry).toBe("ui.js");
   });
 
   test("folder import path shares validation", () => {

@@ -6248,6 +6248,7 @@ const WALL_PICK_RADIUS = 12;
           client={app.gm.client}
           bus={app.gm.bus}
           rulesModule={app.rulesModule}
+          uiModule={app.uiModule}
           sceneId={activeScene()?._id ?? null}
           selectedTokenId={singleSelectedTokenId()}
           {selectedItemRef}

@@ -66,6 +66,7 @@ import type { WelcomeRulesArtifact } from "../core/messages";
 import { BUILTIN_SYSTEM_ID, BUILTIN_SYSTEM_VERSION } from "./builtinSystem";
 import { createWorldFromRecipe } from "./worldRecipe";
 import { loadFirstPartyRecipePackages, type FirstPartyPackage } from "./firstPartyPackages";
+import { importUiModule, type PackageUiModule } from "../packages/uiModuleLoader";
 export { BUILTIN_SYSTEM_ID, BUILTIN_SYSTEM_VERSION } from "./builtinSystem";
 import { MASS_BATTLE_SCHEMA_COLUMNS } from "../packages";
 import { readZipPackage } from "../packages/packageLoader";
@@ -255,6 +256,12 @@ export interface HostRulesBoot {
    * and those features fall back to the built-in rules while the worker still runs the package.
    */
   inPage: "package" | "builtin" | { error: string };
+  /**
+   * D-475: the package's `ui.js` (window components) imported in-page — `"package"` when it
+   * loaded, `"none"` when the package declares no UI (or runs built-in), an error when the
+   * declared entry did not evaluate or failed the shape gate (the rules still run).
+   */
+  ui: "package" | "none" | { error: string };
 }
 
 export interface HostPackages {
@@ -327,6 +334,8 @@ export interface HostApp {
    * This is the dispatch instance host code consumes instead of importing system symbols.
    */
   readonly rulesModule: RulesModule | null;
+  /** D-475: the active package's window components, or null (built-in rules / no UI / failed). */
+  readonly uiModule: PackageUiModule | null;
   /** §12 active package module entry for the sandboxed iframe (null = none). */
   readonly moduleBoot: HostModuleBoot | null;
   /** AIS independent multi-module runtime plan (local grants never enter its profile). */
@@ -892,11 +901,14 @@ async function bootHostAppLocked(
     version: "1.0.0",
     error: null,
     inPage: "builtin",
+    ui: "none",
   };
   let rulesModule: RulesModule | null = null;
+  let uiModule: PackageUiModule | null = null;
   let simSys: SysSchema = MASS_BATTLE_SCHEMA_COLUMNS;
   let rulesSource: string | undefined;
   let rulesArtifact: WelcomeRulesArtifact | undefined;
+  let uiArtifact: WelcomeRulesArtifact | undefined;
   if (pkg && pkgSource !== undefined) {
     // §12 gate: the package is imported (blob URL) + validated INSIDE the
     // worker sandbox before any campaign may start; failure degrades cleanly
@@ -909,12 +921,28 @@ async function bootHostAppLocked(
       // always imported it in-page, so this adds no new execution tier.
       const inPage = await importRulesModule(pkgSource);
       if (inPage.ok) rulesModule = inPage.value.module;
+      // D-475: the package's window components load in the page the same way; a UI that does
+      // not evaluate is the package's error to show, never a reason to drop its rules.
+      let uiBoot: HostRulesBoot["ui"] = "none";
+      const uiEntry = pkg.manifest.ui?.entry;
+      const uiSource = uiEntry === undefined ? undefined : pkg.files[uiEntry];
+      if (uiEntry !== undefined) {
+        if (uiSource === undefined) uiBoot = { error: `ui entry ${uiEntry} is missing from the package` };
+        else {
+          const imported = await importUiModule(uiSource);
+          if (imported.ok) {
+            uiModule = imported.value;
+            uiBoot = "package";
+          } else uiBoot = { error: imported.error };
+        }
+      }
       rulesBoot = {
         source: "package",
         packageId: pkg.id,
         version: info.version,
         error: null,
         inPage: inPage.ok ? "package" : { error: inPage.error },
+        ui: uiBoot,
       };
       simSys = pkg.manifest.rules?.modelColumns ?? MASS_BATTLE_SCHEMA_COLUMNS;
       rulesSource = pkgSource;
@@ -924,6 +952,13 @@ async function bootHostAppLocked(
       const artifactHash = await sha256Hex(artifactBytes);
       host.publishArtifact(artifactHash, artifactBytes);
       rulesArtifact = { hash: artifactHash, size: artifactBytes.byteLength, name: pkg.manifest.name };
+      // D-475: the UI the GM page could evaluate is published beside it, under the same consent.
+      if (uiBoot === "package" && uiSource !== undefined) {
+        const uiBytes = new TextEncoder().encode(uiSource);
+        const uiHash = await sha256Hex(uiBytes);
+        host.publishArtifact(uiHash, uiBytes);
+        uiArtifact = { hash: uiHash, size: uiBytes.byteLength, name: pkg.manifest.name };
+      }
     } catch (e) {
       rulesBoot = {
         source: "builtin",
@@ -931,6 +966,7 @@ async function bootHostAppLocked(
         version: pkg.manifest.version,
         error: e instanceof Error ? e.message : String(e),
         inPage: "builtin",
+        ui: "none",
       };
     }
   } else if (worldRec?.activeRulesPackage) {
@@ -940,6 +976,7 @@ async function bootHostAppLocked(
       version: "1.0.0",
       error: "active package record missing or not a system package",
       inPage: "builtin",
+      ui: "none",
     };
   }
   const moduleSource =
@@ -970,6 +1007,7 @@ async function bootHostAppLocked(
     packageId: rulesBoot.packageId,
     version: rulesBoot.version,
     ...(rulesArtifact ? { artifact: rulesArtifact } : {}),
+    ...(uiArtifact ? { ui: uiArtifact } : {}),
   });
   const bridge = new SimBridge(DEFAULT_SCENE_ID, {
     db,
@@ -1511,6 +1549,7 @@ async function bootHostAppLocked(
   return {
     rulesBoot,
     rulesModule,
+    uiModule,
     moduleBoot,
     automationBoot,
     migrationBoot,

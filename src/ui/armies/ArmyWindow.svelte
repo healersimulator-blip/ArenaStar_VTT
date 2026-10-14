@@ -31,8 +31,8 @@
     type TreeRow,
   } from "./armyModel";
   import TurnReportTimeline from "./TurnReportTimeline.svelte";
-  import PF1eBattleAnalysis from "./PF1eBattleAnalysis.svelte";
   import type { PF1eBattleReport } from "../../packages/pf1e/analytics";
+  import type { PackageUiModule } from "../../packages/uiModuleLoader";
   import {
     castOrderFor,
     directAttackOrder,
@@ -47,14 +47,21 @@
     bus,
     armyId,
     rules,
+    ui = null,
     onClose,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
     armyId: string;
     rules: RulesModule | null;
+    /** D-475: the active system package's window components (the analysis tab is one of its slots). */
+    ui?: PackageUiModule | null;
     onClose: () => void;
   } = $props();
+
+  // D-475: the per-army battle analysis is the PF1e package's component, mounted through the
+  // `battleAnalysis` slot; without a package UI the tab says so instead of shipping a copy.
+  const BattleAnalysis = $derived(ui?.components.battleAnalysis ?? null);
 
   type Tab = "tree" | "roster" | "orders" | "reports" | "analysis";
   const ROW_H = 26;
@@ -932,8 +939,13 @@
           reconciliation is the turn report's own per-army sheet (M12), not a
           fixture.
         </p>
+      {:else if BattleAnalysis === null}
+        <p class="dim" data-analysis-missing>
+          The active ruleset ships no battle-analysis view — the turn report
+          tab still holds every resolved turn.
+        </p>
       {:else}
-        <PF1eBattleAnalysis report={analysis} />
+        <BattleAnalysis report={analysis} />
       {/if}
     </div>
   {:else}

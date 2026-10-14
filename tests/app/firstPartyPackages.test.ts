@@ -84,6 +84,12 @@ describe("first-party list accessors", () => {
     expect(isFirstPartyArtifact(hash.toUpperCase(), list)).toBe(false);
     expect(isFirstPartyArtifact("0".repeat(64), list)).toBe(false);
     expect(isFirstPartyArtifact("", list)).toBe(false);
+    // D-475: the package's ui.js hash is trusted the same way; a list without one trusts no UI.
+    const uiHash = "ab".repeat(32);
+    expect(isFirstPartyArtifact(uiHash, list)).toBe(false);
+    const withUi = list.map((entry) => (entry.type === "system" ? { ...entry, uiSha256: uiHash } : entry));
+    expect(isFirstPartyArtifact(uiHash, withUi)).toBe(true);
+    expect(isFirstPartyArtifact(hash, withUi)).toBe(true);
   });
 
   test("the embedded base64 round-trips to the zip bytes the loader reads", async () => {
@@ -155,6 +161,11 @@ describe("the real embedded set (present after `pnpm build:systems`)", () => {
       expect(set?.content.map((pkg) => pkg.manifest.id)).toEqual(["pf1e-core"]);
       const rulesJs = set?.ruleset.files["rules.js"] ?? "";
       expect(await sha256Hex(new TextEncoder().encode(rulesJs))).toBe(system?.rulesSha256);
+      // D-475: the window components ship as the second hash-pinned artifact of the same package.
+      expect(set?.ruleset.manifest.ui?.entry).toBe("ui.js");
+      const uiJs = set?.ruleset.files["ui.js"] ?? "";
+      expect(uiJs.length).toBeGreaterThan(1000);
+      expect(await sha256Hex(new TextEncoder().encode(uiJs))).toBe(system?.uiSha256);
     },
   );
 });

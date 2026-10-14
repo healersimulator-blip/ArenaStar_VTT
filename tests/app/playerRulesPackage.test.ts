@@ -29,6 +29,7 @@ import { openVttDb, getSetting } from "../../src/storage/idb";
 import {
   PlayerRulesPackage,
   playerRulesConsentScope,
+  type PlayerRulesOffer,
   type PlayerRulesStatus,
 } from "../../src/app/playerRulesPackage";
 
@@ -85,6 +86,8 @@ interface Harness {
   worldId: string;
   announce: (source: string, over?: Partial<WelcomeSimInfo>) => Promise<string>;
   addPlayer: (pubkey: string, options?: { importModule?: (source: string) => Promise<Result<RulesModule>>; trusted?: (hash: string) => boolean }) => Promise<Player>;
+  /** D-475: publish a `ui.js` beside the rules and announce both. */
+  announceWithUi: (rules: string, ui: string) => Promise<{ hash: string; uiHash: string }>;
 }
 
 async function setup(): Promise<Harness> {
@@ -132,8 +135,16 @@ async function setup(): Promise<Harness> {
     return hash;
   };
 
+  const announceWithUi = async (rules: string, ui: string): Promise<{ hash: string; uiHash: string }> => {
+    const uiBytes = encode(ui);
+    const uiHash = await sha256Hex(uiBytes);
+    host.publishArtifact(uiHash, uiBytes);
+    const hash = await announce(rules, { ui: { hash: uiHash, size: uiBytes.byteLength, name: "Probe Rules" } });
+    return { hash, uiHash };
+  };
+
   return {
-    host, hostBus, worldId: meta.worldId, announce,
+    host, hostBus, worldId: meta.worldId, announce, announceWithUi,
     addPlayer: async (pubkey, options = {}) => {
       const pair = createTransportPair();
       host.addSession(`peer-${pubkey}`, pair.a);
@@ -178,7 +189,7 @@ describe("D-472 — delivery: the active rules package reaches an approved playe
     expect(player.client.simInfo?.artifact).toEqual({ hash, size: encode(RULES_JS).byteLength, name: "Probe Rules" });
     const offer = must(player.statuses.find((status) => status.state === "pending"));
     if (offer.state !== "pending") throw new Error("unreachable");
-    expect(offer.offer).toEqual({ packageId: "probe-rules", name: "Probe Rules", version: "3.1.0", hash, size: encode(RULES_JS).byteLength, updated: false, firstParty: false });
+    expect(offer.offer).toEqual({ packageId: "probe-rules", name: "Probe Rules", version: "3.1.0", hash, uiHash: null, size: encode(RULES_JS).byteLength, updated: false, firstParty: false });
     // Nothing moved on the wire before the decision.
     expect(player.fetchCalls).toEqual([]);
     expect(player.rules.module).toBeNull();
@@ -195,7 +206,7 @@ describe("D-472 — delivery: the active rules package reaches an approved playe
     expect(player.fetchCalls).toEqual([hash]);
     // The decision is remembered for this exact artifact, scoped to the world.
     const row = await getSetting(player.db, playerRulesConsentScope(h.worldId), "probe-rules");
-    expect(row?.value).toEqual({ hash, decision: "allow", at: 1_700_000_000_000 });
+    expect(row?.value).toEqual({ hash, uiHash: null, decision: "allow", at: 1_700_000_000_000 });
     // The content-addressed cache filled, so a rejoin costs no wire traffic (§7 acceptance).
     expect(player.backend.entries.has(hash)).toBe(true);
     player.rules.dispose();
@@ -250,7 +261,7 @@ describe("D-472 — consent: this device decides, per world, package and exact a
     await player.rules.deny();
     expect(lastState(player)).toBe("declined");
     expect(player.fetchCalls).toEqual([]);
-    expect((await getSetting(player.db, playerRulesConsentScope(h.worldId), "probe-rules"))?.value).toEqual({ hash: hashV1, decision: "deny", at: 1_700_000_000_000 });
+    expect((await getSetting(player.db, playerRulesConsentScope(h.worldId), "probe-rules"))?.value).toEqual({ hash: hashV1, uiHash: null, decision: "deny", at: 1_700_000_000_000 });
     player.rules.dispose();
 
     // Next session, same artifact: no prompt, still declined, still no traffic.
@@ -367,5 +378,89 @@ describe("D-472 — integrity: what runs is what was announced and allowed", () 
     await until(() => lastState(player) === "failed", "shape failure");
     expect(player.rules.module).toBeNull();
     player.rules.dispose();
+  });
+});
+
+const UI_JS = "export default { api: 'arena.ui/1', components: { battleAnalysis: function BattleAnalysis() {} } };";
+const UI_JS_V2 = UI_JS.replace("BattleAnalysis()", "BattleAnalysisV2()");
+const offerOf = (player: Player): PlayerRulesOffer => {
+  const status = player.statuses[player.statuses.length - 1];
+  if (!status || status.state === "none") throw new Error("no offer yet");
+  return status.offer;
+};
+
+describe("D-475 — the package's window components travel as a second artifact under the same consent", () => {
+  test("one prompt covers rules + ui; both are fetched and verified after allow; the components reach the shell", async () => {
+    const h = await setup();
+    const { hash, uiHash } = await h.announceWithUi(RULES_JS, UI_JS);
+    const player = await h.addPlayer("rex-key");
+    await until(() => lastState(player) === "pending", "prompt");
+    // The offer sizes the whole download and names the UI hash the decision will cover.
+    expect(offerOf(player)).toMatchObject({ hash, uiHash, size: encode(RULES_JS).byteLength + encode(UI_JS).byteLength, firstParty: false });
+    expect(player.fetchCalls).toEqual([]);
+    await player.rules.allow();
+    await until(() => lastState(player) === "ready", "load");
+    expect(player.fetchCalls).toEqual([hash, uiHash]);
+    expect(must(player.rules.module).schema.version).toBe("3.1.0");
+    expect(must(player.rules.ui).components.battleAnalysis).toBeTypeOf("function");
+    expect((await getSetting(player.db, playerRulesConsentScope(h.worldId), "probe-rules"))?.value).toEqual({ hash, uiHash, decision: "allow", at: 1_700_000_000_000 });
+    player.rules.dispose();
+
+    // Reconnect with the same pair: remembered, no prompt, no second transfer of either file.
+    const again = await h.addPlayer("rex-key");
+    await until(() => lastState(again) === "ready", "remembered");
+    expect(again.statuses.map((status) => status.state)).toEqual(["loading", "ready"]);
+    expect(again.fetchCalls).toEqual([hash, uiHash]); // a fresh cache fetches, but nobody was asked
+    expect(must(again.rules.ui).components.battleAnalysis).toBeTypeOf("function");
+
+    // A new UI build beside the same rules is an update: it asks again, the components it has
+    // not been allowed are withheld, and the rules — the exact hash this device did allow — keep running.
+    const next = await h.announceWithUi(RULES_JS, UI_JS_V2);
+    expect(next.hash).toBe(hash);
+    expect(next.uiHash).not.toBe(uiHash);
+    await until(() => lastState(again) === "pending", "re-prompt for the ui change");
+    expect(offerOf(again)).toMatchObject({ hash, uiHash: next.uiHash, updated: true });
+    expect(must(again.rules.module).schema.version).toBe("3.1.0");
+    expect(again.rules.ui).toBeNull();
+    await again.rules.allow();
+    await until(() => lastState(again) === "ready", "load the new pair");
+    expect(again.fetchCalls).toEqual([hash, uiHash, hash, next.uiHash]); // rules re-read from this player's cache
+    expect(must(again.rules.ui).components.battleAnalysis?.name).toBe("BattleAnalysisV2");
+    again.rules.dispose();
+  });
+
+  test("a ui.js that fails its gate leaves the rules running and names the error; a first-party pair needs both hashes trusted", async () => {
+    const h = await setup();
+    const { hash, uiHash } = await h.announceWithUi(RULES_JS, "export default { api: 'arena.ui/1', components: { battleAnalysis: 42 } };");
+    const player = await h.addPlayer("rex-key");
+    await until(() => lastState(player) === "pending", "prompt");
+    await player.rules.allow();
+    await until(() => lastState(player) === "ready", "rules ready despite the ui");
+    const ready = player.statuses[player.statuses.length - 1];
+    if (ready?.state !== "ready") throw new Error("unreachable");
+    expect(ready.uiError).toContain("battleAnalysis");
+    expect(must(player.rules.module).schema.version).toBe("3.1.0");
+    expect(player.rules.ui).toBeNull();
+    player.rules.dispose();
+
+    // D-473 trust is per artifact: a build that lists the rules hash but not the ui hash (a
+    // tampered or foreign ui.js beside a genuine rules.js) is a stranger, so it prompts.
+    const half = await h.addPlayer("rex-key", { trusted: (candidate) => candidate === hash });
+    await until(() => lastState(half) === "ready", "the remembered allow still covers this exact pair");
+    expect(offerOf(half).firstParty).toBe(false);
+    half.rules.dispose();
+    const fresh = await h.announceWithUi(RULES_JS_V2, UI_JS);
+    const halfFresh = await h.addPlayer("rex-key", { trusted: (candidate) => candidate === fresh.hash });
+    await until(() => lastState(halfFresh) === "pending", "prompt when only the rules hash is first-party");
+    expect(offerOf(halfFresh)).toMatchObject({ firstParty: false, hash: fresh.hash, uiHash: fresh.uiHash, updated: true });
+    halfFresh.rules.dispose();
+    const both = await h.addPlayer("rex-key", { trusted: (candidate) => candidate === fresh.hash || candidate === fresh.uiHash });
+    await until(() => lastState(both) === "ready", "silent load of a fully first-party pair");
+    expect(both.statuses.map((status) => status.state)).toEqual(["loading", "ready"]);
+    expect(offerOf(both).firstParty).toBe(true);
+    expect(must(both.rules.ui).components.battleAnalysis).toBeTypeOf("function");
+    // The build's trust writes nothing: the only row is the first player's explicit allow of the old pair.
+    expect((await getSetting(both.db, playerRulesConsentScope(h.worldId), "probe-rules"))?.value).toMatchObject({ hash, uiHash, decision: "allow" });
+    both.rules.dispose();
   });
 });

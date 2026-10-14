@@ -12,6 +12,7 @@
   import type { WindowManager, WindowSpec } from "../../core/windows";
   import type { HostPackages, HostRulesBoot } from "../../app/hostBoot";
   import type { RulesModule } from "../../core/rules";
+  import type { PackageUiModule } from "../../packages/uiModuleLoader";
   import PermissionsPanel from "../permissions/PermissionsPanel.svelte";
   import MacrosPanel from "../macros/MacrosPanel.svelte";
   import SettingsPanel from "../settings/SettingsPanel.svelte";
@@ -58,6 +59,7 @@
     packages = null,
     rulesBoot = null,
     rulesModule = null,
+    uiModule = null,
     aisRuntimeStatuses = {},
     agents = null,
     saves = null,
@@ -113,6 +115,8 @@
     rulesBoot?: HostRulesBoot | null;
     /** D-471: the host page's copy of the active system package (army window validation). */
     rulesModule?: RulesModule | null;
+    /** D-475: the active system package's window components (null = package ships none / not loaded). */
+    uiModule?: PackageUiModule | null;
     aisRuntimeStatuses?: AisRuntimeStatuses;
     /** §3.2 the connector's agent desk (GM only; null hides the Agents section). */
     agents?: AgentManager | null;
@@ -428,6 +432,7 @@
             {bus}
             armyId={win.data.armyId ?? ""}
             rules={armyWindowRules(rulesModule)}
+            ui={uiModule}
             onClose={() => manager.close(win.id)}
           />
         {/if}

@@ -24,6 +24,10 @@ import { FakeCodec } from "./fakes";
 const RULES_JS =
   "export default { schema: { version: '3.1.0', modelColumns: { ammo: 'u8' }, unitTypes: {}, orderTypes: ['move'], subPhases: ['move'] }, validateOrder(){ return {ok:true}; }, resolveTurn(){}, detection(){ return 5; } };";
 
+// D-475: the shape a system package's `ui.js` evaluates to; the component is any function here,
+// the real one is Svelte's compiled output reading the shell's runtime off a global.
+const UI_JS = "export default { api: 'arena.ui/1', components: { battleAnalysis: function BattleAnalysis() {}, somethingNew: function Later() {} } };";
+
 const zipOf = (files: Record<string, string>): Uint8Array =>
   zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)])));
 
@@ -199,6 +203,7 @@ describe("HostPackages — the record names the ruleset it runs", () => {
       version: "3.1.0",
       error: null,
       inPage: "package",
+      ui: "none",
     });
     // D-471: the host page holds the same validated module for its own dispatch (army window
     // validation, hero stats); the shell bundles no system-specific code for that.
@@ -214,8 +219,74 @@ describe("HostPackages — the record names the ruleset it runs", () => {
     // meta.system feeds the join welcome's world block — it now agrees with rulesBoot
     expect(second.meta.system).toBe("probe-rules");
     expect(second.meta.systemVersion).toBe("3.1.0");
+    expect(second.uiModule).toBeNull();
     await second.persister.flush();
     await second.close();
+  });
+
+  test("D-475: a package's ui.js loads in the page, is published as a second artifact, and a broken one costs only the UI", async () => {
+    const reboot = async (worldId: HostApp["worldId"]): Promise<HostApp> =>
+      bootHostApp({ db: await openVttDb(), root: new MemDirHandle(), codec: new FakeCodec(), simRunner: new InlineSimRunner(), worldId });
+
+    const app = await freshApp();
+    const worldId = app.worldId;
+    const imported = await app.packages.importZip(
+      zipOf({
+        "manifest.json": JSON.stringify({
+          id: "probe-rules", name: "Probe Rules", version: "3.1.0", type: "system",
+          rules: { entry: "rules.js", modelColumns: { ammo: "u8" } },
+          ui: { entry: "ui.js" },
+        }),
+        "rules.js": RULES_JS,
+        "ui.js": UI_JS,
+      }),
+    );
+    expect(imported.ok ? null : imported.error).toBeNull();
+    expect(await app.packages.activate("probe-rules")).toEqual({ ok: true });
+    await app.persister.flush();
+    await app.close();
+
+    const second = await reboot(worldId);
+    expect(second.rulesBoot).toMatchObject({ source: "package", inPage: "package", ui: "package" });
+    // The components are the module's own functions, reachable through the known slot only.
+    expect(second.uiModule?.api).toBe("arena.ui/1");
+    expect(second.uiModule?.components.battleAnalysis).toBeTypeOf("function");
+    expect(Object.keys(second.uiModule?.components ?? {})).toEqual(["battleAnalysis"]);
+    // Both artifacts are published; the welcome names the UI next to the rules so a player shell
+    // fetches it under the same consent (or first-party trust) as the code that already runs.
+    const rulesHash = await sha256Hex(new TextEncoder().encode(RULES_JS));
+    const uiBytes = new TextEncoder().encode(UI_JS);
+    const uiHash = await sha256Hex(uiBytes);
+    expect(second.host.publishedArtifacts().sort()).toEqual([rulesHash, uiHash].sort());
+    expect(second.gm.client.simInfo?.ui).toEqual({ hash: uiHash, size: uiBytes.byteLength, name: "Probe Rules" });
+    await second.persister.flush();
+    await second.close();
+
+    // A UI that fails the shape gate (or does not evaluate) is the package's error to show; the
+    // rules still run, nothing about it is published, and the welcome stays silent about a UI.
+    const third = await reboot(worldId);
+    const broken = await third.packages.importZip(
+      zipOf({
+        "manifest.json": JSON.stringify({
+          id: "probe-rules", name: "Probe Rules", version: "3.1.0", type: "system",
+          rules: { entry: "rules.js", modelColumns: { ammo: "u8" } },
+          ui: { entry: "ui.js" },
+        }),
+        "rules.js": RULES_JS,
+        "ui.js": "export default { api: 'arena.ui/0', components: {} };",
+      }),
+    );
+    expect(broken.ok ? null : broken.error).toBeNull();
+    await third.persister.flush();
+    await third.close();
+    const fourth = await reboot(worldId);
+    expect(fourth.rulesBoot).toMatchObject({ source: "package", inPage: "package", ui: { error: expect.stringContaining("arena.ui/1") as string } });
+    expect(fourth.rulesModule?.schema.version).toBe("3.1.0");
+    expect(fourth.uiModule).toBeNull();
+    expect(fourth.host.publishedArtifacts()).toEqual([rulesHash]);
+    expect(fourth.gm.client.simInfo?.ui).toBeUndefined();
+    await fourth.persister.flush();
+    await fourth.close();
   });
 });
 

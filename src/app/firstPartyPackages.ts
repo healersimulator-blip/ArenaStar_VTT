@@ -27,6 +27,8 @@ export interface FirstPartyPackage {
   dependencies: readonly string[];
   /** sha256 (hex) of the system package's `rules.js` bytes — the D-472 artifact hash; null for data packages. */
   rulesSha256: string | null;
+  /** D-475: sha256 (hex) of the system package's `ui.js` bytes — its second artifact; null when it ships none. */
+  uiSha256?: string | null;
   /** The package zip, base64 — what `readZipPackage` reads. */
   zipBase64: string;
 }
@@ -50,9 +52,9 @@ export function firstPartySystemPackage(list: readonly FirstPartyPackage[] = emb
   return list.find((entry) => entry.type === "system" && entry.rulesSha256 !== null) ?? null;
 }
 
-/** D-473: is this D-472 rules artifact one of this build's own packages? */
+/** D-473/D-475: is this announced artifact (rules.js or ui.js) one of this build's own packages? */
 export function isFirstPartyArtifact(hash: string, list: readonly FirstPartyPackage[] = embedded()): boolean {
-  return /^[0-9a-f]{64}$/.test(hash) && list.some((entry) => entry.rulesSha256 === hash);
+  return /^[0-9a-f]{64}$/.test(hash) && list.some((entry) => entry.rulesSha256 === hash || (entry.uiSha256 ?? null) === hash);
 }
 
 /** Decode the embedded zip (no Buffer: the shell runs in the page). */

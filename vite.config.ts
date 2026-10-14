@@ -20,7 +20,7 @@ function firstPartyPackages(): Array<Record<string, unknown>> {
   const indexPath = join(dir, "index.json");
   if (!existsSync(indexPath)) return [];
   const index = JSON.parse(readFileSync(indexPath, "utf8")) as Array<{
-    id: string; name: string; version: string; type: string; dependencies: string[]; zip: string; rulesSha256: string | null;
+    id: string; name: string; version: string; type: string; dependencies: string[]; zip: string; rulesSha256: string | null; uiSha256?: string | null;
   }>;
   return index.map((entry) => ({
     id: entry.id,
@@ -29,6 +29,7 @@ function firstPartyPackages(): Array<Record<string, unknown>> {
     type: entry.type,
     dependencies: entry.dependencies,
     rulesSha256: entry.rulesSha256,
+    uiSha256: entry.uiSha256 ?? null,
     zipBase64: readFileSync(join(dir, entry.zip)).toString("base64"),
   }));
 }

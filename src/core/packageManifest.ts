@@ -42,6 +42,17 @@ export interface PackageRulesBlock {
   modelColumns: Record<string, ModelColumnType>;
 }
 
+/**
+ * D-475: the components a system package contributes to the shells' windows — one
+ * self-contained ESM file built against the shell's own Svelte runtime
+ * (`globalThis.__ARENASTAR_SVELTE__`), imported in-page by the GM shell and, after the D-472
+ * consent (or D-473 first-party trust), by player shells. Default export `{ api: "arena.ui/1",
+ * components: { <slot>: Component } }`.
+ */
+export interface PackageUiBlock {
+  entry: string;
+}
+
 /** Iframe module block: classic script run in the §12 sandboxed iframe. */
 export interface PackageModuleBlock {
   entry: string;
@@ -80,6 +91,8 @@ export interface PackageManifest {
   rules?: PackageRulesBlock;
   /** Optional (system only): classic-script module entry for the sandboxed iframe. */
   module?: PackageModuleBlock;
+  /** Optional (system only, D-475): the package's window components, loaded in-page by both shells. */
+  ui?: PackageUiBlock;
   /** Optional (system only): declarative schema migrations (§12). */
   migrations?: MigrationStep[];
   packs?: PackagePack[];
@@ -360,6 +373,9 @@ export function validatePackageManifest(raw: unknown): Result<PackageManifest> {
     if (raw.interconnect !== undefined) {
       return err(`package ${id}: data-only packages must not declare interconnect code`);
     }
+    if (raw.ui !== undefined) {
+      return err(`package ${id}: data-only packages must not declare a ui block`);
+    }
   } else if (type === "module") {
     if (rules !== undefined) return err(`package ${id}: AIS modules must not declare a rules block`);
     if (raw.module !== undefined) return err(`package ${id}: AIS modules use interconnect, not the legacy module block`);
@@ -401,6 +417,14 @@ export function validatePackageManifest(raw: unknown): Result<PackageManifest> {
         return err(`package ${id}: module.trusted must be a boolean`);
       }
       manifest.module = trusted === undefined ? { entry: modEntry } : { entry: modEntry, trusted };
+    }
+    const rawUi = (raw as Record<string, unknown>).ui;
+    if (rawUi !== undefined) {
+      if (!isRecord(rawUi)) return err(`package ${id}: ui block must be an object`);
+      if (typeof rawUi.entry !== "string" || !isSafePackagePath(rawUi.entry)) {
+        return err(`package ${id}: ui.entry must be a safe package-relative path`);
+      }
+      manifest.ui = { entry: rawUi.entry };
     }
     const rawMigrations = (raw as Record<string, unknown>).migrations;
     if (rawMigrations !== undefined) {

@@ -71,6 +71,7 @@
   import { PlayerRulesPackage, type PlayerRulesStatus } from "./playerRulesPackage";
   import { isFirstPartyArtifact } from "./firstPartyPackages";
   import type { RulesModule } from "../core/rules";
+  import type { PackageUiModule } from "../packages/uiModuleLoader";
   import type { AisModuleSelectRequest } from "../packages/aisModuleHandlers";
   import {
     NO_ONBOARDING_FACTS,
@@ -755,6 +756,8 @@
   let playerRules: PlayerRulesPackage | null = null;
   let playerRulesStatus = $state.raw<PlayerRulesStatus>({ state: "none" });
   let playerRulesModule = $state.raw<RulesModule | null>(null);
+  // D-475: the package's window components follow the same announcement/consent as its rules.
+  let playerUiModule = $state.raw<PackageUiModule | null>(null);
   let rulesDeciding = $state(false);
   function startPlayerRules(playerApp: PlayerApp): void {
     const client = playerApp.client;
@@ -770,6 +773,7 @@
       onStatus: (status) => {
         playerRulesStatus = status;
         playerRulesModule = playerRules?.module ?? null;
+        playerUiModule = playerRules?.ui ?? null;
       },
     });
   }
@@ -2269,6 +2273,7 @@
             client={app.client}
             bus={app.bus}
             rulesModule={playerRulesModule}
+            uiModule={playerUiModule}
             sceneId={activeScene()?._id ?? null}
             selectedTokenId={selection.length === 1 ? (selection[0] ?? null) : null}
             {selectedItemRef}

@@ -1559,6 +1559,12 @@ export interface VttE2eSurface {
    * the host does — the harness exercises the real artifact, not an in-bundle twin.
    */
   heroOrdersSmoke(input: { rulesSource: string }): Promise<HeroOrdersSmokeResult>;
+  /**
+   * D-475: the package's `ui.js` (`systems/pf1e-mass-battles/ui.js`) is imported in the real
+   * bundle — against the Svelte runtime `main.ts` exposed — and its `battleAnalysis` component
+   * is mounted the way `ArmyWindow` mounts it, then read back from the DOM.
+   */
+  packageUiSmoke(input: { uiSource: string }): Promise<PackageUiSmokeResult>;
   visionSmoke(): Promise<VisionSmokeResult>;
   gridsSmoke(): Promise<GridsSmokeResult>;
   paritySmoke(): Promise<ParitySmokeResult>;
@@ -4544,6 +4550,61 @@ function orderLandedCheck(pending: number): boolean {
  * `ArmyWindow` component over a real `ClientSync` replica, so what is asserted is the op that
  * lands on the unit document — not a re-implementation of the component's logic.
  */
+export interface PackageUiSmokeResult {
+  ok: boolean;
+  /** `main.ts` published the runtime before anything could import a package UI. */
+  runtimeExposed: boolean;
+  /** The slots the loaded module filled (the shape gate keeps only known ones). */
+  slots: string[];
+  /** The mounted component's heading, read back from the DOM. */
+  heading: string;
+  /** The summary cards it rendered for the synthetic report. */
+  cards: number;
+  /** The component's own styles reached the document (injected on mount, not shipped by the shell). */
+  styled: boolean;
+  error?: string;
+}
+
+async function runPackageUiSmoke(input: { uiSource: string }): Promise<PackageUiSmokeResult> {
+  const fail = (error: string): PackageUiSmokeResult => ({
+    ok: false, runtimeExposed: false, slots: [], heading: "", cards: 0, styled: false, error,
+  });
+  try {
+    if (typeof input?.uiSource !== "string" || input.uiSource.length === 0)
+      throw new Error("packageUiSmoke needs the built package's ui.js text (run `pnpm build:systems`)");
+    const [{ svelteRuntimeExposed }, { importUiModule }, { mount, unmount, flushSync }] = await Promise.all([
+      import("./svelteRuntime"),
+      import("../packages/uiModuleLoader"),
+      import("svelte"),
+    ]);
+    const runtimeExposed = svelteRuntimeExposed();
+    const loaded = await importUiModule(input.uiSource);
+    if (!loaded.ok) return { ...fail(`ui.js did not import in-page: ${loaded.error}`), runtimeExposed };
+    const slots = Object.keys(loaded.value.components);
+    const BattleAnalysis = loaded.value.components.battleAnalysis;
+    if (!BattleAnalysis) return { ...fail("battleAnalysis slot not filled"), runtimeExposed, slots };
+    const zero = {
+      unitId: "all", totalAttacks: 12, hits: 7, misses: 5, hitPercentage: 58, critThreats: 1, critsConfirmed: 1,
+      misfiresCount: 0, rawDamageDealt: 40, drAbsorbed: 5, drBypassed: 2, srBlocked: 0, netDamageDealt: 35,
+      damageHealed: 0, killsCount: 2, deathsCount: 1, savesPassed: 3, savesFailed: 1, aooExecuted: 0, aooHits: 0,
+      cmbSuccesses: 0, concentrationPassed: 0, concentrationFailed: 0,
+    };
+    const report = { totals: zero, units: { "u-a": { ...zero, unitId: "u-a" } } };
+    const target = globalThis.document.createElement("div");
+    globalThis.document.body.appendChild(target);
+    const instance = mount(BattleAnalysis, { target, props: { report } });
+    flushSync();
+    const heading = target.querySelector(".pf1e-analysis h3")?.textContent?.trim() ?? "";
+    const cards = target.querySelectorAll(".pf1e-analysis .summary-cards .card").length;
+    const styled = [...globalThis.document.querySelectorAll("style")].some((style) => (style.textContent ?? "").includes("pf1e-analysis"));
+    unmount(instance);
+    target.remove();
+    return { ok: heading.length > 0 && cards > 0, runtimeExposed, slots, heading, cards, styled };
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : String(e));
+  }
+}
+
 async function runHeroOrdersSmoke(input: { rulesSource: string }): Promise<HeroOrdersSmokeResult> {
   const fail = (error: string): HeroOrdersSmokeResult => ({
     ok: false,
@@ -6109,6 +6170,7 @@ export async function installE2eHook(app?: HostApp | null): Promise<void> {
     rulesPackageSmoke: () => runRulesPackageSmoke(),
     armiesSmoke: () => runArmiesSmoke(),
     heroOrdersSmoke: (input) => runHeroOrdersSmoke(input),
+    packageUiSmoke: (input) => runPackageUiSmoke(input),
     visionSmoke: () => runVisionSmoke(),
     gridsSmoke: () => runGridsSmoke(),
     paritySmoke: () => runParitySmoke(),

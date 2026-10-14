@@ -1109,6 +1109,7 @@ interface WelcomeMsg {
     /** D-472: the active package's rules.js as a content-addressed blob —
      *  fetch with asset.get { assetId: hash } on the assets channel. */
     artifact?: { hash: AssetId; size: number; name: string };
+    ui?: { hash: AssetId; size: number; name: string };       // D-475: the package's ui.js
   };
 }
 ```
@@ -1150,8 +1151,8 @@ host-side no-op; `start` broadcasts the first snapshot). When the host
 re-announces a _changed_ `sim` (package switch), clients discard replicas
 decoded under the old shape and re-pull a snapshot before applying further
 deltas; re-announcing identical info (reconnect) is a no-op. A change of
-`sim.artifact.hash` alone (the GM activated a new build of the same package)
-also re-announces.
+`sim.artifact.hash` or `sim.ui.hash` alone (the GM activated a new build of
+the same package) also re-announces.
 
 `sim.artifact` (D-472) names the active package's `rules.js` as a
 **published artifact**: `hash` is the sha256 of its UTF-8 bytes and doubles as
@@ -1169,6 +1170,18 @@ sha256 of the embedded `rules.js`) and load it without asking — that is the
 code this very release used to bundle, now carried by the world file. The
 exception is keyed on the exact hash, never on the package id: a different
 build of the same package prompts like any stranger's.
+
+`sim.ui` (D-475, optional) names the same package's `ui.js` — the window
+components it contributes, compiled against the host build's Svelte runtime —
+as a second published artifact with the same `{hash, size, name}` shape and the
+same fetch path. It is present only when the host itself could evaluate the
+file. A client treats the pair as **one decision**: the consent prompt sizes
+both, the stored decision binds both hashes, a changed `sim.ui.hash` beside an
+unchanged `sim.artifact.hash` re-announces and re-prompts as an update (the
+already-allowed rules may keep running; the un-allowed components MUST NOT be
+mounted), and the first-party exception applies only when *both* hashes are in
+the client build's own list. A `ui.js` that fails to evaluate or fails the
+`arena.ui/1` shape gate is reported and ignored; it never unloads the rules.
 
 ### snapshot (0x21 · host → client · ops)
 

@@ -5,9 +5,14 @@ import { mount } from "svelte";
 import JoinApp from "./JoinApp.svelte";
 import Root from "./Root.svelte";
 import type { HostApp } from "./hostBoot";
+import { exposeSvelteRuntime } from "./svelteRuntime";
 
 const target = document.getElementById("app");
 if (!target) throw new Error("boot: #app container missing from index.html");
+
+// D-475: package components (`ui.js`) read the shell's Svelte runtime from a global — published
+// before either shell boots, so the first package UI import finds it.
+exposeSvelteRuntime();
 
 // Test-only (D-045): install the e2e surface IMMEDIATELY (before boot) so
 // transport drivers are available the moment the page loads; the app surface

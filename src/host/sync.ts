@@ -957,6 +957,7 @@ export class HostSync {
         this.simInfo.packageId === info.packageId &&
         this.simInfo.version === info.version &&
         this.simInfo.artifact?.hash === info.artifact?.hash &&
+        this.simInfo.ui?.hash === info.ui?.hash &&
         sameSchema(this.simInfo.schema, info.schema));
     if (same) return;
     this.simInfo = info;

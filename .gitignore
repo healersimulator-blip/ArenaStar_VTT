@@ -5,6 +5,7 @@ test-results/
 
 # §12 generated system-package artifacts (build step: pnpm build:systems)
 systems/*/rules.js
+systems/*/ui.js
 # D-473 first-party embed set (build step: pnpm build:systems; inlined by vite.config.ts)
 systems/.first-party/
 playwright-report/

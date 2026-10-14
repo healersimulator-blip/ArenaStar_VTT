@@ -510,3 +510,12 @@ because the readers pull ≈61 KB of PF1e helpers (`consumables`, `inventory`, `
 +13,185 B gzip**, not −51 KB. Correction to the T1 row: a package-side move of code that shares
 helpers with code still in the shell costs the shared part twice until T2 moves the helpers too;
 the figure to watch from here is duplicated bytes, not T-tier bytes.
+
+**Outcome (D-475) — T2 cannot go alone.** The per-module importer survey behind the T2 row found
+that every tactical module the host imports is also imported by shell UI (sheets, combat panel,
+agent bridge, e2e hook); `automationHealth` is the only host-exclusive one. A logic-only T2 seam
+would therefore duplicate ≈324 KB rather than move it, and a UI-first T3 would duplicate the
+60-file / 1.3 MB tactical core the actor sheet shares with the shell. The tiers T2 and T3 are one
+coordinated move, and the prerequisite was a component-package mechanism — built in D-475 with the
+battle-analysis view as its first payload (`ui.js` 9,790 B; fixed cost +45,427 B raw, of which
+38,978 B is the shell's `svelte/internal/client` namespace kept whole for package components).

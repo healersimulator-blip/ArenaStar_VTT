@@ -875,6 +875,12 @@ export interface WelcomeSimInfo {
    * Absent for the built-in rules or when the host did not publish the artifact.
    */
   artifact?: WelcomeRulesArtifact;
+  /**
+   * D-475: the active package's `ui.js` — the window components it contributes — as a second
+   * published artifact under the same consent (or first-party trust) as `artifact`. Absent when
+   * the package ships no UI or the host did not publish it.
+   */
+  ui?: WelcomeRulesArtifact;
 }
 
 /** D-472: how a player fetches and verifies the active rules package. */
