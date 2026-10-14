@@ -266,4 +266,18 @@ export interface RulesModule {
   detection(ctx: RulesContext, unit: UnitView): number;
   forecast?(ctx: RulesContext, army: ArmyView): Forecast;
   migrate?(pool: ModelPool, fromVersion: string): ModelPool;
+  /**
+   * D-471 (M07 seam) — hero-authored unit stats from a bound leader actor. The host's turn
+   * channel overlays `fromActor(ctx.leaderActors[unit.id])` on `unit.stats` before each
+   * resolve and writes `overlayKeys` back into the Unit document inside the turn envelope.
+   * Absent ⇒ the system has no actor-derived unit stats (mass-battle-basic).
+   */
+  leaderStats?: RulesLeaderStats;
+}
+
+export interface RulesLeaderStats {
+  /** The numeric `unit.stats` keys `fromActor` produces (write-back complement). */
+  overlayKeys: readonly string[];
+  /** null when the document is missing or unparseable: the caller keeps the unit's stats. */
+  fromActor(actorJson: unknown): Record<string, number> | null;
 }

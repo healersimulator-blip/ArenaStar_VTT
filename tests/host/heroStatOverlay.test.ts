@@ -12,6 +12,7 @@ import type { SimBridge } from "../../src/host/simBridge";
 import type { ArmyDocument, UnitDocument } from "../../src/core/strategic";
 import {
   combatStatsFromLeaderActor,
+  createMassBattlePf1e,
   LEADER_STAT_OVERLAY_KEYS,
 } from "../../src/packages/massBattlePf1e";
 import { deriveFromDocuments } from "../../src/packages/pf1e/actor";
@@ -64,6 +65,8 @@ describe("combatStatsFromLeaderActor (M07/D-229)", () => {
     expect(combatStatsFromLeaderActor({ system: 42 })).toBeNull();
   });
 });
+
+const pf1eLeaderStats = createMassBattlePf1e().leaderStats;
 
 describe("advance/write-back (M07/D-229)", () => {
   it("feeds hero stats into the sim and persists them in the resolve envelope", async () => {
@@ -243,6 +246,8 @@ describe("advance/write-back (M07/D-229)", () => {
       sceneId,
       sys: {},
       seed: 12345,
+      // D-471: the host receives the hero derivation through the RulesModule seam.
+      ...(pf1eLeaderStats ? { leaderStats: pf1eLeaderStats } : {}),
     });
 
     await channel.start("stepwise");
@@ -459,6 +464,8 @@ describe("movement-during-turn reconciliation (M08/D-229)", () => {
       sceneId,
       sys: {},
       seed: 12345,
+      // D-471: the host receives the hero derivation through the RulesModule seam.
+      ...(pf1eLeaderStats ? { leaderStats: pf1eLeaderStats } : {}),
     });
     await channel.start("stepwise");
     const gm = {

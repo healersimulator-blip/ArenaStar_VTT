@@ -60,6 +60,8 @@ import {
   WorkerSimRunner,
   type SimRunner,
 } from "../workers/simWorkerClient";
+import { importRulesModule } from "../sim/rulesLoader";
+import type { RulesModule } from "../core/rules";
 import { MASS_BATTLE_SCHEMA_COLUMNS } from "../packages";
 import { readZipPackage } from "../packages/packageLoader";
 import { type CompendiumPack } from "../core/compendium";
@@ -240,6 +242,13 @@ export interface HostRulesBoot {
   version: string;
   /** Why a package was refused at boot (validation/import error). */
   error: string | null;
+  /**
+   * D-471: whether the host page also holds the package's RulesModule (the same `rules.js` the
+   * worker validated) for its own dispatch — order validation in the army window, hero stats on
+   * resolve. `"builtin"` = mass-battle-basic (no package); a string = the in-page import failed
+   * and those features fall back to the built-in rules while the worker still runs the package.
+   */
+  inPage: "package" | "builtin" | { error: string };
 }
 
 export interface HostPackages {
@@ -307,6 +316,11 @@ export interface HostApp {
   readonly pipeline: ImportPipeline;
   /** §12 what the sim booted with this world load. */
   readonly rulesBoot: HostRulesBoot;
+  /**
+   * D-471: the active system's RulesModule as loaded in the host page (null = built-in rules).
+   * This is the dispatch instance host code consumes instead of importing system symbols.
+   */
+  readonly rulesModule: RulesModule | null;
   /** §12 active package module entry for the sandboxed iframe (null = none). */
   readonly moduleBoot: HostModuleBoot | null;
   /** AIS independent multi-module runtime plan (local grants never enter its profile). */
@@ -851,7 +865,9 @@ async function bootHostAppLocked(
     packageId: null,
     version: "1.0.0",
     error: null,
+    inPage: "builtin",
   };
+  let rulesModule: RulesModule | null = null;
   let simSys: SysSchema = MASS_BATTLE_SCHEMA_COLUMNS;
   let rulesSource: string | undefined;
   if (pkg && pkgSource !== undefined) {
@@ -861,11 +877,17 @@ async function bootHostAppLocked(
     try {
       if (!runner.loadRules) throw new Error("runner cannot load packages");
       const info = await runner.loadRules(pkgSource, 5_000);
+      // D-471: the host page keeps its own copy of the validated package for dispatch (order
+      // validation, hero stats). Same source, same shape gate; the InlineSimRunner fallback has
+      // always imported it in-page, so this adds no new execution tier.
+      const inPage = await importRulesModule(pkgSource);
+      if (inPage.ok) rulesModule = inPage.value.module;
       rulesBoot = {
         source: "package",
         packageId: pkg.id,
         version: info.version,
         error: null,
+        inPage: inPage.ok ? "package" : { error: inPage.error },
       };
       simSys = pkg.manifest.rules?.modelColumns ?? MASS_BATTLE_SCHEMA_COLUMNS;
       rulesSource = pkgSource;
@@ -875,6 +897,7 @@ async function bootHostAppLocked(
         packageId: pkg.id,
         version: pkg.manifest.version,
         error: e instanceof Error ? e.message : String(e),
+        inPage: "builtin",
       };
     }
   } else if (worldRec?.activeRulesPackage) {
@@ -883,6 +906,7 @@ async function bootHostAppLocked(
       packageId: worldRec.activeRulesPackage,
       version: "1.0.0",
       error: "active package record missing or not a system package",
+      inPage: "builtin",
     };
   }
   const moduleSource =
@@ -929,6 +953,7 @@ async function bootHostAppLocked(
     sceneId: DEFAULT_SCENE_ID,
     sys: simSys,
     seed: campaignSeed || 1,
+    ...(rulesModule?.leaderStats ? { leaderStats: rulesModule.leaderStats } : {}),
   });
 
   const pair = createTransportPair();
@@ -1451,6 +1476,7 @@ async function bootHostAppLocked(
 
   return {
     rulesBoot,
+    rulesModule,
     moduleBoot,
     automationBoot,
     migrationBoot,

@@ -17,6 +17,7 @@ import {
 import type { ArmyDocument, FactionDocument, UnitDocument } from "../../src/core/strategic";
 import type { SimEvent, TurnReport } from "../../src/core/sim";
 import { allocModel, createModelPool } from "../../src/sim/pool";
+import { createMassBattlePf1e } from "../../src/packages/massBattlePf1e";
 import { ModelStatus } from "../../src/core/strategic";
 
 function unit(id: string, type: string, over: Partial<UnitDocument> = {}): UnitDocument {
@@ -270,27 +271,20 @@ describe("reports tab data (§10)", () => {
   });
 });
 
-describe("armyWindowRules (M14/D-224) — production rules resolution", () => {
-  test("active PF1e package resolves the PF1e module; plain world resolves the builtin", async () => {
-    const pf1ePackages = {
-      list: async () => [
-        { id: "pf1e-mass-battles", name: "PF1e", version: "1.0.0", type: "system" as const, packCount: 2, active: true, trustRequested: false, trusted: false },
-      ],
-    };
-    const plainPackages = {
-      list: async () => [
-        { id: "sample.scenery", name: "Scenery", version: "1.0.0", type: "data" as const, packCount: 1, active: true, trustRequested: false, trusted: false },
-      ],
-    };
-    const rules = await armyWindowRules(pf1ePackages as unknown as Parameters<typeof armyWindowRules>[0]);
+describe("armyWindowRules (M14/D-224, D-471) — production rules resolution", () => {
+  test("the host page's package module wins; no in-page module resolves the builtin", () => {
+    // D-471: the window consumes whatever system package the host imported in-page
+    // (`HostApp.rulesModule`); the shell no longer names or bundles PF1e for this.
+    const pf1e = createMassBattlePf1e();
+    const rules = armyWindowRules(pf1e);
+    expect(rules).toBe(pf1e);
     // PF1e module's declared sub-phases include heal/spell — the basic module never does.
     expect(rules.schema.subPhases).toContain("heal");
     expect(rules.schema.subPhases).toContain("spell");
-    const basic = await armyWindowRules(plainPackages as unknown as Parameters<typeof armyWindowRules>[0]);
+    const basic = armyWindowRules(null);
     expect(basic.schema.subPhases).toContain("supply");
     expect(basic.schema.subPhases).not.toContain("heal");
-    const none = await armyWindowRules(null);
-    expect(none.schema.subPhases).not.toContain("heal");
+    expect(armyWindowRules(undefined)).toBe(basic); // memoized builtin
   });
 });
 

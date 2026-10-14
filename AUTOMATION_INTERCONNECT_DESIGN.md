@@ -141,6 +141,11 @@ shell draws the window chrome around it (`src/packages/aisPanel.ts`, used by bot
 iframe is created inside the panel body and never re-parented). `AIS.ui.panel.open()/close()` from
 the module, "Open panel" buttons in Settings → Packages and in the player's *Shared modules* card.
 
+**P3 step 1 (D-471)** started moving native PF1e into the world file: the strategic ruleset is no
+longer compiled into the main file — the host imports the active system package's `rules.js`
+in-page (`HostApp.rulesModule`) and consumes it through `RulesModule` seams (`leaderStats` for the
+hero overlay, order validation in the army window). Measured −50,252 B; main file 5,688,191 B.
+
 ## 1. Goals and non-goals
 
 ### Goals

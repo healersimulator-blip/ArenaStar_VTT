@@ -498,9 +498,22 @@ describe("activating PF1e in a world (§1.1 acceptance, no browser)", () => {
       packageId: "pf1e-mass-battles",
       version: "1.0.0",
       error: null,
+      inPage: "package",
     });
     // `version` above is echoed from the loaded module's own schema, not the manifest — so it
     // proves the bundle loaded, not just that a record existed.
+    // D-471: the host page's dispatch copy comes from the same artifact; the hero-stat seam the
+    // turn channel consumes is served by the package, not by an import of PF1e code.
+    expect(second.rulesModule?.schema.version).toBe("1.0.0");
+    const leaderStats = second.rulesModule?.leaderStats;
+    expect(leaderStats?.overlayKeys).toContain("bab");
+    const overlay = leaderStats?.fromActor({ system: { pf1e: {
+      size: "Medium", baseAttack: 6, abilities: { str: 18, dex: 16, con: 16, int: 10, wis: 12, cha: 10 },
+      armorClass: { armor: 5, shield: 2, natural: 1, dodge: 0, misc: 0 }, saves: { fort: 5, ref: 2, will: 2 },
+      initiative: 0, hpMax: 58, hp: 58, dr: 5, spellResistance: 21, landSpeedFt: 30, attacks: [],
+    } } });
+    expect(overlay).toMatchObject({ hp: 58, bab: 6, strMod: 4, dexMod: 3, sr: 21, drVal: 5 });
+    expect(leaderStats?.fromActor(null)).toBeNull();
     await second.persister.drain();
     second.close();
   });

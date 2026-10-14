@@ -14197,3 +14197,65 @@ the panel host against an element double (`tests/packages/aisPanel.test.ts`, 2),
 runtime's mount → attach → open/close → remove protocol (`playerAisRuntime.test.ts`) and the
 GM runtime + boot + summary + profile path (`aisRuntimeSharing.test.ts`). No browser run (see
 D-468 for the sandbox limitation).
+
+## D-471 — P3 step 1: the strategic ruleset leaves the main bundle — the host consumes the active system package in-page through the RulesModule seam (2026-10-14)
+
+**Context.** Tier T0 of the cost analysis (D-467): the PF1e strategic ruleset was compiled twice —
+once into `systems/pf1e-mass-battles/rules.js` for the sim worker (the §12 path) and once into
+the main file through three static imports (`host/turnChannel.ts` for the M07 hero-stat overlay,
+`ui/armies/armyModel.ts` for order validation in the army window, `app/e2eHook.ts` for the hero
+e2e harness). `armyModel.ts` even resolved the module *by package id* and then instantiated the
+bundled twin, with the comment "package content zips never execute in-page". That comment was
+already false for the fallback: `InlineSimRunner` (used whenever a worker cannot be created, and
+by every Node test) imports the package's `rules.js` in the page context through
+`importRulesModule`, and D-089 established page-level `import(blob:)` under the CSP.
+
+**Decision.**
+
+1. **`RulesModule.leaderStats?: { overlayKeys, fromActor }`** is the new seam for the M07 hero
+   derivation. `createMassBattlePf1e()` implements it from `combatStatsFromLeaderActor` /
+   `LEADER_STAT_OVERLAY_KEYS`; `validateRulesModule` passes the member through unchanged.
+   `TurnChannel` takes `leaderStats` as an option and overlays/writes back only through it — a
+   system without the member (mass-battle-basic) keeps units on their authored stats, which for
+   basic worlds is what the sim already assumed.
+2. **`HostApp.rulesModule`** — after the worker has validated and loaded the active package, boot
+   imports the same `rules.js` text in-page (`importRulesModule`, same shape gate) and keeps the
+   module as the host's **dispatch instance**. `rulesBoot.inPage` reports `"package"`,
+   `"builtin"`, or `{ error }` (in-page import failed while the worker still runs the package →
+   the two in-page consumers fall back to the built-in rules). No new execution tier: the GM
+   activated this package as the world's rules and the fallback runner already ran it in-page.
+3. **Consumers switched**: `armyWindowRules(rulesModule)` returns the package module or
+   mass-battle-basic (WindowHost gets a `rulesModule` prop from the GM shell; the player shell
+   passes none and keeps basic, as before); `TurnChannel` receives `rulesModule?.leaderStats`;
+   the hero e2e harness (`heroOrdersSmoke`) now takes the built artifact's text from the spec
+   (`systems/pf1e-mass-battles/rules.js`, read on the Node side) and imports it in-page — it
+   exercises the real artifact instead of an in-bundle twin.
+4. `src/packages/massBattlePf1e.ts` is now imported only by `src/packages/pf1e/rulesEntry.ts`
+   (the `rules.js` build entry) and by tests.
+
+**Measured.** `dist/index.html`: **5,738,443 B at D-470 → 5,688,191 B** (−50,252 B raw;
+gzip 1,737,982 → 1,722,431, −15,551 B) — twice the T0 estimate, because the ruleset's
+exclusive dependencies (`pf1e/deploySeed`, `envelopment`, `targeting`, `stride`, `spells`,
+`heroBridge` …) left with it. Net across this round: 5,723,400 B (D-468) → 5,688,191 B
+(−35,209 B) with P1b and P2a included (+15,043 B). Headroom under the 6 MiB gate: 603,265 B.
+`tools/analysis/pf1eCoupling.mjs`: host → PF1e **146 → 143 edges, 183 → 179 symbols**, host
+files 27 → 27 (`turnChannel.ts` still imports `pf1e/pendingRoll` and `pf1e/rollLedger`).
+Tests: `tests/packages/pf1ePackage.test.ts` boots the real built package and asserts the hero
+overlay (`hp 58, bab 6, strMod 4, dexMod 3, sr 21, drVal 5`) comes out of
+`app.rulesModule.leaderStats` — i.e. out of the artifact; `tests/host/heroStatOverlay.test.ts`
+injects the seam explicitly; `hostPackages`/`worldRecipe`/`worldFilePackages` assert
+`rulesBoot.inPage === "package"`; `tests/ui/armyModel.test.ts` covers the sync resolver. Gates:
+`tsc` 0, `eslint .` 0, svelte check 0 blocking, vitest **5,787 passed / 12 skipped (5,799)** —
+the first full-suite number since D-468's 5,775 / 12, so it also covers P1b and P2a.
+
+**What this is not.** T1–T4 are untouched: the 348 KB tactical PF1e logic and the 334 KB PF1e UI
+remain in the bundle because 143 host import edges still name PF1e symbols; moving them is the
+dispatch-interface programme of plan P3 (≈ 6–10 k LOC). This step proves the mechanism that
+programme will repeat — *a seam on `RulesModule` (or its successor contract), the host consumes
+the package's in-page instance, the bundled twin goes* — and records its first measured yield.
+
+**Open owner decision (recorded, not taken).** In-page execution of the active system package
+is here justified by activation + the existing fallback precedent. When third-party system
+packages become common, the owner may want the D-089 per-world trust grant (or a build-signed
+first-party hash list) to gate `rulesBoot.inPage`; the fallback to built-in rules already exists
+for that case.

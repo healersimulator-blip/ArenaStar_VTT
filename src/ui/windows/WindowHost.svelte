@@ -11,6 +11,7 @@
    */
   import type { WindowManager, WindowSpec } from "../../core/windows";
   import type { HostPackages, HostRulesBoot } from "../../app/hostBoot";
+  import type { RulesModule } from "../../core/rules";
   import PermissionsPanel from "../permissions/PermissionsPanel.svelte";
   import MacrosPanel from "../macros/MacrosPanel.svelte";
   import SettingsPanel from "../settings/SettingsPanel.svelte";
@@ -56,6 +57,7 @@
     onRedo,
     packages = null,
     rulesBoot = null,
+    rulesModule = null,
     aisRuntimeStatuses = {},
     agents = null,
     saves = null,
@@ -109,6 +111,8 @@
     packages?: HostPackages | null;
     /** Which strategic ruleset booted (Settings → ruleset section status line). */
     rulesBoot?: HostRulesBoot | null;
+    /** D-471: the host page's copy of the active system package (army window validation). */
+    rulesModule?: RulesModule | null;
     aisRuntimeStatuses?: AisRuntimeStatuses;
     /** §3.2 the connector's agent desk (GM only; null hides the Agents section). */
     agents?: AgentManager | null;
@@ -419,15 +423,13 @@
             onCreated={() => manager.close(win.id)}
           />
         {:else if win.kind === "army" && win.data}
-          {#await armyWindowRules(packages) then rules}
-            <ArmyWindow
-              {client}
-              {bus}
-              armyId={win.data.armyId ?? ""}
-              {rules}
-              onClose={() => manager.close(win.id)}
-            />
-          {/await}
+          <ArmyWindow
+            {client}
+            {bus}
+            armyId={win.data.armyId ?? ""}
+            rules={armyWindowRules(rulesModule)}
+            onClose={() => manager.close(win.id)}
+          />
         {/if}
       </div>
       <div

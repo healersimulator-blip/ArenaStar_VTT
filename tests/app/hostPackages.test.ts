@@ -197,7 +197,13 @@ describe("HostPackages — the record names the ruleset it runs", () => {
       packageId: "probe-rules",
       version: "3.1.0",
       error: null,
+      inPage: "package",
     });
+    // D-471: the host page holds the same validated module for its own dispatch (army window
+    // validation, hero stats); the shell bundles no system-specific code for that.
+    expect(second.rulesModule?.schema.version).toBe("3.1.0");
+    expect(second.rulesModule?.validateOrder).toBeTypeOf("function");
+    expect(second.rulesModule?.leaderStats).toBeUndefined();
     // meta.system feeds the join welcome's world block — it now agrees with rulesBoot
     expect(second.meta.system).toBe("probe-rules");
     expect(second.meta.systemVersion).toBe("3.1.0");

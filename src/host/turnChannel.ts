@@ -68,16 +68,17 @@ import {
 } from "./turnEngine";
 import { pendingPruneOps } from "../packages/pf1e/pendingRoll";
 import { pruneOpsForWindow as rollLedgerPruneOps } from "../packages/pf1e/rollLedger";
-import {
-  combatStatsFromLeaderActor,
-  LEADER_STAT_OVERLAY_KEYS,
-  type LeaderActorStatOverlay,
-} from "../packages/massBattlePf1e";
+import type { RulesLeaderStats } from "../core/rules";
 
 export interface TurnChannelOptions {
   host: HostSync;
   store: DocumentStore;
   bridge: SimBridge;
+  /**
+   * D-471: the active system's hero-stat derivation (`RulesModule.leaderStats`), resolved by
+   * boot from the in-page copy of the package. Absent ⇒ units fight from their authored stats.
+   */
+  leaderStats?: RulesLeaderStats;
   sceneId: DocId;
   sys: SysSchema;
   /** Campaign seed; per-turn seeds derive from it (§5A). */
@@ -143,6 +144,8 @@ export class TurnChannel {
   private readonly host: HostSync;
   private readonly store: DocumentStore;
   private readonly bridge: SimBridge;
+  /** D-471: the active system's hero-stat seam (undefined for systems without one). */
+  private readonly leaderStats: RulesLeaderStats | undefined;
   private readonly sceneId: DocId;
   private readonly sys: SysSchema;
   private readonly seed: number;
@@ -183,6 +186,7 @@ export class TurnChannel {
     this.host = options.host;
     this.store = options.store;
     this.bridge = options.bridge;
+    this.leaderStats = options.leaderStats;
     this.sceneId = options.sceneId;
     this.sys = options.sys;
     this.seed = options.seed;
@@ -514,11 +518,12 @@ export class TurnChannel {
       // M07 — hero-authored stats are the authoritative combat inputs (G §4.12). Units
       // with a bound leader actor fight from the tactical derivation, not the legion
       // defaults; the derived values are the `unit.stats` keys the profile loader reads.
-      const heroStats = new Map<string, LeaderActorStatOverlay>();
+      const heroStats = new Map<string, Record<string, number>>();
+      const leaderStats = this.leaderStats;
       const units = this.unitViews().map((u) => {
         const actor = ctx.leaderActors[u.id];
-        if (actor === undefined) return u;
-        const overlay = combatStatsFromLeaderActor(actor);
+        if (actor === undefined || !leaderStats) return u;
+        const overlay = leaderStats.fromActor(actor);
         if (!overlay) return u;
         heroStats.set(u.id, overlay);
         return { ...u, stats: { ...u.stats, ...overlay } };
@@ -574,7 +579,7 @@ export class TurnChannel {
     units: UnitView[],
     result: SimResolveResult,
     turnNumber: number,
-    heroStats?: ReadonlyMap<string, LeaderActorStatOverlay>,
+    heroStats?: ReadonlyMap<string, Record<string, number>>,
   ): void {
     const forward: Op[] = [];
     const inverse: Op[] = [];
@@ -613,9 +618,10 @@ export class TurnChannel {
         if (!docUnit) continue;
         const diff: Record<string, number | null> = {};
         const inv: Record<string, number | null> = {};
-        const keys: Array<keyof LeaderActorStatOverlay> = [];
-        for (const k of LEADER_STAT_OVERLAY_KEYS) {
+        const keys: string[] = [];
+        for (const k of this.leaderStats?.overlayKeys ?? []) {
           const v = overlay[k];
+          if (v === undefined) continue;
           const docV = docUnit.stats[k] ?? 0;
           if (v !== docV) {
             keys.push(k);

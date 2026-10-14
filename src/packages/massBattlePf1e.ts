@@ -2082,6 +2082,11 @@ export function createMassBattlePf1e(
       };
     },
   };
+  // D-471: the host consumes the hero derivation through the RulesModule seam, not by import.
+  module.leaderStats = {
+    overlayKeys: LEADER_STAT_OVERLAY_KEYS,
+    fromActor: (actorJson) => combatStatsFromLeaderActor(actorJson) as Record<string, number> | null,
+  };
 
   return module;
 }

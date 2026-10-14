@@ -108,6 +108,7 @@ describe("createWorldFromRecipe", () => {
       packageId: "recipe-rules",
       version: "4.0.0",
       error: null,
+      inPage: "package",
     });
     expect(app.meta.system).toBe("recipe-rules");
     const scene = app.gm.client.store.get("scenes", DEFAULT_SCENE_ID) as SceneDocument;

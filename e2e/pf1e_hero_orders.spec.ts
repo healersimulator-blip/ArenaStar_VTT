@@ -1,8 +1,14 @@
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const entry =
   "file://" + fileURLToPath(new URL("../dist/index.html", import.meta.url));
+/** D-471: the PF1e rules live in the package artifact, not the bundle (`pnpm build:systems`). */
+const rulesSource = readFileSync(
+  fileURLToPath(new URL("../systems/pf1e-mass-battles/rules.js", import.meta.url)),
+  "utf8",
+);
 
 /**
  * M10 — hero melee, casting and direct targeting through normal player controls.
@@ -17,14 +23,14 @@ test.describe("M10 hero orders in the Army Management Window", () => {
     page,
   }) => {
     await page.goto(entry + "?e2e=1");
-    const result = await page.evaluate(async () => {
+    const result = await page.evaluate(async (source) => {
       const surface = (
         globalThis as unknown as {
-          __vttE2E?: { heroOrdersSmoke: () => Promise<unknown> };
+          __vttE2E?: { heroOrdersSmoke: (input: { rulesSource: string }) => Promise<unknown> };
         }
       ).__vttE2E;
       if (!surface) throw new Error("e2e hook not installed");
-      return (await surface.heroOrdersSmoke()) as {
+      return (await surface.heroOrdersSmoke({ rulesSource: source })) as {
         ok: boolean;
         heroControls: boolean;
         targets: string[];
@@ -37,7 +43,7 @@ test.describe("M10 hero orders in the Army Management Window", () => {
         castOptions: string[];
         error?: string;
       };
-    });
+    }, rulesSource);
     expect(result.error).toBeUndefined();
     expect(result.ok).toBe(true);
     expect(result.heroControls).toBe(true);

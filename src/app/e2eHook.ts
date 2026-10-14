@@ -1553,7 +1553,12 @@ export interface VttE2eSurface {
   modelsSmoke(): Promise<ModelsSmokeResult>;
   rulesPackageSmoke(): Promise<RulesPackageSmokeResult>;
   armiesSmoke(): Promise<ArmiesSmokeResult>;
-  heroOrdersSmoke(): Promise<HeroOrdersSmokeResult>;
+  /**
+   * D-471: the PF1e rules are no longer bundled; the spec hands over the built package's
+   * `rules.js` text (`systems/pf1e-mass-battles/rules.js`) and the hook imports it exactly like
+   * the host does — the harness exercises the real artifact, not an in-bundle twin.
+   */
+  heroOrdersSmoke(input: { rulesSource: string }): Promise<HeroOrdersSmokeResult>;
   visionSmoke(): Promise<VisionSmokeResult>;
   gridsSmoke(): Promise<GridsSmokeResult>;
   paritySmoke(): Promise<ParitySmokeResult>;
@@ -4539,7 +4544,7 @@ function orderLandedCheck(pending: number): boolean {
  * `ArmyWindow` component over a real `ClientSync` replica, so what is asserted is the op that
  * lands on the unit document — not a re-implementation of the component's logic.
  */
-async function runHeroOrdersSmoke(): Promise<HeroOrdersSmokeResult> {
+async function runHeroOrdersSmoke(input: { rulesSource: string }): Promise<HeroOrdersSmokeResult> {
   const fail = (error: string): HeroOrdersSmokeResult => ({
     ok: false,
     heroControls: false,
@@ -4569,7 +4574,7 @@ async function runHeroOrdersSmoke(): Promise<HeroOrdersSmokeResult> {
       { createTransportPair, flushMicrotasks },
       { mount, unmount },
       { default: ArmyWindow },
-      { createMassBattlePf1e },
+      { importRulesModule },
       { createMassBattleBasic },
     ] = await Promise.all([
       import("../core/store"),
@@ -4581,7 +4586,7 @@ async function runHeroOrdersSmoke(): Promise<HeroOrdersSmokeResult> {
       import("../net/memory"),
       import("svelte"),
       import("../ui/armies/ArmyWindow.svelte"),
-      import("../packages/massBattlePf1e"),
+      import("../sim/rulesLoader"),
       import("../packages/massBattleBasic"),
     ]);
     const store = new DocumentStore({
@@ -4692,7 +4697,11 @@ async function runHeroOrdersSmoke(): Promise<HeroOrdersSmokeResult> {
         await new Promise((r) => setTimeout(r, 0));
     };
 
-    const rules = createMassBattlePf1e();
+    if (typeof input?.rulesSource !== "string" || input.rulesSource.length === 0)
+      throw new Error("heroOrdersSmoke needs the built package's rules.js text (run `pnpm build:systems`)");
+    const imported = await importRulesModule(input.rulesSource);
+    if (!imported.ok) throw new Error(`PF1e rules package did not import in-page: ${imported.error}`);
+    const rules = imported.value;
     const host0 = globalThis.document.createElement("div");
     globalThis.document.body.appendChild(host0);
     const win = mount(ArmyWindow, {
@@ -6099,7 +6108,7 @@ export async function installE2eHook(app?: HostApp | null): Promise<void> {
     modelsSmoke: () => runModelsSmoke(),
     rulesPackageSmoke: () => runRulesPackageSmoke(),
     armiesSmoke: () => runArmiesSmoke(),
-    heroOrdersSmoke: () => runHeroOrdersSmoke(),
+    heroOrdersSmoke: (input) => runHeroOrdersSmoke(input),
     visionSmoke: () => runVisionSmoke(),
     gridsSmoke: () => runGridsSmoke(),
     paritySmoke: () => runParitySmoke(),
