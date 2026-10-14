@@ -13983,3 +13983,52 @@ table and splits the would-be runtime into a facade over plumbing ArenaStar alre
 genuinely new framework pieces (`DataModel`, `Document` semantics over a system-owned document
 store, `Roll` classes, `ApplicationV2`/Handlebars, `CONFIG`), and names the acceptance gate such a
 project would have for free: `pf1`'s own Quench batches.
+
+## D-467 — Three cost questions on PF1e ⇄ Foundry, answered with measurements (2026-10-14)
+
+**Context.** After D-466 the owner asked for hard numbers rather than verdicts: (a) how much of the
+6 MiB main file the native PF1e implementation occupies and could give back if moved into the
+world zip; (b) how many lines of change to AIS, its adapter and the core would let them *run* the
+pf1 system, pf-content, pf1e-archetypes, statblock-library and SBC; (c) how extensive a rework of
+the *modules* (reusing their code, not clean-room) would be instead.
+
+**Decision — the document and the instruments.** `PF1E_FOUNDRY_PORT_COST_ANALYSIS.md` (new)
+answers the three questions; `tools/analysis/` (new, lint-clean, not part of any gate) holds the
+instruments so the numbers can be re-run: `vite.attribution.config.ts` (the production build
+without the inliner, with a source map), `bundleAttribution.mjs` (VLQ-decodes the map and charges
+every byte of the 5,236,560 B chunk to its source module; agrees with source-map-explorer to
+0.2 %), `pf1eCoupling.mjs` (host↔PF1e import edges and player-/GM-shell reachability),
+`foundryApiInventory.mjs` (framework-reference families, coupling density and distinct-member
+inventories for any Foundry package checkout).
+
+**Measured.** PF1e-named code is **732,893 B of JS (14.0 % of the chunk) + ≈ 24 KB CSS = 13.3 %
+of `index.html`**; logic 348,022 · UI 310,713 · importers 49,003 · strategic ruleset 25,155.
+**115 of 118 PF1e files (730,408 B) are reachable from the player shell**, which loads no packages
+(`JoinApp`/`joinBoot` have zero `packageLoader`/`trustedModule`/`aisModule*` references); GM-only
+is 2,485 B. Host→PF1e coupling: 146 import edges, 27 host files, 183 symbols (75 in `host/sync.ts`).
+pf1 mirror `681929d1`: 62,573 product LOC + 3,568 Quench test LOC; 4,643 framework references
+(7.4/100 LOC); 86 `foundry.*` classes, 25 utils, 19 field types (991 uses), 71 `game.*` members
+(1,216 uses; `i18n.localize` 558, `settings.get` 119), 60 `CONFIG` paths, 59 `canvas` members, 36
+Application lifecycle members, 9 core Handlebars helpers (1,927 uses), 173 Font Awesome classes;
+minified bundle 1,606,325 B; templates 582 KB; CSS 298 KB; `en.json` 145 KB / 2,819 keys; packs
+21.8 MB YAML; actor YAML avg 34.6 KB / max 93.9 KB (AIS RPC cap 64 KB). SBC 4.0.3 (last GitHub
+release): 7,151 LOC, 90 `system.*` paths written. In-repo calibration: AIS v1 = 2,441 product LOC
+for 76 facade members/RPCs (≈ 32 LOC each) with 2,240 test LOC; `src/dice` 924; `compendium*` 753;
+20.1 minified bytes per source line.
+
+**Answers.** (a) Ceiling **757 KB** (headroom 579 KiB → 1.29 MiB), but free today only **≈ 28 KB**
+(the duplicated strategic ruleset + GM-only code), **≈ 77 KB** with the import UI gated to the GM
+shell; the remaining ≈ 680 KB needs a player-side package runtime, a Svelte component-package
+contract and a dispatch interface for 183 symbols — and the host-core slot that (b)/(c) need puts
+≈ 160–310 KB back. (b) **≈ 23–45 k product LOC** (host core 8–16 k in the main file; Foundry-shaped
+runtime 15–27 k in the world zip) **+ 16–41 k tests ≈ 39–86 k**, trusted in-page tier only (the
+sandbox tier adds 4–8 k and a limits redesign); the four other repositories add 0.7–1.7 k.
+(c) pf1 **10–17 k lines modified (16–27 %) + 7–13 k shims + the same 7–14 k host slot**, SBC
+10–20 % (schema kept) or 30–40 %, statblock-library ≈ 200 LOC, data modules 0 → **≈ 25–49 k
+product LOC**, as a GPLv3 fork against 12 upstream releases in 13 months. Both routes cost the
+same order of magnitude; they differ in what they yield and when.
+
+**Not done.** No product code changed; no gates re-run (the new tools are outside `tsconfig`
+`include` and outside every test batch; `eslint tools/analysis` is clean). The spike that would
+replace the widest estimates with measurements — port `test/actor-basics.test.mjs` to vitest and
+count the stub — is named in the document and not started.

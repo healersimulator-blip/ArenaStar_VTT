@@ -166,6 +166,9 @@ names is not code transfer.
 
 ### 3.1a If the `pf1` package were made the adapter's target — what that costs, measured
 
+> The line-count and byte answers (main-file space, LOC for a runtime, LOC for a module
+> rework) are in `PF1E_FOUNDRY_PORT_COST_ANALYSIS.md`; this section keeps the surface inventory.
+
 The proposal calls full system execution "a separate project". That is a scoping statement, not
 a prohibition, so here is the project's size from the mirror (`681929d1`, `module/` only), so the
 decision can be taken on numbers:
