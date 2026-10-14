@@ -189,6 +189,8 @@
     (TRUSTED players may place tokens and drawings; ASSISTANT is a co-GM). A character is the actor a player
     plays — assigning it makes them its owner. Token control is per token on the current scene.
   </p>
+  <!-- The roster scrolls sideways in a narrow window instead of clipping its Actions column. -->
+  <div class="roster-scroll">
   <table class="users" data-perm-users>
     <thead>
       <tr><th>Player</th><th>Role</th><th>Character</th><th>Tokens here</th><th>Macros</th><th class="actions-head">Actions</th></tr>
@@ -281,6 +283,7 @@
       {/each}
     </tbody>
   </table>
+  </div>
   {#if !presence}
     <p class="hint">Connection status is only visible from the host.</p>
   {/if}
@@ -369,6 +372,9 @@
     gap: 4px;
   }
   .hint { color: #99b4c5; font-size: 0.8rem; margin: 0; }
+  .roster-scroll { overflow-x: auto; max-width: 100%; }
+  .users th { white-space: nowrap; }
+  .users select { max-width: 11rem; }
   .who { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #55606f; box-shadow: 0 0 0 1px #0b0f16 inset; flex: 0 0 auto; }
   .dot.online { background: #3fd37a; box-shadow: 0 0 6px #3fd37a99; }

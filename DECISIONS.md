@@ -13868,4 +13868,43 @@ offline player, World settings embeds it; Scene settings edits size/grid/colour/
 token reaches the player's replica as OWNER via `myTokenLevel`, Disconnect drops the session and
 the row turns offline).
 
-**Verification.** _(filled in below once the runs finish)_
+**What the browser tests caught (and the code now says).** Three defects none of the unit tests
+could see: (1) the light markers and the selected-light readout read `activeScene()` without a
+reactive dependency, so the marker never appeared for the light just placed — both now read
+`storeVersion`; (2) a chorded right button is a `pointermove`, not a `pointerdown` (above); (3) a
+GM kick closed the player's *sync transport* but not its `ClientPeerSession`, so the player shell
+stayed "connected" forever and §6.5 would have tried to reconnect to a host that had just removed
+it — `joinBoot` now closes the session on the `kick` event with the reason
+(`tests/app/joinBoot.test.ts` reproduces the stuck state without the fix). Two smaller ones: the
+"Add token" token is open to everyone (`default: OWNER`), so a per-player grant would change
+nothing — `controlsToken` reports that as `"everyone"` and the roster shows the box ticked and
+disabled with "(open to everyone)"; and the selected-light options had replaced "Erase last",
+which `fog_lighting.spec.ts` (and GM habit) still reach for — both buttons are shown.
+
+**Verification.** `typecheck` 0 blocking (98 components), `lint` clean, unit **5,754 passed /
+12 skipped across 430 files**, `dist/index.html` **5,698,348 B (5.434 MiB of 6; gzip
+1,726,672 B)**, the four builders pass. Browser: the seven D-465 tests plus the pin test pass in
+isolation; the affected batches on the finished tree: `test:fx:canvas` 26 passed / 1 failed
+(`fog_lighting` could not find "Erase last" while a light was selected — the fix above; the spec
+then passes on its own, 28 s), `test:e2e:core` **50/50**, `test:e2e:table` **39/39**,
+`test:e2e:images` **31 passed / 1 skipped**, `test:e2e:net` 4 passed / 1 failed —
+`realtime.spec.ts:46`, the 10 Hz tick budget D-464 already recorded as timing-sensitive (7 ticks
+once, then green). On this sandbox it now misses consistently (7–9 of the ≥ 10 ticks in 1.5 s),
+so it was A/B'd: the **previous commit `85a9ed1` built in a worktree misses identically (9, 8,
+8)** — the sandbox, not D-465 (`pumpRealtime` catches up to 8 ticks per drive, but each tick is a
+worker round-trip plus periodic IndexedDB checkpoints, and the SwiftShader frame competes for the
+same two cores). Recorded in `E2E_BATCHES.md`; not changed, because loosening the budget would
+hide a real regression on a machine that can keep it.
+
+**What a screenshot pass added.** After the batches, each new surface was photographed at
+1280×960 (headless, SwiftShader) and looked at. Two things the hooks could not see: the Light
+tool's first click placed a light of `DEFAULT_TOOL_OPTIONS.lightRadius` = 40 *world pixels* —
+0.4 of a cell, a glint the GM would take for a failed click — so `CanvasToolbar` now promotes an
+untouched default to **two cells** once the grid is known (an explicit swatch or an already
+changed radius is left alone; the options object is per shell, so a player's toolbar gets the
+same treatment); and the 560 px permissions window clipped the roster's actions column as soon
+as a second player row existed — the window is now **720 px** and the roster scrolls
+horizontally inside the panel (`.roster-scroll`), so the compact copy inside World settings also
+fits. A third observation is *not* a defect: every window in a headless screenshot sits on a
+large white block — the `.wm-window` box-shadow composited by SwiftShader over the WebGL
+canvas; it vanishes with the shadow off and does not appear on a GPU.

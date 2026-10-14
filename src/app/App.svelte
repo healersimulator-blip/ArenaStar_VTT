@@ -2880,7 +2880,7 @@ const WALL_PICK_RADIUS = 12;
       kind,
       x: 40 + (wm.list().length % 5) * 24,
       y: 40 + (wm.list().length % 5) * 24,
-      width: kind === "hexcrawl-wizard" ? 520 : kind === "macros" || kind === "permissions" ? 560 : kind === "scene-settings" ? 460 : 380,
+      width: kind === "permissions" ? 720 : kind === "hexcrawl-wizard" ? 520 : kind === "macros" ? 560 : kind === "scene-settings" ? 460 : 380,
       // Settings carries the ruleset section on top of the scene options (D-249): taller;
       // the hexcrawl wizard has three steps and a readout to show at once (D-270).
       height: kind === "settings" || kind === "scene-settings" ? 560 : kind === "hexcrawl-wizard" || kind === "macros" ? 580 : 420,

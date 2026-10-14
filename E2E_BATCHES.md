@@ -121,8 +121,13 @@ Six new browser tests and one new spec: `canvas_rail.spec.ts` (+2, lights editab
 with right-click waypoints), `background_layer.spec.ts` (+1, grid by square count / octave / fit),
 `windows.spec.ts` (+2, players roster; Scene settings window) and `players_roster.spec.ts` (new,
 `test:e2e:net`: a real joined player online, token grant reaching the replica, Disconnect). The
-suite is now 143 files / 457 tests; the per-batch measurements below this line are from D-464 and
-were re-run only for the affected batches (see D-465's verification paragraph).
+suite is now 143 files / 457 tests. Re-measured on the D-465 tree: `test:fx:canvas` 27/27
+(after one fix; 7.7 min), `test:e2e:core` **50/50** (7.4 min), `test:e2e:table` **39/39**
+(10 min), `test:e2e:images` **31 passed / 1 skipped** (4.4 min), `test:e2e:net` 4 passed +
+`realtime.spec.ts:46` failing on its tick budget (7–9 of ≥ 10 ticks in 1.5 s at 10 Hz). That one
+was A/B'd against the D-464 commit built in a worktree on the same sandbox: identical misses
+(9, 8, 8) — the sandbox's speed, not the tree. It stays as it is; rerun it on a quieter machine
+before reading it as a regression.
 
 ## Known pre-existing failures (not regressions)
 

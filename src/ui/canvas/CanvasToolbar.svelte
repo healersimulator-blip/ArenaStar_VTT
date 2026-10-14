@@ -11,7 +11,7 @@
   import { isTypingTarget } from "../../core/keys";
   import { hexTravel } from "../../core/hexcrawl/strings";
   import Icon from "../icons/Icon.svelte";
-  import type { ToolOptions } from "../../canvas/tools/controller";
+  import { DEFAULT_TOOL_OPTIONS, type ToolOptions } from "../../canvas/tools/controller";
   import type { DoorState } from "../../canvas/vision/wallSight";
 
   export type CanvasTool =
@@ -101,6 +101,15 @@
     onLightDelete?: () => void;
   } = $props();
 
+  // D-465: the stock light radius (40 world px) is a near-invisible pin-prick on a 100 px grid — a
+  // tester "placed a light and nothing happened". Once the cell size is known, an untouched default
+  // becomes the 2-cell swatch; a GM's own choice is left alone.
+  let lightDefaultApplied = false;
+  $effect(() => {
+    if (lightDefaultApplied || !(cellSize > 0)) return;
+    lightDefaultApplied = true;
+    if (settings.lightRadius === DEFAULT_TOOL_OPTIONS.lightRadius) settings.lightRadius = cellSize * 2;
+  });
   let formula = $state("1d20");
   let diceCount = $state(1);
   let rollMode = $state<RollMode>("roll");
@@ -699,6 +708,9 @@
             />
             <button type="button" data-canvas-light-delete onclick={() => onLightDelete()}>
               <span class="label">Delete light</span>
+            </button>
+            <button type="button" data-canvas-action="delete-last-placement" onclick={() => act("delete-last-placement")}>
+              <span class="label">Erase last</span>
             </button>
           </div>
           <p class="hint">Drag the marker to move it · Alt-click or Delete removes it · Esc deselects</p>
