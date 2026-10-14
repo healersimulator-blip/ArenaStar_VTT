@@ -184,15 +184,42 @@ decision can be taken on numbers:
 | Document CRUD (`create/update/deleteDocuments`, `…EmbeddedDocuments`) — socket-backed DB writes | 50 sites | none (AIS has no document writes) |
 | Source size | 4.4 MB `module/` + 1.1 MB templates | app budget: 6 MiB total, 579 KiB headroom |
 
+**Who provides what** (the layering, stated precisely, because the first draft of this section
+blurred it):
+
+| Layer | Provides | Knows PF1e? |
+|---|---|---|
+| Foundry **core** (proprietary client + server) | The generic framework: `Document` classes and CRUD/embedded/lifecycle semantics, `DataModel` + field types, `Roll` and dice terms, `ApplicationV2` + Handlebars + core helpers, compendium collections, settings, i18n, sockets, canvas placeables, `Hooks`, `CONFIG`/`CONST` registries | **No.** Nothing PF1e-specific lives here |
+| **`pf1` system** | *All* of PF1e: 20 `TypeDataModel` schemas (actor/item/spellbook/attack…), the rules engine (108 `prepare*Data` sites: BAB, saves, AC composition, CMB/CMD, skills, `changes` stacking by bonus type, size, encumbrance, spell slots), `actions`, buffs/conditions, `RollPF`/`d20roll`/`damage-roll`, 69 sheets and dialogs, 185 templates, chat cards, registries, and its own 24 packs | **Yes — all of it** |
+| `pf-content`, `pf1e-archetypes`, `pf1-statblock-library` | More data in `pf1`'s schema (plus one journal sheet) | Data only |
+| SBC | A tool that produces `pf1` actors from text | Writes `pf1`'s schema |
+
 Three consequences follow, independent of any document's opinion:
 
-1. **The target is Foundry core, not `pf1`.** `pf1` does not carry its own document, data-model,
-   roll, application or compendium layers — it calls Foundry's. Foundry's client is proprietary
-   and cannot be embedded, so "run `pf1`" means a clean-room, Foundry-core-compatible runtime
-   (documents + DataModel + preparation lifecycle, `Roll`, Applications + Handlebars, compendium
-   collections, settings, i18n, canvas placeables). That is the separate project. It cannot be
-   approached incrementally through `pf1` itself: `pf1` has no headless mode even upstream — its
-   own tests are 21 Quench batches that run *inside* a live Foundry world.
+1. **What has to be built is Foundry's *framework*, not PF1e.** `pf1` *is* the PF1e rules engine —
+   but it is written against Foundry core's framework APIs (the 125 `foundry.*` uses above, ~21
+   core hooks: `init setup ready canvasReady renderChatMessageHTML createItem updateItem hotbarDrop
+   controlToken chatMessage updateWorldTime render*…`), and Foundry's client is proprietary and
+   cannot be embedded. So "run `pf1`" = a clean-room, Foundry-framework-compatible runtime. Because
+   Foundry core is generic VTT plumbing, part of that runtime is a **facade over plumbing ArenaStar
+   already has** — `Hooks` (adapter), settings storage, i18n, the compendium reader (entries are
+   already free-form `data: Record<string, unknown>`, `src/core/compendium.ts:51`), chat, combat
+   tracker, the window host, dice evaluation, scenes/tokens, persistence and replication,
+   permissions — and part is **genuinely new and must match Foundry's semantics exactly**, because
+   `pf1` is written against them: the `DataModel`/fields framework (19 field types, 20 models); the
+   `Document` class hierarchy with CRUD, embedded collections and lifecycle, over a **generic
+   system-owned document store** (ArenaStar has no slot where a plugin defines actor schemas — its
+   native `RulesModule` contract in `src/core/rules.ts` is the strategic-sim one,
+   `validateOrder/resolveTurn/tick/detection`, and tactical PF1e is hard-wired host code); the
+   Foundry `Roll` class hierarchy and grammar (`pf1` subclasses the terms); `ApplicationV2` +
+   Handlebars with the core helpers its templates use (`localize` ×1,411, `checked`,
+   `selectOptions`, `disabled`, `numberFormat`, `formInput`, `formGroup`), form binding and
+   `TextEditor` enrichers; `CONFIG`/`CONST`; and the canvas placeable API (5 `pf1` subclasses —
+   stubbable in a first slice at the price of "unchanged"). No honest line count exists for the
+   new part: the reference is proprietary and there is no open reimplementation to measure.
+   **Acceptance gate, if the project is opened:** `pf1`'s own 21 Quench test batches running
+   green under the runtime — a real certification, stronger than proposal §10 — and, because
+   repos 2–5 are `pf1`-schema data and an SBC that writes `pf1` actors, they would load with it.
 2. **Two world models.** If it ran, `pf1` would produce pf1 documents replicated by Foundry's
    socket DB semantics; ArenaStar's world is a typed 74-message host-authoritative protocol with
    its own actor model. Either the two are reconciled permanently (a bidirectional mapping for

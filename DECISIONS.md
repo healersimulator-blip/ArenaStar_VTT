@@ -13974,3 +13974,12 @@ Foundry + `pf1` session (cheap, recommended), **data as the mechanics carrier** 
 `actions[]` / class associations — `itemChanges.ts` from D-259 already evaluates pf1-shaped
 changes; highest leverage, maps onto L01/L02/L04), and the **runtime** (the separate project).
 
+
+**Second correction (same day).** §3.1a's first draft said `pf1` "does not carry its own
+document, data-model, roll, application or compendium layers". Wrong as worded: Foundry core knows
+nothing of PF1e; `pf1` *is* the PF1e rules engine (schemas, derivation, actions, rolls, sheets,
+packs) and only the *framework* under it is Foundry's. §3.1a now opens with a who-provides-what
+table and splits the would-be runtime into a facade over plumbing ArenaStar already has versus the
+genuinely new framework pieces (`DataModel`, `Document` semantics over a system-owned document
+store, `Roll` classes, `ApplicationV2`/Handlebars, `CONFIG`), and names the acceptance gate such a
+project would have for free: `pf1`'s own Quench batches.
