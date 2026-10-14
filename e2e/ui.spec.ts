@@ -75,7 +75,9 @@ test.describe("readable, keyboard-friendly UI surfaces", () => {
     expect(rail?.width).toBeLessThanOrEqual(60);
     expect(await page.evaluate(() => document.body.scrollHeight)).toBeLessThanOrEqual(960);
 
-    for (const selector of ["#add-token", "#gm-perms", "#gm-settings", "#gm-undo", "#gm-redo"]) {
+    // Per-minute GM actions stay visible in the command bar; secondary ones (permissions, session,
+    // extras, close world) sit one click away in the main menu (D-464).
+    for (const selector of ["#add-token", "#gm-macros", "#gm-settings", "#gm-undo", "#gm-redo"]) {
       const control = page.locator(selector);
       await expect(control).toBeVisible();
       await expect(control).toHaveAttribute("aria-label", /.+/);
@@ -87,6 +89,13 @@ test.describe("readable, keyboard-friendly UI surfaces", () => {
     const invite = page.locator("#share");
     await expect(invite).toBeVisible();
     expect((await controlMetrics(invite)).fontSize).toBeGreaterThanOrEqual(14);
+    await page.locator("[data-workspace-menu]").click();
+    const perms = page.locator("[data-workspace-menu-panel] #gm-perms");
+    await expect(perms).toBeVisible();
+    expect((await perms.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(30);
+    await perms.click();
+    await expect(page.locator('[data-window="permissions"]')).toBeVisible();
+    await page.locator('[data-window="permissions"] [data-window-close]').click();
 
     await page.click("#gm-settings");
     await expect(page.locator('[data-window="settings"]')).toBeVisible();

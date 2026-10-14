@@ -1,7 +1,7 @@
 # Automation Interconnect System (AIS) — Design
 
-**Status:** Architecture plus a partial, tested AIS v1 implementation slice; this document remains the target design, not a claim of full delivery.
-**Date:** 2026-10-12
+**Status:** Architecture plus a partial, browser-tested AIS v1 foundation; this document remains the target design, not a claim of full delivery.
+**Date:** 2026-10-13
 **Product constraint:** `dist/index.html` remains a single self-contained app, with a hard raw-size gate of 6 MiB. World archives carry system rules, modules, data, and media separately.
 
 ## 0. Decision summary
@@ -23,23 +23,79 @@ System-specific rules and most automation code stay in the world ZIP. The app re
 
 The central design decision for “multiple mods connected to the same subsystem and vying for control” is: **all extensions declare how they contribute**. Observers and typed modifiers may compose; exclusive resolvers cannot silently overwrite one another. Conflicts are detected before activation and resolved explicitly in the manager. There is no implicit “last module loaded wins.”
 
-### 0.1 Implemented AIS v1 slice (2026-10-12)
+### 0.1 Implemented AIS v1 slice (2026-10-13; reliability pass D-461)
 
 The repository has a partial AIS v1 runtime and one app-integrated exclusive token-light provider. This is more than a metadata-only prototype, but it is **not** the complete scheduler, mechanics contribution pipeline, theme/UI slot system, or player-hydration architecture described below.
 
 - `type: "module"` is a distinct package kind. Its closed `interconnect` block supports `api`, `entry`, exact-version requirements, declared contribution slots/modes/contracts, typed macro-callable command IDs with contract versions, declared custom event names, and the capability allow-list. Entry paths and module metadata are validated at import; import never executes module code.
 - Enabled modules are locked to exact package ID, version, and a canonical SHA-256 over the package file map. The resolver validates dependencies/cycles and explicit exclusive-provider choices. `observe`/`augment`/`transform` and `register` declarations are resolved as metadata, but the general workflow/mechanics execution pipeline is not implemented. V1 package requirements use exact versions, not semver ranges.
-- Settings → Packages can import modules, enable/disable them in a world profile, show dependency/provider diagnostics, select an exclusive provider, inspect a bounded entry-source preview, review requested capabilities, and grant/revoke local code approval. A module runs only when it is enabled, resolves, and has a matching exact-hash local approval. World profile intent and each host's consent/grants remain separate.
+- Settings → Packages can import modules, enable/disable them in a world profile, show dependency/provider diagnostics, select an exclusive provider, inspect a bounded entry-source preview, review requested capabilities, and grant/revoke local code approval. A module runs only when it is enabled, resolves, and has a matching exact-hash local approval. The source preview carries its package hash: replacement invalidates cached previews, and approval refuses a hash that changed after review. World profile intent and each host's consent/grants remain separate.
 - World ZIP format 4 carries installed module package files, enabled exact locks, and provider selections. Local capability grants are not exported. A copy import carries the requested profile but does not carry local approval; restore does not make an edited hash trusted.
-- Approved modules run in a hidden `sandbox="allow-scripts"` iframe with an opaque origin and restrictive CSP. The RPC bridge checks the source frame, each requested capability, schema, JSON bounds, result size, concurrency, and rate. Current RPC families include visible-scene projection; bounded actor inventory read; the narrow host-authoritative token-light update (with optional linked-item consumption); module-scoped storage; escaped plain-text chat; host notification; host-rendered text selection; and declared custom event emission. Capabilities include `event.emit` in addition to the existing scene, inventory, storage, chat, UI, and token-light grants.
-- Typed events are `world.snapshot`, `world.ops.committed`, `scene.token.light.changed`, `turn.phase.changed`, `turn.report.committed`, `ui.token.action`, and `module.event`. `scene.token.light.changed` is an after-commit host hook: it carries only the active scene's visible token ID and bounded light snapshot (including optional animation metadata), never raw ops or hidden-token data. `ui.token.action` is dispatched only to the selected `scene.token.light.action` provider from the native token context menu. A module can emit only names declared in its exact manifest; the host authenticates the source package and broadcasts to subscribers that separately hold `action.observe`.
-- Declared module commands can be registered with `AIS.commands.on` and called by ArenaStar's already-reviewed script macros through `api.ais.invoke(moduleId, commandId, input)`. Macro invocation requires a separate script grant and reviewed GM run-as; the target must be enabled, exact-hash approved and locally capable. Calls accept bounded JSON, use a short deadline, propagate liveness through host RPCs, and cannot invoke raw module source or Foundry globals. This is a typed bridge into module-owned command handlers, not general `eval` or a Foundry-compatible macro runtime.
+- Approved modules run in a hidden `sandbox="allow-scripts"` iframe with an opaque origin and restrictive CSP. A one-use handshake checks the exact source frame, opaque origin and per-instance boot ID, then all RPCs/commands/events use a document-bound `MessagePort`. The original document must answer a post-load probe before becoming ready. Navigation cannot inherit the bridge, and no `allow-same-origin` or cross-origin `Location` read is needed. The dispatcher checks each requested capability, closed request envelopes, bounded JSON, response-envelope size, concurrency, rate and replayed request IDs. Current RPC families include visible-scene projection; bounded inventory reads restricted to actors linked to visible tokens in the active scene; the narrow host-authoritative token-light update (with optional linked-item consumption); module-scoped storage; escaped plain-text chat; host notification; host-rendered text selection; and declared custom event emission. Capabilities include `event.emit` in addition to the existing scene, inventory, storage, chat, UI, and token-light grants.
+- Runtime wiring lives in typed `src/app/aisRuntime.ts`, rather than relying on Svelte-only callback checks. Settings distinguishes **starting / ready / failed / stopped** from code approval. Startup has a 5-second readiness deadline; entry errors, unhandled callback errors and navigation stop the instance with a visible reason. Disablement, replacement, approval revocation and capability changes close the old frame/port, reject pending commands, cancel its choice dialog and invalidate queued RPC work. New code/grants still start only after reload. Revocation cannot roll back an already-submitted host transaction.
+- Token-light/inventory and chat RPC success waits for `gm.client.submitAndWait`, not just intent creation. AIS light/storage mutations share a serial queue; consent/liveness and authoritative documents are read after awaits, per-module quotas cannot race, and token state changes only the calling module's flag namespace. This is the existing narrow transaction path, not the unimplemented general mechanics proposal/commit system.
+- Typed events are `world.snapshot`, `world.ops.committed`, `scene.token.light.changed`, `turn.phase.changed`, `turn.report.committed`, `ui.token.action`, and `module.event`. `scene.token.light.changed` is an after-commit host hook: it carries only the active scene's visible token ID and bounded light snapshot (including optional animation metadata), never raw ops or hidden-token data. `ui.token.action` is dispatched only to the selected `scene.token.light.action` provider from the native token context menu. A new `world.snapshot` subscriber receives the current sequence even though the GM welcome preceded module boot. Subscriptions are registered only after successful live authorization. A module can emit only names declared in its exact manifest; the host authenticates the source package and broadcasts to subscribers that separately hold `action.observe`.
+- Declared module commands can be registered with `AIS.commands.on` and called by ArenaStar's already-reviewed script macros through `api.ais.invoke(moduleId, commandId, input)`. Macro invocation requires a separate script grant and reviewed GM run-as; the target must be enabled, exact-hash approved and locally capable. Calls accept up to 16 KiB of bounded JSON, use an 8-second execution deadline, reserve the single per-module command slot before awaiting readiness/consent, propagate liveness through host RPCs, and cannot invoke raw module source or Foundry globals. Human selection is refused inside a macro command; it remains available to ordinary live module callbacks. This is a typed bridge into module-owned command handlers, not general `eval` or a Foundry-compatible macro runtime.
 - Light documents now support strict, declarative `torch` and `pulse` animation metadata (bounded rate/intensity and optional phase reversal). The host validates module-authored token-light updates; scene rendering applies modulation to placed, carried, and cross-floor light graphics, pauses it for reduced-motion users, and leaves light-range/vision calculations unchanged. Foundry imports retain only the supported metadata fields; no animation script or arbitrary renderer callback is accepted.
-- The `pf1e-torch` world module demonstrates the end-to-end path: PF1e light catalog, aliases, source choice/cycling, fallback and inventory preferences, optional consumable tracking, directional carried lighting, flame animation metadata, eight typed macro commands, and `torch.changed` / `torch.selected` events. Starter profiles may enable and select it, but no world ZIP approves code or grants capabilities. The parity test remains incomplete and the conditional modding skill is therefore not included.
+- The `pf1e-torch` world module demonstrates the end-to-end path: PF1e light catalog, aliases, source choice/cycling, fallback and inventory preferences, optional consumable tracking, directional carried lighting, flame animation metadata, eight typed macro commands, and `torch.changed` / `torch.selected` events. Starter profiles may enable and select it, but no world ZIP approves code or grants capabilities. Its real native menu, host-committed consumption, text selection, persisted preferences and reviewed macro path now pass in Chromium over both file and HTTPS origins. Full Foundry parity remains incomplete and the conditional modding skill is therefore not included.
 - RPC requests/results are limited to 64 KiB, 120 requests per second, and 32 concurrent requests per module. Module storage is bounded to 128 KiB per module, 256 keys, and 16 KiB per value. These are not a CPU budget. The iframe/CSP arrangement has not been audited across every target browser and cannot prove that arbitrary approved JavaScript is harmless or stop an infinite loop. Review the exact code and use disposable worlds when testing.
-- The current `pnpm build && pnpm size` measurement is **5,296,674 raw bytes (5.051 MB)** and 1,512,739 gzip bytes, below the 6 MiB main-file gate. Module entry sources remain in world package records and are not statically bundled.
+- D-461 verification: **5,681 unit tests passed / 12 skipped**; typecheck and lint passed; the dedicated `test:e2e:ais` batch passed **12/12** real Chromium tests with no retries in **4.6 minutes**. Coverage includes both-origin approval/RPC/event/storage/revocation and Torch workflows, cross-module events, stale source replacement, runtime/startup failure, navigation (including before first load), command deadlines, grant changes and simultaneous command admission.
+- The current `pnpm size` measurement after `test:fx:prepare` is **5,319,995 raw bytes (5.074 MiB)** and 1,519,421 gzip bytes, below the 6 MiB main-file gate. Module entry sources remain in world package records and are not statically bundled.
 
-Still outstanding from the target design: typed runtime execution for general `augment`/`transform`/resolver contributions, domain action proposals/prompts and atomic mechanics commits, schema-driven module settings and theme/UI contributions, health traces/circuit breakers/CPU budgets, comprehensive per-player compatibility negotiation, package signing/discovery, semver-range dependency solving, and broader adversarial/browser tests. Do not treat the current slice as satisfying all acceptance criteria in §16.
+Still outstanding from the target design: typed runtime execution for general `augment`/`transform`/resolver contributions, domain action proposals/prompts and atomic mechanics commits, schema-driven module settings and theme/UI contributions, health traces/circuit breakers/CPU budgets, comprehensive per-player compatibility negotiation, package signing/discovery, semver-range dependency solving, and broader adversarial/cross-browser tests beyond the Chromium acceptance batch. Do not treat the current slice as satisfying all acceptance criteria in §16.
+
+### 0.2 Adapter feasibility slice (D-462; not general Foundry compatibility)
+
+The [runnable demo](AIS_FOUNDRY_FEASIBILITY.md) now loads a world-packaged runtime provider and
+original pinned Tagger 1.5.4 source, locally rebundled without source edits, into one opaque guest
+frame. The additive, closed `arena.ais.runtime/1` extension to AIS 1 adds `runtimeProvider` and
+`runtime` declarations, prepared classic-script lists, bounded JSON configuration and a
+composition-bound guest approval. Both packages must declare/grant `runtime.execute`, also
+preventing older kernels from ignoring the binding in shared local storage. Each package still
+needs separate local consent, and effective capabilities are their intersection. Providers never execute standalone. Runtime packages require
+world ZIP format 5 and its explicit feature marker; the new exporter/importer retains formats 1–4.
+
+New narrow services expose non-hidden active-scene placeable tags and native transient FX. Tag
+proposals carry a global-sequence precondition, are host-validated/committed synchronously, and
+support normal undo. Upstream Tagger query/rule code and local pre/post update hooks run in the
+adapter; native ArenaStar edits do not yet pass through a general AIS workflow scheduler. The FX
+facade reuses the existing native scheduler, per-viewer policy and Pixi/audio runtime, not upstream
+Sequencer. Owned FX handles cannot cancel another module's runs; stopping a module cleans them up.
+Adapter-backed command dispatch is restricted to the local GM and currently viewed scene.
+
+D-462 verification: **5,705 unit tests passed / 12 skipped**, typecheck/lint/build/size passed,
+and the complete AIS Chromium batch passed **15/15 in 7.7 minutes**, with no retries. The new
+browser cases execute the original Tagger methods and actual native FX drawing on file and HTTPS
+origins, including clean-context world export/import and negative consent/capability cases.
+
+This deliberately does not implement the proposed AIS 2 contract, arbitrary Foundry ZIP/ES-module
+loading, binary package resources, Foundry UI/settings/system behavior, player hydration, persistent
+foreign FX, or CPU-loop containment. See the [broader proposal](FOUNDRY_AIS_ADAPTER_PROPOSAL.md)
+for the remaining stages. Legal review is separate from this feasibility demonstration; no legal
+approval status or Foundry-core redistribution claim is changed.
+
+### 0.3 UI appearance adapters and usable preview (D-463)
+
+The [UI laboratory](AIS_UI_MODULES.md) now opens its own world from an inert, integrity-checked
+embedded archive. A native GM selector explicitly reviews/activates one appearance provider,
+switches palettes without reload, and persists module/variant/density/width in a normal settings
+document. Local code grants remain separate and never travel in that world.
+
+This is real but bounded upstream reuse: Your Flavor's original token engine and presets;
+Carolingian's original CSS variable cascade; RPG Styled UI's original startup/settings hooks and
+selected raster artwork. Their full Studio, sidebar/carousel and system-sheet implementations are
+not claimed. Original files and source digests accompany prepared, isolated runtime resources.
+
+AIS adds an allowlisted, chunked `package.resource.read` service and a closed `ui.theme` appearance
+contract. Foreign selectors/CSS/HTML never enter the parent page. Only host-owned selectors consume
+validated colors, typography, bounded layout and checked raster resources. Appearance-only
+runtimes may be explicitly hot-started through the existing AIS iframe/consent boundary; broader
+modules retain reload-based startup. The host rechecks selected-provider identity and consent
+before applying results. Native modal review and Ctrl+Alt+0 recovery stay outside themed styling.
+
+Verification: **5,721 unit tests passed / 12 skipped**, typecheck/lint/build/size passed, UI-adapter
+browser batch **3/3**, existing AIS browser batch **15/15**, adjacent shell/world tests **20/20**.
+The ordinary app is **5,355,180 raw bytes / 1,530,129 gzip bytes** (5.107 MiB raw), under the 6 MiB cap.
 
 ## 1. Goals and non-goals
 
@@ -175,7 +231,7 @@ The repository already has useful pieces; AIS connects and evolves them rather t
 - `src/core/scriptMacros.ts` and `src/host/scriptWorker.ts` implement GM-reviewed scripts with policy hashes, named inputs, grants, and host RPC. The script worker explicitly documents that a browser Worker is **not** a security sandbox for hostile code. Reuse its ideas—review, grants, budgets, explicit APIs—but do not equate Worker isolation with safe execution of imported untrusted code.
 - The FX Wizard and macro automation paths prove that world-owned definitions can drive a generic host runner. AIS should expose the reusable capabilities, not bake the FX Wizard into every module or allow FX code to write mechanics.
 
-**Remaining gap:** the first slice now has a package manager, exact-hash profile locks, provider conflict metadata/UI, a capability broker, and typed read-only events. It does not yet execute registered contributions in system workflows, propose/commit mechanics actions, provide schema-driven player UI, or negotiate module versions with player clients. The selected provider currently resolves metadata only; it is not wired to an action resolver.
+**Remaining gap:** the first slice now has a package manager, exact-hash profile locks, provider conflict metadata/UI, a capability broker, and typed read-only events. It does not yet execute registered contributions in system workflows, propose/commit mechanics actions, provide schema-driven player UI, or negotiate module versions with player clients. The selected token-light provider is wired to the native token menu; the remaining general mechanics contribution slots still resolve metadata only, without an action-workflow executor.
 
 ## 6. Proposed architecture
 

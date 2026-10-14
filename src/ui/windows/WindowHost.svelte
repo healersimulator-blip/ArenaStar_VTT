@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { AisRuntimeStatuses } from "../../app/aisRuntime";
   import type { CloudBackupController } from "../../storage/cloud/cloudBackup";
   import type { SaveCoordinator } from "../../storage/saveCoordinator";
   /**
@@ -13,6 +14,9 @@
   import PermissionsPanel from "../permissions/PermissionsPanel.svelte";
   import MacrosPanel from "../macros/MacrosPanel.svelte";
   import SettingsPanel from "../settings/SettingsPanel.svelte";
+  import SceneSettingsPanel from "../scenes/SceneSettingsPanel.svelte";
+  import type { PlayerPresence } from "../permissions/PermissionsPanel.svelte";
+  import type { NaturalSize } from "../../core/backgroundTransform";
   import JournalPopout from "../journals/JournalPopout.svelte";
   import HandoutsPanel from "../journals/HandoutsPanel.svelte";
   import PF1eSheetWindow from "../sheets/PF1eSheetWindow.svelte";
@@ -52,6 +56,7 @@
     onRedo,
     packages = null,
     rulesBoot = null,
+    aisRuntimeStatuses = {},
     agents = null,
     saves = null,
     cloud = null,
@@ -75,7 +80,16 @@
     onEncounterPlaceAll = null,
     onEncounterBattleScene = null,
     resolveAsset = null,
+    backgroundNatural = null,
+    onOpenBackground = null,
+    presence = null,
   }: {
+    /** D-465: live connections + kick/ban (host shell only); the roster shows who is online. */
+    presence?: PlayerPresence | null;
+    /** D-465: natural size of the active scene's background (Scene settings' grid-count fit). */
+    backgroundNatural?: NaturalSize | null;
+    /** D-465: Scene settings → "Measure the map's squares" opens the Map & background panel. */
+    onOpenBackground?: (() => void) | null;
     saves?: SaveCoordinator | null;
     cloud?: CloudBackupController | null;
     onBackup?: (() => Promise<void>) | null;
@@ -95,6 +109,7 @@
     packages?: HostPackages | null;
     /** Which strategic ruleset booted (Settings → ruleset section status line). */
     rulesBoot?: HostRulesBoot | null;
+    aisRuntimeStatuses?: AisRuntimeStatuses;
     /** §3.2 the connector's agent desk (GM only; null hides the Agents section). */
     agents?: AgentManager | null;
     /** §10 keybinding map for the help window (D-256). */
@@ -292,12 +307,14 @@
         {:else if win.kind === "journals"}
           <HandoutsPanel {client} {bus} {resolveAsset} />
         {:else if win.kind === "permissions"}
-          <PermissionsPanel {client} {bus} />
+          <PermissionsPanel {client} {bus} {presence} activeSceneId={sceneId} />
         {:else if win.kind === "macros"}
           <MacrosPanel {client} {bus} {onFxImport} {listFxAssets} {setFxAssetRights} {getFxAsset}
             {selectedTokenId} {selectedItemRef}
             listCompendia={isGM && packages ? () => packages.compendia() : null} activeSceneId={sceneId}
             {onPickSummon} {onPickAnchor} {onPreviewFx} {onStopFxPreview} />
+        {:else if win.kind === "scene-settings"}
+          <SceneSettingsPanel {client} {bus} sceneId={win.data?.sceneId ?? null} activeSceneId={sceneId} {backgroundNatural} {onOpenBackground} />
         {:else if win.kind === "settings"}
           <SettingsPanel
             saves={isGM ? saves : null}
@@ -310,7 +327,11 @@
             {onRedo}
             {packages}
             {rulesBoot}
+            {aisRuntimeStatuses}
             {agents}
+            {presence}
+            onOpenPlayers={() => manager.open({ id: "permissions", title: "Players & permissions", kind: "permissions", x: 64, y: 48, width: 560, height: 480 })}
+            onOpenSceneSettings={() => manager.open({ id: "scene-settings", title: "Scene settings", kind: "scene-settings", x: 72, y: 56, width: 460, height: 560, ...(sceneId ? { data: { sceneId } } : {}) })}
           />
         {:else if win.kind === "journal" && win.data}
           <JournalPopout

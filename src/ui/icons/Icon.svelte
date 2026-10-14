@@ -1,22 +1,35 @@
 <script lang="ts">
+  import { workspaceUi } from "../workspace/state";
+  import { referenceIcons } from "../workspace/referenceIcons";
   /** One consistent 24px outline language for the app shell and map tools.
    * Decorative only: the parent button supplies its accessible name/shortcut. */
   let { name, size = 20 }: { name: string; size?: number } = $props();
+  const filled = $derived($workspaceUi.profile === "foundry" ? referenceIcons[name] : undefined);
 </script>
 
 <svg
   width={size}
   height={size}
-  viewBox="0 0 24 24"
-  fill="none"
+  viewBox={filled ? `0 0 ${filled.icon[0]} ${filled.icon[1]}` : "0 0 24 24"}
+  fill={filled ? "currentColor" : "none"}
   stroke="currentColor"
-  stroke-width="1.8"
+  stroke-width={filled ? 0 : 1.7}
   stroke-linecap="round"
   stroke-linejoin="round"
   aria-hidden="true"
   focusable="false"
 >
-  {#if name === "select"}<path d="m4 3 15 9-7 1.4L9 20 4 3Z" /><path
+  {#if filled}{#each (Array.isArray(filled.icon[4]) ? filled.icon[4] : [filled.icon[4]]) as path, i (i)}<path d={path}/>{/each}
+  {:else if name === "menu"}<path d="M4 6h16M4 12h16M4 18h16"/>
+  {:else if name === "more"}<circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/>
+  {:else if name === "layout"}<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M15 9v11"/>
+  {:else if name === "search"}<circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/>
+  {:else if name === "chevronDown"}<path d="m6 9 6 6 6-6"/>
+  {:else if name === "placeables"}<rect x="3" y="3" width="7" height="7" rx="1"/><circle cx="17" cy="7" r="4"/><path d="m7 13 4 8H3l4-8Zm8 1h6v7h-6z"/>
+  {:else if name === "macros"}<path d="m14 2-8 12h6l-2 8 9-13h-7l2-7Z"/>
+  {:else if name === "volume"}<path d="m3 9 4 0 5-4v14l-5-4H3V9Zm12-1a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/>
+  {:else if name === "palette"}<path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1.4-3.4A1.5 1.5 0 0 1 15.5 15H18a3 3 0 0 0 3-3 9 9 0 0 0-9-9Z"/><circle cx="7" cy="10" r=".7"/><circle cx="10" cy="6.8" r=".7"/><circle cx="15" cy="7" r=".7"/><circle cx="17.4" cy="11" r=".7"/>
+  {:else if name === "select"}<path d="m4 3 15 9-7 1.4L9 20 4 3Z" /><path
       d="m12 13.5 3.5 6"
     />
   {:else if name === "pan"}<path

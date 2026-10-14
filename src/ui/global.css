@@ -86,13 +86,13 @@ textarea {
     textarea
   ) {
   min-height: var(--vtt-control-height) !important;
-  font-size: 1rem !important;
+  font-size: var(--vtt-ui-font-size, 1rem) !important;
   line-height: 1.35;
 }
 
 .vtt-ui :where(label, legend, .field-label) {
   color: var(--vtt-text);
-  font-size: 0.95rem;
+  font-size: calc(var(--vtt-ui-font-size, 16px) * .95);
   line-height: 1.35;
 }
 
@@ -104,7 +104,7 @@ textarea {
 }
 
 .vtt-ui :where(.wm-body, .tabbody, .chat, .rollcard, .pendingcard, .page) {
-  font-size: 1rem !important;
+  font-size: var(--vtt-ui-font-size, 1rem) !important;
   line-height: 1.45;
 }
 
@@ -141,7 +141,7 @@ textarea {
 }
 
 .vtt-ui .token-menu {
-  font-size: 1rem !important;
+  font-size: var(--vtt-ui-font-size, 1rem) !important;
 }
 
 .vtt-ui .token-menu button {
@@ -165,3 +165,32 @@ textarea {
     animation-iteration-count: 1 !important;
   }
 }
+
+
+/* AIS only supplies validated visual tokens. Selector/layout ownership stays in the host. */
+.gm-app[data-ais-theme] { background:var(--vtt-bg) !important; color:var(--vtt-text); font-family:var(--vtt-ui-font,system-ui); }
+.gm-app[data-ais-theme] :where(.app-header,.sidebar,.wm-window,.canvas-rail,.scenenav,.tabbody,.chat,.chat-log,.session-panel) {
+  background-color:var(--vtt-panel) !important; color:var(--vtt-text) !important; border-color:var(--vtt-border) !important;
+}
+.gm-app[data-ais-theme] :where(.sidebar,.wm-body) { background-image:var(--vtt-theme-panel-image,none) !important; background-size:100% 100%; }
+.gm-app[data-ais-theme] :where(.app-header,.wm-title,.dock-heading) { background-color:var(--vtt-panel-raised) !important; background-image:var(--vtt-theme-header-image,none) !important; background-size:100% 100%; }
+.gm-app[data-ais-theme] :where(h1,h2,h3,h4,label,legend,.wm-name,.dock-heading h2,.status-world) { color:var(--vtt-text) !important; }
+.gm-app[data-ais-theme] :where(.eyebrow,.dock-eyebrow,.status-connected,.header-actions .session-trigger) { color:var(--vtt-accent) !important; }
+.gm-app[data-ais-theme] :where(.hint,.meta,.sub,.state,small) { color:var(--vtt-muted) !important; }
+.gm-app[data-ais-theme] :where(button:not([data-ais-protected]),input,select,textarea) { background-color:var(--vtt-panel-raised) !important; color:var(--vtt-text) !important; border-color:var(--vtt-border) !important; border-radius:var(--vtt-radius,6px) !important; }
+.gm-app[data-ais-theme] :where(button.active,[aria-pressed="true"],button:hover:not(:disabled)) { border-color:var(--vtt-accent) !important; box-shadow:inset 0 -2px var(--vtt-accent); }
+.gm-app[data-ais-theme] :where(.wm-window,.rollcard,.message) { border-color:var(--vtt-border) !important; border-radius:var(--vtt-radius,8px) !important; }
+.gm-app[data-ais-theme] :where(.chat .message,.chat .rollcard,.chat .pendingcard) { color:var(--vtt-text) !important; background-color:var(--vtt-panel-raised) !important; }
+.gm-app[data-ui-density="compact"] :where(.eyebrow,.dock-eyebrow) { display:none; }
+.gm-app[data-ui-density="compact"] .header-status [data-rules-status] { display:none; }
+.gm-app[data-ui-density="compact"] :where(.wm-title,.tabs) { min-height:34px; }
+.gm-app[data-ui-density="compact"] .wm-name { font-size:13px !important; }
+.gm-app[data-ui-density="compact"] :where(.tabbody,.wm-body) { padding:8px; }
+.gm-app[data-ui-density="compact"] :where(.section,.settings-section) { margin-block:8px; }
+.gm-app[data-ui-density="compact"] .tabs button span { font-size:11px; }
+.gm-app [data-ais-protected].appearance-trigger { background:#172333 !important; color:#d9fff2 !important; border:1px solid #648b9e !important; border-radius:7px !important; }
+@media(max-width:760px) { .gm-app[data-ui-density="compact"] { --vtt-control-height:36px !important; --vtt-ui-font-size:15px !important; } }
+
+.gm-app[data-ais-theme] #chat-log { background-color:var(--vtt-panel) !important; background-image:var(--vtt-theme-panel-image,none) !important; background-size:cover; border-color:var(--vtt-border) !important; color:var(--vtt-text) !important; }
+.gm-app[data-ais-theme] :where(.status-connected,.header-actions .session-trigger) { color:var(--vtt-text) !important; background-color:var(--vtt-panel-raised) !important; }
+.gm-app[data-ais-theme] :where(.header-actions button:not([data-ais-protected]),.canvas-rail button,.hotbar .slot) { background-image:var(--vtt-theme-button-image,none); background-size:100% 100%; }

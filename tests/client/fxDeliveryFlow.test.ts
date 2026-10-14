@@ -564,9 +564,10 @@ describe("sound channels, fades and the device-local list (D-297, SQ-09)", () =>
     await sleep(200);
     expect(audios[0]?.volume).toBeCloseTo(1, 2);
     setFxViewPrefs({ soundMix: { muted: false, channels: { sfx: 1, music: 0.25, ambience: 1, voice: 1 } } });
-    await sleep(160);
-    expect(audios[0]?.volume).toBeCloseTo(0.25, 2);
-    expect(fxSounds()[0]?.gain).toBeCloseTo(0.25, 2);
+    // The element and throttled live-list registry update on different ticks. Observe
+    // both required outcomes instead of assuming 160 ms covers a loaded CI worker.
+    await expect.poll(() => audios[0]?.volume).toBeCloseTo(0.25, 2);
+    await expect.poll(() => fxSounds()[0]?.gain).toBeCloseTo(0.25, 2);
     expect(fxSounds()[0]?.channel).toBe("music");
     expect(fxSounds()[0]?.name).toBeNull(); // the harness supplies no asset-name lookup
   });

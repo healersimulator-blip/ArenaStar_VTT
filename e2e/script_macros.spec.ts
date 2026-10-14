@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { entry, hostCall, waitForSurface } from "./lib";
+import { entry, hostCall, openSceneNav, waitForSurface } from "./lib";
 
 test.describe("reviewed script macros in the production single-file build", () => {
   test("reviewed code lists and atomically stops two named persistent FX, then undo restores both", async ({ page }) => {
@@ -166,13 +166,13 @@ return await api.fx.sequence()
     await page.goto(entry + "?e2e=1");
     await waitForSurface(page, "app");
     const first = await hostCall<string>(page, "activeSceneId");
-    await page.locator("#scene-add").click();
+    await openSceneNav(page); await page.locator("#scene-add").click();
     await page.locator("#scene-new-blank").click();
     const secondScene = page.locator('[data-testid="scene-nav"] [data-scene]').last();
     await expect(secondScene).toContainText("Scene 2");
     const second = await secondScene.getAttribute("data-scene");
     if (!second) throw new Error("Remote scene missing ID");
-    await secondScene.click();
+    await openSceneNav(page); await secondScene.click();
     await expect.poll(() => hostCall<string>(page, "activeSceneId")).toBe(second);
     await page.locator("#add-token").click();
     await page.locator("#gm-macros").click();
@@ -228,12 +228,12 @@ return { scenes: Object.keys(groups), rows: rows.length, scene: rows[0].sceneId,
     await waitForSurface(page, "app");
     const first = await hostCall<string>(page, "activeSceneId");
     await page.locator("#add-token").click();
-    await page.locator("#scene-add").click();
+    await openSceneNav(page); await page.locator("#scene-add").click();
     await page.locator("#scene-new-blank").click();
     const secondScene = page.locator('[data-testid="scene-nav"] [data-scene]').last();
     const second = await secondScene.getAttribute("data-scene");
     if (!second) throw new Error("Remote scene missing ID");
-    await secondScene.click();
+    await openSceneNav(page); await secondScene.click();
     await expect.poll(() => hostCall<string>(page, "activeSceneId")).toBe(second);
     await page.locator("#add-token").click();
     await page.locator("#gm-macros").click();

@@ -6,7 +6,7 @@ import {
   type AisModuleCommandDeclaration,
 } from "../core/automationInterconnect";
 import type { Json } from "../core/documents";
-import { AIS_MODULE_RUNTIME_SOURCE } from "./aisModuleRuntimeSource";
+import { aisModuleRuntimeSource } from "./aisModuleRuntimeSource";
 
 export const AIS_RPC_TAG = 1 as const;
 export const AIS_MAX_RPC_BYTES = 64 * 1024;
@@ -14,6 +14,7 @@ const MAX_REQUESTS_PER_SECOND = 120;
 const MAX_COMMANDS_PER_SECOND = 30;
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_COMMAND_MS = 8_000;
+const MAX_STARTUP_MS = 5_000;
 const COMMAND_ID_RE = /^cmd-[0-9]{1,16}$/;
 const COMMAND_NAME_RE = /^[a-z0-9][a-z0-9._:-]{1,127}$/;
 
@@ -28,6 +29,12 @@ export const AIS_MODULE_METHODS = [
   "chat.post",
   "ui.notify",
   "ui.select",
+  "scene.tags.snapshot",
+  "scene.tags.update",
+  "fx.play",
+  "fx.list",
+  "fx.stop",
+  "package.resource.read",
 ] as const;
 export type AisModuleMethod = (typeof AIS_MODULE_METHODS)[number];
 
@@ -42,6 +49,12 @@ const REQUIRED_CAPABILITY: Record<AisModuleMethod, AisCapability> = {
   "chat.post": "chat.post",
   "ui.notify": "ui.notify",
   "ui.select": "ui.interaction",
+  "scene.tags.snapshot": "scene.tags.read",
+  "scene.tags.update": "scene.tags.write",
+  "fx.play": "fx.play",
+  "fx.list": "fx.play",
+  "fx.stop": "fx.play",
+  "package.resource.read": "package.resources.read",
 };
 
 export interface AisModuleRequest {
@@ -85,8 +98,15 @@ export interface AisModuleCommandFrame {
   };
 }
 
+/** Every RPC is bound to a live module instance, including non-command event callbacks. */
+export interface AisModuleRequestContext {
+  commandId?: string;
+  isActive(): boolean;
+  assertActive(): void;
+}
+
 /** Host-only authorization/liveness context attached to RPCs made by a macro command. */
-export interface AisModuleCallContext {
+export interface AisModuleCallContext extends AisModuleRequestContext {
   commandId: string;
   sceneId: string;
   callerId: string;
@@ -108,7 +128,7 @@ export interface AisModuleInvocationOptions {
 
 export type AisModuleHandler = (
   args: Record<string, unknown>,
-  context?: AisModuleCallContext,
+  context?: AisModuleRequestContext,
 ) => unknown | Promise<unknown>;
 export type AisModuleHandlers = Record<AisModuleMethod, AisModuleHandler>;
 
@@ -136,6 +156,7 @@ function boundedJson(value: unknown, depth = 0, seen = new Set<object>()): value
   let valid: boolean;
   if (Array.isArray(value)) valid = value.length <= 1024 && value.every((item) => boundedJson(item, depth + 1, seen));
   else {
+    if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
     const row = value as Record<string, unknown>;
     const keys = Object.keys(row);
     valid = keys.length <= 1024 && keys.every((key) =>
@@ -155,7 +176,8 @@ function parseRequest(value: unknown): AisModuleRequest | null {
   if (!frame || frame.vttAisRpc !== AIS_RPC_TAG || frame.kind !== "request") return null;
   if (!Number.isSafeInteger(frame.id) || Number(frame.id) < 0) return null;
   if (typeof frame.method !== "string" || !(AIS_MODULE_METHODS as readonly string[]).includes(frame.method)) return null;
-  if (frame.args !== null && frame.args !== undefined && jsonByteLength(frame.args) === null) return null;
+  if (Object.keys(frame).some((key) => !["vttAisRpc", "kind", "id", "method", "args", "commandId"].includes(key))) return null;
+  if (!asRecord(frame.args) || Array.isArray(frame.args) || !boundedJson(frame.args)) return null;
   if (frame.commandId !== undefined && (typeof frame.commandId !== "string" || !COMMAND_ID_RE.test(frame.commandId))) return null;
   return {
     vttAisRpc: AIS_RPC_TAG,
@@ -172,6 +194,7 @@ export function createAisModuleDispatcher(
   handlers: AisModuleHandlers,
   grantedCapabilities: ReadonlySet<AisCapability>,
   onSubscribe: (event: AisEventName) => void,
+  lifetime?: AisModuleRequestContext,
 ): {
   onFrame(
     data: unknown,
@@ -181,11 +204,15 @@ export function createAisModuleDispatcher(
 } {
   const requestTimes: number[] = [];
   let activeRequests = 0;
+  let lastRequestId = -1;
   return {
     onFrame(data, post, resolveCommandContext) {
       const size = jsonByteLength(data);
       const request = parseRequest(data);
-      if (!request || size === null || size > AIS_MAX_RPC_BYTES) return;
+      if (!request || size === null || size > AIS_MAX_RPC_BYTES || lifetime?.isActive() === false) return;
+      // Ordered port + monotonically increasing SDK IDs: replay can never repeat a write.
+      if (request.id <= lastRequestId) return;
+      lastRequestId = request.id;
 
       const now = Date.now();
       while (requestTimes.length > 0 && now - (requestTimes[0] ?? now) >= 1000) requestTimes.shift();
@@ -206,7 +233,7 @@ export function createAisModuleDispatcher(
         return;
       }
 
-      let callContext: AisModuleCallContext | undefined;
+      let callContext: AisModuleRequestContext | undefined = lifetime;
       if (request.commandId !== undefined) {
         callContext = resolveCommandContext?.(request.commandId) ?? undefined;
         if (!callContext || !callContext.isActive()) {
@@ -226,7 +253,6 @@ export function createAisModuleDispatcher(
           respondError("Unknown AIS event");
           return;
         }
-        onSubscribe(args.event);
       }
       activeRequests++;
       void (async () => {
@@ -235,10 +261,12 @@ export function createAisModuleDispatcher(
           callContext?.assertActive();
           const result = await handlers[request.method](args, callContext);
           callContext?.assertActive();
-          const resultSize = jsonByteLength(result);
-          if (resultSize === null || resultSize > AIS_MAX_RPC_BYTES)
-            throw new Error("AIS RPC result exceeds the size limit");
           response = { vttAisRpc: AIS_RPC_TAG, kind: "response", id: request.id, ok: true, result };
+          if (!boundedJson(result) || (jsonByteLength(response) ?? Infinity) > AIS_MAX_RPC_BYTES)
+            throw new Error("AIS RPC result exceeds the size limit or is not bounded JSON");
+          // A dynamic grant check may refuse an otherwise well-formed subscription.
+          // Register only after that check has succeeded, never on a rejected request.
+          if (request.method === "events.subscribe") onSubscribe(args.event as AisEventName);
         } catch (error) {
           response = {
             vttAisRpc: AIS_RPC_TAG,
@@ -250,22 +278,32 @@ export function createAisModuleDispatcher(
         } finally {
           activeRequests--;
         }
-        post(response);
+        if (lifetime?.isActive() !== false) post(response);
       })();
     },
   };
 }
 
+export interface AisModuleRuntimeStatus {
+  state: "starting" | "ready" | "failed" | "stopped" | "available" | "blocked";
+  error?: string;
+}
+
 export interface AisModuleIframeOptions {
   packageId: string;
   source: string;
+  runtimeContext?: Json;
+  /** Guest globals cannot survive an expired invocation and be reused by another call. */
+  stopOnCommandTimeout?: boolean;
   grantedCapabilities: readonly AisCapability[];
   handlers: AisModuleHandlers;
   commands?: readonly AisModuleCommandDeclaration[];
   /** Rechecked before forwarding events, so revocation takes effect without waiting for reload. */
   isCapabilityCurrentlyGranted?: (capability: AisCapability) => Promise<boolean> | boolean;
-  /** Rechecked before a script macro dispatches a declared command. */
-  isModuleCurrentlyActive?: () => Promise<boolean> | boolean;
+  /** An assertion, not a truthy-return callback: returning void means the check succeeded. */
+  assertModuleActive?: () => Promise<void> | void;
+  onStatus?: (status: AisModuleRuntimeStatus) => void;
+  onSubscribe?: (event: AisEventName) => void;
   hostElement?: HTMLElement;
 }
 
@@ -277,8 +315,9 @@ interface ActiveModuleCommand {
 }
 
 /**
- * Run a module in an opaque-origin, script-only iframe. Network and external resources are
- * blocked by a restrictive CSP; every bridge request is source-checked and capability-gated.
+ * Script-only opaque iframe. A one-use authenticated handshake transfers a MessagePort
+ * FROM the original document; subsequent navigation cannot inherit that capability.
+ * No same-origin access, cross-origin Location reads, or wildcard RPC replies are needed.
  */
 export class AisModuleIframe {
   readonly packageId: string;
@@ -286,67 +325,117 @@ export class AisModuleIframe {
   private readonly dispatcher: ReturnType<typeof createAisModuleDispatcher>;
   private readonly subscriptions = new Set<AisEventName>();
   private readonly commandIds: ReadonlySet<string>;
-  private readonly isCapabilityCurrentlyGranted: ((capability: AisCapability) => Promise<boolean> | boolean) | undefined;
-  private readonly isModuleCurrentlyActive: (() => Promise<boolean> | boolean) | undefined;
+  private readonly options: AisModuleIframeOptions;
   private readonly activeCommands = new Map<string, ActiveModuleCommand>();
   private readonly commandTimes: number[] = [];
   private readonly ready: Promise<void>;
   private resolveReady!: () => void;
-  private readyState = false;
+  private rejectReady!: (error: Error) => void;
+  private readonly startupTimer: ReturnType<typeof setTimeout>;
+  private readonly bootId = globalThis.crypto.randomUUID();
+  private port: MessagePort | null = null;
+  private loaded = false;
+  private entryReady = false;
+  private documentVerified = false;
+  private commandPending = false;
   private nextCommandId = 1;
   private disposed = false;
+  private statusValue: AisModuleRuntimeStatus = { state: "starting" };
 
   constructor(options: AisModuleIframeOptions) {
     this.packageId = options.packageId;
+    this.options = options;
     this.commandIds = new Set((options.commands ?? []).map((command) => command.id));
-    this.isCapabilityCurrentlyGranted = options.isCapabilityCurrentlyGranted;
-    this.isModuleCurrentlyActive = options.isModuleCurrentlyActive;
-    this.ready = new Promise((resolve) => { this.resolveReady = resolve; });
-    this.dispatcher = createAisModuleDispatcher(
-      options.handlers,
-      new Set(options.grantedCapabilities),
-      (event) => this.subscriptions.add(event),
-    );
+    this.ready = new Promise((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
+    // A failed module may never be called. Keep its rejection observable to whenReady/invoke
+    // without creating an unhandled promise rejection in the GM's app.
+    void this.ready.catch(() => {});
+    const lifetime: AisModuleRequestContext = {
+      isActive: () => !this.disposed,
+      assertActive: () => { if (this.disposed) throw new Error(`AIS module ${this.packageId} was stopped`); },
+    };
+    this.dispatcher = createAisModuleDispatcher(options.handlers, new Set(options.grantedCapabilities), (event) => {
+      if (!this.subscriptions.has(event)) {
+        this.subscriptions.add(event);
+        options.onSubscribe?.(event);
+      }
+    }, lifetime);
     const doc = globalThis.document;
     const frame = doc.createElement("iframe");
     frame.setAttribute("sandbox", "allow-scripts");
     frame.setAttribute("aria-hidden", "true");
     frame.setAttribute("title", `AIS module:${options.packageId}`);
     frame.style.display = "none";
-    const csp = "default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; navigate-to 'none'";
-    const srcdoc = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><body><script>${escapeScript(AIS_MODULE_RUNTIME_SOURCE)}</script><script>${escapeScript(options.source)}</script><script>globalThis.AIS.__ready()</script></body>`;
-    frame.srcdoc = srcdoc;
-    (options.hostElement ?? doc.body).appendChild(frame);
+    const csp = "default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'";
+    frame.srcdoc = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><body><script>${escapeScript(aisModuleRuntimeSource(this.bootId, options.runtimeContext))}</script><script>${escapeScript(options.source)}</script><script>globalThis.AIS.__ready()</script></body>`;
     this.frame = frame;
-    globalThis.addEventListener("message", this.onMessage);
+    this.startupTimer = globalThis.setTimeout(() => this.stop("Module did not become ready", true), MAX_STARTUP_MS);
+    globalThis.addEventListener("message", this.onConnect);
+    frame.addEventListener("load", this.onLoad);
+    (options.hostElement ?? doc.body).appendChild(frame);
+    options.onStatus?.(this.statusValue);
   }
 
-  private readonly onMessage = (event: MessageEvent): void => {
-    if (this.disposed || event.source !== this.frame.contentWindow || event.origin !== "null") return;
-    const data = asRecord(event.data);
-    if (!data || data.vttAisRpc !== AIS_RPC_TAG) return;
-    if (data.kind === "ready") {
-      if (!this.readyState) {
-        this.readyState = true;
-        this.resolveReady();
-      }
-      return;
-    }
-    if (data.kind === "command-result") {
-      this.finishCommand(data);
-      return;
-    }
-    const commandId = typeof data.commandId === "string" ? data.commandId : undefined;
-    this.dispatcher.onFrame(event.data, (response) => this.post(response), commandId
-      ? (id) => this.activeCommands.get(id)?.context ?? null
-      : undefined);
+  get status(): AisModuleRuntimeStatus { return this.statusValue; }
+  whenReady(): Promise<void> { return this.ready; }
+
+  private readonly onLoad = (): void => {
+    if (this.loaded) this.stop("Module iframe navigated; reload the world to restart it", true);
+    this.loaded = true;
+    this.verifyLoadedDocument();
   };
 
-  private finishCommand(data: Record<string, unknown>): void {
+  private verifyLoadedDocument(): void {
+    // A module can navigate BEFORE the iframe's very first load event. Do not mark an
+    // abandoned srcdoc ready: only its live document-bound port can answer this probe.
+    if (!this.disposed && this.loaded && this.port)
+      this.port.postMessage({ vttAisRpc: AIS_RPC_TAG, kind: "ping", bootId: this.bootId });
+  }
+
+  private readonly onConnect = (event: MessageEvent): void => {
+    if (this.disposed || this.port || event.source !== this.frame.contentWindow || event.origin !== "null") return;
+    const data = asRecord(event.data);
+    if (!data || data.vttAisRpc !== AIS_RPC_TAG || data.kind !== "connect" ||
+        data.bootId !== this.bootId || event.ports.length !== 1) return;
+    const port = event.ports[0];
+    if (!port) return;
+    this.port = port;
+    globalThis.removeEventListener("message", this.onConnect);
+    port.onmessage = (message) => this.onFrame(message.data);
+    port.onmessageerror = () => this.stop("Module bridge could not decode a message", true);
+    port.start();
+    this.verifyLoadedDocument();
+  };
+
+  private onFrame(value: unknown): void {
+    if (this.disposed || (jsonByteLength(value) ?? Infinity) > AIS_MAX_RPC_BYTES) return;
+    const data = asRecord(value);
+    if (!data || data.vttAisRpc !== AIS_RPC_TAG) return;
+    if (data.kind === "error") {
+      this.stop(typeof data.error === "string" ? data.error.slice(0, 500) : "Module execution failed", true);
+    } else if (data.kind === "ready" || data.kind === "pong") {
+      if (this.statusValue.state !== "starting") return;
+      if (data.kind === "ready") this.entryReady = true;
+      else if (this.loaded && data.bootId === this.bootId) this.documentVerified = true;
+      if (!this.entryReady || !this.documentVerified) return;
+      globalThis.clearTimeout(this.startupTimer);
+      this.statusValue = { state: "ready" };
+      this.resolveReady();
+      this.options.onStatus?.(this.statusValue);
+    } else if (data.kind === "command-result") {
+      void this.finishCommand(data);
+    } else {
+      this.dispatcher.onFrame(data, (response) => this.post(response), (id) => this.activeCommands.get(id)?.context ?? null);
+    }
+  }
+
+  private async finishCommand(data: Record<string, unknown>): Promise<void> {
     if (typeof data.id !== "string" || !COMMAND_ID_RE.test(data.id)) return;
     const active = this.activeCommands.get(data.id);
     if (!active) return;
     try {
+      active.context.assertActive();
+      await this.options.assertModuleActive?.();
       active.context.assertActive();
       if (data.ok === true && boundedJson(data.result) && (jsonByteLength(data.result) ?? Infinity) <= MAX_COMMAND_BYTES)
         active.resolve(data.result);
@@ -362,114 +451,82 @@ export class AisModuleIframe {
   }
 
   private post(frame: AisModuleResponse | AisModuleEventFrame | AisModuleCommandFrame): void {
-    const size = jsonByteLength(frame);
-    if (this.disposed || size === null || size > AIS_MAX_RPC_BYTES || !this.hasOpaqueOrigin()) return;
-    this.frame.contentWindow?.postMessage(frame, "*");
+    if (this.disposed || !this.port || (jsonByteLength(frame) ?? Infinity) > AIS_MAX_RPC_BYTES) return;
+    this.port.postMessage(frame);
   }
 
-  private hasOpaqueOrigin(): boolean {
-    try {
-      return this.frame.contentWindow?.location.origin === "null";
-    } catch {
-      // A module can navigate its frame even without top-navigation permission. Never send
-      // host events or capability replies to a document that is no longer the opaque srcdoc.
-      return false;
-    }
-  }
-
-  async invokeCommand(
-    commandId: string,
-    input: Json,
-    options: AisModuleInvocationOptions,
-  ): Promise<Json> {
+  async invokeCommand(commandId: string, input: Json, options: AisModuleInvocationOptions): Promise<Json> {
     if (this.disposed) throw new Error(`AIS module ${this.packageId} is not running`);
     if (!this.commandIds.has(commandId)) throw new Error(`AIS module ${this.packageId} does not declare command ${commandId}`);
     if (!COMMAND_NAME_RE.test(commandId)) throw new Error("Invalid AIS command ID");
     if (options.runAs !== "gm") throw new Error("AIS module commands require explicitly reviewed GM authority");
     if (!boundedJson(input) || (jsonByteLength(input) ?? Infinity) > MAX_COMMAND_BYTES)
       throw new Error("AIS command input exceeds 16 KiB or is not bounded JSON");
-    if (this.activeCommands.size > 0) throw new Error(`AIS module ${this.packageId} already has a command running`);
-
+    if (this.commandPending) throw new Error(`AIS module ${this.packageId} already has a command running`);
     const now = Date.now();
     while (this.commandTimes.length > 0 && now - (this.commandTimes[0] ?? now) >= 1000) this.commandTimes.shift();
     if (this.commandTimes.length >= MAX_COMMANDS_PER_SECOND) throw new Error("AIS command rate limit exceeded");
     this.commandTimes.push(now);
-
-    await Promise.race([
-      this.ready,
-      new Promise<never>((_, reject) => globalThis.setTimeout(() => reject(new Error(`AIS module ${this.packageId} did not become ready`)), 2000)),
-    ]);
-    if (this.disposed || !(await options.isActive())) throw new Error("AIS macro invocation is no longer active");
-    if (this.isModuleCurrentlyActive && !(await this.isModuleCurrentlyActive()))
-      throw new Error(`AIS module ${this.packageId} is no longer enabled and locally approved`);
-
-    const id = `cmd-${this.nextCommandId++}`;
-    const deadlineAt = Date.now() + MAX_COMMAND_MS;
-    const isActive = (): boolean => !this.disposed && this.activeCommands.has(id) &&
-      Date.now() < deadlineAt && options.isActive();
-    const context: AisModuleCallContext = {
-      commandId: id,
-      sceneId: options.sceneId,
-      callerId: options.callerId,
-      requestId: options.requestId,
-      runAs: options.runAs,
-      deadlineAt,
-      isActive,
-      assertActive: () => {
-        if (!isActive()) throw new Error("AIS macro command was cancelled, expired or exceeded its budget");
-      },
-    };
-
-    return new Promise<Json>((resolve, reject) => {
-      const timer = globalThis.setTimeout(() => {
-        this.activeCommands.delete(id);
-        reject(new Error("AIS module command timed out"));
-      }, MAX_COMMAND_MS);
-      this.activeCommands.set(id, { context, resolve, reject, timer });
-      this.post({
-        vttAisRpc: AIS_RPC_TAG,
-        kind: "command",
-        id,
-        commandId,
-        input,
-        context: {
-          sceneId: options.sceneId,
-          callerId: options.callerId,
-          requestId: options.requestId,
-          runAs: options.runAs,
-          deadlineAt,
-        },
+    // Reserve BEFORE readiness/consent await: two simultaneous calls cannot both pass the gate.
+    this.commandPending = true;
+    try {
+      await this.ready;
+      await this.options.assertModuleActive?.();
+      if (this.disposed || !options.isActive()) throw new Error("AIS macro invocation is no longer active");
+      const id = `cmd-${this.nextCommandId++}`;
+      const deadlineAt = Date.now() + MAX_COMMAND_MS;
+      const isActive = (): boolean => !this.disposed && this.activeCommands.has(id) &&
+        Date.now() < deadlineAt && options.isActive();
+      const context: AisModuleCallContext = {
+        commandId: id, sceneId: options.sceneId, callerId: options.callerId,
+        requestId: options.requestId, runAs: options.runAs, deadlineAt, isActive,
+        assertActive: () => { if (!isActive()) throw new Error("AIS macro command was cancelled, expired or exceeded its budget"); },
+      };
+      return await new Promise<Json>((resolve, reject) => {
+        const timer = globalThis.setTimeout(() => {
+          this.activeCommands.delete(id);
+          reject(new Error("AIS module command timed out"));
+          if (this.options.stopOnCommandTimeout) this.stop("Guest command timed out; reload to restart", true);
+        }, MAX_COMMAND_MS);
+        this.activeCommands.set(id, { context, resolve, reject, timer });
+        this.post({ vttAisRpc: AIS_RPC_TAG, kind: "command", id, commandId, input,
+          context: { sceneId: options.sceneId, callerId: options.callerId,
+            requestId: options.requestId, runAs: options.runAs, deadlineAt } });
       });
-    });
+    } finally { this.commandPending = false; }
   }
 
   emit<K extends AisEventName>(event: K, payload: AisEventPayloads[K]): void {
-    if (!this.subscriptions.has(event)) return;
-    const post = (): void => {
+    if (this.disposed || !this.subscriptions.has(event)) return;
+    void (async () => {
+      await this.options.assertModuleActive?.();
+      if (this.options.isCapabilityCurrentlyGranted && !(await this.options.isCapabilityCurrentlyGranted("action.observe"))) return;
       if (!this.disposed && this.subscriptions.has(event))
         this.post({ vttAisRpc: AIS_RPC_TAG, kind: "event", event, payload });
-    };
-    if (!this.isCapabilityCurrentlyGranted) {
-      post();
-      return;
-    }
-    void Promise.resolve(this.isCapabilityCurrentlyGranted("action.observe")).then((allowed) => {
-      if (allowed) post();
-    }).catch(() => {});
+    })().catch(() => {});
   }
 
-  dispose(): void {
+  private stop(reason: string, failed = false): void {
     if (this.disposed) return;
     this.disposed = true;
-    globalThis.removeEventListener("message", this.onMessage);
+    this.statusValue = { state: failed ? "failed" : "stopped", error: reason };
+    globalThis.clearTimeout(this.startupTimer);
+    this.rejectReady(new Error(`AIS module ${this.packageId}: ${reason}`));
+    globalThis.removeEventListener("message", this.onConnect);
+    this.frame.removeEventListener("load", this.onLoad);
+    this.port?.close();
+    this.port = null;
     this.subscriptions.clear();
     for (const command of this.activeCommands.values()) {
       globalThis.clearTimeout(command.timer);
-      command.reject(new Error(`AIS module ${this.packageId} was stopped`));
+      command.reject(new Error(`AIS module ${this.packageId}: ${reason}`));
     }
     this.activeCommands.clear();
     this.frame.remove();
+    this.options.onStatus?.(this.statusValue);
   }
+
+  dispose(reason = "Module stopped"): void { this.stop(reason); }
 }
 
 function escapeScript(source: string): string {

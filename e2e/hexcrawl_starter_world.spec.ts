@@ -17,7 +17,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { strFromU8, unzipSync } from "fflate";
-import { entry, hostCall, surfaceCallArg, waitForSurface } from "./lib";
+import { chromeAction, entry, hostCall, openSceneNav, surfaceCallArg, waitForSurface } from "./lib";
 
 const distWorlds = fileURLToPath(new URL("../dist/worlds", import.meta.url));
 const starterZip = (): string | null => {
@@ -65,7 +65,7 @@ const HOUR = 3_600;
 async function openStarterWorld(page: Page, zipPath: string): Promise<void> {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
-  await page.locator("#close-world").click();
+  await chromeAction(page, "close-world");
   await expect(page.locator("#role-host")).toHaveText(/Host a world|Continue/, {
     timeout: 30_000,
   });
@@ -105,7 +105,7 @@ test.describe("the starter world's overland region (D-291)", () => {
     // ── the region is a scene in the rail, and opening it makes it the hexcrawl scene ──
     const rail = page.locator('[data-scene="scene-3"]');
     await expect(rail).toContainText("Hollow Reach");
-    await rail.click();
+    await openSceneNav(page); await rail.click();
 
     const read = (): Promise<HexcrawlReadback | null> =>
       hostCall<HexcrawlReadback | null>(page, "hexcrawl");

@@ -39,8 +39,8 @@ import type { ElevationCue } from "../core/elevationCues";
 import type { RegionDocument, TokenDocument } from "../core/documents";
 import type { Camera, Viewport } from "./camera";
 import { fitRect, screenToWorld } from "./camera";
-import type { GridSpec, SquareGrid } from "./grid";
-import { hexCenter, hexCorners, hexesInView, squareGridLines } from "./grid";
+import type { GridSpec, GridStyle, SquareGrid } from "./grid";
+import { DEFAULT_GRID_STYLE, hexCenter, hexCorners, hexesInView, squareGridLines } from "./grid";
 import type { TemplatesLayer } from "./layers/TemplatesLayer";
 import { TemplatesLayer as TemplatesLayerImpl } from "./layers/TemplatesLayer";
 import type { DrawingsLayer } from "./layers/DrawingsLayer";
@@ -180,6 +180,8 @@ export interface Stage {
   setForegroundSceneSize(width: number, height: number, elevation?: number): void;
   setTokenImageLoader(loader: ((image: string) => Promise<Texture | null>) | null): void;
   setGrid(grid: GridSpec | null): void;
+  /** D-465: scene-configurable grid line colour/opacity (null = default). */
+  setGridStyle(style: GridStyle | null): void;
   /** §9 templates overlay (cone/circle/ray/rect). */
   getTemplatesLayer(): TemplatesLayer;
   /** P5/C01 (D-154) PF1e area preview overlay — caster UI in the controls holder. */
@@ -537,6 +539,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   gridLayer.addChild(gridGraphics);
   root.addChild(gridLayer);
   let grid: GridSpec | null = null;
+  let gridStyle: GridStyle = { ...DEFAULT_GRID_STYLE };
   let templatesLayer: TemplatesLayerImpl | null = null;
   let drawingsLayer: DrawingsLayerImpl | null = null;
   let strategicFogLayer: StrategicFogLayerImpl | null = null;
@@ -862,6 +865,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     },
     setGrid(next: GridSpec | null): void {
       grid = next;
+    },
+    setGridStyle(style: GridStyle | null): void {
+      gridStyle = style ? { ...style } : { ...DEFAULT_GRID_STYLE };
     },
     getStrategicFogLayer(): StrategicFogLayer {
       if (!strategicFogLayer) {
@@ -1375,11 +1381,12 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     };
     gridGraphics.clear();
     if (grid.type === "gridless") return;
+    if (gridStyle.alpha <= 0) return;
     if (grid.type === "hex") {
       gridGraphics.setStrokeStyle({
         width: 1 / cam.scale,
-        color: 0x5c6672,
-        alpha: 0.35,
+        color: gridStyle.color,
+        alpha: gridStyle.alpha,
       });
       const hexes = hexesInView(grid, world);
       for (const hex of hexes) {
@@ -1401,8 +1408,8 @@ export async function createStage(options: StageOptions): Promise<Stage> {
     const lines = squareGridLines(square, world);
     gridGraphics.setStrokeStyle({
       width: 1 / cam.scale,
-      color: 0x5c6672,
-      alpha: 0.35,
+      color: gridStyle.color,
+      alpha: gridStyle.alpha,
     });
     const y0 = world.y - 1 / cam.scale;
     const y1 = world.y + world.height + 1 / cam.scale;

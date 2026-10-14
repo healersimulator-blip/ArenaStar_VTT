@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import type { ItemDocument, JournalDocument } from "../src/core/documents";
+import { chromeAction } from "./lib";
 
 const entry =
   "file://" + fileURLToPath(new URL("../dist/index.html", import.meta.url));
@@ -102,7 +103,7 @@ test.describe("world.zip export/import (§8)", () => {
     await expect.poll(() => appCall<number>(page, "tokenCount")).toBe(3);
 
     // ── D-249: importing happens on the start screen — Close world, Open file, Restore ──
-    await page.click("#close-world");
+    await chromeAction(page, "close-world");
     const list = page.locator("[data-world-list]");
     await expect(
       list.locator(`[data-world-row][data-world-id="${worldId}"]`),
@@ -326,7 +327,7 @@ test.describe("world.zip export/import (§8)", () => {
       )
       .toBe("Drifted passage");
 
-    await page.click("#close-world");
+    await chromeAction(page, "close-world");
     await page.setInputFiles("#role-import", archivePath);
     const dialog = page.locator("[data-open-dialog]");
     await expect(dialog).toHaveAttribute("data-open-kind", "world");
@@ -638,7 +639,7 @@ test.describe("world.zip export/import (§8)", () => {
     writeFileSync(brokenArchivePath, zipSync(files, { level: 6 }));
 
     try {
-      await page.click("#close-world");
+      await chromeAction(page, "close-world");
       await page.setInputFiles("#role-import", brokenArchivePath);
       const dialog = page.locator("[data-open-dialog]");
       await expect(dialog).toHaveAttribute("data-open-kind", "world");
@@ -1235,7 +1236,7 @@ test.describe("world.zip export/import (§8)", () => {
         ).toHaveCount(1);
 
         // ── back on the start screen the copy is listed under its own id; Export + Delete work ──
-        await picker.click("#close-world");
+        await chromeAction(picker, "close-world");
         const rows = picker.locator("[data-world-list] [data-world-row]");
         await expect(rows).toHaveCount(1);
         await expect(rows.first().locator("[data-world-name]")).toHaveText(

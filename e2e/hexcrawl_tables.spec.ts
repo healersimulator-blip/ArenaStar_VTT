@@ -9,14 +9,7 @@
  * table…*), and that a save made from a hex also attaches the table to that hex.
  */
 import { expect, test } from "@playwright/test";
-import {
-  entry,
-  hostCall,
-  importShippedCore,
-  solidPng,
-  surfaceCallArg,
-  waitForSurface,
-} from "./lib";
+import { chromeAction, entry, hostCall, importShippedCore, openSceneNav, solidPng, surfaceCallArg, waitForSurface } from "./lib";
 
 interface TableReadback {
   id: string;
@@ -58,7 +51,7 @@ test.describe("encounter tables (§8 Phase 3, D-272)", () => {
     await importShippedCore(page);
 
     // ── a hexcrawl scene, because this phase's second door hangs off a hex ──
-    await page.click("#scene-add");
+    await openSceneNav(page); await page.click("#scene-add");
     await page.click("#scene-new-hexcrawl");
     const wizard = page.locator("[data-hexcrawl-wizard]");
     await expect(wizard).toBeVisible();
@@ -255,7 +248,7 @@ test.describe("encounter tables (§8 Phase 3, D-272)", () => {
 
     // ── door 2: the GM toolbar's Tables lists the same table, with its summary ──
     await hexWindow.locator("[data-window-close]").click();
-    await page.click("#gm-tables");
+    await chromeAction(page, "gm-tables");
     const library = page
       .locator("[data-window]")
       .filter({ has: page.locator("[data-encounter-tables]") });

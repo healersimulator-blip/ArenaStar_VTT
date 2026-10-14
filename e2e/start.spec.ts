@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { strToU8, zipSync } from "fflate";
-import { entry } from "./lib";
+import { chromeAction, entry } from "./lib";
 
 const RULES_JS = [
   "export default {",
@@ -74,7 +74,7 @@ test.describe("start screen (D-249)", () => {
 
     // the sidebar has no importer any more — Close world leads back to the list
     await expect(page.locator("#import-world")).toHaveCount(0);
-    await page.click("#close-world");
+    await chromeAction(page, "close-world");
     const rows = page.locator("[data-world-list] [data-world-row]");
     await expect(rows).toHaveCount(1);
     await expect(rows.first()).toContainText("Wizard World");
@@ -85,12 +85,12 @@ test.describe("start screen (D-249)", () => {
     await expectHosting(page, "Wizard World");
 
     // Open from the row too (after closing again)
-    await page.click("#close-world");
+    await chromeAction(page, "close-world");
     await rows.first().locator("[data-world-open]").click();
     await expectHosting(page, "Wizard World");
 
     // an empty name cannot be created
-    await page.click("#close-world");
+    await chromeAction(page, "close-world");
     await page.click("#new-world");
     await wizard.locator("#wizard-name").fill("   ");
     await expect(wizard.locator("#wizard-create")).toBeDisabled();
@@ -159,7 +159,7 @@ test.describe("start screen (D-249)", () => {
       await expect(scale).toHaveValue("strategic");
       await expect(page.locator("#status [data-rules-status]")).toHaveText("strategic rules: probe-rules v9.9.9");
 
-      await page.click("#close-world");
+      await chromeAction(page, "close-world");
       const row = page.locator("[data-world-list] [data-world-row]");
       await expect(row).toHaveCount(1);
       await expect(row.first()).toContainText("probe-rules v9.9.9");
@@ -199,14 +199,14 @@ test.describe("start screen (D-249)", () => {
     await expect(settings.locator("[data-scene-scale]")).toHaveValue("tactical"); // heroes-only scene by default
 
     // second import: another world, the template id never lands
-    await page.click("#close-world");
+    await chromeAction(page, "close-world");
     const rows = page.locator("[data-world-list] [data-world-row]");
     await expect(rows).toHaveCount(1);
     await page.setInputFiles("#role-import", zipPath);
     await dialog.locator("#open-copy-name").fill("Second Front");
     await dialog.locator("[data-open-copy]").click();
     await expectHosting(page, "Second Front");
-    await page.click("#close-world");
+    await chromeAction(page, "close-world");
     await expect(rows).toHaveCount(2);
     for (const id of await rows.evaluateAll((els) => els.map((el) => el.getAttribute("data-world-id")))) {
       expect(id).toMatch(/^w-/);

@@ -26,6 +26,7 @@
   import { sightBlockedBetween, type CrosshairPlacement } from "../core/crosshair";
   import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
   import { displayDistance } from "../canvas/grid/measure";
+  import { gridSpecFromScene, gridStyleFromScene } from "../canvas/grid";
   import { rulerLabel } from "../canvas/ephemera";
   import CanvasToolbar, {
     type CanvasAction,
@@ -75,6 +76,12 @@
   import { QuickbarRow, prefetchQuickbarSpellFx, runQuickbarEntangleArea, runQuickbarLightningBoltLine,
     type PF1eQuickbarEntry, type PF1eQuickbarRunResult } from "../ui/quickbar";
   import { MacroHotbar, macroResultText, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
+  import WorkspacePicker from "../ui/workspace/WorkspacePicker.svelte";
+  import WorkspaceChrome from "../ui/workspace/WorkspaceChrome.svelte";
+  import WorkspaceTabs from "../ui/workspace/WorkspaceTabs.svelte";
+  import WorkspaceDirectory from "../ui/workspace/WorkspaceDirectory.svelte";
+  import { workspaceUi, setWorkspacePanel } from "../ui/workspace/state";
+  import { workspaceTabLabel, workspaceToolInset } from "../core/workspaceUi";
   import MacroHotbarPrefsPanel from "../ui/macros/MacroHotbarPrefsPanel.svelte";
   import { assignMacroHotbarSlot, hotbarMacroChoices, macroHotbarStorageKey, normalizeMacroHotbarPrefs,
     playerMacroSlots, readMacroHotbarPrefs, writeMacroHotbarPrefs,
@@ -100,6 +107,7 @@
   import FxViewPrefsPanel from "../ui/macros/FxViewPrefsPanel.svelte";
   import { fogMaskLog } from "../core/fogMask";
   import { drawingBounds } from "../canvas/layers/drawingGeometry";
+  import { canDeleteDrawing } from "../core/drawingPermissions";
   import { createVisionComputer } from "../workers/visionComputer";
   import { buildChatMessage, parseChatCommand } from "../core/chat";
   import { tokenHpBarsMap } from "../packages/pf1e/tokenHpBars";
@@ -120,7 +128,7 @@
   let seq = $state(0);
   let tokenCount = $state(0);
   let playerName = $state("");
-  let playerTab = $state<"chat" | "actors" | "images">("chat");
+  let playerTab = $state<"chat" | "actors" | "images" | "settings">("chat");
   let guideOpen = $state(false);
   /** SQ-13: one-line FX delivery warnings for this viewer (max 4, newest last). */
   let fxNotices = $state<string[]>([]);
@@ -311,16 +319,17 @@
     imagePreferences = loadImageHandlingPreferences(client.store.meta.worldId, user.id);
   });
 
-  // A player's macro hotbar answers 1-5 like the GM's keymap does. The keys are
+  // A player's macro hotbar answers 1-0 like the GM's keymap does. The keys are
   // claimed only when the matching slot actually holds a macro, so an unbound key
   // keeps its other meanings; typing targets are never intercepted.
   $effect(() => {
     const onMacroKey = (event: KeyboardEvent): void => {
       if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
-      if (!/^[1-5]$/.test(event.key) || isTypingTarget(event.target)) return;
-      if (!playerHotbarSlots[Number(event.key) - 1]) return;
+      if (!/^[0-9]$/.test(event.key) || isTypingTarget(event.target)) return;
+      const index = event.key === "0" ? 9 : Number(event.key) - 1;
+      if (!playerHotbarSlots[index]) return;
       event.preventDefault();
-      runPlayerSlot(Number(event.key) - 1);
+      runPlayerSlot(index);
     };
     globalThis.addEventListener("keydown", onMacroKey);
     return () => globalThis.removeEventListener("keydown", onMacroKey);
@@ -402,6 +411,15 @@
       { kind: "create", coll: "drawings", parent: { coll: "scenes", id: scene._id }, data: drawing },
     ]);
   }
+  /** D-465: delete one of the player's own drawings (Alt-click erase, the label editor's Delete). */
+  function deleteOwnDrawing(id: string): void {
+    const scene = activeScene();
+    const me = app?.client.user;
+    const drawing = scene?.drawings.find((entry) => entry._id === id);
+    if (!scene || !me || !drawing || !canDeleteDrawing(drawing, me.id, me.role)) return;
+    app?.client.submit([{ kind: "delete", ref: { coll: "drawings", id, parent: { coll: "scenes", id: scene._id } } }]);
+    if (textDraft?.editingId === id) textDraft = null;
+  }
   /** Double-clicking a label re-opens it in the editor (Roll20's double-click to edit). */
   function editTextAt(world: { x: number; y: number }): boolean {
     const scene = activeScene();
@@ -425,6 +443,11 @@
   }
   /** The rail's actions a player has: view + windows (no GM fog/placement tools). */
   function runCanvasAction(action: CanvasAction) {
+    if (action === "character-sheet") {
+      const actorId = activeScene()?.tokens.find((token) => selection.includes(token._id))?.actorId;
+      if (actorId) openActorSheet(actorId);
+      return;
+    }
     const view = stage;
     switch (action) {
       case "zoom-in":
@@ -456,7 +479,8 @@
         toolController?.recall();
         break;
       case "escape":
-        if (!toolController || toolController.current() === null) canvasTool = "select";
+        // D-465: dismiss what is armed first; with nothing armed Escape returns to Select.
+        if (!toolController || !toolController.hasPendingGesture()) canvasTool = "select";
         else toolController.dismissGesture();
         break;
       default:
@@ -466,7 +490,7 @@
   /** Player-callable scripts are projected as input-only stubs; code stays with the host. */
   function openMacros() {
     const rect = canvasHost?.getBoundingClientRect();
-    if (rect) wm.setBounds({ width: rect.width, height: rect.height });
+    if (rect) wm.setBounds({ width: rect.width, height: rect.height, leftInset: workspaceToolInset($workspaceUi.profile) });
     wm.open({ id: "macros", title: "Published macros", kind: "macros",
       x: 55, y: 50, width: 550, height: 580 });
   }
@@ -475,7 +499,7 @@
    *  MATT-style `@Tile[…]{}` links as buttons (the host resolves each link's anchor). */
   function openHandouts() {
     const rect = canvasHost?.getBoundingClientRect();
-    if (rect) wm.setBounds({ width: rect.width, height: rect.height });
+    if (rect) wm.setBounds({ width: rect.width, height: rect.height, leftInset: workspaceToolInset($workspaceUi.profile) });
     wm.open({ id: "handouts", title: "Handouts", kind: "journals",
       x: 60, y: 60, width: 520, height: 560 });
   }
@@ -483,7 +507,7 @@
   /** Roll20's Turn Tracker for a player: the shared list, read-only where they lack rights. */
   function openTurnOrder() {
     const rect = canvasHost?.getBoundingClientRect();
-    if (rect) wm.setBounds({ width: rect.width, height: rect.height });
+    if (rect) wm.setBounds({ width: rect.width, height: rect.height, leftInset: workspaceToolInset($workspaceUi.profile) });
     wm.open({
       id: "turn-order",
       title: "Turn order",
@@ -496,7 +520,7 @@
   }
   function openHelp() {
     const rect = canvasHost?.getBoundingClientRect();
-    if (rect) wm.setBounds({ width: rect.width, height: rect.height });
+    if (rect) wm.setBounds({ width: rect.width, height: rect.height, leftInset: workspaceToolInset($workspaceUi.profile) });
     wm.open({
       id: "help",
       title: "Keyboard shortcuts",
@@ -669,7 +693,7 @@
     const scene = activeScene();
     if (!scene) return;
     const rect = canvasHost?.getBoundingClientRect();
-    if (rect) wm.setBounds({ width: rect.width, height: rect.height });
+    if (rect) wm.setBounds({ width: rect.width, height: rect.height, leftInset: workspaceToolInset($workspaceUi.profile) });
     wm.open({
       id: `hex-${scene._id}-${key}`,
       title: `Hex ${key}`,
@@ -891,6 +915,14 @@
   }
 
   /** MC-01/D-392: defaults are world state; a player's overrides never leave this device. */
+  let workspaceOpen = $state(false);
+  const contentOpen = $derived($workspaceUi.panels[$workspaceUi.profile]);
+  function selectPlayerContent(id: string): void {
+    if (id === "macros") { openMacros(); return; }
+    if (id === "journals") { openHandouts(); return; }
+    if (["chat", "actors", "images", "settings"].includes(id)) playerTab = id as typeof playerTab;
+    setWorkspacePanel(true);
+  }
   let hotbarPrefs = $state<MacroHotbarPrefs>(normalizeMacroHotbarPrefs(null));
   let hotbarLoadedKey = $state("");
   let hotbarSaveStatus = $state("");
@@ -1204,8 +1236,10 @@
     const fetcher = current.fetcher;
     if (fetcher) sceneBackground.sync(scene?.img ?? null, client.store.world.assetManifest,
       (hash, priority) => fetcher.request(hash, priority), view, scene);
-    const grid = squareGrid(scene?.grid);
-    if (grid) view.setGrid(grid);
+    // D-465: players see the scene's grid as the GM configured it — hex grids too, the scene's
+    // line colour/opacity, and no stale lines after a switch to a gridless scene.
+    view.setGrid(gridSpecFromScene(scene?.grid));
+    view.setGridStyle(gridStyleFromScene(scene?.grid));
   }
 
   /** Overlay coordinates are the canvas's own screen space (stage root = top-left origin). */
@@ -1402,6 +1436,23 @@
           createWall: () => undefined,
           createLight: () => undefined,
           createNote: () => undefined,
+          // D-465: Alt-click with the Draw tool erases a drawing the player may delete (their own).
+          drawingEditing: {
+            hit: (world) => {
+              const sc = activeScene();
+              const me = client.user;
+              if (!sc || !me) return null;
+              const slack = 4 / (view.camera.scale || 1);
+              for (let index = sc.drawings.length - 1; index >= 0; index--) {
+                const drawing = sc.drawings[index];
+                if (!drawing || !canDeleteDrawing(drawing, me.id, me.role)) continue;
+                const box = drawingBounds(drawing);
+                if (world.x >= box.x - slack && world.x <= box.x + box.width + slack && world.y >= box.y - slack && world.y <= box.y + box.height + slack) return { id: drawing._id, x: 0, y: 0 };
+              }
+              return null;
+            },
+            remove: (id) => deleteOwnDrawing(id),
+          },
           measurePreview: (value) => { measurePreview = value; },
           shapePreview: (value) => { shapePreview = value; },
           broadcastMeasure: (points) => {
@@ -1414,6 +1465,7 @@
         const toolPointer = (e: PointerEvent) => ({
           world: toWorld(e),
           button: e.button,
+          buttons: e.buttons,
           ctrlKey: e.ctrlKey,
           shiftKey: e.shiftKey,
           altKey: e.altKey,
@@ -1422,6 +1474,8 @@
         const toolMove = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController.pointerMove(toolPointer(e)); };
         const toolUp = (e: PointerEvent) => { if (GESTURE_TOOLS.has(canvasTool)) toolController.pointerUp(toolPointer(e)); };
         const onToolContext = (e: MouseEvent) => {
+          // The ruler's right button is a waypoint (pointerdown); never a menu over the canvas.
+          if (canvasTool === "measure") { e.preventDefault(); return; }
           if (canvasTool !== "draw") return;
           e.preventDefault();
           toolController.finishPoly();
@@ -1429,7 +1483,9 @@
         const onToolKey = (e: KeyboardEvent) => {
           if (e.key !== "Escape" || isTypingTarget(e.target)) return;
           closeHexMenu(); // D-271: the hex menu dismisses like every other canvas menu
-          if (GESTURE_TOOLS.has(canvasTool)) toolController.finishPoly();
+          if (e.defaultPrevented) return; // the rail's key layer already took this Escape
+          e.preventDefault();
+          runCanvasAction("escape");
         };
         const onTextEdit = (e: MouseEvent) => {
           if (canvasTool !== "text" || e.button !== 0) return;
@@ -1711,41 +1767,29 @@
 
 <svelte:window ondragenter={onWindowDragEnter} ondragleave={onWindowDragLeave} ondragover={onWindowDragOver} ondrop={onWindowDrop} onpaste={onWindowPaste} />
 
-<main class="vtt-ui" class:player-live={phase === "live" || phase === "dead"}>
-  <header class="join-header" class:live-header={phase === "live" || phase === "dead"}>
-    {#if phase === "live" || phase === "dead"}
-      <div class="brand-badge" aria-hidden="true">✦</div>
-      <div class="player-identity">
-        <p class="eyebrow">ARENASTAR <span> / PLAYER TABLE</span></p>
-        <h1 title={worldName}>{worldName}</h1>
-      </div>
-      <div id="pstatus" aria-live="polite">
-        <strong class="sr-only">{worldName}</strong>
-        <span class="connection-badge" class:disconnected={phase === "dead"}><span class="connection-dot"></span>{phase === "dead" ? "Disconnected" : "Connected"}</span>
-        <span>{playerName}</span>
-        <span>seq {seq} · tokens {tokenCount}</span>
-      </div>
-      <div class="notify-stack" aria-live="polite" data-player-notify-stack>
-        {#each fxNotices as message, i (message + ":" + String(i))}
-          <div class="notify" data-player-notify>{message}</div>
-        {/each}
-        {#each moveNotices as notice (notice.id)}
-          {#if notice.tone === "warn"}<div class="notify notify-refused" role="status" data-player-move-refused>{notice.message}</div>
-          {:else}<div class="notify" role="status" data-player-floor-notice>{notice.message}</div>{/if}
-        {/each}
-      </div>
-      <div class="player-actions" aria-label="Player actions">
-        <button data-icon-button data-player-macros type="button" aria-label="Published macros" title="Published macros" onclick={openMacros}><Icon name="macro" /></button>
-        <button data-icon-button data-player-handouts type="button" aria-label="Handouts" title="Handouts" onclick={openHandouts}><Icon name="journals" /></button>
-        <button data-icon-button data-player-setup type="button" bind:this={guideTrigger} aria-expanded={guideOpen}
-          aria-label="Session & guide" title="Session & guide" onclick={openGuide}><Icon name="sliders" /></button>
-      </div>
-    {:else}
-      <p class="eyebrow">ARENASTAR</p>
-      <h1>Join a game</h1>
-      <p class="sub">Connect to a host with an invite link and a short manual code exchange.</p>
-    {/if}
-  </header>
+<main class="vtt-ui" class:workspace={phase === "live" || phase === "dead"} class:player-live={phase === "live" || phase === "dead"}
+  data-ui-profile={phase === "live" || phase === "dead" ? $workspaceUi.profile : undefined}
+  data-ui-scheme={$workspaceUi.profile === "roll20" ? $workspaceUi.roll20Scheme : "dark"}
+  data-sidebar-open={contentOpen ? "true" : "false"}>
+  {#if phase === "live" || phase === "dead"}
+    <WorkspaceChrome {worldName} sceneName={activeScene()?.name ?? ""} {seq} {tokenCount} isGM={false}
+      connected={phase === "live"} statusId="pstatus" onLayout={() => { workspaceOpen = true; }}
+      actions={[
+        { id: "player-macros", label: "Published macros", icon: "macro", run: openMacros },
+        { id: "player-handouts", label: "Handouts", icon: "journals", run: openHandouts },
+        { id: "player-setup", label: "Session & guide", icon: "settings", run: openGuide }
+      ]} />
+    <div class="notify-stack" aria-live="polite" data-player-notify-stack>
+      {#each fxNotices as message, i (message + ":" + String(i))}<div class="notify" data-player-notify>{message}</div>{/each}
+      {#each moveNotices as notice (notice.id)}
+        {#if notice.tone === "warn"}<div class="notify notify-refused" role="status" data-player-move-refused>{notice.message}</div>
+        {:else}<div class="notify" role="status" data-player-floor-notice>{notice.message}</div>{/if}
+      {/each}
+    </div>
+  {:else}
+    <header class="join-header"><p class="eyebrow">ARENASTAR</p><h1>Join a game</h1><p class="sub">Connect to a host with an invite link and a short manual code exchange.</p></header>
+  {/if}
+
   {#if joinError}<p class="error" role="alert">{joinError}</p>{/if}
   {#if imageNotice}<p class="image-notice" role="status">{imageNotice}</p>{/if}
   {#if phase === "invite"}
@@ -1866,7 +1910,7 @@
           {#if floorFocusError}<p class="floor-focus-error" role="status">{floorFocusError} <button type="button" disabled={floorFocusPending || phase !== "live"} onclick={() => chooseFloorFocus(null)}>Retry floor list</button></p>{/if}
           <ZoomControl {stage} onInput={() => fxPlayer?.cancelCamera()} />
           <div class="toolrail">
-            <CanvasToolbar
+            <CanvasToolbar onPanel={selectPlayerContent}
               bind:active={canvasTool}
               bind:collapsed={canvasToolbarCollapsed}
               settings={toolOptions}
@@ -1888,12 +1932,14 @@
             {@const tail = pts.at(-1) ?? null}
             {@const areaPts = measurePreview.area ? templateOutline(measurePreview.area).map(measurePoint) : null}
             <svg class="measure-preview" aria-label={`Measurement ${measureReadout(measurePreview.distance)}`}>
-              <polyline points={pts.map((p) => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#f4c95d" stroke-width="3" stroke-dasharray="8 5" />
-              {#if measurePreview.radiusPx && pts[0]}
+              <polyline points={pts.map((p) => `${p.x},${p.y}`).join(" ")} fill="none" stroke="#f4c95d" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" />
+              {#each pts.slice(1, -1) as pivot, index (index)}
+                <circle class="waypoint" cx={pivot.x} cy={pivot.y} r="4" fill="#f4c95d" stroke="#111" stroke-width="1" />
+              {/each}
+              {#if measurePreview.shape === "circle" && measurePreview.radiusPx && pts[0]}
                 <circle cx={pts[0].x} cy={pts[0].y} r={measurePreview.radiusPx * (stage?.camera.scale ?? 1)} fill="#f4c95d22" stroke="#f4c95d" stroke-width="2" />
-              {/if}
-              {#if areaPts && areaPts.length > 1}
-                <polygon points={areaPts.map((p) => `${p.x},${p.y}`).join(" ")} fill="#f4c95d1a" stroke="#f4c95d" stroke-width="2" stroke-dasharray="4 4" />
+              {:else if areaPts && areaPts.length > 1}
+                <polygon points={areaPts.map((p) => `${p.x},${p.y}`).join(" ")} fill="#f4c95d1a" stroke="#f4c95d" stroke-width="2" />
               {/if}
               {#if tail}
                 <text x={tail.x + 8} y={tail.y - 8} fill="#fff" stroke="#111" stroke-width="3" paint-order="stroke">{measureReadout(measurePreview.distance)}</text>
@@ -1938,7 +1984,10 @@
               ></textarea>
               <div class="text-editor-actions">
                 <button type="button" data-text-commit onclick={() => commitTextDraft()}>Done</button>
-                <button type="button" onclick={() => (textDraft = null)}>Cancel</button>
+                <button type="button" data-text-cancel onclick={() => (textDraft = null)}>Cancel</button>
+                {#if textDraft.editingId}
+                  <button type="button" data-text-delete onclick={() => { if (textDraft?.editingId) deleteOwnDrawing(textDraft.editingId); }}>Delete</button>
+                {/if}
               </div>
             </div>
           {/if}
@@ -2017,19 +2066,20 @@
           />
         {/if}
       </div>
+        {#if app?.client}<div class="workspace-bottom">
+          <MacroHotbar slots={playerHotbarSlots} onRun={runPlayerSlot} onArrange={openHotbarPrefs} arranging={guideOpen} onAssign={(index, id) => assignPlayerSlot(index, id)} />
+          {#if hotbarRunStatus}<p class="hotbar-status" role="status" data-player-hotbar-run-status>{hotbarRunStatus}</p>{/if}
+          {#if quickbarActor}<QuickbarRow client={app.client} actor={quickbarActor} targets={quickbarTargets}
+            onAimSpell={requestQuickbarSpellAim} />{/if}
+        </div>{/if}
       <aside class="sidebar" data-player-dock aria-label="Player content">
-        <div class="dock-heading"><div><span class="dock-eyebrow">AT YOUR TABLE</span><h2>{playerTab === "chat" ? "Chat" : playerTab === "actors" ? "Characters" : "Images"}</h2></div></div>
-        <nav class="player-tabs" aria-label="Player content tabs">
-          <button data-player-tab="chat" type="button" class:active={playerTab === "chat"}
-            aria-label="Chat" title="Chat" onclick={() => (playerTab = "chat")}><Icon name="chat" size={19}/><span>Chat</span></button>
-          <button data-player-tab="actors" type="button" class:active={playerTab === "actors"}
-            aria-label="Characters" title="Characters" onclick={() => (playerTab = "actors")}><Icon name="actors" size={19}/><span>Characters</span></button>
-          <button data-player-tab="images" type="button" class:active={playerTab === "images"}
-            aria-label="Images" title="Images" onclick={() => (playerTab = "images")}><Icon name="images" size={19}/><span>Images</span></button>
-        </nav>
+        <WorkspaceTabs active={playerTab} onSelect={selectPlayerContent} tabs={["chat", "actors", "images", "macros", "journals", "settings"]} player={true}/>
+        <div class="dock-heading"><h2>{workspaceTabLabel($workspaceUi.profile, playerTab)}</h2><button type="button" data-icon-button aria-label="Collapse content panel" onclick={() => setWorkspacePanel(false)}><Icon name="chevronRight" size={16}/></button></div>
         <div class="tabbody" data-player-active-tab={playerTab}>
           {#if app?.client}
-            {#if playerTab === "chat"}
+            {#if playerTab === "settings"}
+              <WorkspaceDirectory kind="settings" isGM={false} onAction={openGuide} onLayout={() => { workspaceOpen = true; }} />
+            {:else if playerTab === "chat"}
               <ChatPanel client={app.client} bus={app.bus}
                 targetTokenId={selection.length === 1 ? (selection[0] ?? null) : null} {selectedItemRef} />
             {:else if playerTab === "actors"}
@@ -2045,12 +2095,6 @@
             {/if}
           {/if}
         </div>
-        {#if app?.client}<div class="dock-footer">
-          <MacroHotbar slots={playerHotbarSlots} onRun={runPlayerSlot} onArrange={openHotbarPrefs} arranging={guideOpen} />
-          {#if hotbarRunStatus}<p class="hotbar-status" role="status" data-player-hotbar-run-status>{hotbarRunStatus}</p>{/if}
-          <QuickbarRow client={app.client} actor={quickbarActor} targets={quickbarTargets}
-            onAimSpell={requestQuickbarSpellAim} />
-        </div>{/if}
       </aside>
     </section>
     {#if guideOpen}
@@ -2116,6 +2160,8 @@
     onDismiss={() => (sharedImageAnnouncement = null)}
   />
 {/if}
+{#if workspaceOpen}<WorkspacePicker onClose={() => { workspaceOpen = false; }} />{/if}
+
 <style>
   .floor-focus { position: absolute; z-index: 25; top: 12px; left: 74px; padding: 8px 12px; background: #172432ee; color: #eef3fa; border: 1px solid #53687d; border-radius: 6px; max-width: 300px; }
   .floor-focus label, .floor-focus small { display: block; }
@@ -2327,21 +2373,6 @@
   .take-stairs { margin-top: 4px; padding: 3px 8px; border: 1px solid #a88c52; border-radius: 4px; background: #3a301c; color: #fff3d6; cursor: pointer; font-size: 0.75rem; }
   .board.floor-fade :global(canvas) { animation: floor-fade 0.4s ease-out; }
   @keyframes floor-fade { from { opacity: 0.25; } to { opacity: 1; } }
-  #pstatus {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    padding: 12px;
-    border: 1px solid #40566d;
-    border-radius: 9px;
-    background: #172331;
-    font-size: 0.95rem;
-    color: #cbd8e5;
-  }
-  #pstatus strong {
-    color: #f2f5f8;
-    font-size: 1.1rem;
-  }
   .canvas-area {
     position: relative;
     flex: 1;
@@ -2483,84 +2514,7 @@
     overflow: hidden;
     background: #0c141d;
   }
-  .join-header.live-header {
-    flex: 0 0 70px;
-    width: 100%;
-    min-height: 70px;
-    display: flex;
-    align-items: center;
-    gap: 13px;
-    padding: 0 16px;
-    border-bottom: 1px solid #344352;
-    background: #17222e;
-    box-shadow: 0 2px 16px #0004;
-    text-align: left;
-    z-index: 23;
-  }
-  .live-header .brand-badge {
-    flex: 0 0 36px;
-    width: 36px;
-    height: 36px;
-    display: grid;
-    place-items: center;
-    border-radius: 11px;
-    background: linear-gradient(145deg, #8be8d0, #459d99);
-    color: #142933;
-    font-size: 1.55rem;
-    line-height: 1;
-  }
-  .player-identity { flex: 0 1 190px; min-width: 95px; overflow: hidden; }
-  .live-header .eyebrow { margin: 0 0 2px; color: #7ce3ca; font-size: .63rem; font-weight: 800; letter-spacing: .13em; white-space: nowrap; }
-  .live-header .eyebrow span { color: #96aaaf; font-weight: 650; }
-  .live-header h1 { overflow: hidden; color: #f5fafb; font-size: 1.12rem; font-weight: 750; line-height: 1.2; letter-spacing: -.018em; white-space: nowrap; text-overflow: ellipsis; }
-  #pstatus {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 12px;
-    overflow: hidden;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    color: #b6c7d0;
-    font-size: .76rem;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-  }
-  #pstatus .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .connection-badge {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    padding: 6px 9px;
-    border: 1px solid #335850;
-    border-radius: 20px;
-    background: #1a3537;
-    color: #b8e9d9;
-    font-size: .72rem;
-    font-weight: 650;
-  }
-  .connection-badge.disconnected { border-color: #835455; background: #3f292e; color: #ffc0b8; }
-  .connection-dot { width: 7px; height: 7px; border-radius: 50%; background: #66dbc0; box-shadow: 0 0 7px #6cebd28c; }
-  .disconnected .connection-dot { background: #f1a995; box-shadow: none; }
-  .player-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 5px; }
-  .player-actions button {
-    display: grid;
-    place-items: center;
-    width: 36px;
-    min-width: 36px;
-    height: 36px;
-    min-height: 36px;
-    padding: 0;
-    border: 1px solid transparent;
-    border-radius: 9px;
-    background: transparent;
-    color: #bacbd3;
-  }
-  .player-actions button:hover, .player-actions button[aria-expanded="true"] { background: #2a3e49; border-color: #52998d; color: #eafff9; }
+  .player-actions button[aria-expanded="true"] { background: #2a3e49; border-color: #52998d; color: #eafff9; }
   .player-live .error { width: 100%; padding: 8px 16px; background: #38262a; font-size: .85rem; }
   .player-live .shell {
     flex: 1 1 auto;
@@ -2598,30 +2552,10 @@
   .dock-heading { flex: 0 0 60px; min-height: 60px; display: flex; align-items: center; padding: 8px 15px; }
   .dock-eyebrow { color: #81d4c5; font-size: .64rem; font-weight: 800; letter-spacing: .13em; }
   .dock-heading h2, .guide-heading h2 { margin: 1px 0 0; font-size: .98rem; font-weight: 700; color: #f0f8f9; }
-  .player-tabs { flex: 0 0 auto; display: flex; min-height: 46px; padding: 0 10px; border-bottom: 1px solid #3b4b59; }
-  .player-tabs button {
-    flex: 1 1 auto;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    min-height: 44px;
-    padding: 7px 12px;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
-    background: transparent;
-    color: #a8b9c4;
-    font-size: .83rem;
-    font-weight: 600;
-  }
-  .player-tabs button:hover { background: #243440; color: #effcfa; }
-  .player-tabs button.active { border-bottom-color: #74d9c5; background: #1b3037; color: #b9f7e4; }
   .tabbody { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 13px 14px; background: #15222d; }
   .tabbody :global(.chat) { min-height: 100%; height: 100%; }
   .tabbody :global(#chat-log) { flex: 1 1 auto; max-height: none; min-height: 120px; border-color: #344957; background: #101a24; }
   .hotbar-status { margin: 4px 0; font-size: 0.75rem; color: #cbd8e5; }
-  .dock-footer { flex: 0 0 auto; max-height: 170px; overflow-y: auto; padding: 9px 12px; border-top: 1px solid #3a4b59; background: #192834; }
   .player-guide {
     position: fixed;
     top: 70px;
@@ -2663,19 +2597,12 @@
     .player-live .sidebar { flex-basis: 306px; width: 306px; }
   }
   @media (max-width: 710px) {
-    .join-header.live-header { flex-basis: 60px; min-height: 60px; gap: 8px; padding-inline: 8px; }
-    .live-header .brand-badge { display: none; }
-    .player-identity { flex: 0 0 125px; min-width: 0; }
-    .player-identity .eyebrow span { display: none; }
-    #pstatus { flex: 1 1 auto; justify-content: flex-end; }
-    #pstatus > span:not(.connection-badge) { display: none; }
     .player-live .shell { flex-direction: column; }
     .player-live .canvas-area { flex: 1 1 auto; min-height: 0; }
     .player-live .sidebar { order: 1; flex: 0 0 min(42dvh, 360px); width: 100%; max-height: none; border-left: 0; border-top: 1px solid #344657; }
     .dock-heading { flex-basis: 44px; min-height: 44px; }
     .dock-eyebrow { display: none; }
     .tabbody :global(#chat-log) { min-height: 80px; }
-    .dock-footer { display: block; max-height: 80px; overflow-y: auto; padding: 4px 12px; }
     .player-guide, .join-panel.exchange-panel.reconnect { top: 60px; }
   }
 </style>

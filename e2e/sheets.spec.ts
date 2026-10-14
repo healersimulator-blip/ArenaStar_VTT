@@ -1,13 +1,6 @@
 // Checklist: S01 S04 — browser acceptance: sidebar + canvas-dblclick sheet mount, compendium→token→sheet flow.
 import { test, expect, type Page } from "@playwright/test";
-import {
-  entry,
-  hostCall,
-  importShippedCore,
-  playerCall,
-  waitForSurface,
-  manualFragment,
-} from "./lib";
+import { chromeAction, entry, hostCall, importShippedCore, manualFragment, openSceneNav, playerCall, waitForSurface } from "./lib";
 
 // Real WebRTC peers, with the same manual invite exchange used by normal UI.
 async function connectSheetPlayer(host: Page, player: Page): Promise<string> {
@@ -492,7 +485,7 @@ test("owned PF1e token opens a live player sheet and revocation removes private 
       window.getByRole("heading", { name: "Private renamed infantry" }),
     ).toBeVisible();
 
-    await host.click("#gm-perms");
+    await chromeAction(host, "gm-perms");
     const perms = host.locator('[data-window="permissions"]');
     await perms.locator("[data-perm-coll]").selectOption("actors");
     await perms
@@ -711,14 +704,14 @@ test("canvas selection creates scoped rosters, adds/removes members and rolls on
   await expect(page.locator(".combat .round")).toHaveText(
     "Round 1 · No combatants",
   );
-  await page.click("#scene-add");
+  await openSceneNav(page); await page.click("#scene-add");
   await page.click("#scene-new-blank");
-  await page.locator(".scenenav [data-scene]").nth(1).click();
+  await openSceneNav(page); await page.locator(".scenenav [data-scene]").nth(1).click();
   await expect(page.locator("[data-combat-selection]")).toContainText(
     "0 selected",
   );
   await expect(page.locator("[data-encounter-select] option")).toHaveCount(1);
-  await page.locator(".scenenav [data-scene]").first().click();
+  await openSceneNav(page); await page.locator(".scenenav [data-scene]").first().click();
   await expect(page.locator("[data-combat-selection]")).toContainText(
     "0 selected",
   );

@@ -1,0 +1,366 @@
+/* First-party interaction layouts. The world/canvas/permission engine is shared.
+   Modern owns its visual language; compatibility shells follow the pinned reference notes. */
+main.workspace[data-ui-profile] {
+  --ws-bg:#10141a; --ws-panel:#171c24; --ws-raised:#222934; --ws-line:#303846;
+  --ws-text:#e1e5ed; --ws-muted:#929ba9; --ws-accent:#a2b9e7; --ws-input:#10161e;
+  --ws-font:Inter,system-ui,sans-serif; --ws-radius:8px; --ws-header:46px;
+  --ws-dock:310px; --ws-tabs:42px; --ws-rail:50px; --ws-tool:34px;
+  display:flex; flex-direction:column; width:100%; height:100dvh; min-height:360px;
+  position:relative; overflow:hidden; margin:0; padding:0; color:var(--ws-text); background:var(--ws-bg); font-family:var(--ws-font);
+  --vtt-control-height:30px; --vtt-ui-font-size:13px;
+}
+main.workspace[data-ui-profile="modern"][data-ais-theme] {
+  --ws-bg:var(--vtt-bg); --ws-panel:var(--vtt-panel); --ws-raised:var(--vtt-panel-raised); --ws-line:var(--vtt-border);
+  --ws-text:var(--vtt-text); --ws-muted:var(--vtt-muted); --ws-accent:var(--vtt-accent); --ws-font:var(--vtt-ui-font);
+}
+.workspace[data-ui-profile] :where(button,input,select,textarea) { font-family:var(--ws-font); }
+.workspace[data-ui-profile] :where(button:not([data-icon-button]),input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),select,textarea) {
+  min-height:30px !important; font-size:13px !important; line-height:1.4;
+}
+.workspace[data-ui-profile] :where(label,legend,.field-label) { font-size:12px; color:var(--ws-text); }
+.workspace[data-ui-profile] :where(.wm-body,.tabbody,.chat,.rollcard,.pendingcard,.page) { font-size:13px !important; line-height:1.5; }
+.workspace[data-ui-profile] :where(button,input,select,textarea):focus-visible { outline:2px solid var(--ws-accent); outline-offset:2px; }
+.workspace[data-ui-profile] > .shell { position:relative; flex:1; display:flex; min-height:0; gap:0; overflow:hidden; }
+.workspace[data-ui-profile] .canvas-col,.workspace[data-ui-profile] .canvas-area { flex:1 1 auto; width:0; min-width:0; min-height:0; position:relative; display:flex; flex-direction:column; }
+.workspace[data-ui-profile] .board { display:flex; flex:1 1 auto; min-height:0; position:relative; }
+.workspace[data-ui-profile] .canvas-host { flex:1 1 auto; min-width:0; min-height:0; background:#10151b; }
+/* The rail is one stacking context (24): above the board and the zoom pill (15), below the session
+   panel (70) and floating windows (80), so the dice options never cover the setup checklist and a
+   window stays on top of the tool options — the legacy order the onboarding/workspace specs encode.
+   Its fly-outs share that rank; a window dragged over the top-left corner covers "More tools". */
+.workspace[data-ui-profile] .toolrail { position:absolute; left:12px; top:14px; bottom:auto; width:var(--ws-rail); height:auto; max-height:calc(100% - 88px); z-index:24; }
+/* Modern keeps the rail *in flow* (its own column, like the legacy shell and Roll20's toolbox) rather
+   than floating over the board: a floating rail covers the scene's top-left corner — the first grid
+   cells, where small maps, starter scenes and a third of the browser specs put their tokens. The
+   card look is kept with margins; only the board's left edge moves right by the rail's width. */
+.workspace[data-ui-profile="modern"] .toolrail { position:relative; left:auto; top:auto; flex:0 0 auto; align-self:flex-start; margin:14px 0 0 12px; }
+.workspace[data-ui-profile] .zoom-control { z-index:15; }
+.workspace[data-ui-profile] .canvas-toolbar { width:var(--ws-rail); flex:none; background:transparent; border:0; border-radius:var(--ws-radius); height:auto; }
+.workspace[data-ui-profile] .rail-scroll { width:100%; height:auto; padding:5px; gap:3px; background:var(--ws-panel); border:1px solid var(--ws-line); border-radius:var(--ws-radius); box-shadow:0 6px 24px #0003; }
+.workspace[data-ui-profile] .rail-scroll .group { padding:0; border:0; gap:3px; }
+.workspace[data-ui-profile] .rail-gap { display:block; width:22px; height:1px; margin:3px auto; background:var(--ws-line); }
+.workspace[data-ui-profile="modern"] .layer-switch { margin-top:4px; padding-top:6px; border-top:1px solid var(--ws-line); gap:2px; }
+.workspace[data-ui-profile="modern"] .layer-switch button { height:26px; min-height:26px !important; flex-basis:26px; border-radius:4px; }
+.workspace[data-ui-profile="modern"] .layer-switch button.active { color:var(--ws-text); background:var(--ws-raised); border-color:var(--ws-accent); }
+.workspace[data-ui-profile] .rail-scroll button { width:var(--ws-tool); height:var(--ws-tool); flex:0 0 var(--ws-tool); min-height:var(--ws-tool); border:1px solid transparent; border-radius:5px; background:transparent; color:var(--ws-muted); box-shadow:none; }
+.workspace[data-ui-profile] .rail-scroll .collapse { height:22px; min-height:22px; flex-basis:22px; }
+.workspace[data-ui-profile] .rail-scroll button:hover { background:var(--ws-raised); color:var(--ws-text); }
+.workspace[data-ui-profile] .rail-scroll button.active { background:var(--ws-raised); color:var(--ws-accent); border-color:var(--ws-line); box-shadow:none; }
+.workspace[data-ui-profile] .canvas-toolbar::after { display:none; }
+.workspace[data-ui-profile] .tool-popover,.workspace[data-ui-profile] .tool-extra-menu {
+  position:absolute; left:calc(var(--ws-rail) + 8px); right:auto; top:0; width:260px; max-height:min(640px,calc(100dvh - 130px));
+  overflow:auto; background:var(--ws-panel); color:var(--ws-text); border:1px solid var(--ws-line); border-radius:var(--ws-radius); box-shadow:0 14px 42px #0006;
+}
+/* Tool options sit on the dock side of the table (D-256): the map's left half, where the rail's
+   tools are drawn and dragged, stays clickable in every layout. */
+.workspace[data-ui-profile] .tool-popover { position:fixed; left:auto; right:calc(var(--ws-dock) + 12px); top:calc(var(--ws-header) + 14px); z-index:40; }
+.workspace[data-ui-profile][data-sidebar-open="false"] .tool-popover { right:calc(var(--ws-tabs) + 12px); }
+.workspace[data-ui-profile] .popover-heading { padding:9px 11px; background:var(--ws-raised); border-color:var(--ws-line); }
+.workspace[data-ui-profile] .popover-kicker { display:none; }
+.workspace[data-ui-profile] .popover-heading strong { font-size:13px; }
+.workspace[data-ui-profile] .subpanel { gap:10px; padding:12px; }
+.workspace[data-ui-profile] .subpanel :where(button,input) { background:var(--ws-input); border-color:var(--ws-line); color:var(--ws-text); border-radius:4px; }
+.workspace[data-ui-profile] .subpanel button.active { border-color:var(--ws-accent); }
+.workspace[data-ui-profile] .subpanel .hint { color:var(--ws-muted); font-size:11px !important; }
+.workspace[data-ui-profile] .tool-extra-menu { display:flex; flex-direction:column; padding:6px; gap:2px; z-index:2; }
+.workspace[data-ui-profile] .tool-extra-menu button { display:flex; align-items:center; gap:10px; border:0; padding:7px 8px; background:transparent; color:var(--ws-text); text-align:left; border-radius:4px; }
+.workspace[data-ui-profile] .tool-extra-menu button:hover { background:var(--ws-raised); }
+.workspace[data-ui-profile] .menu-caption { font:10px var(--ws-font); color:var(--ws-muted); text-transform:uppercase; letter-spacing:.08em; padding:9px 8px 4px; }
+
+/* A genuinely smaller command bar, without permanent setup panels or diagnostic prose. */
+/* The command bar is a stacking context, so its menu and palette must out-rank the floating-window
+   band (80) — a GM Extras window under the menu once swallowed the Permissions click. */
+.workspace[data-ui-profile] .workspace-chrome { flex:0 0 var(--ws-header); min-height:var(--ws-header); height:var(--ws-header); display:flex; align-items:center; gap:14px; padding:0 14px; background:var(--ws-panel); border-bottom:1px solid var(--ws-line); box-shadow:none; z-index:95; }
+.workspace[data-ui-profile] .chrome-world { display:flex; align-items:center; min-width:0; gap:10px; }
+.workspace[data-ui-profile] .wordmark { width:28px; height:28px; min-height:28px !important; border:0; padding:0; border-radius:5px; background:transparent; color:var(--ws-text); display:grid; place-items:center; }
+.workspace[data-ui-profile] .wordmark>svg { display:none; }
+.workspace[data-ui-profile] .modern-mark { font:bold 26px Georgia,serif; position:relative; line-height:1; }
+.workspace[data-ui-profile] .modern-mark>span { position:absolute; top:-1px; right:-6px; color:var(--ws-accent); font:12px var(--ws-font); }
+.workspace[data-ui-profile] .chrome-title { min-width:0; max-width:220px; }
+.workspace[data-ui-profile] .product-name { display:none; }
+.workspace[data-ui-profile] .chrome-title h1 { font-size:13px; font-weight:550; margin:0; line-height:1.2; color:var(--ws-text); white-space:nowrap; text-overflow:ellipsis; overflow:hidden; }
+.workspace[data-ui-profile] .world-divider { width:1px; height:18px; background:var(--ws-line); margin-inline:3px; }
+.workspace[data-ui-profile] .scene-crumb { display:flex; align-items:center; gap:7px; min-width:0; padding:5px 6px; background:transparent; border:0; color:var(--ws-muted); border-radius:4px; }
+.workspace[data-ui-profile] .scene-crumb>span { max-width:170px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:11px; }
+.workspace[data-ui-profile] .scene-crumb:hover { color:var(--ws-text); background:var(--ws-raised); }
+.workspace[data-ui-profile] .chrome-center { flex:1; display:flex; justify-content:center; }
+.workspace[data-ui-profile] .command-trigger { display:flex; align-items:center; justify-content:flex-start; gap:8px; min-width:160px; border:1px solid var(--ws-line); background:var(--ws-input); color:var(--ws-muted); border-radius:6px; padding:4px 8px; font-size:11px !important; }
+.workspace[data-ui-profile] .command-trigger kbd { margin-left:auto; font:9px var(--ws-font); border:1px solid var(--ws-line); border-radius:3px; padding:1px 3px; }
+.workspace[data-ui-profile] .chrome-utilities,.workspace[data-ui-profile] .chrome-primary { display:flex; align-items:center; gap:3px; }
+.workspace[data-ui-profile] .workspace-status { color:var(--ws-muted); display:flex; align-items:center; gap:5px; font-size:10px; margin-right:8px; }
+.workspace[data-ui-profile] .online-dot { width:5px; height:5px; border-radius:50%; background:#7ca98e; }
+.workspace[data-ui-profile] .rules-status { max-width:190px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-left:6px; border-left:1px solid var(--ws-line); }
+.workspace[data-ui-profile] .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
+.workspace[data-ui-profile] .chrome-action,.workspace[data-ui-profile] .workspace-trigger { width:32px; height:32px; min-height:32px !important; padding:0; display:grid; place-items:center; border:0; border-radius:5px; background:transparent; color:var(--ws-muted); }
+.workspace[data-ui-profile] .chrome-action:hover,.workspace[data-ui-profile] .workspace-trigger:hover { color:var(--ws-text); background:var(--ws-raised); }
+.workspace[data-ui-profile] .chrome-invite { display:flex; align-items:center; gap:6px; background:var(--ws-raised); color:var(--ws-text); border:1px solid var(--ws-line); border-radius:5px; padding:4px 10px; min-height:32px !important; font-size:14px !important; font-weight:500; margin-left:6px; }
+.workspace[data-ui-profile] .workspace-menu,.workspace[data-ui-profile] .command-palette { position:fixed; left:12px; top:calc(var(--ws-header) + 6px); width:245px; padding:6px; background:var(--ws-panel); color:var(--ws-text); border:1px solid var(--ws-line); border-radius:9px; box-shadow:0 18px 60px #0007; z-index:120; }
+.workspace[data-ui-profile] .workspace-menu button { display:flex; align-items:center; gap:9px; width:100%; background:transparent; color:var(--ws-text); border:0; padding:7px 9px; border-radius:4px; text-align:left; font-size:12px !important; }
+.workspace[data-ui-profile] .workspace-menu button:hover { background:var(--ws-raised); }
+.workspace[data-ui-profile] .workspace-menu kbd { margin-left:auto; font-size:9px; color:var(--ws-muted); }
+.workspace[data-ui-profile] .menu-product { display:flex; justify-content:space-between; padding:9px; font-weight:600; border-bottom:1px solid var(--ws-line); margin-bottom:5px; font-size:12px; }
+.workspace[data-ui-profile] .menu-product span { font-size:10px; font-weight:400; color:var(--ws-muted); }
+.workspace[data-ui-profile] .menu-separator { height:1px; background:var(--ws-line); margin:5px; }
+.workspace[data-ui-profile] .command-palette { top:90px; left:50%; transform:translateX(-50%); width:min(500px,calc(100vw - 30px)); padding:0; }
+.workspace[data-ui-profile] .command-field { display:flex; gap:12px; align-items:center; padding:14px; border-bottom:1px solid var(--ws-line); }
+.workspace[data-ui-profile] .command-field input { flex:1; min-width:0; background:transparent; border:0; color:var(--ws-text); outline:none; }
+.workspace[data-ui-profile] .command-field button { padding:0; border:0; background:none; color:var(--ws-muted); }
+.workspace[data-ui-profile] .command-results { max-height:380px; overflow:auto; padding:7px; }
+.workspace[data-ui-profile] .command-results button { width:100%; display:flex; align-items:center; gap:12px; color:var(--ws-text); background:none; border:0; padding:10px; border-radius:5px; text-align:left; }
+.workspace[data-ui-profile] .command-results button:hover { background:var(--ws-raised); }
+.workspace[data-ui-profile] .command-results .enter { margin-left:auto; color:var(--ws-muted); font-size:11px; }
+
+/* Content is a collapsible workspace, not a permanent wall of controls. */
+.workspace[data-ui-profile] .sidebar { order:1; position:relative; display:grid; grid-template-columns:var(--ws-tabs) minmax(0,1fr); grid-template-rows:44px minmax(0,1fr); flex:0 0 var(--ws-dock); width:var(--ws-dock); min-height:0; padding:0; gap:0; border:0; border-left:1px solid var(--ws-line); background:var(--ws-panel); color:var(--ws-text); z-index:25; overflow:visible; }
+/* overflow:visible (the legacy dock clipped) lets the "More panels" menu and Roll20's collapse tab protrude past the dock edge. */
+.workspace[data-ui-profile][data-sidebar-open="false"] .sidebar { flex-basis:var(--ws-tabs); width:var(--ws-tabs); grid-template-columns:var(--ws-tabs); }
+.workspace[data-ui-profile][data-sidebar-open="false"] .sidebar>.tabbody,.workspace[data-ui-profile][data-sidebar-open="false"] .sidebar>.dock-heading { display:none; }
+.workspace[data-ui-profile] .workspace-tabs { grid-column:1; grid-row:1/-1; position:relative; display:flex; flex-direction:column; align-items:center; gap:4px; padding:10px 3px; background:var(--ws-bg); border-right:1px solid var(--ws-line); }
+.workspace[data-ui-profile] .workspace-tabs button { position:relative; display:flex; align-items:center; justify-content:center; flex:0 0 34px; width:34px; height:34px; min-height:34px !important; padding:0; border:0; border-radius:5px; background:transparent; color:var(--ws-muted); }
+.workspace[data-ui-profile] .workspace-tabs button.active { color:var(--ws-accent); background:var(--ws-raised); }
+.workspace[data-ui-profile] .workspace-tabs button:hover { color:var(--ws-text); background:var(--ws-raised); }
+.workspace[data-ui-profile] .tab-label { position:absolute; width:1px; height:1px; clip-path:inset(50%); overflow:hidden; }
+.workspace[data-ui-profile] .sidebar-toggle { margin-top:auto; }
+.workspace[data-ui-profile] .tab-more-menu { position:absolute; right:calc(100% + 7px); top:260px; width:185px; z-index:100; background:var(--ws-panel); border:1px solid var(--ws-line); padding:5px; border-radius:7px; box-shadow:0 12px 30px #0006; }
+.workspace[data-ui-profile] .tab-more-menu button { width:100%; justify-content:flex-start; gap:10px; padding:6px 8px; height:auto; min-height:32px !important; font-size:12px !important; }
+.workspace[data-ui-profile] .dock-heading { grid-column:2; grid-row:1; padding:9px 12px; height:44px; min-height:44px; flex:none; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--ws-line); }
+.workspace[data-ui-profile] .dock-heading h2 { font-family:var(--ws-font); font-size:12px; font-weight:600; color:var(--ws-text); margin:0; }
+.workspace[data-ui-profile] .dock-heading button { width:24px; height:24px; min-height:24px !important; border:0; padding:0; background:transparent; color:var(--ws-muted); }
+.workspace[data-ui-profile] .tabbody { grid-column:2; grid-row:2; min-height:0; overflow:auto; padding:10px; background:transparent; }
+.workspace[data-ui-profile] .tabbody[data-active-tab="chat"],.workspace[data-ui-profile] .tabbody[data-player-active-tab="chat"] { padding:0; overflow:hidden; }
+.workspace[data-ui-profile] .chat { height:100%; min-height:0; display:flex; flex-direction:column; gap:0; }
+.workspace[data-ui-profile] .chat>h3 { display:none; }
+.workspace[data-ui-profile] #chat-log { background:transparent !important; flex:1; min-height:0; max-height:none; border:0; border-radius:0; padding:5px 13px; gap:0; }
+.workspace[data-ui-profile] .chat .line { display:block; font-size:12px; line-height:1.65; padding:12px 0; margin:0; border-bottom:1px solid color-mix(in srgb,var(--ws-line),transparent 45%); color:var(--ws-text); }
+.workspace[data-ui-profile] .chat .author { display:block; margin:0 0 5px; color:var(--ws-accent); font-size:11px; font-weight:600; }
+.workspace[data-ui-profile] .chat .rollcard { padding:10px; margin:6px 0; border:1px solid var(--ws-line); border-radius:5px; background:var(--ws-raised); }
+.workspace[data-ui-profile] .chat form { padding:11px; display:flex; flex-wrap:wrap; gap:6px; border-top:1px solid var(--ws-line); background:var(--ws-panel); }
+.workspace[data-ui-profile] #chat-input { flex:1 1 100%; width:100%; height:66px; min-height:54px !important; max-height:140px; resize:vertical; padding:9px; background:var(--ws-input); color:var(--ws-text); border:1px solid var(--ws-line); border-radius:6px; font-family:var(--ws-font); font-size:12px !important; }
+.workspace[data-ui-profile] #chat-send { margin-left:auto; padding:4px 10px; background:var(--ws-raised); color:var(--ws-text); border:1px solid var(--ws-line); border-radius:4px; min-height:25px !important; font-size:11px !important; }
+.workspace[data-ui-profile] .chat-compose-tools { display:flex; flex:1; align-items:center; gap:7px; color:var(--ws-muted); font-size:10px; }
+.workspace[data-ui-profile] .chat-compose-tools button { color:var(--ws-muted); background:transparent; border:0; padding:2px; min-height:22px !important; }
+.workspace[data-ui-profile] .chat-empty { font-size:12px; color:var(--ws-muted); }
+.workspace[data-ui-profile] .chat-empty .empty-mark { color:var(--ws-accent); }
+.workspace[data-ui-profile] .chat-empty strong { color:var(--ws-text); }
+.workspace[data-ui-profile] .workspace-directory h3 { font:600 14px var(--ws-font); margin:4px 0 14px; }
+.workspace[data-ui-profile] .directory-actions { display:flex; flex-direction:column; gap:7px; }
+.workspace[data-ui-profile] .directory-actions button,.workspace[data-ui-profile] .directory-top button { display:flex; align-items:center; justify-content:center; gap:8px; background:var(--ws-raised); color:var(--ws-text); border:1px solid var(--ws-line); border-radius:5px; padding:6px; width:100%; }
+.workspace[data-ui-profile] .settings-summary { display:flex; align-items:center; gap:12px; margin:12px 0 20px; }
+.workspace[data-ui-profile] .summary-mark { font-size:26px; color:var(--ws-accent); }
+.workspace[data-ui-profile] .settings-summary strong { display:block; font:600 13px var(--ws-font); }
+.workspace[data-ui-profile] .settings-summary small { display:block; font:10px/1.5 var(--ws-font); color:var(--ws-muted); }
+.workspace[data-ui-profile] .directory-search { display:flex; gap:6px; align-items:center; border:1px solid var(--ws-line); border-radius:5px; margin:12px 0 6px; padding:0 7px; color:var(--ws-muted); }
+.workspace[data-ui-profile] .directory-search input { border:0; background:transparent; color:var(--ws-text); width:100%; }
+.workspace[data-ui-profile] .directory-count { font-size:10px; color:var(--ws-muted); }
+.workspace[data-ui-profile] .workspace-directory ul { list-style:none; padding:0; margin:0; }
+.workspace[data-ui-profile] .workspace-directory li>button { display:flex; align-items:center; gap:9px; width:100%; border:0; border-bottom:1px solid var(--ws-line); padding:10px 4px; background:transparent; color:var(--ws-text); text-align:left; }
+.workspace[data-ui-profile] .workspace-directory li>button:hover { background:var(--ws-raised); }
+.workspace[data-ui-profile] .workspace-directory li strong,.workspace[data-ui-profile] .workspace-directory li small { display:block; }
+.workspace[data-ui-profile] .workspace-directory li strong { font-size:12px; font-weight:500; }.workspace[data-ui-profile] .workspace-directory li small { font-size:10px; color:var(--ws-muted); }
+.workspace[data-ui-profile] .workspace-directory li>button>svg { margin-left:auto; }
+.workspace[data-ui-profile] .document-icon { color:var(--ws-accent); }.workspace[data-ui-profile] .directory-empty { padding:24px 10px; text-align:center; color:var(--ws-muted); font-size:12px; }
+
+/* Pages, presence and hotbar are independent of the content dock. */
+.workspace[data-ui-profile] .scene-bar { position:absolute; left:145px; top:7px; right:70px; display:none; z-index:90; min-height:0; background:var(--ws-panel); border:1px solid var(--ws-line); border-radius:7px; padding:7px; box-shadow:0 12px 30px #0005; }
+.workspace[data-ui-profile][data-pages-open="true"] .scene-bar { display:block; }
+.workspace[data-ui-profile] .scenenav { display:flex; align-items:center; gap:5px; padding:0; overflow:visible; min-height:0; background:transparent; border:0; }
+.workspace[data-ui-profile] .scenenav>button { background:var(--ws-raised); color:var(--ws-text); border:1px solid var(--ws-line); border-radius:4px; font:12px var(--ws-font); padding:7px 10px; }
+.workspace[data-ui-profile] .scenenav>button.active { border-color:var(--ws-accent); }
+/* height:auto matters: the legacy header strip was height:100%, which, once absolutely positioned, became a
+   full-height invisible column over the canvas that swallowed drops as soon as a player connected. */
+.workspace[data-ui-profile] .workspace-presence { position:absolute; left:14px; bottom:12px; z-index:16; display:flex; flex-wrap:wrap; gap:5px; height:auto; max-width:210px; padding:0; overflow:visible; font-size:10px; background:transparent; border:0; pointer-events:none; }
+.workspace[data-ui-profile] .workspace-presence .player { pointer-events:auto; }
+.workspace[data-ui-profile] .workspace-presence .player { padding:4px 7px; border-radius:4px; background:var(--ws-panel); color:var(--ws-muted); border:1px solid var(--ws-line); }
+.workspace[data-ui-profile] .workspace-presence .player small { font-size:9px !important; opacity:.6; margin-left:4px; }
+.workspace[data-ui-profile] .workspace-bottom { position:absolute; bottom:10px; left:calc((100% - var(--ws-dock)) / 2); transform:translateX(-50%); max-width:calc(100% - var(--ws-dock) - 120px); z-index:17; display:flex; flex-direction:column; align-items:center; gap:6px; }
+.workspace[data-ui-profile][data-sidebar-open="false"] .workspace-bottom { left:calc((100% - var(--ws-tabs)) / 2); max-width:calc(100% - 210px); }
+.workspace[data-ui-profile] .hotbar { display:flex; align-items:center; gap:4px; padding:5px; background:var(--ws-panel); border:1px solid var(--ws-line); border-radius:7px; box-shadow:0 6px 25px #0005; }
+.workspace[data-ui-profile] .hotbar-slots { display:flex; gap:3px; }
+.workspace[data-ui-profile] .hotbar .slot { position:relative; width:35px; height:35px; min-height:35px !important; min-width:0; display:flex; align-items:center; justify-content:center; padding:0; border:1px solid var(--ws-line); background:var(--ws-input); color:var(--ws-muted); border-radius:4px; overflow:hidden; }
+.workspace[data-ui-profile] .slot-key { position:absolute; top:2px; left:4px; font:9px var(--ws-font); opacity:.55; }
+.workspace[data-ui-profile] .slot-symbol { color:var(--ws-accent); }.workspace[data-ui-profile] .slot-name { position:absolute; bottom:1px; max-width:95%; font:8px var(--ws-font); overflow:hidden; white-space:nowrap; }
+.workspace[data-ui-profile] .slot.bound { border-color:#617491; }.workspace[data-ui-profile] .hotbar-toggle,.workspace[data-ui-profile] .hotbar .arrange { width:23px; padding:0; height:30px; min-height:30px !important; display:grid; place-items:center; background:transparent; color:var(--ws-muted); border:0; }
+.workspace[data-ui-profile] .hotbar .arrange span { display:none; }
+.workspace[data-ui-profile] .quickbar { background:var(--ws-panel); color:var(--ws-text); border:1px solid var(--ws-line); border-radius:5px; }
+.workspace[data-ui-profile] .quickbar .title { display:none; }
+
+/* Floating windows follow the selected interface, not a global theme repaint. */
+.workspace[data-ui-profile] .wm-window { border:1px solid var(--ws-line); border-radius:var(--ws-radius); background:var(--ws-panel); color:var(--ws-text); box-shadow:0 16px 60px #0006; overflow:hidden; }
+.workspace[data-ui-profile] .wm-title { background:var(--ws-raised); border-color:var(--ws-line); min-height:34px; padding:4px 8px 4px 12px; }
+.workspace[data-ui-profile] .wm-name { font-family:var(--ws-font); font-size:12px !important; font-weight:500; color:var(--ws-text); }
+.workspace[data-ui-profile] .wm-body { background:var(--ws-panel); color:var(--ws-text); padding:12px; font-family:var(--ws-font); }
+.workspace[data-ui-profile] .wm-buttons button { background:transparent; color:var(--ws-muted); border:0; min-width:25px !important; min-height:25px !important; padding:1px !important; font-size:16px !important; border-radius:3px; }
+.workspace[data-ui-profile] .wm-body :where(input,select,textarea,button) { background:var(--ws-input); color:var(--ws-text); border:1px solid var(--ws-line); border-radius:4px; }
+.workspace[data-ui-profile] .wm-body :where(h2,h3,h4,legend,label) { color:var(--ws-text); }
+.workspace[data-ui-profile] .wm-body :where(.hint,.meta,.sub,small) { color:var(--ws-muted); font-size:11px !important; }
+.workspace[data-ui-profile] .session-panel { background:var(--ws-panel); border-color:var(--ws-line); color:var(--ws-text); border-radius:var(--ws-radius); }
+
+/* Foundry v13/v14 reference layout (image-search/foundry-vtt-v13-default-user-interface-s-1.webp):
+   cool near-black panels, two control columns (warm border = active group, indigo fill = active
+   tool), a scene pill top-left, the document tab column on the LEFT edge of the right sidebar,
+   parchment chat cards, a dark user pill lower-left and a centered ten-slot macro dock. */
+main.workspace[data-ui-profile="foundry"] { --ws-bg:#0d0d14; --ws-panel:#15141cf0; --ws-raised:#23222e; --ws-input:#0f0e15; --ws-line:#3b3a4a; --ws-text:#e6e6ee; --ws-muted:#aaa9b8; --ws-accent:#ee9b3a; --ws-warm:#c9593f; --ws-cool:#4f52d2; --ws-font:'Roboto Condensed',Arial,sans-serif; --ws-radius:4px; --ws-header:0px; --ws-dock:340px; --ws-tabs:40px; --ws-rail:86px; --ws-tool:36px; }
+.workspace[data-ui-profile="foundry"] .workspace-chrome,.workspace[data-ui-profile="roll20"] .workspace-chrome { display:contents; }
+.workspace[data-ui-profile="foundry"] .chrome-title,.workspace[data-ui-profile="foundry"] .world-divider,.workspace[data-ui-profile="foundry"] .chrome-center,.workspace[data-ui-profile="foundry"] .scene-crumb,.workspace[data-ui-profile="foundry"] .chrome-invite,.workspace[data-ui-profile="foundry"] .workspace-status { position:absolute; width:1px; height:1px; clip-path:inset(50%); overflow:hidden; }
+.workspace[data-ui-profile="foundry"] .wordmark { position:fixed; left:14px; bottom:14px; z-index:30; width:30px; height:30px; color:var(--ws-text); background:#15141ce6; border:1px solid var(--ws-line); border-radius:4px; }
+.workspace[data-ui-profile="foundry"] .wordmark>svg { display:block; width:16px; height:16px; }.workspace[data-ui-profile="foundry"] .modern-mark { display:none; }
+.workspace[data-ui-profile="foundry"] .workspace-trigger,.workspace[data-ui-profile="foundry"] .appearance-trigger { position:fixed; left:50px; bottom:14px; z-index:30; background:#15141ce6; color:var(--ws-text); border:1px solid var(--ws-line); width:30px; height:30px; border-radius:4px; }
+.workspace[data-ui-profile="foundry"] .appearance-trigger { left:86px; }
+.workspace[data-ui-profile="foundry"] .workspace-menu { top:auto; left:14px; bottom:52px; }
+.workspace[data-ui-profile="foundry"] .toolrail { left:14px; top:12px; max-height:calc(100% - 120px); width:86px; }
+.workspace[data-ui-profile="foundry"] .foundry-controls { display:flex; gap:4px; }
+.workspace[data-ui-profile="foundry"] .control-sets,.workspace[data-ui-profile="foundry"] .control-tools { display:flex; flex-direction:column; gap:4px; }
+.workspace[data-ui-profile="foundry"] .foundry-controls button { width:36px; height:36px; min-height:36px !important; border:1px solid var(--ws-line); border-radius:4px; background:#15141ccc; color:var(--ws-text); box-shadow:0 0 4px #0009; display:grid; place-items:center; padding:0; }
+.workspace[data-ui-profile="foundry"] .foundry-controls button:hover { border-color:#8a8898; background:#23222ee6; }
+.workspace[data-ui-profile="foundry"] .control-sets button.active { border-color:var(--ws-warm); box-shadow:0 0 6px #c9593f66,inset 0 0 0 1px #c9593f33; }
+.workspace[data-ui-profile="foundry"] .control-tools button.active { background:var(--ws-cool); border-color:#7a7cf0; color:#fff; box-shadow:0 0 6px #4f52d266; }
+.workspace[data-ui-profile="foundry"] .tool-popover { top:60px; right:calc(var(--ws-dock) + 20px); background:#15141cf2; }
+.workspace[data-ui-profile="foundry"][data-sidebar-open="false"] .tool-popover { right:65px; }
+.workspace[data-ui-profile="foundry"] .scene-bar { display:block; left:108px; top:12px; right:calc(var(--ws-dock) + 15px); background:transparent; padding:0; border:0; box-shadow:none; }
+.workspace[data-ui-profile="foundry"][data-sidebar-open="false"] .scene-bar { right:60px; }
+.workspace[data-ui-profile="foundry"] .scenenav { flex-wrap:wrap; gap:4px; }
+.workspace[data-ui-profile="foundry"] .scenenav>button { min-height:32px !important; padding:5px 12px; background:#15141cdd; border:1px solid #44435a; border-radius:4px; color:var(--ws-text); font-family:'Roboto Condensed',sans-serif; font-size:13px !important; box-shadow:0 0 4px #0008; }
+.workspace[data-ui-profile="foundry"] .scenenav>button:hover { border-color:#8a8898; }
+.workspace[data-ui-profile="foundry"] .scenenav>button.active { border-color:#8a8cf0; box-shadow:0 0 6px #4f52d266; }
+.workspace[data-ui-profile="foundry"] .scenenav>button.active::before { content:''; display:inline-block; width:6px; height:6px; margin-right:7px; border-radius:50%; background:#6fa7ff; vertical-align:middle; }
+.workspace[data-ui-profile="foundry"] .scene-menu { background:#15141cf2; border:1px solid var(--ws-line); color:var(--ws-text); }
+/* The Foundry canvas runs under the floating dock, so the zoom pill moves to the free bottom-right corner. */
+.workspace[data-ui-profile="foundry"] .zoom-control { top:auto; bottom:78px; right:calc(var(--ws-dock) + 20px); } /* clears the hotbar row */
+.workspace[data-ui-profile="foundry"][data-sidebar-open="false"] .zoom-control { right:70px; }
+.workspace[data-ui-profile="foundry"] .zoom-control[open] { display:flex; flex-direction:column-reverse; align-items:flex-end; }
+.workspace[data-ui-profile="foundry"] .zoom-control .zoom-panel { margin:0 0 6px; }
+.workspace[data-ui-profile="foundry"] .sidebar { position:absolute; right:5px; top:8px; bottom:10px; border:0; border-radius:4px; grid-template-columns:40px minmax(0,1fr); grid-template-rows:40px minmax(0,1fr); background:transparent; }
+.workspace[data-ui-profile="foundry"] .workspace-tabs { grid-column:1; border:0; padding:0 6px 0 0; background:transparent; gap:4px; }
+.workspace[data-ui-profile="foundry"] .workspace-tabs button { width:32px; height:32px; min-height:32px !important; flex-basis:32px; border:1px solid var(--ws-line); background:#15141ccc; border-radius:4px; color:var(--ws-text); box-shadow:0 0 4px #0009; }
+.workspace[data-ui-profile="foundry"] .workspace-tabs button:hover { border-color:#8a8898; background:#23222ee6; }
+.workspace[data-ui-profile="foundry"] .workspace-tabs button.active { border-color:var(--ws-warm); box-shadow:0 0 6px #c9593f66; background:#2a1f24; }
+.workspace[data-ui-profile="foundry"] .dock-heading,.workspace[data-ui-profile="foundry"] .tabbody { grid-column:2; background:#15141ce6; }
+.workspace[data-ui-profile="foundry"] .dock-heading { border:1px solid var(--ws-line); border-bottom:0; border-radius:4px 4px 0 0; }
+.workspace[data-ui-profile="foundry"] .tabbody { border:1px solid var(--ws-line); border-top:0; border-radius:0 0 4px 4px; padding:8px; }
+.workspace[data-ui-profile="foundry"][data-sidebar-open="false"] .sidebar { width:40px; grid-template-columns:40px 0; }
+.workspace[data-ui-profile="foundry"] .workspace-presence { bottom:53px; left:14px; width:200px; flex-direction:column; align-items:stretch; gap:3px; }
+.workspace[data-ui-profile="foundry"] .workspace-presence .player { display:flex; align-items:center; background:#15141cdd; border:1px solid var(--ws-line); border-radius:4px; padding:5px 9px; font-size:13px; color:var(--ws-text); }
+.workspace[data-ui-profile="foundry"] .workspace-presence .player::before { content:''; width:8px; height:8px; border-radius:50%; background:#5ec26a; margin-right:8px; flex:none; }
+.workspace[data-ui-profile="foundry"] .workspace-presence .player small { color:var(--ws-muted); margin-left:auto; }
+.workspace[data-ui-profile="foundry"] .workspace-bottom { left:50%; max-width:calc(100% - 440px); bottom:10px; }
+.workspace[data-ui-profile="foundry"] .hotbar { background:#15141ce6; border:1px solid var(--ws-line); border-radius:4px; padding:4px; gap:4px; }
+.workspace[data-ui-profile="foundry"] .hotbar .slot { width:46px; height:46px; min-height:46px !important; border:1px solid var(--ws-line); border-radius:4px; background:#0f0e15e6; color:var(--ws-text); }
+.workspace[data-ui-profile="foundry"] .hotbar .slot.bound { border-color:#6a6980; }
+.workspace[data-ui-profile="foundry"] .slot-key { font:11px 'Roboto Condensed',sans-serif; top:2px; left:5px; color:var(--ws-muted); opacity:1; }
+.workspace[data-ui-profile="foundry"] .slot-name { font:9px 'Roboto Condensed',sans-serif; color:var(--ws-text); }
+.workspace[data-ui-profile="foundry"] .slot-symbol { color:var(--ws-accent); }
+.workspace[data-ui-profile="foundry"] .chat .line { background:#e8e4dc; border:1px solid #7a7466; border-radius:4px; margin:6px 0; padding:9px; color:#1b1b22; line-height:1.45; font-family:'Roboto Condensed',sans-serif; font-size:14px; }
+.workspace[data-ui-profile="foundry"] .chat .author { color:#1b1b22; font-family:'Roboto Condensed',sans-serif; font-size:13px; font-weight:700; }
+.workspace[data-ui-profile="foundry"] .chat .line a { color:#c9641f; }
+.workspace[data-ui-profile="foundry"] .chat .rollcard { background:#dcd7cc; border-color:#9a9284; color:#1b1b22; }
+.workspace[data-ui-profile="foundry"] #chat-log { padding:2px 3px; }
+.workspace[data-ui-profile="foundry"] .wm-title { min-height:34px; background:#1c1b26; border-bottom:1px solid var(--ws-line); }
+.workspace[data-ui-profile="foundry"] .wm-name { font-family:'Roboto Condensed',sans-serif; font-size:16px !important; font-weight:400; }
+.workspace[data-ui-profile="foundry"] .wm-window { background:#15141cf2; border:1px solid #4a4960; border-radius:4px; }
+.workspace[data-ui-profile="foundry"] .wm-body { background:#15141cf2; }
+
+/* Current Roll20 reference layout: independent black toolbox/layers, pages drawer,
+   horizontal sidebar tabs and a light/dark dock. */
+/* Reference: image-search/roll20-jumpgate-new-tabletop-interface-t-2.png (dark) and -t-3.png (toolbar). */
+main.workspace[data-ui-profile="roll20"] { --ws-bg:#dedee1; --ws-panel:#fafafa; --ws-raised:#eeeef0; --ws-input:#fff; --ws-line:#c9c9ce; --ws-text:#343238; --ws-muted:#77737d; --ws-accent:#7f3fbf; --ws-toolbox:#1a1a1a; --ws-rail:56px; --ws-font:Roboto,Arial,sans-serif; --ws-radius:3px; --ws-header:0px; --ws-dock:310px; --ws-tabs:0px; --ws-tool:32px; }
+main.workspace[data-ui-profile="roll20"][data-ui-scheme="dark"] { --ws-bg:#141416; --ws-panel:#1f1f21; --ws-raised:#2b2b2e; --ws-input:#161618; --ws-line:#3f3f44; --ws-text:#e4e3e6; --ws-muted:#a7a5ad; --ws-accent:#c454b0; }
+/* Roll20 has no command bar: these reach assistive tech only; mouse users take the ≡ menu. The appearance
+   trigger is in the list too, or its 32px box leaves a blank band above the canvas. */
+.workspace[data-ui-profile="roll20"] .chrome-title,.workspace[data-ui-profile="roll20"] .world-divider,.workspace[data-ui-profile="roll20"] .chrome-center,.workspace[data-ui-profile="roll20"] .chrome-invite,.workspace[data-ui-profile="roll20"] .workspace-status,.workspace[data-ui-profile="roll20"] .workspace-trigger,.workspace[data-ui-profile="roll20"] .appearance-trigger { position:absolute; width:1px; height:1px; clip-path:inset(50%); overflow:hidden; }
+.workspace[data-ui-profile="roll20"] .wordmark { position:fixed; top:6px; left:9px; width:38px; height:34px; background:var(--ws-toolbox); color:#e8e8e8; border-radius:4px; z-index:35; /* over the toolbox it sits on */ }
+.workspace[data-ui-profile="roll20"] .wordmark>svg { display:block; width:21px; height:21px; }.workspace[data-ui-profile="roll20"] .modern-mark { display:none; }
+.workspace[data-ui-profile="roll20"] .workspace-menu { left:60px; top:6px; border-radius:4px; }
+.workspace[data-ui-profile="roll20"] .zoom-control { top:50px; }
+.workspace[data-ui-profile="roll20"] .scene-crumb { position:fixed; right:calc(var(--ws-dock) + 22px); top:10px; background:var(--ws-panel); border:1px solid var(--ws-line); color:var(--ws-text); border-radius:4px; padding:6px 10px; z-index:30; }
+.workspace[data-ui-profile="roll20"][data-sidebar-open="false"] .scene-crumb { right:42px; }
+.workspace[data-ui-profile="roll20"] .scene-crumb>span { font-size:12px; }
+.workspace[data-ui-profile="roll20"] .scene-bar { left:68px; top:53px; right:325px; padding:14px; background:var(--ws-panel); border-radius:4px; }
+.workspace[data-ui-profile="roll20"] .scenenav { gap:12px; flex-wrap:wrap; }
+.workspace[data-ui-profile="roll20"] .scenenav>button:not(#scene-add) { min-width:130px; min-height:80px !important; padding:42px 10px 8px; background:linear-gradient(135deg,transparent,#00000016),var(--ws-raised); border:2px solid var(--ws-line); color:var(--ws-text); font-family:Roboto,Arial,sans-serif; font-size:12px !important; }
+.workspace[data-ui-profile="roll20"] .scenenav>button.active { border-color:var(--ws-accent); }
+.workspace[data-ui-profile="roll20"] .toolrail { position:relative; left:auto; top:auto; bottom:auto; flex:0 0 var(--ws-rail); align-self:stretch; width:var(--ws-rail); height:auto; max-height:none; background:var(--ws-toolbox); }
+.workspace[data-ui-profile="roll20"] .canvas-toolbar { width:var(--ws-rail); height:100%; }
+.workspace[data-ui-profile="roll20"] .rail-scroll { height:100%; padding:46px 6px 8px; background:var(--ws-toolbox); border:0; border-radius:0; gap:8px; box-shadow:none; }
+.workspace[data-ui-profile="roll20"] .main-tools { gap:4px; }
+.workspace[data-ui-profile="roll20"] .rail-scroll button { width:40px; height:34px; min-height:34px; flex-basis:34px; color:#d9d9d9; border-radius:6px; }
+.workspace[data-ui-profile="roll20"] .rail-scroll button:hover { background:#2e2e2e; color:#fff; }
+.workspace[data-ui-profile="roll20"] .rail-scroll button.active { color:#fff; background:#454545; border-color:#5a5a5a; }
+.workspace[data-ui-profile="roll20"] .rail-scroll .layer-dock { margin-top:auto; padding-top:8px; border-top:1px solid #3a3a3a; align-items:center; gap:5px; }
+.workspace[data-ui-profile="roll20"] .layer-caption,.workspace[data-ui-profile="roll20"] .menu-caption { font:8px/1.2 Roboto,sans-serif; color:#b5b5b5; letter-spacing:.04em; white-space:nowrap; text-transform:uppercase; }
+.workspace[data-ui-profile="roll20"] .layer-dock button { flex:0 0 52px; min-height:52px; height:52px; display:flex; flex-direction:column; gap:3px; padding:6px 0 0; border-radius:8px; }
+.workspace[data-ui-profile="roll20"] .layer-dock button span { font:7px/1.2 Roboto,sans-serif; color:#c9c9c9; white-space:nowrap; text-transform:uppercase; }
+.workspace[data-ui-profile="roll20"] .layer-dock button.active { background:#1e8c4e; color:#eafbee; border-color:#2fa862; }
+.workspace[data-ui-profile="roll20"] .tool-extra-menu { left:62px; top:45px; border-radius:4px; }
+.workspace[data-ui-profile="roll20"] .tool-popover { top:56px; border-radius:4px; }
+.workspace[data-ui-profile="roll20"] .sidebar { grid-template-columns:minmax(0,1fr); grid-template-rows:36px minmax(0,1fr); border-left:1px solid var(--ws-line); }
+.workspace[data-ui-profile="roll20"] .workspace-tabs { grid-column:1; grid-row:1; flex-direction:row; gap:0; padding:0 4px; border:0; border-bottom:1px solid var(--ws-line); background:var(--ws-raised); }
+.workspace[data-ui-profile="roll20"] .workspace-tabs button { width:38px; height:35px; min-height:35px !important; flex-basis:38px; border-radius:0; color:var(--ws-muted); }
+.workspace[data-ui-profile="roll20"] .workspace-tabs button.active { background:var(--ws-panel); color:var(--ws-accent); box-shadow:inset 0 -3px var(--ws-accent); }
+.workspace[data-ui-profile="roll20"] .sidebar>.dock-heading { display:none; }
+.workspace[data-ui-profile="roll20"] .sidebar>.tabbody { grid-column:1; grid-row:2; padding:10px; }
+.workspace[data-ui-profile="roll20"] .sidebar>.tabbody[data-active-tab="chat"],.workspace[data-ui-profile="roll20"] .sidebar>.tabbody[data-player-active-tab="chat"] { padding:0; }
+/* Selector must out-rank the strip's generic button rule (position/flex-basis), or the toggle flows
+   into the strip and covers the "More panels" button. */
+.workspace[data-ui-profile="roll20"] .workspace-tabs button.sidebar-toggle { position:absolute; left:-24px; top:0; width:23px; flex:none; background:var(--ws-panel); border:1px solid var(--ws-line); border-right:0; border-radius:4px 0 0 4px; }
+.workspace[data-ui-profile="roll20"][data-sidebar-open="false"] .sidebar { width:0; flex-basis:0; border:0; }
+.workspace[data-ui-profile="roll20"][data-sidebar-open="false"] .workspace-tabs { width:0; padding:0; border:0; overflow:visible; }
+.workspace[data-ui-profile="roll20"][data-sidebar-open="false"] .workspace-tabs>button:not(.sidebar-toggle),.workspace[data-ui-profile="roll20"][data-sidebar-open="false"] .tab-more { display:none; }
+.workspace[data-ui-profile="roll20"] .tab-more-menu { top:38px; right:3px; }
+.workspace[data-ui-profile="roll20"] .chat .line { padding:12px 9px; border-bottom:1px solid var(--ws-line); font:14px/1.5 Roboto,Arial,sans-serif; }
+.workspace[data-ui-profile="roll20"] .chat .author { color:var(--ws-text); font:bold 12px Roboto,Arial,sans-serif; margin-bottom:5px; }
+.workspace[data-ui-profile="roll20"] #chat-log { padding:0; }
+.workspace[data-ui-profile="roll20"] #chat-input { height:70px; background:var(--ws-input); color:var(--ws-text); border:1px solid #a4a1aa; border-radius:4px; }
+.workspace[data-ui-profile="roll20"] #chat-send { background:var(--ws-accent); border-color:var(--ws-accent); color:#fff; border-radius:3px; }
+.workspace[data-ui-profile="roll20"] .workspace-presence { left:68px; bottom:42px; }
+.workspace[data-ui-profile="roll20"] .workspace-presence .player { background:#262628d9; border:0; border-bottom:4px solid var(--ws-accent); border-radius:0; color:#eee; min-width:84px; padding:5px 9px; }
+.workspace[data-ui-profile="roll20"] .workspace-bottom { bottom:7px; left:68px; transform:none; max-width:calc(100% - var(--ws-dock) - 90px); }
+.workspace[data-ui-profile="roll20"][data-sidebar-open="false"] .workspace-bottom { left:68px; max-width:calc(100% - 110px); }
+.workspace[data-ui-profile="roll20"] .hotbar { padding:0; border:0; background:none; border-radius:0; box-shadow:none; }
+.workspace[data-ui-profile="roll20"] .hotbar .slot { width:42px; height:25px; min-height:25px !important; border:1px solid var(--ws-line); border-radius:3px; background:var(--ws-panel); }
+.workspace[data-ui-profile="roll20"] .slot-symbol { display:none; }.workspace[data-ui-profile="roll20"] .slot-key { top:2px; left:3px; font-size:8px; }
+.workspace[data-ui-profile="roll20"] .slot-name { position:static; font-size:10px; }.workspace[data-ui-profile="roll20"] .slot:not(.bound) { width:26px; opacity:.6; }
+.workspace[data-ui-profile="roll20"] .wm-window { border:1px solid var(--ws-line); border-radius:5px; background:var(--ws-panel); }
+.workspace[data-ui-profile="roll20"] .wm-title { background:var(--ws-raised); border-bottom:1px solid var(--ws-line); min-height:35px; }
+.workspace[data-ui-profile="roll20"] .wm-name { font:bold 13px Roboto,Arial,sans-serif !important; }
+.workspace[data-ui-profile="roll20"] .wm-body { background:var(--ws-panel); }
+
+@media(max-width:1100px) {
+  .workspace[data-ui-profile="modern"] .chrome-center { display:none; }
+  .workspace[data-ui-profile="modern"] .rules-status { display:none; }
+  .workspace[data-ui-profile="modern"] .chrome-utilities { margin-left:auto; }
+  .workspace[data-ui-profile="modern"] .chrome-title { max-width:150px; }
+}
+@media(max-height:820px) {
+  .workspace[data-ui-profile="roll20"] .rail-scroll { gap:3px; }
+  .workspace[data-ui-profile="roll20"] .main-tools { gap:0; }
+  .workspace[data-ui-profile="roll20"] .rail-scroll button { height:28px; min-height:28px; flex-basis:28px; }
+  .workspace[data-ui-profile="roll20"] .layer-dock button { min-height:43px; height:43px; flex-basis:43px; }
+}
+@media(max-width:760px) {
+  main.workspace[data-ui-profile] { --ws-dock:min(320px,80vw); }
+  .workspace[data-ui-profile="modern"] .chrome-world { flex:1; } /* modern only: in the display:contents headers it would grow down the column */
+  .workspace[data-ui-profile] .chrome-title { max-width:125px; }
+  .workspace[data-ui-profile] .chrome-world .scene-crumb,.workspace[data-ui-profile] .world-divider,.workspace[data-ui-profile] .workspace-status,.workspace[data-ui-profile] .chrome-invite span { display:none; }
+  .workspace[data-ui-profile] .chrome-action { width:25px; }
+  /* Phones stack the dock under the board (the legacy shell's proven arrangement) instead of floating
+     an 80 %-wide drawer over it: the tab column becomes a scrollable strip across the dock's top. */
+  .workspace[data-ui-profile] > .shell { flex-direction:column; }
+  .workspace[data-ui-profile] .canvas-col,.workspace[data-ui-profile] .canvas-area { width:auto; }
+  .workspace[data-ui-profile] .sidebar { position:relative; inset:auto; order:1; flex:0 0 min(42dvh,360px); width:100%; height:auto; max-height:none; border:0; border-top:1px solid var(--ws-line); grid-template-columns:minmax(0,1fr); grid-template-rows:40px minmax(0,1fr); }
+  .workspace[data-ui-profile][data-sidebar-open="false"] .sidebar { flex-basis:40px; width:100%; grid-template-columns:minmax(0,1fr); }
+  .workspace[data-ui-profile] .sidebar>.dock-heading { display:none; }
+  .workspace[data-ui-profile] .workspace-tabs { grid-column:1; grid-row:1; width:auto; flex-direction:row; align-items:center; gap:2px; padding:0 4px; overflow-x:auto; overflow-y:hidden; border:0; border-bottom:1px solid var(--ws-line); }
+  .workspace[data-ui-profile] .workspace-tabs button { flex:0 0 auto; width:34px; height:34px; min-height:34px !important; display:grid; }
+  .workspace[data-ui-profile] .workspace-tabs button.sidebar-toggle { position:sticky; right:0; inset:auto 0 auto auto; margin:0 0 0 auto; width:34px; flex:none; border:0; border-radius:4px; background:var(--ws-bg); }
+  .workspace[data-ui-profile="roll20"][data-sidebar-open="false"] .workspace-tabs { width:auto; padding:0 4px; }
+  .workspace[data-ui-profile] .sidebar>.tabbody { grid-column:1; grid-row:2; padding:8px; }
+  .workspace[data-ui-profile] .tab-more-menu { left:4px; right:auto; top:42px; }
+  .workspace[data-ui-profile] .tool-popover,.workspace[data-ui-profile][data-sidebar-open="false"] .tool-popover { right:10px; width:min(260px,calc(100vw - 80px)); }
+  .workspace[data-ui-profile="foundry"] .zoom-control { right:12px; bottom:auto; top:52px; }
+  .workspace[data-ui-profile] .workspace-bottom { max-width:calc(100% - 95px); left:50%; }
+  .workspace[data-ui-profile] .hotbar .slot { width:27px; height:30px; min-height:30px !important; }
+  .workspace[data-ui-profile] .workspace-presence { display:none; }
+  .workspace[data-ui-profile="foundry"] .scene-bar { left:108px; right:50px; }
+  .workspace[data-ui-profile="roll20"] .scene-bar { left:62px; right:25px; }
+  .workspace[data-ui-profile="foundry"] .workspace-bottom { max-width:calc(100% - 120px); left:calc((100% - 40px)/2); }
+}

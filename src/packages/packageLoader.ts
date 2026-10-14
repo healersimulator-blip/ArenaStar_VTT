@@ -10,6 +10,7 @@ import { extractZipEntriesBounded } from "../host/worldZip";
 import type { PackageManifest } from "../core/packageManifest";
 import { validatePackageManifest } from "../core/packageManifest";
 import type { Result } from "../core/result";
+import { aisOwnSource, aisRuntimeConfiguration, aisRuntimeResources } from "./aisRuntimePackage";
 import { err, okVal } from "../core/result";
 
 /** Validated package contents (world-scoped fields added by the store). */
@@ -97,6 +98,14 @@ export function buildPackageFromFiles(rawFiles: Record<string, string>): Result<
     if (entry.trim().length === 0) {
       return err(`package ${manifest.value.id}: AIS entry is empty`);
     }
+  }
+  if (manifest.value.interconnect) {
+    try {
+      const pkg = { id: manifest.value.id, version: manifest.value.version, manifest: manifest.value, files };
+      aisOwnSource(pkg);
+      aisRuntimeConfiguration(pkg);
+      aisRuntimeResources(pkg);
+    } catch (error) { return err(error instanceof Error ? error.message : String(error)); }
   }
   for (const pack of manifest.value.packs ?? []) {
     const text = files[pack.file];

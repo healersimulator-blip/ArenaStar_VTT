@@ -234,6 +234,44 @@ test.describe("map & background layer", () => {
     await expect(page.locator("[data-bg-alignment]")).toContainText("Map lines sit on the grid.");
   });
 
+  test("D-465: the map's square count sets the map grid without detection, the octave buttons correct it, and Fit sizes the scene to the map", async ({ page }) => {
+    await page.goto(entry + "?e2e=1");
+    await waitForSurface(page, "app");
+    // 960 × 640 px, 64 px squares → 15 × 10 squares; the GM reads that off the map and types it in.
+    await replaceBackground(page, "grid-count.png", gridMap(960, 640, 64, 0, 0));
+    await openLayer(page, "Shift+M");
+    await expect(page.locator("[data-bg-count]")).toBeVisible();
+    await page.locator("[data-bg-count-columns]").fill("15");
+    await page.locator("[data-bg-count-rows]").fill("10");
+    await page.locator("[data-bg-count-apply]").click();
+    await expect(page.locator("[data-bg-map-grid]")).toContainText("Map squares: 64 × 64");
+    await expect(page.locator("[data-bg-squares-count]")).toHaveText("15 × 10");
+    const typed = (await activeScene(page)).background?.mapGrid;
+    expect(typed?.sizeX).toBe(64);
+    expect(typed?.sizeY).toBe(64);
+    expect(typed?.offsetX).toBe(0);
+
+    // A detector off by an octave is corrected in one click, both ways.
+    await page.locator('[data-bg-octave="double"]').click();
+    await expect(page.locator("[data-bg-squares-count]")).toHaveText("30 × 20");
+    expect((await activeScene(page)).background?.mapGrid?.sizeX).toBe(32);
+    await page.locator('[data-bg-octave="half"]').click();
+    await expect(page.locator("[data-bg-squares-count]")).toHaveText("15 × 10");
+    expect((await activeScene(page)).background?.mapGrid?.sizeX).toBe(64);
+
+    // Fit: the scene becomes exactly 15 × 10 grid cells and the map's squares equal the grid's.
+    await page.locator("[data-bg-fit-scene]").first().click();
+    await expect.poll(async () => {
+      const scene = await activeScene(page);
+      return { width: scene.width / scene.grid.size, height: scene.height / scene.grid.size };
+    }).toEqual({ width: 15, height: 10 });
+    const fitted = await activeScene(page);
+    expect(fitted.background?.scaleX ?? fitted.background?.scale ?? 1).toBeCloseTo(fitted.grid.size / 64, 6);
+    expect(fitted.background?.offset?.x ?? 0).toBe(0);
+    expect(fitted.background?.offset?.y ?? 0).toBe(0);
+    await expect(page.locator("[data-bg-alignment]")).toContainText("Map lines sit on the grid.");
+  });
+
   test("a map without a grid reports that no square grid was found", async ({ page }) => {
     await page.goto(entry + "?e2e=1");
     await waitForSurface(page, "app");

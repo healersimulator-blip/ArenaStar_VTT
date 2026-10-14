@@ -308,6 +308,9 @@ describe("HostPackages — AIS activation, approval and arbitration", () => {
     expect(await app.packages.grantAutomationCapabilities("hash-mod", ["ui.notify"])).toEqual({ ok: true });
 
     const before = (await app.packages.automation()).modules[0]?.hash;
+    const preview = await app.packages.previewAutomationModule("hash-mod");
+    if (!preview.ok) throw new Error(preview.error);
+    expect(preview.hash).toBe(before);
     const replacement = zipOf({
       "manifest.json": JSON.stringify({
         id: "hash-mod", name: "hash-mod", version: "1.0.1", type: "module",
@@ -319,6 +322,12 @@ describe("HostPackages — AIS activation, approval and arbitration", () => {
     const after = (await app.packages.automation()).modules[0];
     expect(after?.hash).not.toBe(before);
     expect(after).toMatchObject({ enabled: false, approved: false, grantedCapabilities: [] });
+    expect(await app.packages.grantAutomationCapabilities("hash-mod", ["ui.notify"], preview.hash))
+      .toMatchObject({ ok: false, error: expect.stringContaining("changed after the source preview") });
+    expect((await app.packages.automation()).modules[0]?.approved).toBe(false);
+    const currentPreview = await app.packages.previewAutomationModule("hash-mod");
+    if (!currentPreview.ok) throw new Error(currentPreview.error);
+    expect(await app.packages.grantAutomationCapabilities("hash-mod", ["ui.notify"], currentPreview.hash)).toEqual({ ok: true });
     await app.persister.flush();
     await app.close();
   });
@@ -365,5 +374,49 @@ describe("HostPackages — AIS activation, approval and arbitration", () => {
     expect((await restarted.packages.automation()).profile.providers[slot]).toBeUndefined();
     await restarted.persister.flush();
     await restarted.close();
+  });
+});
+
+
+describe("HostPackages — live AIS invalidation", () => {
+  test("a revocation waits for listeners to observe persisted consent; subscriptions dispose cleanly", async () => {
+    const app = await freshApp();
+    await app.packages.importZip(automationModule({ id: "live-probe", capabilities: ["ui.notify"] }));
+    await app.packages.enableAutomationModule("live-probe");
+    await app.packages.grantAutomationCapabilities("live-probe", ["ui.notify"]);
+    let entered!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const approvals: boolean[] = [];
+    const off = app.packages.onAutomationChanged(async () => {
+      approvals.push((await app.packages.automation()).modules[0]?.approved === true);
+      entered();
+      await gate;
+    });
+    let acknowledged = false;
+    const revoked = app.packages.revokeAutomationApproval("live-probe").then(() => { acknowledged = true; });
+    await reached;
+    expect(approvals).toEqual([false]);
+    expect(acknowledged).toBe(false);
+    release();
+    await revoked;
+    off();
+    await app.packages.grantAutomationCapabilities("live-probe", []);
+    expect(approvals).toHaveLength(1);
+    await app.close();
+  });
+
+  test("concurrent package edits preserve both exact locks and grants", async () => {
+    const app = await freshApp();
+    const ids = ["queue-one", "queue-two"];
+    await Promise.all(ids.map((id) => app.packages.importZip(automationModule({ id, capabilities: ["ui.notify"] }))));
+    expect(await Promise.all(ids.map((id) => app.packages.enableAutomationModule(id))))
+      .toEqual([{ ok: true }, { ok: true }]);
+    expect(await Promise.all(ids.map((id) => app.packages.grantAutomationCapabilities(id, ["ui.notify"]))))
+      .toEqual([{ ok: true }, { ok: true }]);
+    expect((await app.packages.automation()).modules.map((module) => ({ id: module.id, enabled: module.enabled, approved: module.approved })))
+      .toEqual(ids.map((id) => ({ id, enabled: true, approved: true })));
+    await app.close();
   });
 });

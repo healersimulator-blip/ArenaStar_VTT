@@ -9,14 +9,7 @@
  * than trusted.
  */
 import { expect, test } from "@playwright/test";
-import {
-  applySidebarMap,
-  entry,
-  hostCall,
-  solidPng,
-  surfaceCallArg,
-  waitForSurface,
-} from "./lib";
+import { applySidebarMap, entry, hostCall, openSceneNav, solidPng, surfaceCallArg, waitForSurface } from "./lib";
 
 /** The app's own readback of the active scene's hexcrawl state (D-270 `hexcrawl()`). */
 interface HexcrawlReadback {
@@ -61,7 +54,7 @@ test.describe("hexcrawl scene (§9 Phase 1, D-270)", () => {
     await waitForSurface(page, "gm");
 
     // ── the chooser: `+` asks which kind of scene, and a blank one is still one click ──
-    await page.click("#scene-add");
+    await openSceneNav(page); await page.click("#scene-add");
     await expect(page.locator("[data-scene-menu]")).toBeVisible();
     await page.click("#scene-new-hexcrawl");
 
@@ -198,7 +191,7 @@ test.describe("hexcrawl scene (§9 Phase 1, D-270)", () => {
     await waitForSurface(page, "gm");
 
     // ── the picture, then "fit" into a 2400 × 1500 scene ──
-    await page.click("#scene-add");
+    await openSceneNav(page); await page.click("#scene-add");
     await page.click("#scene-new-hexcrawl");
     const wizard = page.locator("[data-hexcrawl-wizard]");
     await expect(wizard).toBeVisible();
@@ -237,7 +230,7 @@ test.describe("hexcrawl scene (§9 Phase 1, D-270)", () => {
       });
 
     // ── a second hexcrawl with no picture takes the next free name ──
-    await page.click("#scene-add");
+    await openSceneNav(page); await page.click("#scene-add");
     await page.click("#scene-new-hexcrawl");
     await expect(wizard).toBeVisible();
     await page.click("[data-hx-next]");

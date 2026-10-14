@@ -161,7 +161,7 @@
       <label>Fixed scene <select data-script-scene bind:value={sceneId} onchange={() => reviewed = false}>{#each scenes as scene (scene._id)}<option value={scene._id}>{scene.name}</option>{/each}</select></label>
       <label>Run as <select bind:value={runAs} onchange={() => reviewed = false}><option value="caller" disabled={grants.includes("ais.invoke")}>Invoking user</option><option value="gm">GM (reviewed elevation)</option></select></label>
       <label><input type="checkbox" bind:checked={playerCallable} onchange={() => reviewed = false} />Allow players to invoke</label>
-      <label>Hotbar slot <select bind:value={slot}><option value={0}>—</option>{#each [1, 2, 3, 4, 5] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
+      <label>Hotbar slot <select bind:value={slot}><option value={0}>—</option>{#each [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
     </div>
     <label class="source">JavaScript source <textarea data-script-source spellcheck="false" rows="11" bind:value={source} oninput={() => reviewed = false}></textarea></label>
     <div class="grants">Host API grants:

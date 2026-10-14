@@ -95,6 +95,11 @@ export type GridDetection =
       grid: MapGridEstimate;
       /** Per-axis autocorrelation strength, for diagnostics. */
       axisConfidence: { x: number; y: number };
+      /**
+       * D-465: how many squares the measured size spans across the image. The GM recognises
+       * "30 × 30" far faster than "75.05 px", and a wrong octave shows up as half/double the count.
+       */
+      squares: { columns: number; rows: number };
     }
   | {
       found: false;
@@ -139,8 +144,21 @@ export function detectMapGrid(acc: EdgeProfileAccumulator, options: DetectOption
 
   // A square grid has equal periods on both axes; use one shared estimate for both.
   const fitted = Math.abs(px.lag - py.lag) <= Math.max(0.02 * combined.lag, 0.5);
-  const periodX0 = fitted ? combined.lag : refinePeak(rx, lags, px.index);
-  const periodY0 = fitted ? combined.lag : refinePeak(ry, lags, py.index);
+  let periodX0 = fitted ? combined.lag : refinePeak(rx, lags, px.index);
+  let periodY0 = fitted ? combined.lag : refinePeak(ry, lags, py.index);
+  // D-465 octave defence. Maps that emphasise every other line (a 10 ft rule drawn bold) carry
+  // most of their edge energy at twice the real pitch, so autocorrelation alone reads 2L and the
+  // VTT ends up with four map squares per cell. Lines halfway between the chosen lines, on both
+  // axes and clearly above the background, mean the fine grid is the real one.
+  if (
+    periodX0 / 2 >= minPeriod &&
+    periodY0 / 2 >= minPeriod &&
+    hasHalfPeriodLines(qx, periodX0, bestPhase(qx, periodX0)) &&
+    hasHalfPeriodLines(qy, periodY0, bestPhase(qy, periodY0))
+  ) {
+    periodX0 /= 2;
+    periodY0 /= 2;
+  }
   const lineX = refineLines(qx, periodX0, bestPhase(qx, periodX0));
   const lineY = refineLines(qy, periodY0, bestPhase(qy, periodY0));
 
@@ -158,6 +176,10 @@ export function detectMapGrid(acc: EdgeProfileAccumulator, options: DetectOption
       offsetY: wrap(lineY.offset, sizeY),
     },
     axisConfidence,
+    squares: {
+      columns: Math.max(1, Math.round(acc.width / sizeX)),
+      rows: Math.max(1, Math.round(acc.height / sizeY)),
+    },
   };
 }
 
@@ -220,12 +242,72 @@ function pickFundamental(
   for (let i = 1; i < r.length - 1; i++) {
     const v = at(r, i);
     if (v >= at(r, i - 1) && v >= at(r, i + 1) && v >= 0.75 * max) {
+      // D-465 octave defence: when the lag half this one is itself a local peak nearly as
+      // strong (≥ 85%), the grid is the finer one and this peak is its first multiple — the
+      // 75% gate skipped it only because an even larger multiple set the bar.
+      const half = halfLagPeak(r, lags, i);
+      if (half && half.r >= 0.85 * v) return half;
       return { lag: at(lags, i), r: v, index: i };
     }
   }
   let index = 0;
   for (let i = 1; i < r.length; i++) if (at(r, i) > at(r, index)) index = i;
   return { lag: at(lags, index), r: at(r, index), index };
+}
+
+/** The local autocorrelation peak at half of lags[index], if there is one in range. */
+function halfLagPeak(
+  r: ArrayLike<number>,
+  lags: number[],
+  index: number,
+): { lag: number; r: number; index: number } | null {
+  const target = at(lags, index) / 2;
+  const first = at(lags, 0);
+  const j = Math.round(target - first);
+  if (j < 1 || j >= index - 1) return null;
+  // Allow one sample of slack for odd lags (37.5 → 37 or 38) and take the stronger neighbour.
+  let best = -1;
+  for (const k of [j - 1, j, j + 1]) {
+    if (k < 1 || k >= r.length - 1) continue;
+    const v = at(r, k);
+    if (v >= at(r, k - 1) && v >= at(r, k + 1) && (best < 0 || v > at(r, best))) best = k;
+  }
+  return best < 0 ? null : { lag: at(lags, best), r: at(r, best), index: best };
+}
+
+/**
+ * Mean of the detrended profile's strongest sample within ±`slack` px of each boundary
+ * `offset + k·period` (bestPhase's convention). The slack matters: a bold line's phase is its
+ * outer edge, which sits a pixel or two off the thin lines between them.
+ */
+function meanAtLines(q: Float64Array, period: number, offset: number, slack = 2): number {
+  const n = q.length;
+  let sum = 0;
+  let count = 0;
+  for (let b = offset; b <= n; b += period) {
+    const centre = Math.round(b - 1);
+    let best = -Infinity;
+    for (let i = centre - slack; i <= centre + slack; i++) if (i >= 0 && i < n) best = Math.max(best, at(q, i));
+    if (best === -Infinity) continue;
+    sum += best;
+    count++;
+  }
+  return count > 0 ? sum / count : -Infinity;
+}
+
+/**
+ * Are there lines halfway between the lines at `offset + k·period`? Compared against the
+ * profile's median (the background) the mid-lines must carry a clear share of the main lines'
+ * energy and stand well above the noise; a single stray feature averages away over the map.
+ */
+function hasHalfPeriodLines(q: Float64Array, period: number, offset: number): boolean {
+  const sorted = Array.from(q).sort((a, b) => a - b);
+  const median = at(sorted, Math.floor(sorted.length / 2));
+  const upper = at(sorted, Math.floor(sorted.length * 0.9));
+  const main = meanAtLines(q, period, offset) - median;
+  const mid = meanAtLines(q, period, offset + period / 2) - median;
+  if (!(main > 0) || !(mid > 0)) return false;
+  return mid >= 0.25 * main && mid >= 2 * Math.max(upper - median, 1e-9);
 }
 
 /** Sub-sample peak position by parabolic interpolation over the autocorrelation. */

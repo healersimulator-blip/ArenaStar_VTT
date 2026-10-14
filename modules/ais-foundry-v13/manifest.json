@@ -1,0 +1,13 @@
+{
+  "id": "ais-foundry-v13",
+  "name": "Foundry v13 adapter — feasibility profile",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Experimental GM-local scene tags and transient FX. Uses AIS, never Foundry core or the parent renderer. Approve each guest separately.",
+  "interconnect": {
+    "api": "arena.ais/1",
+    "entry": "runtime/adapter.js",
+    "runtimeProvider": { "contract": 1, "profiles": ["foundry-v13-scene-tags-fx"] },
+    "capabilities": ["runtime.execute", "scene.tags.read", "scene.tags.write", "fx.play"]
+  }
+}

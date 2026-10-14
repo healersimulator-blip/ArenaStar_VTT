@@ -53,7 +53,7 @@
     { keys: "Alt + drag", action: "Ellipse instead of a rectangle (draw tool)" },
     { keys: "Shift + drag", action: "Snap the shape to the grid" },
     { keys: "Right-click or Escape", action: "Finish a polygon or a fog brush" },
-    { keys: "Ctrl + click", action: "Add a ruler waypoint (max 12) · Alt+click pings" },
+    { keys: "Right-click / Ctrl + click", action: "Add a ruler waypoint while measuring (max 12) · Alt+click pings" },
     { keys: "Middle / right / Shift + drag", action: "Pan the map from any tool" },
     { keys: "Double-click a label", action: "Edit it (text tool)" },
     { keys: "Click a door (wall tool, GM info)", action: "Open or close it · a locked door ignores the click" },

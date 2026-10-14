@@ -12,7 +12,7 @@ function harness() {
   const options: ToolOptions = { ...DEFAULT_TOOL_OPTIONS, placementSnap: "none", wallEditMode: "corner" };
   const tool = new ToolInteractionController({
     nextId: () => `fresh-${++nextId}`, userId: "gm", grid: () => null, options: () => options,
-    createDrawing: () => {}, createWall: (wall) => created.push(wall), createLight: () => {}, createNote: () => {}, promptText: () => {},
+    createDrawing: () => {}, createWall: (wall) => created.push(wall), createLight: () => undefined, createNote: () => {}, promptText: () => {},
     measurePreview: () => {}, shapePreview: (preview) => previews.push(preview), broadcastMeasure: () => {}, fogPaint: () => {},
     wallEditing: { context: () => ({ sceneId, scale, walls }), commit: (plan) => plans.push(plan), error: (message) => errors.push(message) },
   });

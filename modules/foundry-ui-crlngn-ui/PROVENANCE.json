@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/crlngn/crlngn-ui",
+  "commit": "d179e8ab044fc03dffe0a24404e5f686b1c60c56",
+  "mode": "bounded-appearance-adaptation",
+  "files": {
+    "src/module.json": "41ee172d7b7a33e99e539b8fe17006b43cbae9c1d3f7f00d0f548b950298bc95",
+    "README.md": "a675ea5565a14d5de157ae072e8a68fbb5e1c5dcd699cd87e29844fc186698f4",
+    "LICENSE": "6f17a688175694045f4a79e45f17d42be2eb58b262600e35f47b00d34836c2bf",
+    "src/styles/vars.css": "06b2f3de045973649d87132ab0b4855a924e02337431c588834f1c9a43c07b17"
+  }
+}

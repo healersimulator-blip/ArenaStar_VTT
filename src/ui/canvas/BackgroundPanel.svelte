@@ -12,6 +12,7 @@
     type NaturalSize,
   } from "../../core/backgroundTransform";
   import type { BackgroundDetectionView } from "./backgroundPanelTypes";
+  import { MAX_GRID_COUNT, gridCountOfMap, type GridCount } from "../../core/sceneFit";
 
   let {
     natural,
@@ -31,6 +32,10 @@
     onAlignToGrid,
     onUseSquaresAsGrid,
     onForgetMapGrid,
+    onMapGridScale = () => {},
+    onMapGridCount = () => {},
+    onFitSceneToMap = () => {},
+    onOpenSceneSettings = null,
     onClose,
   }: {
     natural: NaturalSize | null;
@@ -52,6 +57,13 @@
     onAlignToGrid: () => void;
     onUseSquaresAsGrid: () => void;
     onForgetMapGrid: () => void;
+    /** D-465: octave correction — the detector measured every second (2) or every half (0.5) line. */
+    onMapGridScale?: (factor: 0.5 | 2) => void;
+    /** D-465: the GM states the map's square count; the map grid follows from it. */
+    onMapGridCount?: (count: GridCount) => void;
+    /** D-465: scale the map to the grid *and* size the scene to the map's squares. */
+    onFitSceneToMap?: () => void;
+    onOpenSceneSettings?: (() => void) | null;
     onClose: () => void;
   } = $props();
 
@@ -65,6 +77,15 @@
   /** Square size as drawn on the scene, so the GM compares like with like. */
   const drawnSquare = $derived(mapGrid ? round(mapGrid.sizeX * transform.scaleX) : null);
   const detecting = $derived(detection.status === "running");
+  /** How many squares the measured grid spans — the number the GM can check against the map. */
+  const squares = $derived(natural && mapGrid ? gridCountOfMap(natural, mapGrid) : null);
+  let countDraft = $state<GridCount | null>(null);
+  const countValue = $derived(countDraft ?? squares ?? (natural && gridSize ? { columns: Math.max(1, Math.round(natural.width * transform.scaleX / gridSize)), rows: Math.max(1, Math.round(natural.height * transform.scaleY / gridSize)) } : { columns: 20, rows: 15 }));
+  function applyCount(): void {
+    const next = countDraft ?? countValue;
+    countDraft = null;
+    onMapGridCount(next);
+  }
 
   function num(value: string, fallback: number): number {
     const parsed = Number(value);
@@ -246,22 +267,38 @@
         </button>
       {:else}
         <div class="measured">
-          <p data-bg-map-grid>Map squares: {fmt(mapGrid.sizeX)} × {fmt(mapGrid.sizeY)} px (native).</p>
+          <p data-bg-map-grid>Map squares: {fmt(mapGrid.sizeX)} × {fmt(mapGrid.sizeY)} px (native){#if squares} — about <strong data-bg-squares-count>{squares.columns} × {squares.rows}</strong> squares across the map{/if}.</p>
           <div class="measured-actions">
             <button type="button" class="link" disabled={locked || detecting} onclick={onDetect} data-bg-detect>Detect again</button>
             <button type="button" class="link" disabled={locked} onclick={onForgetMapGrid}>Forget</button>
           </div>
         </div>
+        {#if squares}
+          <!-- D-465: a detector off by an octave (every second line) shows as half the squares;
+               the GM corrects it against the map in one click instead of re-measuring. -->
+          <div class="octave" data-bg-octave-row>
+            <span>Not what the map shows?</span>
+            <button type="button" class="link" disabled={locked} data-bg-octave="double" onclick={() => onMapGridScale(0.5)}>It has twice as many ({squares.columns * 2} × {squares.rows * 2})</button>
+            <button type="button" class="link" disabled={locked} data-bg-octave="half" onclick={() => onMapGridScale(2)}>Half as many ({Math.max(1, Math.round(squares.columns / 2))} × {Math.max(1, Math.round(squares.rows / 2))})</button>
+          </div>
+        {/if}
 
         {#if !gridSize}
           <div class="card warn">
             <p class="card-body">This scene has no square grid. Turn one on in Scene settings to line the map up with it.</p>
+            {#if onOpenSceneSettings}<button type="button" class="link" data-bg-open-scene-settings onclick={() => onOpenSceneSettings?.()}>Open Scene settings</button>{/if}
           </div>
         {:else if aligned}
           <div class="card ok">
             <p class="card-title" data-bg-alignment>Map lines sit on the grid.</p>
             <p class="card-body">Each map square draws at {drawnSquare} px, the same as the grid.</p>
           </div>
+          {#if squares}
+            <button type="button" class="secondary wide" disabled={locked} onclick={onFitSceneToMap} data-bg-fit-scene>
+              Size scene to the map ({squares.columns} × {squares.rows} cells)
+            </button>
+            <p class="choice-hint">The scene becomes exactly the map's squares, so nothing hangs over the edge.</p>
+          {/if}
         {:else if alignment}
           <div class="card warn">
             <p class="card-title" data-bg-alignment>Map lines are off the grid.</p>
@@ -279,8 +316,35 @@
               Use map squares as grid
             </button>
             <p class="choice-hint">Sets the scene grid to {fmt(mapGrid.sizeX)} px. The map stays the same.</p>
+            {#if squares}
+              <button type="button" class="secondary wide" disabled={locked} onclick={onFitSceneToMap} data-bg-fit-scene>
+                Fit scene to the map ({squares.columns} × {squares.rows} cells)
+              </button>
+              <p class="choice-hint">Scales the map so its squares fit the grid and sizes the scene to exactly {squares.columns} × {squares.rows} cells.</p>
+            {/if}
           </div>
         {/if}
+      {/if}
+
+      {#if natural && !detecting}
+        <!-- D-465: the count is the ground truth a GM can read off the map ("48 × 64 squares");
+             it needs no detection at all and overrides a wrong one. -->
+        <div class="count" data-bg-count>
+          <span class="snap-label">Squares on the map</span>
+          <div class="count-fields">
+            <input type="number" min="1" max={MAX_GRID_COUNT} step="1" aria-label="Squares across" data-bg-count-columns
+              value={countValue.columns} disabled={locked}
+              oninput={(e) => (countDraft = { ...countValue, columns: Math.max(1, Math.min(MAX_GRID_COUNT, Math.round(num(e.currentTarget.value, countValue.columns)))) })}
+              onkeydown={(e) => { if (e.key === "Enter") applyCount(); }} />
+            <span aria-hidden="true">×</span>
+            <input type="number" min="1" max={MAX_GRID_COUNT} step="1" aria-label="Squares down" data-bg-count-rows
+              value={countValue.rows} disabled={locked}
+              oninput={(e) => (countDraft = { ...countValue, rows: Math.max(1, Math.min(MAX_GRID_COUNT, Math.round(num(e.currentTarget.value, countValue.rows)))) })}
+              onkeydown={(e) => { if (e.key === "Enter") applyCount(); }} />
+            <button type="button" class="secondary" disabled={locked} data-bg-count-apply onclick={applyCount}>Set map squares</button>
+          </div>
+          <p class="choice-hint">One square = {fmt(natural.width / countValue.columns)} × {fmt(natural.height / countValue.rows)} px of the image. Then match or fit as above.</p>
+        </div>
       {/if}
 
       <div class="snap">
@@ -544,6 +608,11 @@
   }
   .measured p { margin: 0; }
   .measured-actions { display: flex; gap: 14px; }
+  .octave { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin-top: 6px; color: var(--vtt-muted); font-size: 0.8125rem; }
+  .count { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .count-fields { display: flex; align-items: center; gap: 6px; }
+  .count-fields input { width: 64px; padding: 4px 6px; color: inherit; background: var(--vtt-panel-sunken, #0c111b); border: 1px solid var(--vtt-border, #3a455e); border-radius: 4px; font: inherit; }
+  .count-fields button { padding: 4px 10px; }
 
   button.link {
     padding: 0.2rem 0;

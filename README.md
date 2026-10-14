@@ -87,6 +87,74 @@ implementation gaps. `modules/pf1e-torch/` is the worked ArenaStar-native carrie
 README documents the current command/event contracts and capabilities. Full feature parity with
 the original Foundry Torch module is not yet established.
 
+AIS v1's working foundation is covered by a dedicated real-browser acceptance batch:
+
+```sh
+corepack pnpm test:fx:prepare   # build the single-file app, systems and starter worlds
+corepack pnpm test:e2e:ais      # Chromium, one worker, no retries, 15-minute hard cap
+```
+
+To try it, open the PF1e starter, go to **Settings → Packages**, review the Torch entry source
+and capabilities, approve its exact hash, and reload. **Runtime: ready** is distinct from
+“approved.” Then use a token's carried-light menu or a separately reviewed GM script macro.
+Revoking approval, disabling/replacing a package, or changing its grants stops the old instance
+without a reload; starting newly approved code still requires one. The acceptance batch checks
+this lifecycle and the shipped Torch path over both `file://` and HTTPS. See D-461 and
+[E2E_BATCHES.md](E2E_BATCHES.md) for the verified scope; this is not yet the full AIS target design.
+
+**Runnable feasibility demo:** [Foundry through AIS](AIS_FOUNDRY_FEASIBILITY.md) loads original,
+byte-pinned Tagger 1.5.4 code through a separately packaged adapter, with host-validated tag writes
+and a small Sequence-style interface to our existing native FX engine. `test:fx:prepare` also builds
+`dist/worlds/ais-foundry-feasibility-0.1.0.zip`. The demo is GM-local and deliberately limited—not
+general Foundry compatibility. The [broader adapter proposal](FOUNDRY_AIS_ADAPTER_PROPOSAL.md)
+records the remaining workflow, UI, system and multiplayer work.
+
+### Foundry UI appearances — ready-to-open laboratory
+
+`corepack pnpm test:fx:prepare` also builds **`dist/ui-demo.html`** and **`dist/preview/index.html`**.
+These open a populated Alderwatch world automatically—no ZIP download, file picker or test flag.
+Use the GM header's **palette button** to choose Your Flavor, Carolingian or RPG Styled UI, review
+the appearance-only packages, and switch live. Compact/comfortable density, sidebar width and a
+native reset are available. The exact upstream code/style coverage is shown on each card.
+
+See [AIS_UI_MODULES.md](AIS_UI_MODULES.md): original Your Flavor token helpers, original RPG startup
+hooks/artwork, and Carolingian's upstream CSS cascade are supported appearance profiles—not full
+Foundry UI/system emulation. The ordinary `dist/index.html` still opens the normal world picker.
+
+### Workspace layouts — Modern, Foundry-like, Roll20-like (D-464)
+
+The GM and player shells come in three **layouts** over the same world, canvas and permission
+engine. The **layout button** in the command bar (or *Workspace layout* in the main menu) opens a
+chooser: **Modern** — ArenaStar's own quiet shell (a 46 px command bar with the per-minute actions,
+a ⌘ K command palette, a left tool rail with every tactical tool and the GM layer switch, a right
+rail with every document tab and a drawer that opens on chat by default, scenes in a popover under
+the scene crumb); **Foundry** — a
+reference-based v13/v14 arrangement (two scene-control columns, scene pills, the document-tab column
+on the sidebar's edge, parchment chat cards, a centred ten-slot macro dock); **Roll20** — a
+reference-based current-tabletop arrangement (a black toolbox with a layers dock, a pages drawer,
+a seven-tab sidebar strip with an overflow menu, light or dark scheme). The choice is a device
+preference (`arenastar.workspace-ui.v1` in local storage), never world data, and every action,
+tab and tool keeps its id in every layout — the e2e suite uses `chromeAction`, `openSceneNav` and
+`canvasAction` from `e2e/lib.ts` to reach controls that a layout keeps behind a menu. The
+compatibility layouts are approximations drawn from public screenshots, not the original products
+and not certified pixel parity.
+
+### Scene settings, grid fit and the players roster (D-465)
+
+**Scene settings** (main menu → *Scene settings*, the scene directory, or the background panel)
+sets a scene's size in pixels (shown as whole cells), its grid type, cell size, **grid line colour
+and opacity**, distance, units and diagonal rule. For an imported map, open **Map & background**
+(Shift+M) and either let *Detect map grid* measure the squares — it reports the map's total square
+count and offers "twice / half as many" when a bold every-second-line fooled it — or simply type
+the count you can read off the map (e.g. 48 × 64), then **Fit scene to the map**: the image is
+scaled so its squares equal the grid and the scene becomes exactly that many cells. **Players &
+permissions** (main menu, or embedded in World settings) is the roster: who is connected, their
+colour and role, the character they play, which tokens on the current scene they control (tick a
+token to hand it over), per-player macro saving, and Disconnect / Ban / Unban / Remove. On the
+canvas, a right-click while dragging the ruler pins a turn point (Ctrl+click too); placed lights
+can be clicked, dragged, re-sized and deleted again with the Light tool; Escape always dismisses
+what is armed first and only then returns to Select.
+
 ## World files, rulesets and content packs (§8, §12)
 
 A GM handles **one file per campaign**: the world file. Everything else travels inside it

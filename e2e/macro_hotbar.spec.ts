@@ -86,7 +86,8 @@ async function joinPlayer(host: Page, player: Page): Promise<void> {
 
 const slot = (page: Page, index: number) => page.locator(`[data-macro-hotbar] [data-hotbar-slot="${index}"]`);
 const prefs = (page: Page) => page.locator("[data-player-hotbar-prefs]");
-const binding = (page: Page, index: number) => prefs(page).getByLabel(`Macro hotbar slot ${index}`);
+const binding = (page: Page, index: number) =>
+  prefs(page).getByLabel(`Macro hotbar slot ${index}`, { exact: true }); // ten slots: "slot 1" must not match "slot 10"
 const runs = async (host: Page, name: string, userId: string) =>
   (await host.locator("#chat-log").innerText()).split(`${name} manual ${userId}`).length - 1;
 

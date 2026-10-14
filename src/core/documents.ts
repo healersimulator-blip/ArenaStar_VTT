@@ -767,6 +767,10 @@ export interface SceneGrid {
   diagonals: "555" | "5105" | "euclidean";
   /** Hex orientation — 4 layouts (§9). */
   hexLayout: HexLayout;
+  /** D-465: grid line colour as a CSS hex string (`#rrggbb`); absent = the default slate. */
+  color?: string;
+  /** D-465: grid line opacity 0..1; absent = the default 0.35. */
+  alpha?: number;
 }
 
 /**

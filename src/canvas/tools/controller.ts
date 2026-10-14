@@ -8,11 +8,14 @@
  * Gestures (Roll20 parity):
  *   draw    freehand / rect / ellipse / line / polygon, `Alt` = ellipse, `Shift` = grid snap
  *   text    one click, the shell opens its in-canvas editor at that point
- *   measure line or AoE (circle/cone/ray), snap modes, ctrl+click waypoints, broadcast
+ *   measure line or AoE (circle/cone/ray), snap modes, waypoints (right-click while the
+ *           ruler is held, or Ctrl+click), broadcast
  *   fog     GM brushes — rect or polygon, reveal or hide
  *   wall    GM drag, grid-snapped; door variant
- *   light   GM click
- *   pin     GM click (map pin / journal link)
+ *   light   GM click places; a click on an existing light selects it, a drag moves it,
+ *           Alt-click / Delete removes it (`lightEditing` port)
+ *   pin     GM click places; drag moves an existing pin, Alt-click removes it (`noteEditing`)
+ *   draw    Alt-click on an existing drawing erases it (`drawingEditing`)
  */
 import {
   drawingForFreehand,
@@ -91,7 +94,14 @@ export const DEFAULT_TOOL_OPTIONS: ToolOptions = {
 
 export interface ToolPointer {
   world: Point;
+  /** The button whose state changed (`PointerEvent.button`; -1 for a plain move). */
   button: number;
+  /**
+   * The buttons held *after* this event (`PointerEvent.buttons` bitmask). Browsers report a
+   * second button pressed while another is held as a `pointermove` with `button` set — the
+   * ruler reads the right-button waypoint from there, so the mask tells press from release.
+   */
+  buttons?: number;
   ctrlKey?: boolean;
   shiftKey?: boolean;
   altKey?: boolean;
@@ -124,10 +134,32 @@ export type ShapePreview =
   /** G-14 (D-450): the stairwell being dragged out, snapped to grid corners. */
   | { kind: "stairs"; from: Point; to: Point }
   /** D-453: the raised area being dragged out, snapped to grid corners. */
-  | { kind: "raised"; from: Point; to: Point };
+  | { kind: "raised"; from: Point; to: Point }
+  /** D-465: an existing light or pin being dragged to a new spot. */
+  | { kind: "placeable"; tool: "light" | "pin"; at: Point; radius: number };
+
+/**
+ * D-465: what a placement tool may do to the things it already placed. The shell owns the
+ * geometry (`hit` picks with its own layers and scale); the controller owns the gesture.
+ */
+export interface PlaceableEditPort {
+  /** The placeable under `world`, or null. `radius` is the light's dim radius (preview ring). */
+  hit(world: Point): { id: string; x: number; y: number; radius?: number } | null;
+  /** Commit a move (one op = one undo step). Absent: the kind cannot be dragged. */
+  move?(id: string, at: Point): void;
+  remove(id: string): void;
+  /** Selection feedback for the shell's markers and options; null clears it. */
+  select?(id: string | null): void;
+}
 
 export interface ToolCallbacks {
   wallEditing?: WallEditorPort;
+  /** D-465: existing lights the Light tool may select, drag and delete (GM shells). */
+  lightEditing?: PlaceableEditPort;
+  /** D-465: existing pins the Pin tool may drag and Alt-delete (GM shells). */
+  noteEditing?: PlaceableEditPort;
+  /** D-465: existing drawings the Draw tool erases with Alt-click. */
+  drawingEditing?: PlaceableEditPort;
   nextId: () => DocId;
   userId: UserId;
   grid: () => MeasureGrid | null;
@@ -138,7 +170,8 @@ export interface ToolCallbacks {
     c: [number, number, number, number];
     door: 0 | 1 | 2;
   }) => void;
-  createLight: (light: { x: number; y: number; radius: number; color: string }) => void;
+  /** Returns the new light's id when the shell has one, so it becomes the selection. */
+  createLight: (light: { x: number; y: number; radius: number; color: string }) => string | undefined;
   createNote: (at: Point) => void;
   promptText: (at: Point) => void;
   measurePreview: (value: MeasurePreview | null) => void;
@@ -157,6 +190,8 @@ export interface ToolCallbacks {
 const CLOSE_TOLERANCE = 24;
 /** A shape needs this much drag to commit (a stray click must not leave a dot). */
 const MIN_SHAPE_SIZE = 2;
+/** A placeable drag shorter than this (world units) is a click: select, do not move. */
+const MIN_PLACEABLE_DRAG = 2;
 
 /** Tool-only gesture state. It is deliberately independent of Pixi and DOM events. */
 export class ToolInteractionController {
@@ -165,6 +200,12 @@ export class ToolInteractionController {
   private start: Point | null = null;
   private lastMeasure: Point[] = [];
   private lastBroadcastKey = "";
+  /** A finished measurement is still on screen (Escape clears it before leaving the tool). */
+  private measureShown = false;
+  /** D-465: the light the Light tool has selected (markers, options, Delete). */
+  private selectedLight: string | null = null;
+  /** D-465: an existing light/pin under the pointer since pointerdown. */
+  private placeableDrag: { tool: "light" | "pin"; id: string; grab: Point; from: Point; radius: number; moved: boolean } | null = null;
   private readonly wallEditor: WallEditorController | null;
   constructor(private readonly callbacks: ToolCallbacks) {
     this.wallEditor = callbacks.wallEditing ? new WallEditorController(callbacks.wallEditing,
@@ -183,6 +224,64 @@ export class ToolInteractionController {
   /** The last finished measurement (Roll20's `X` — "show last measure"). */
   get lastMeasurement(): ReadonlyArray<Point> {
     return this.lastMeasure;
+  }
+
+  /**
+   * D-465: something is armed — a stroke, polygon or measurement in flight, a measurement
+   * still on screen, a placeable drag or a selected light, or a wall endpoint drag. Escape
+   * dismisses that first; with nothing armed the shell returns to Select.
+   */
+  hasPendingGesture(): boolean {
+    return (
+      this.points.length > 0 ||
+      this.start !== null ||
+      this.measureShown ||
+      this.placeableDrag !== null ||
+      this.selectedLight !== null ||
+      (this.wallEditor?.busy ?? false)
+    );
+  }
+
+  /** D-465: the selected light's id, or null. */
+  get selectedLightId(): string | null {
+    return this.selectedLight;
+  }
+
+  /** D-465: select a light from outside the gesture (e.g. a list) or clear the selection. */
+  selectLight(id: string | null): void {
+    if (this.selectedLight === id) return;
+    this.selectedLight = id;
+    this.callbacks.lightEditing?.select?.(id);
+  }
+
+  /** D-465: Delete/Backspace with a selected light removes it. Returns whether anything happened. */
+  deleteSelected(): boolean {
+    const id = this.selectedLight;
+    const port = this.callbacks.lightEditing;
+    if (!id || !port) return false;
+    port.remove(id);
+    this.selectLight(null);
+    return true;
+  }
+
+  /** D-465: pointerdown on an existing light/pin — select, start a drag, or Alt-delete. */
+  private beginPlaceable(tool: "light" | "pin", event: ToolPointer): boolean {
+    const port = tool === "light" ? this.callbacks.lightEditing : this.callbacks.noteEditing;
+    const hit = port?.hit(event.world);
+    if (!port || !hit) return false;
+    if (event.altKey) {
+      port.remove(hit.id);
+      if (tool === "light" && this.selectedLight === hit.id) this.selectLight(null);
+      return true;
+    }
+    if (tool === "light") this.selectLight(hit.id);
+    if (port.move) {
+      this.placeableDrag = {
+        tool, id: hit.id, from: { x: hit.x, y: hit.y }, radius: hit.radius ?? 0, moved: false,
+        grab: { x: event.world.x - hit.x, y: event.world.y - hit.y },
+      };
+    }
+    return true;
   }
 
   private options(): ToolOptions {
@@ -209,25 +308,44 @@ export class ToolInteractionController {
     return this.snap(event.world, event, this.options().placementSnap);
   }
 
+  /**
+   * A right-click while the ruler is being held pins a turn point without ending the
+   * measurement (testers asked for this alongside Ctrl+click). The shell suppresses the
+   * context menu; a right-click with no measurement in flight does nothing.
+   */
+  private rulerWaypointFromRightButton(event: ToolPointer): boolean {
+    if (event.button !== 2) return false;
+    if (this.mode === "measure" && this.points.length > 0) {
+      this.addWaypoint(this.snap(event.world, event, this.options().measureSnap));
+    }
+    return true;
+  }
+
   pointerDown(event: ToolPointer): void {
-    if (!this.mode || event.button !== 0) return;
+    if (!this.mode) return;
     const options = this.options();
+    if (this.rulerWaypointFromRightButton(event)) return;
+    if (event.button !== 0) return;
     if (this.mode === "text") {
       this.callbacks.promptText({ ...event.world });
       return;
     }
     if (this.mode === "pin") {
+      if (this.beginPlaceable("pin", event)) return;
       this.callbacks.createNote(this.snap(event.world, event, "none"));
       return;
     }
     if (this.mode === "light") {
+      if (this.beginPlaceable("light", event)) return;
       const at = this.snap(event.world, event, options.placementSnap);
-      this.callbacks.createLight({
+      const id = this.callbacks.createLight({
         x: at.x,
         y: at.y,
         radius: options.lightRadius,
         color: options.lightColor,
       });
+      // The light just placed is the selection, so it can be moved or deleted at once.
+      this.selectLight(typeof id === "string" ? id : null);
       return;
     }
     if (this.mode === "fog") {
@@ -261,6 +379,12 @@ export class ToolInteractionController {
       return;
     }
     if (this.mode === "draw") {
+      // Alt-click on an existing drawing erases it (the wall tool's eraser gesture); no stroke
+      // starts, so a stray Alt-click never leaves a dot behind.
+      if (event.altKey && this.callbacks.drawingEditing) {
+        const hit = this.callbacks.drawingEditing.hit(event.world);
+        if (hit) { this.callbacks.drawingEditing.remove(hit.id); return; }
+      }
       const shape = this.drawShapeFor(event);
       const at = this.snap(event.world, event, "none");
       if (shape === "poly") {
@@ -289,6 +413,21 @@ export class ToolInteractionController {
 
   pointerMove(event: ToolPointer): void {
     const options = this.options();
+    // Chorded buttons: pressing the right button while the left is held arrives as a
+    // `pointermove` whose `button` is 2 and whose `buttons` mask now includes bit 2 (its
+    // release is the same event without the bit) — that press is the ruler's waypoint.
+    if (event.button === 2) {
+      if (event.buttons !== undefined && (event.buttons & 2) === 0) return;
+      this.rulerWaypointFromRightButton(event);
+      return;
+    }
+    const drag = this.placeableDrag;
+    if (drag) {
+      const at = this.placeableTarget(drag, event);
+      if (Math.hypot(at.x - drag.from.x, at.y - drag.from.y) >= MIN_PLACEABLE_DRAG) drag.moved = true;
+      if (drag.moved) this.callbacks.shapePreview({ kind: "placeable", tool: drag.tool, at, radius: drag.radius });
+      return;
+    }
     if (this.mode === "draw") {
       const shape = this.drawShapeFor(event);
       if (shape === "freehand" && this.points.length > 0) {
@@ -319,6 +458,17 @@ export class ToolInteractionController {
   pointerUp(event: ToolPointer): void {
     if (!this.mode || event.button !== 0) return;
     const options = this.options();
+    const drag = this.placeableDrag;
+    if (drag) {
+      this.placeableDrag = null;
+      this.callbacks.shapePreview(null);
+      const at = this.placeableTarget(drag, event);
+      if (drag.moved && Math.hypot(at.x - drag.from.x, at.y - drag.from.y) >= MIN_PLACEABLE_DRAG) {
+        const port = drag.tool === "light" ? this.callbacks.lightEditing : this.callbacks.noteEditing;
+        port?.move?.(drag.id, at);
+      }
+      return;
+    }
     if (this.mode === "wall" && options.wallEditMode !== "draw") {
       this.wallEditor?.up(event.world, this.snap(event.world, event, options.placementSnap), options.wallEndpointSnap && !event.ctrlKey); return;
     }
@@ -401,9 +551,11 @@ export class ToolInteractionController {
     }
   }
 
-  /** Add a path pivot without ending the measurement. */
+  /** Add a path pivot without ending the measurement (a repeat of the last point is ignored). */
   addWaypoint(world: Point): void {
     if (this.mode !== "measure") return;
+    const last = this.points[this.points.length - 1];
+    if (last && Math.hypot(world.x - last.x, world.y - last.y) <= 0.01) return;
     this.points.push({ ...world });
     this.preview();
   }
@@ -438,7 +590,7 @@ export class ToolInteractionController {
     this.points = [];
     this.start = null;
     this.callbacks.shapePreview(null);
-    this.callbacks.measurePreview(null);
+    this.clearMeasurePreview();
   }
 
   /**
@@ -446,10 +598,19 @@ export class ToolInteractionController {
    * recallable with `X`; a polygon closes; anything else is dropped.
    */
   dismissGesture(): void {
+    if (this.placeableDrag) {
+      this.placeableDrag = null;
+      this.callbacks.shapePreview(null);
+      return;
+    }
+    if (this.mode === "light" && this.selectedLight) {
+      this.selectLight(null);
+      return;
+    }
     if (this.mode === "measure") {
       this.points = [];
       this.start = null;
-      this.callbacks.measurePreview(null);
+      this.clearMeasurePreview();
       this.callbacks.shapePreview(null);
       return;
     }
@@ -467,7 +628,7 @@ export class ToolInteractionController {
   commitMeasure(): void {
     this.points = [];
     this.lastMeasure = [];
-    this.callbacks.measurePreview(null);
+    this.clearMeasurePreview();
   }
 
   cancel(): void {
@@ -475,8 +636,16 @@ export class ToolInteractionController {
     this.mode = null;
     this.points = [];
     this.start = null;
-    this.callbacks.measurePreview(null);
+    this.placeableDrag = null;
+    this.selectLight(null);
+    this.clearMeasurePreview();
     this.callbacks.shapePreview(null);
+  }
+
+  /** Where a dragged light/pin lands: the pointer minus the grab offset, snapped like a placement. */
+  private placeableTarget(drag: NonNullable<typeof this.placeableDrag>, event: ToolPointer): Point {
+    const raw = { x: event.world.x - drag.grab.x, y: event.world.y - drag.grab.y };
+    return this.snap(raw, event, drag.tool === "light" ? this.options().placementSnap : "none");
   }
 
   private nearStart(world: Point): boolean {
@@ -489,16 +658,26 @@ export class ToolInteractionController {
     if (this.points.length) this.emitMeasure([...this.points], false);
   }
 
+  private clearMeasurePreview(): void {
+    this.measureShown = false;
+    this.callbacks.measurePreview(null);
+  }
+
   private emitMeasure(points: Point[], finished: boolean): void {
+    this.measureShown = true;
     const grid = this.callbacks.grid();
     const options = this.options();
     const distance = measureRulerPath(grid, points);
     const [first, second] = points;
     const area = first && second ? measureArea(options.measureShape, grid, first, second) : null;
+    // Only the circle measure carries a radius: the overlay draws `radiusPx` as a circle, so a
+    // radius on a ruler, cone or ray painted a stray circle under every two-point measurement.
     const radius =
-      points.length === 2 && first && second ? radiusMeasure(grid, first, second) : null;
+      options.measureShape === "circle" && points.length === 2 && first && second
+        ? radiusMeasure(grid, first, second)
+        : null;
     this.callbacks.measurePreview({
-      kind: points.length > 2 ? "path" : options.measureShape === "circle" ? "radius" : area ? "line" : "line",
+      kind: points.length > 2 ? "path" : options.measureShape === "circle" ? "radius" : "line",
       shape: options.measureShape,
       points,
       distance,

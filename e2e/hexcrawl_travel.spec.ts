@@ -21,13 +21,7 @@
  *    hex and reveals itself on the third, through the travel advance — no GM click involved.
  */
 import { expect, test, type Page } from "@playwright/test";
-import {
-  entry,
-  hostCall,
-  solidPng,
-  surfaceCallArg,
-  waitForSurface,
-} from "./lib";
+import { entry, hostCall, openSceneNav, solidPng, surfaceCallArg, waitForSurface } from "./lib";
 
 interface Point {
   x: number;
@@ -79,7 +73,7 @@ async function cellAt(page: Page, key: string): Promise<Point> {
 async function bootHexcrawl(page: Page): Promise<string> {
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
-  await page.click("#scene-add");
+  await openSceneNav(page); await page.click("#scene-add");
   await page.click("#scene-new-hexcrawl");
   await page.setInputFiles("[data-hx-map-input]", {
     name: "overland.png",

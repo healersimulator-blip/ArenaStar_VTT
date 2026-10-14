@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import type { WorldFileDocuments } from "../src/host/worldFile";
 import type { SceneDocument } from "../src/core/documents";
-import { entry, hostCall, manualFragment, playerCall, waitForSurface } from "./lib";
+import { chromeAction, entry, hostCall, manualFragment, playerCall, waitForSurface } from "./lib";
 
 async function rendered(page:Page) {
   return page.evaluate(()=>{
@@ -39,7 +39,7 @@ test("Move draws lights, line geometry and imported templates on GM/player repli
   const scene=documents.docs.find((row)=>row.coll==="scenes")?.doc as SceneDocument|undefined;if(!scene)throw new Error("missing scene");
   scene.templates.push({_id:"move-template",type:"template",name:"Moving circle",ownership:{default:1},flags:{},system:{},kind:"circle",x:300,y:350,distance:50,direction:0,width:0});
   files["documents.json"]=strToU8(JSON.stringify(documents));
-  await page.locator("#close-world").click();await page.locator("#role-import").setInputFiles({name:"placeable-move.world.zip",mimeType:"application/zip",buffer:Buffer.from(zipSync(files))});
+  await chromeAction(page, "close-world");await page.locator("#role-import").setInputFiles({name:"placeable-move.world.zip",mimeType:"application/zip",buffer:Buffer.from(zipSync(files))});
   await page.locator("[data-open-dialog] [data-open-replace]").click();await waitForSurface(page,"app");
   // Light polygons arrive asynchronously from the worker; a ready template alone
   // does not mean all three rendered objects are ready for the baseline snapshot.

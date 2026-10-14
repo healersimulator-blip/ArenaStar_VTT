@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { entry, hostCall, manualFragment, playerCall, surfaceCall, surfaceCallArg, solidPng, waitForSurface } from "./lib";
+import { entry, hostCall, manualFragment, openSceneNav, playerCall, solidPng, surfaceCall, surfaceCallArg, waitForSurface } from "./lib";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Sq9hX8AAAAASUVORK5CYII=", "base64");
 async function openZone(page: Page, name: string) {
@@ -221,7 +221,7 @@ test("Scene Background targets another saved scene without switching scenes; und
   test.setTimeout(90_000);
   await page.goto(entry + "?e2e=1"); await waitForSurface(page, "app");
   const sourceId = await hostCall<string>(page, "activeSceneId");
-  await page.locator("#scene-add").click(); await page.locator("#scene-new-blank").click();
+  await openSceneNav(page); await page.locator("#scene-add").click(); await page.locator("#scene-new-blank").click();
   const remote = page.locator(`[data-scene]:not([data-scene="${sourceId}"])`);
   await expect(remote).toHaveCount(1);
   const remoteId = await remote.getAttribute("data-scene");
@@ -255,7 +255,7 @@ test("Scene Background targets another saved scene without switching scenes; und
   await zones.locator("[data-zone-run]").click(); await expect.poll(remoteImage).toBe(hash);
   await hostCall(page, "drainOps"); await page.reload(); await waitForSurface(page, "app");
   expect(await remoteImage()).toBe(hash); expect(await hostCall(page, "activeSceneId")).toBe(sourceId);
-  await page.locator(`[data-scene="${remoteId}"]`).click();
+  await openSceneNav(page); await page.locator(`[data-scene="${remoteId}"]`).click();
   await expect.poll(() => drawn(page, "unused")).toEqual({ tile: null, background: [{ width: 1, height: 1 }] });
 });
 

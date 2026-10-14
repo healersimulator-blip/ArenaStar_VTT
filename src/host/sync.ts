@@ -1,3 +1,4 @@
+import { aisTagProposal, parseAisTagUpdate } from "../core/aisScene";
 import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE, STAIR_OFFER_TTL_MS, levelCreationOps, stairChoiceOps, stairChoicesHere, stairMovementPlan, type StairPrompt } from "../core/levelPlay";
 import { isScopedCollection } from "../core/levelMembership";
 import { levelFocusView, LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
@@ -957,6 +958,58 @@ export class HostSync {
     );
   }
 
+  /** GM-local AIS domain service. Consent is checked by the instance broker; the host
+   * independently validates the proposal and its revision in the same synchronous commit. */
+  applyAisSceneTags(input: Record<string, unknown>): { seq: number; tags: string[] } {
+    if (this.disposed) throw new Error("Host is closed");
+    const request = parseAisTagUpdate(input);
+    const ops = aisTagProposal(this.store.get("scenes", request.sceneId), this.store.seq, request);
+    const user: SessionUser = { id: this.systemUserId, name: "AIS", role: "GM" };
+    const normalized = this.normalizeOps(user.id, ops);
+    if (!normalized.ok) throw new Error(normalized.error);
+    const checked = this.validateOps(user, normalized.ops);
+    if (!checked.ok) throw new Error(checked.error);
+    const compatibility = this.draftCompatibilityError(normalized.ops);
+    if (compatibility) throw new Error(compatibility);
+    const committed = this.commitOps([...normalized.ops, ...normalized.hostOps, ...checked.hostOps],
+      user.id, `ais-tags-${randomId()}`, true);
+    if (!committed.ok) throw new Error(committed.error);
+    return { seq: committed.seq, tags: request.tags };
+  }
+
+  /** Transient program execution reuses the SAME scheduler, per-viewer projection and renderer
+   * as saved FX macros. No hidden Macro document, arbitrary renderer object or player elevation. */
+  playAisFx(sceneId: string, input: Record<string, unknown>): { runId: string; atHostTime: number; endsAtHostTime: number } {
+    if (this.disposed) throw new Error("Host is closed");
+    if (Object.keys(input).some((key) => !["sequence", "sourceTokenId", "targetTokenId"].includes(key)) ||
+        (input.sourceTokenId !== undefined && typeof input.sourceTokenId !== "string") ||
+        (input.targetTokenId !== undefined && typeof input.targetTokenId !== "string"))
+      throw new Error("Invalid AIS FX request");
+    const checked = validateFxSequence(input.sequence);
+    if (!checked.ok) throw new Error(checked.error);
+    if (checked.sequence.persistent) throw new Error("AIS feasibility profile supports transient FX only");
+    const scene = this.store.get("scenes", sceneId);
+    if (!scene || [input.sourceTokenId, input.targetTokenId].some((id) =>
+      id !== undefined && !scene.tokens.some((token) => token._id === id && !token.hidden)))
+      throw new Error("AIS FX scene or visible anchor is unavailable");
+    const definition: MacroDocument = { _id: `ais-fx-${randomId()}`, type: "macro", name: "AIS FX program",
+      ownership: { default: 2 }, flags: {}, system: {}, kind: "sequence", command: "", sequence: checked.sequence };
+    const prepared = this.prepareFx({ id: this.systemUserId, name: "AIS", role: "GM" }, {
+      macroId: definition._id, sceneId,
+      ...(typeof input.sourceTokenId === "string" ? { sourceTokenId: input.sourceTokenId } : {}),
+      ...(typeof input.targetTokenId === "string" ? { targetTokenId: input.targetTokenId } : {}),
+    }, undefined, this.systemUserId, [], definition);
+    if (!prepared.ok) throw new Error(prepared.error);
+    if (!this.emitPreparedFx(prepared)) throw new Error("AIS FX could not be started");
+    return { runId: prepared.cue.runId, atHostTime: prepared.cue.atHostTime,
+      endsAtHostTime: this.fxEndsAt(prepared.cue) };
+  }
+
+  /** Only the AIS instance broker holding the owned handle calls this host-local service. */
+  stopAisFx(runId: string): boolean {
+    return this.cancelTransientFx(runId, { id: this.systemUserId, name: "AIS", role: "GM" });
+  }
+
   /** Send a sim/turn wire message to authenticated sessions (GM always). */
   broadcastSim(
     msg: WireMessage,
@@ -1068,6 +1121,28 @@ export class HostSync {
 
   isBanned(userId: UserId): boolean {
     return this.banned.has(userId);
+  }
+
+  /** D-465: disconnect every session of a user without banning them (they may rejoin). */
+  kickUser(userId: UserId, reason = "disconnected by the GM"): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (session.user?.id === userId) {
+        this.kick(session.peerId, reason);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /** D-465: lift a ban so the user can be approved again. */
+  unban(userId: UserId): void {
+    this.banned.delete(userId);
+  }
+
+  /** D-465: ids of the users with a live session (the roster's "online" dot). */
+  onlineUserIds(): UserId[] {
+    return this.sessionUsers().map((user) => user.id);
   }
 
   get sessionCount(): number {
@@ -8460,6 +8535,8 @@ export class HostSync {
     ownerId = caller.id,
     /** Earlier cues in one atomic automation preflight (not yet present in the store). */
     pending: readonly PreparedFx[] = [],
+    /** Host-local validated transient programs; never accepted from the normal macro wire path. */
+    transientDefinition?: MacroDocument,
   ): { ok: true } & PreparedFx |
      { ok: false; reason: "forbidden" | "invalid_schema"; error: string } {
     const invalid = (error: string) => ({ ok: false as const, reason: "invalid_schema" as const, error });
@@ -8468,7 +8545,7 @@ export class HostSync {
         typeof req.sceneId !== "string" || !req.sceneId ||
         (req.sourceTokenId !== undefined && typeof req.sourceTokenId !== "string") ||
         (req.targetTokenId !== undefined && typeof req.targetTokenId !== "string")) return invalid("invalid FX reference");
-    const macro = this.store.get("macros", req.macroId) as MacroDocument | undefined;
+    const macro = transientDefinition ?? this.store.get("macros", req.macroId) as MacroDocument | undefined;
     const scene = this.store.get("scenes", req.sceneId) as SceneDocument | undefined;
     if (!macro || macro.kind !== "sequence" || !scene || !macro.sequence)
       return invalid("sequence macro or scene missing");

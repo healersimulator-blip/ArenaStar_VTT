@@ -1,4 +1,6 @@
 import "../ui/global.css";
+import "../ui/workspace/fonts.css";
+import "../ui/workspace/workspace.css";
 import { mount } from "svelte";
 import JoinApp from "./JoinApp.svelte";
 import Root from "./Root.svelte";

@@ -41,13 +41,14 @@ export function matches(combo: string, e: ComboEvent): boolean {
   return comboOf(e) === combo;
 }
 
-/** Default bindings (§10): hotbar 1-5, undo/redo, cycle tab. */
+/** Default bindings (§10): hotbar 1-0, undo/redo, cycle tab. */
 export const DEFAULT_BINDINGS: Readonly<Record<string, string>> = {
   "hotbar.1": "1",
   "hotbar.2": "2",
   "hotbar.3": "3",
   "hotbar.4": "4",
   "hotbar.5": "5",
+  "hotbar.6": "6", "hotbar.7": "7", "hotbar.8": "8", "hotbar.9": "9", "hotbar.10": "0",
   "edit.undo": "Control+z",
   "edit.redo": "Control+y",
 };

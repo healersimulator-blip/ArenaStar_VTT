@@ -595,7 +595,7 @@ function projectMacro(
     flags: {
       core: {
         playerCallable: callable,
-        ...(typeof slot === "number" && slot >= 1 && slot <= 5 ? { slot } : {}),
+        ...(typeof slot === "number" && slot >= 1 && slot <= 10 ? { slot } : {}),
       },
     },
     // Publish only validated input fields. A malformed import cannot smuggle

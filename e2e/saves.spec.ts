@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { entry, hostCall, waitForSurface } from "./lib";
+import { chromeAction, entry, hostCall, waitForSurface } from "./lib";
 
 test.setTimeout(90_000);
 async function boot(page: Page) {
@@ -60,7 +60,7 @@ test("save failure is persistent but non-modal; close stays on table until retry
   await page.click("#add-token");
   await expect.poll(() => hostCall<number>(page, "tokenCount")).toBe(1);
   await expect(page.locator("[data-save-warning]")).toContainText("Saving needs attention");
-  await page.click("#close-world");
+  await chromeAction(page, "close-world");
   await expect(page.locator('[aria-label="Game table"]')).toBeVisible();
   await expect(page.locator("[data-save-warning]")).toBeVisible();
   await page.evaluate(() => {
@@ -68,7 +68,7 @@ test("save failure is persistent but non-modal; close stays on table until retry
   });
   await page.getByRole("button", { name: "Retry save", exact: true }).click();
   await expect(page.locator("[data-save-warning]")).toHaveCount(0);
-  await page.click("#close-world");
+  await chromeAction(page, "close-world");
   await expect(page.locator('[aria-label="Game table"]')).toHaveCount(0);
   await page.goto(entry + "?e2e=1");
   await waitForSurface(page, "app");
@@ -81,7 +81,7 @@ test("a second GM tab cannot concurrently open the same world", async ({ page, c
   const second = await context.newPage();
   await second.goto(entry + "?e2e=1");
   await expect(second.getByRole("alert")).toContainText("already open in another GM tab");
-  await page.click("#close-world");
+  await chromeAction(page, "close-world");
   await expect(page.locator('[aria-label="Game table"]')).toHaveCount(0);
   await second.reload();
   await waitForSurface(second, "app");

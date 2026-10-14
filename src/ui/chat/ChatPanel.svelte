@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Icon from "../icons/Icon.svelte";
+  import { workspaceUi } from "../workspace/state";
   import { onMount } from "svelte";
   import type { ClientSync } from "../../client/sync";
   import type { ClientEvents } from "../../client/sync";
@@ -522,13 +524,13 @@
       send();
     }}
   >
-    <input
-      id="chat-input"
-      type="text"
-      bind:value={draft}
-      placeholder="Message — /roll 1d20+5 · /emote · /w <name> · /run <macro>"
-      autocomplete="off"
-    />
+    <textarea id="chat-input" rows="2" bind:value={draft}
+      aria-label="Chat message" placeholder={$workspaceUi.profile === "foundry" ? "Type a message…" : $workspaceUi.profile === "roll20" ? "Message or /roll 1d20" : "Message your table…"}
+      autocomplete="off" onkeydown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } }}></textarea>
+    <div class="chat-compose-tools"><span>{$workspaceUi.profile === "roll20" ? "As:" : "Speaking as"} {client.user?.name ?? "You"}</span>
+      <button type="button" title="Prepare a dice roll" aria-label="Prepare a dice roll" onclick={() => { draft = "/roll 1d20"; document.getElementById("chat-input")?.focus(); }}><Icon name="dice" size={15}/></button>
+      <button type="button" title="Prepare a whisper" aria-label="Prepare a whisper" onclick={() => { draft = "/w "; document.getElementById("chat-input")?.focus(); }}><Icon name="chat" size={14}/></button>
+    </div>
     <button id="chat-send" type="submit">Send</button>
   </form>
 </section>
@@ -640,16 +642,6 @@
   form {
     display: flex;
     gap: 4px;
-  }
-  input {
-    flex: 1;
-    min-width: 0;
-    padding: 6px 8px;
-    border: 1px solid #3a3f4a;
-    border-radius: 6px;
-    background: #101216;
-    color: #e8e8ee;
-    font-size: 0.9rem;
   }
   button {
     padding: 6px 10px;

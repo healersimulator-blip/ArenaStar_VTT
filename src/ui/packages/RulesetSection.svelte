@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { AisRuntimeStatuses } from "../../app/aisRuntime";
   /**
    * §12 the packages view (AIS v1 lands modules next to the ruleset/content view; D-248/D-249).
    * Lives in the Settings window: "which rules does this world run" is a settings question,
@@ -17,9 +18,11 @@
   let {
     packages,
     rulesBoot = null,
+    aisRuntimeStatuses = {},
   }: {
     packages: HostPackages;
     rulesBoot?: HostRulesBoot | null;
+    aisRuntimeStatuses?: AisRuntimeStatuses;
   } = $props();
 
   let pkgList = $state<PackageSummary[]>([]);
@@ -27,7 +30,7 @@
   let selectedCapabilities = $state<Record<string, AisCapability[]>>({});
   let aisApprovalConfirmId = $state("");
   let aisApprovalTimer: ReturnType<typeof setTimeout> | null = null;
-  let aisCodePreviews = $state<Record<string, { entry: string; source: string; truncated: boolean }>>({});
+  let aisCodePreviews = $state<Record<string, { entry: string; source: string; truncated: boolean; hash: string; runtimeHash?: string }>>({});
   let aisPreviewLoadingId = $state("");
   let aisPendingReload = $state(false);
   let pkgBusy = $state(false);
@@ -49,6 +52,12 @@
     void packages
       .list()
       .then((list) => {
+        const changed = new Set(list.filter((entry) => pkgList.some((previous) =>
+          previous.id === entry.id && (previous.hash !== entry.hash || previous.runtimeHash !== entry.runtimeHash))).map((entry) => entry.id));
+        aisCodePreviews = Object.fromEntries(Object.entries(aisCodePreviews).filter(([id, preview]) =>
+          list.some((entry) => entry.id === id && entry.hash === preview.hash && entry.runtimeHash === preview.runtimeHash)));
+        selectedCapabilities = Object.fromEntries(Object.entries(selectedCapabilities).filter(([id]) => !changed.has(id)));
+        if (changed.has(aisApprovalConfirmId)) aisApprovalConfirmId = "";
         pkgList = list;
       })
       .catch(() => {});
@@ -178,17 +187,22 @@
       if (!aisCodePreviews[id]) void loadAisCodePreview(id);
       return;
     }
-    if (!aisCodePreviews[id]) return;
+    const preview = aisCodePreviews[id];
+    if (!preview || preview.hash !== summary.hash || preview.runtimeHash !== summary.runtimeHash) {
+      pkgError = "Package changed. Open the current entry source before approving it.";
+      return;
+    }
     aisApprovalConfirmId = "";
     if (aisApprovalTimer !== null) clearTimeout(aisApprovalTimer);
-    void approveAisModule(id, capabilitiesFor(id, summary));
+    void approveAisModule(id, capabilitiesFor(id, summary), preview.hash, preview.runtimeHash);
   }
 
-  async function approveAisModule(id: string, capabilities: AisCapability[]): Promise<void> {
+  async function approveAisModule(id: string, capabilities: AisCapability[], reviewedHash: string | null, reviewedRuntimeHash?: string): Promise<void> {
+    if (!reviewedHash) { pkgError = "Review the exact package hash before approving it."; return; }
     pkgBusy = true;
     pkgError = "";
     try {
-      const result = await packages.grantAutomationCapabilities(id, capabilities);
+      const result = await packages.grantAutomationCapabilities(id, capabilities, reviewedHash, reviewedRuntimeHash);
       if (!result.ok) pkgError = result.error;
       else aisPendingReload = true;
       refresh();
@@ -355,6 +369,14 @@
       <div class="module-review" data-ais-module-review={p.id}>
         <span title={p.hash ?? ""}>SHA-256: {p.hash ? `${p.hash.slice(0, 16)}…` : "unavailable"}</span>
         <span>{p.approved ? "Code approved on this device for this exact hash" : "Code is not approved and will not run"}</span>
+        <span data-ais-runtime={aisRuntimeStatuses[p.id]?.state ?? "not-started"}
+          class:error={aisRuntimeStatuses[p.id]?.state === "failed"}>
+          Runtime: {aisRuntimeStatuses[p.id]?.state ?? "not started · enable, approve, then reload"}
+          {#if aisRuntimeStatuses[p.id]?.error} — {aisRuntimeStatuses[p.id]?.error}{/if}
+        </span>
+        {#if p.runtimeProvider}<p class="hint" data-ais-runtime-provider>Runtime adapter: no standalone execution. Each guest requires separate approval; effective capabilities are the intersection of both grants.</p>{/if}
+        {#if p.runtimeProviderId}<p class="hint" data-ais-runtime-binding>Experimental adapter-backed guest · {p.runtimeProviderId}. Review and enable the adapter first. Composition: {p.runtimeHash?.slice(0, 16) ?? "unresolved"}.</p>{/if}
+        {#if p.runtimeError}<p class="error">{p.runtimeError}</p>{/if}
         {#if p.commands.length > 0}
           <p class="hint" data-ais-commands>Macro-callable commands: {p.commands.map((command) => `${command.id} (contract v${command.contract})`).join(", ")}. Calls require the separate reviewed script-macro grant.</p>
         {/if}
@@ -394,7 +416,7 @@
         {#if p.approved}
           <span data-ais-approved>Approved: {p.grantedCapabilities.length ? p.grantedCapabilities.join(", ") : "no capabilities"}</span>
           <button type="button" data-ais-revoke disabled={pkgBusy} onclick={() => revokeAisApproval(p.id)}>Revoke local approval</button>
-          <button type="button" data-ais-update-grant disabled={pkgBusy} onclick={() => void approveAisModule(p.id, capabilitiesFor(p.id, p))}>Update capabilities</button>
+          <button type="button" data-ais-update-grant disabled={pkgBusy} onclick={() => void approveAisModule(p.id, capabilitiesFor(p.id, p), p.hash, p.runtimeHash)}>Update capabilities</button>
         {:else}
           <button type="button" data-ais-approve disabled={pkgBusy || aisPreviewLoadingId === p.id} onclick={() => requestAisApproval(p.id, p)}>
             {aisApprovalConfirmId === p.id ? "Confirm sandboxed-code approval" : "Review & approve code"}
@@ -446,7 +468,8 @@
   {/if}
   {#if aisPendingReload}
     <p class="hint" data-ais-pending>
-      Automation profile, approval, or capability changes apply after reload. Local grants are not exported with the world.
+      New code and grants start after reload. Disabled, replaced, or revoked modules stop immediately;
+      capability changes stop the old instance until reload. Local grants are not exported with the world.
       <button type="button" data-ais-reload onclick={reloadWorld}>Reload now</button>
     </p>
   {/if}

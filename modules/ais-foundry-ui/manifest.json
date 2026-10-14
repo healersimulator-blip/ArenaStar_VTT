@@ -1,0 +1,13 @@
+{
+  "id": "ais-foundry-ui",
+  "name": "Foundry appearance adapter",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Computes bounded native UI appearance from isolated Foundry theme hooks, token engines or stylesheets. No parent DOM access or world-edit authority.",
+  "interconnect": {
+    "api": "arena.ais/1",
+    "entry": "runtime/adapter.js",
+    "runtimeProvider": { "contract": 1, "profiles": ["foundry-ui-v1"] },
+    "capabilities": ["runtime.execute", "package.resources.read", "ui.theme"]
+  }
+}

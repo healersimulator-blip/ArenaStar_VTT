@@ -9,6 +9,8 @@ import type { Op } from "./ops";
 
 export const AIS_API_VERSION = "arena.ais/1" as const;
 export const AIS_WORLD_FEATURE = "arena.ais/1" as const;
+/** Experimental, closed adapter-loading extension; old readers must refuse its archives. */
+export const AIS_RUNTIME_FEATURE = "arena.ais.runtime/1" as const;
 
 /** Typed, read-only workflow/event slice supported by the initial AIS runtime. */
 export const AIS_EVENTS = [
@@ -106,7 +108,7 @@ export const AIS_CONTRIBUTION_MODES = [
 ] as const;
 export type AisContributionMode = (typeof AIS_CONTRIBUTION_MODES)[number];
 
-/** Capabilities supported by the initial sandbox bridge; no capability commits game mechanics. */
+/** Explicit narrow host services; never raw ops, a store handle or arbitrary system writes. */
 export const AIS_CAPABILITIES = [
   "scene.read.visible",
   "action.observe",
@@ -119,6 +121,14 @@ export const AIS_CAPABILITIES = [
   "actor.inventory.read",
   "actor.inventory.consume",
   "scene.token.light.manage",
+  "scene.tags.read",
+  "scene.tags.write",
+  "fx.play",
+  // Also a downgrade fence: older kernels reject this unknown capability instead of
+  // ignoring runtime metadata in an already-imported shared IndexedDB world.
+  "runtime.execute",
+  "package.resources.read",
+  "ui.theme",
 ] as const;
 export type AisCapability = (typeof AIS_CAPABILITIES)[number];
 
@@ -147,10 +157,29 @@ export interface AisModuleCommandDeclaration {
   contract: number;
 }
 
+export interface AisRuntimeProviderDeclaration {
+  contract: 1;
+  profiles: string[];
+}
+
+export interface AisRuntimeBinding {
+  provider: string;
+  profile: string;
+  /** Ordered, already-prepared classic-script files, executed after the adapter. */
+  scripts: string[];
+  /** Package-local JSON configuration. Not executable and never an authority claim. */
+  configuration: string;
+  /** Explicitly readable package-local UTF-8 resources (CSS, translations, encoded raster assets). */
+  resources?: string[];
+}
+
 export interface AisInterconnectManifest {
   api: typeof AIS_API_VERSION;
   /** Classic script loaded only in the package's restricted iframe. */
   entry: string;
+  /** A provider is reviewed/enabled but only executes as part of an approved guest. */
+  runtimeProvider?: AisRuntimeProviderDeclaration;
+  runtime?: AisRuntimeBinding;
   requires?: AisPackageRequirement[];
   provides?: AisContributionDeclaration[];
   /** Declared callable module entry points; each callback remains constrained by host capabilities. */
@@ -373,6 +402,15 @@ export function resolveAisProfile(
         });
         if (!requirement.optional) blocked.add(id);
       } else if (dependency?.type === "module") dependencies.push(requirement.id);
+    }
+    const runtime = pkg.interconnect?.runtime;
+    if (runtime) {
+      const provider = available.get(runtime.provider);
+      if (!provider?.interconnect?.runtimeProvider?.profiles.includes(runtime.profile)) {
+        blocked.add(id);
+        issues.push({ kind: "inactive-dependency", packageId: id, blocking: true,
+          message: `${id} requires runtime profile ${runtime.profile} from ${runtime.provider}` });
+      }
     }
     edges.set(id, dependencies);
     for (const capability of pkg.interconnect?.capabilities ?? []) {

@@ -34,19 +34,20 @@ function stubClient(events: string[], user: string | null = "u-1"): ClientSync {
 }
 
 describe("macro hotbar slots (MC-01)", () => {
-  test("only slots 1-5 bind, and the last macro on a slot wins", () => {
+  test("only slots 1-10 bind, and the last macro on a slot wins", () => {
     const slots = macroSlots([
       withSlot(macro("a", "chat"), 0),
       withSlot(macro("b", "chat"), 1),
-      withSlot(macro("c", "automation"), 6),
-      withSlot(macro("d", "chat"), 5),
+      withSlot(macro("c", "automation"), 11),
+      withSlot(macro("d", "chat"), 10),
       withSlot(macro("e", "chat"), 1),
     ]);
-    expect(slots).toHaveLength(5);
-    expect(slots.map((m) => m?._id ?? null)).toEqual(["e", null, null, null, "d"]);
+    expect(slots).toHaveLength(10);
+    expect(slots.map((m) => m?._id ?? null)).toEqual(["e", null, null, null, null, null, null, null, null, "d"]);
   });
 
-  test("an empty list leaves five empty slots", () => {
+  test("an empty list leaves ten empty slots", () => {
+    expect(macroSlots([])).toHaveLength(10);
     expect(macroSlots([]).every((slot) => slot === null)).toBe(true);
   });
 

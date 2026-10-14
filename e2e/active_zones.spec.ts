@@ -1,5 +1,5 @@
 import { expect, test, type Browser } from "@playwright/test";
-import { entry, hostCall, manualFragment, playerCall, surfaceCall, surfaceCallArg, waitForSurface } from "./lib";
+import { entry, hostCall, manualFragment, openSceneNav, playerCall, surfaceCall, surfaceCallArg, waitForSurface } from "./lib";
 
 test("GM authors a tile graph and verifies native click/right-click/double-click and pointer hover events", async ({ page }) => {
   await page.goto(entry + "?e2e=1");
@@ -89,13 +89,13 @@ test("GM scene activation fires a destination-scene scene-change graph once", as
   const sourceId = await scenes.first().getAttribute("data-scene");
   if (!sourceId) throw new Error("initial scene ID missing");
 
-  await page.locator("#scene-add").click();
+  await openSceneNav(page); await page.locator("#scene-add").click();
   await page.locator("#scene-new-blank").click();
   await expect(scenes).toHaveCount(2);
   const destination = scenes.nth(1);
   const destinationId = await destination.getAttribute("data-scene");
   if (!destinationId) throw new Error("destination scene ID missing");
-  await destination.click();
+  await openSceneNav(page); await destination.click();
   await expect.poll(() => hostCall<string | null>(page, "activeSceneId")).toBe(destinationId);
 
   await page.locator("#gm-macros").click();

@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/fantasycalendar/FoundryVTT-Tagger",
+  "commit": "e7936bc9ee01e4445624fbc82a11e887e5cd0075",
+  "tag": "1.5.4",
+  "mode": "source-preserving-rebundle",
+  "files": {
+    "upstream/scripts/module.js": "e94ba40cb57f57012b8f307cb921004e574b07a6621280aaed11f25842db3617",
+    "upstream/scripts/hotkeys.js": "fda17c768e166711d06a85f32376bd975009137eac16d05e41bb610a50107d2e",
+    "upstream/scripts/constants.js": "5cd130e82187eb85c5653826793cf3229ccb72c3bc996eb6c918081b037ed3b3",
+    "upstream/module.json": "cbd64eb6021a884cdbe9a2254bb9b100376603e3611e4f2c91e7c4b2c338278a",
+    "upstream/LICENSE": "26d33aff2f1d7e10ba5ade8d033f5d88a884862d5db4414b772e9b18cc6136fb"
+  }
+}

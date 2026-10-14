@@ -115,6 +115,29 @@ describe("player join (§2/§6.4/§5)", () => {
     }
   });
 
+  test("D-465: a GM kick closes the player's session (no reconnect) and reports the reason", async () => {
+    const { hostApp, playerApp, pump } = await joinedPair();
+    try {
+      const userId = playerApp.client?.user?.id ?? "";
+      expect(hostApp.host.onlineUserIds()).toContain(userId);
+      const reasons: string[] = [];
+      playerApp.onDisconnected = (reason) => reasons.push(reason);
+      expect(playerApp.session.stats.state).toBe("connected");
+
+      expect(hostApp.host.kickUser(userId)).toBe(1);
+      await settle(6);
+      expect(hostApp.host.onlineUserIds()).not.toContain(userId);
+      // The player's own bookkeeping follows: closed, told why, not "connected" forever.
+      expect(playerApp.session.stats.state).toBe("closed");
+      expect(reasons).toEqual(["kicked: disconnected by the GM"]);
+    } finally {
+      pump.stop();
+      playerApp.close();
+      await hostApp.persister.flush();
+      await hostApp.close();
+    }
+  });
+
   test("player CANNOT mutate documents they do not own (§5 enforced host-side)", async () => {
     const { hostApp, playerApp, pump } = await joinedPair();
     try {

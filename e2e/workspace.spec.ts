@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { entry, waitForSurface } from "./lib";
+import { chromeAction, entry, waitForSurface } from "./lib";
 
 /** The app shell is a game table, not a permanent setup form. */
 test.describe("play workspace", () => {
@@ -27,19 +27,19 @@ test.describe("play workspace", () => {
 
     await page.getByRole("button", { name: "Close session panel" }).click();
     await expect(page.locator("[data-session-panel]")).toHaveCount(0);
-    await page.click("#session-open");
+    await chromeAction(page, "session-open");
     await expect(page.locator("[data-session-panel]")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.locator("[data-session-panel]")).toHaveCount(0);
 
-    await page.click("#close-world");
+    await chromeAction(page, "close-world");
     await expect(page.locator("[data-world-row]")).toHaveCount(1);
     await page.locator("[data-world-row] [data-world-open]").click();
     await expect(page.locator("#status")).toContainText("A Quiet Table", {
       timeout: 20_000,
     });
     await expect(page.locator("[data-session-panel]")).toHaveCount(0);
-    await page.click("#session-open");
+    await chromeAction(page, "session-open");
     await expect(page.locator("[data-session-panel]")).toBeVisible();
   });
 
@@ -69,7 +69,7 @@ test.describe("play workspace", () => {
     await expect(page.locator("[data-tool-options]")).toHaveCount(0);
 
     // Switching back to map work dismisses setup so its options are not covered.
-    await page.locator("#session-open").click();
+    await chromeAction(page, "session-open");
     await rail.locator('[data-canvas-tool="draw"]').click();
     await expect(page.locator("[data-session-panel]")).toHaveCount(0);
     await expect(page.locator('[data-tool-options="draw"]')).toBeVisible();
@@ -88,7 +88,7 @@ test.describe("play workspace", () => {
     expect(
       await page.evaluate(() => document.body.scrollHeight),
     ).toBeLessThanOrEqual(844);
-    await page.locator("#session-open").click();
+    await chromeAction(page, "session-open");
     await expect(page.locator("[data-session-panel]")).toBeVisible();
   });
 });
