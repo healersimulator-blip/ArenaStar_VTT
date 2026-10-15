@@ -1,13 +1,22 @@
-/* ArenaStar-authored compatibility facade. Runs only INSIDE an approved AIS guest frame.
- * This is a deliberately small API profile, not Foundry core and not the upstream Sequencer.
- * Actual document writes and FX always go through the instance-bound AIS broker.
+/* ArenaStar-authored Foundry compatibility adapter. Runs only INSIDE an approved AIS guest frame.
+ * Two profiles share one file:
+ *   - "foundry-v13-scene-tags-fx" (0.1.0, D-4xx): a bundled guest with ArenaStar commands; small,
+ *     command-scoped API profile (kept byte-for-byte in behaviour).
+ *   - "foundry-module" (0.2.0, D-482): an UNMODIFIED Foundry `module.json` distribution. The
+ *     adapter loads the module's own ES modules from blob URLs through an import map, installs
+ *     Foundry core globals mapped onto AIS services (settings, i18n, modules, notifications,
+ *     hooks, scene documents, FX) and runs the init → setup → ready lifecycle.
+ * This is not Foundry core (proprietary; nothing is copied) and not the upstream Sequencer.
+ * Unknown calls fail explicitly rather than pretending a feature worked.
  */
 (function () {
   "use strict";
   const context = AIS.runtime.context;
-  if (!context || context.profile !== "foundry-v13-scene-tags-fx") throw new Error("Unsupported adapter profile");
+  const PROFILES = ["foundry-v13-scene-tags-fx", "foundry-module"];
+  if (!context || !PROFILES.includes(context.profile)) throw new Error("Unsupported adapter profile");
+  const moduleProfile = context.profile === "foundry-module";
   const config = context.configuration;
-  if (!config || typeof config.id !== "string" || typeof config.version !== "string")
+  if (!moduleProfile && (!config || typeof config.id !== "string" || typeof config.version !== "string"))
     throw new Error("Runtime configuration needs upstream id/version");
   const unsupported = (name) => { throw new Error(`Foundry compatibility profile does not support ${name}`); };
   const clone = (value) => value === undefined ? undefined : structuredClone(value);
@@ -17,6 +26,7 @@
     return parts;
   };
   const getProperty = (object, path) => safeParts(path).reduce((value, key) => value?.[key], object);
+  const hasProperty = (object, path) => getProperty(object, path) !== undefined;
   const setProperty = (object, path, value) => {
     const parts = safeParts(path);
     const last = parts.pop();
@@ -27,16 +37,34 @@
     object[last] = value;
     return true;
   };
-  const mergeObject = (original, other = {}) => {
+  const isPlainObject = (value) => value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+  const mergeObject = (original, other = {}, options = {}) => {
+    const { insertKeys = true, insertValues = true, overwrite = true, recursive = true, inplace = true, performDeletions = false } = options;
+    if (!inplace) original = clone(original) ?? {};
     for (const key of Object.keys(other)) {
       safeParts(key);
       const value = other[key];
-      if (value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype) {
-        if (!original[key] || typeof original[key] !== "object") original[key] = {};
-        mergeObject(original[key], value);
-      } else original[key] = value;
+      if (performDeletions && key.startsWith("-=")) { Reflect.deleteProperty(original, key.slice(2)); continue; }
+      if (key.includes(".")) { // expanded-key form, e.g. { "flags.tagger.tags": [...] }
+        if (!hasProperty(original, key) ? insertKeys : overwrite) setProperty(original, key, clone(value));
+        continue;
+      }
+      const exists = Object.hasOwn(original, key);
+      if (isPlainObject(value) && recursive) {
+        if (!exists && !insertKeys) continue;
+        if (!isPlainObject(original[key])) { if (!exists || overwrite) original[key] = {}; else continue; }
+        mergeObject(original[key], value, { insertKeys: insertValues, insertValues, overwrite, recursive, inplace: true, performDeletions });
+      } else if (exists ? overwrite : insertKeys) original[key] = clone(value);
     }
     return original;
+  };
+  const expandObject = (object) => { const out = {}; for (const [key, value] of Object.entries(object)) setProperty(out, key, isPlainObject(value) ? expandObject(value) : value); return out; };
+  const flattenObject = (object, prefix = "", out = {}) => {
+    for (const [key, value] of Object.entries(object)) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (isPlainObject(value) && Object.keys(value).length) flattenObject(value, path, out); else out[path] = value;
+    }
+    return out;
   };
   const isNewerVersion = (left, right) => {
     const a = String(left).split(".").map(Number), b = String(right).split(".").map(Number);
@@ -45,6 +73,9 @@
     }
     return false;
   };
+  const randomID = (length = 16) => { let out = ""; while (out.length < length) out += crypto.randomUUID().replaceAll("-", ""); return out.slice(0, length); };
+  const debounce = (fn, ms) => { let timer; return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); }; };
+  const escapeHTML = (text) => String(text).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
 
   // Local synchronous hooks. In particular a Promise resolving to false is NOT a veto.
   const hooks = new Map();
@@ -58,10 +89,19 @@
     return entry.id;
   };
   const off = (name, id) => hooks.set(name, (hooks.get(name) || []).filter((entry) => entry.id !== id && entry.callback !== id));
+  const hookErrors = [];
   const dispatch = (name, args, cancellable) => {
     for (const entry of [...(hooks.get(name) || [])]) {
       if (entry.once) off(name, entry.id);
-      const result = entry.callback(...args);
+      let result;
+      try { result = entry.callback(...args); }
+      catch (error) {
+        // Foundry logs and continues; an unmodified module must not take the whole frame down.
+        if (!moduleProfile) throw error;
+        if (hookErrors.length < 32) hookErrors.push({ hook: name, error: error instanceof Error ? error.message : String(error) });
+        console.error(`Hook ${name} failed`, error);
+        continue;
+      }
       if (cancellable && result === false) return false;
     }
     return true;
@@ -69,28 +109,26 @@
   globalThis.Hooks = Object.freeze({ on, off,
     once: (name, callback) => on(name, callback, { once: true }),
     call: (name, ...args) => dispatch(name, args, true),
-    callAll: (name, ...args) => { dispatch(name, args, false); },
+    callAll: (name, ...args) => { dispatch(name, args, false); return true; },
+    get events() { return Object.fromEntries([...hooks].map(([name, rows]) => [name, rows.map((row) => ({ id: row.id, fn: row.callback, once: row.once }))])); },
   });
   // A Foundry convenience extension, installed in this isolated realm only.
   Object.defineProperty(Array.prototype, "deepFlatten", { configurable: true,
     value: function () { return this.flat(Infinity); } });
-  globalThis.randomID = () => crypto.randomUUID().replaceAll("-", "").slice(0, 16);
-  globalThis.foundry = Object.freeze({ utils: Object.freeze({ getProperty, setProperty, mergeObject, isNewerVersion,
-    deepClone: clone, randomID: globalThis.randomID }) });
-  globalThis.CONST = Object.freeze({ KEYBINDING_PRECEDENCE: Object.freeze({ PRIORITY: 0 }) });
-  globalThis.Actor = function Actor() { unsupported("Actor documents in this scene-only profile"); };
-  globalThis.Dialog = function Dialog() { unsupported("Foundry dialog/DOM applications"); };
-  globalThis.$ = () => unsupported("Foundry/jQuery configuration forms");
+  globalThis.randomID = randomID;
 
-  class Collection {
-    constructor(rows = []) { this.rows = new Map(rows.map((row) => [row.id, row])); }
-    get(id) { return this.rows.get(id); }
-    get contents() { return [...this.rows.values()]; }
-    get size() { return this.rows.size; }
+  class Collection extends Map {
+    constructor(rows = []) { super(rows.map((row) => [row.id ?? row._id, row])); }
+    /** Foundry collections iterate VALUES (`for (const token of scene.tokens)`), unlike Map. */
+    [Symbol.iterator]() { return this.values(); }
+    get contents() { return [...this.values()]; }
+    getName(name) { return this.contents.find((row) => row.name === name); }
     find(fn) { return this.contents.find(fn); }
     filter(fn) { return this.contents.filter(fn); }
     map(fn) { return this.contents.map(fn); }
-    [Symbol.iterator]() { return this.rows.values(); }
+    some(fn) { return this.contents.some(fn); }
+    reduce(fn, initial) { return this.contents.reduce(fn, initial); }
+    toJSON() { return this.contents.map((row) => (typeof row.toObject === "function" ? row.toObject() : row)); }
   }
   let currentView = null;
   let activeApi = null;
@@ -101,13 +139,24 @@
   class SceneDocumentView {
     constructor(data, view) {
       this._view = view; this._id = data.id; this.id = data.id; this.name = data.name;
-      this.grid = clone(data.grid); this.documentName = "Scene";
+      this.grid = clone(data.grid); this.documentName = "Scene"; this.active = true;
+      this.flags = {};
     }
+    get uuid() { return `Scene.${this.id}`; }
+    get isView() { return true; }
+    get dimensions() { return { size: this.grid?.size ?? 100, distance: this.grid?.distance ?? 5 }; }
     getEmbeddedDocument(type, id) {
       const key = Object.keys(types).find((key) => types[key] === type);
       if (!key) return unsupported(`embedded document ${type}`);
       return this[key].get(id);
     }
+    getEmbeddedCollection(type) {
+      const key = Object.keys(types).find((key) => types[key] === type);
+      if (!key) return unsupported(`embedded collection ${type}`);
+      return this[key];
+    }
+    getFlag() { return undefined; }
+    toObject() { return { _id: this.id, name: this.name, grid: clone(this.grid), flags: {} }; }
   }
   class DocumentView {
     constructor(data, collection, view) {
@@ -119,8 +168,11 @@
     get uuid() { return `Scene.${this.parent.id}.${this.documentName}.${this.id}`; }
     get flags() { return { tagger: { tags: clone(this._data.tags) } }; }
     get isOwner() { return true; } // GM-local profile, NOT a host permission credential.
+    /** Foundry placeables expose `.document`; modules normalise with `obj.document ?? obj`. */
+    get document() { return this; }
+    get object() { return this; }
     getFlag(scope, key) {
-      if (scope !== "tagger" || key !== "tags") return unsupported(`flag ${scope}.${key}`);
+      if (scope !== "tagger" || key !== "tags") return moduleProfile ? undefined : unsupported(`flag ${scope}.${key}`);
       return clone(this._data.tags);
     }
     setFlag(scope, key, value) {
@@ -129,7 +181,7 @@
     }
     unsetFlag(scope, key) { return this.setFlag(scope, key, []); }
     async update(input) {
-      if (!this._view.api || !busy || this._view !== currentView) throw new Error("Use the command-scoped adapter invocation API");
+      if (!moduleProfile && (!this._view.api || !busy || this._view !== currentView)) throw new Error("Use the command-scoped adapter invocation API");
       const changed = {};
       for (const [key, value] of Object.entries(input)) setProperty(changed, key, clone(value));
       if (!Hooks.call(`preUpdate${this.documentName}`, this, changed, {}, "gm")) throw new Error("Document update vetoed by a pre-hook");
@@ -142,14 +194,23 @@
       if (getProperty(changed, "flags.tagger.-=tags") === null) tags = [];
       if (!Array.isArray(tags)) throw new Error("Tag updates require an array");
       // Draft hook mutations are only proposals. This reply means the HOST committed.
-      const result = await this._view.api.sceneTags.update({ sceneId: this.parent.id, collection: this._collection,
-        id: this.id, expectedSeq: this._view.seq, tags });
+      const request = { sceneId: this.parent.id, collection: this._collection, id: this.id, tags };
+      let result;
+      try { result = await this._view.api.sceneTags.update({ ...request, expectedSeq: this._view.seq }); }
+      catch (error) {
+        // Foundry semantics are last-writer-wins: a stale revision is refreshed once, then retried.
+        if (!moduleProfile || !/stale/i.test(error?.message ?? "")) throw error;
+        const fresh = await this._view.api.sceneTags.snapshot();
+        this._view.seq = fresh.seq;
+        result = await this._view.api.sceneTags.update({ ...request, expectedSeq: fresh.seq });
+      }
       this._data.tags = clone(result.tags);
       this._view.seq = result.seq;
       Hooks.callAll(`update${this.documentName}`, this, changed, {}, "gm");
       return this;
     }
-    toObject() { return { _id: this.id, name: this.name, flags: this.flags }; }
+    toObject() { return { _id: this.id, name: this.name, x: this.x, y: this.y, flags: this.flags }; }
+    toJSON() { return this.toObject(); }
   }
   async function hydrate(api) {
     const snapshot = await api.sceneTags.snapshot();
@@ -162,27 +223,6 @@
     return view;
   }
   const bindings = new Map();
-  globalThis.game = Object.freeze({
-    version: "13", release: Object.freeze({ generation: 13 }),
-    user: Object.freeze({ id: "gm", name: "GM", isGM: true }),
-    modules: new Collection([{ id: config.id, version: config.version, active: true,
-      flags: { ais: { sourceHash: context.sourceHash, runtimeHash: context.runtimeHash } } },
-      { id: "sequencer", active: true, flags: { ais: { substitute: "transient-text-image-sound-v1" } } }]),
-    scenes: Object.freeze({
-      get: (id) => currentView?.scene.id === id ? currentView.scene : undefined,
-      [Symbol.iterator]: () => unsupported("all-scene iteration; only the active scene is projected"),
-    }),
-    get canvas() { return { id: currentView?.scene.id, scene: currentView?.scene, ready: !!currentView }; },
-    get actors() { return unsupported("world actors"); },
-    settings: Object.freeze({ register: () => unsupported("Foundry settings; use AIS storage in this first profile"),
-      get: () => unsupported("Foundry settings"), set: () => unsupported("Foundry settings") }),
-    // Declared exclusion: definitions are retained for diagnostics, not installed in parent UI.
-    keybindings: Object.freeze({ register: (scope, key, definition) => { bindings.set(`${scope}.${key}`, definition); } }),
-  });
-  Object.defineProperty(globalThis, "canvas", { configurable: true, get: () => ({
-    scene: currentView?.scene, tokens: currentView?.scene.tokens,
-    get app() { return unsupported("the host PIXI renderer"); },
-  }) });
 
   // A deliberately bounded Sequencer-shaped builder over ArenaStar's EXISTING FX runtime.
   // Unsupported methods fail explicitly; this is not the original Sequencer implementation.
@@ -192,6 +232,7 @@
     for (const [id, effect] of namedEffects) if (effect.endsAtHostTime <= Date.now()) namedEffects.delete(id);
     return [...namedEffects.values()].filter((effect) => filter.name === undefined || effect.name === filter.name);
   };
+  const fxApi = () => moduleProfile ? AIS : activeApi;
   class SequenceBuilder {
     constructor() { this.steps = []; this.cursor = 0; this.last = null; this.refs = {}; this.started = false; }
     section(kind) {
@@ -210,7 +251,7 @@
     }
     file(path) {
       if (!this.last || !["image", "sound"].includes(this.last.kind)) throw new Error("file needs an effect or sound section");
-      const mapped = config.assets?.[path] ?? path;
+      const mapped = config?.assets?.[path] ?? path;
       if (typeof mapped !== "string" || !/^[a-f0-9]{64}$/.test(mapped)) return unsupported("remote/file media paths without a local asset mapping");
       this.last.assetId = mapped; return this;
     }
@@ -249,12 +290,12 @@
     }
     persist() { return unsupported("persistent foreign FX; the native wizard remains available"); }
     async play() {
-      if (this.started || !activeApi) throw new Error("FX playback needs a live command-scoped invocation");
+      const api = fxApi();
+      if (this.started || !api) throw new Error("FX playback needs a live command-scoped invocation");
       ownEffects();
       this.started = true;
       const duration = Math.max(0, ...this.steps.map((step) => step.startMs + step.durationMs));
-      if (Date.now() + duration + 1500 >= activeDeadline) throw new Error("FX timeline cannot finish within this command budget");
-      const api = activeApi;
+      if (!moduleProfile && Date.now() + duration + 1500 >= activeDeadline) throw new Error("FX timeline cannot finish within this command budget");
       const run = await api.fx.play({ sequence: { version: 1, audience: "scene", persistent: false, sections: this.steps },
         ...(this.refs.source ? { sourceTokenId: this.refs.source } : {}),
         ...(this.refs.target ? { targetTokenId: this.refs.target } : {}) });
@@ -269,11 +310,12 @@
     EffectManager: Object.freeze({
       getEffects: (filter) => ownEffects(filter).map((effect) => ({ ...effect })),
       endEffects: async (filter = {}) => {
-        if (!activeApi || typeof filter.name !== "string" || !filter.name) return unsupported("endEffects needs an exact owned name");
+        const api = fxApi();
+        if (!api || typeof filter.name !== "string" || !filter.name) return unsupported("endEffects needs an exact owned name");
         const effects = ownEffects(filter);
         const results = [];
         for (const effect of effects) {
-          results.push(await activeApi.fx.stop(effect.runId));
+          results.push(await api.fx.stop(effect.runId));
           namedEffects.delete(effect.runId);
         }
         return results;
@@ -281,27 +323,525 @@
     }),
   });
 
-  globalThis.FoundryAdapter = Object.freeze({
-    async invoke(commandContext, callback) {
-      if (busy || !commandContext?.ais) throw new Error("An adapter invocation is already running or lacks scoped authority");
-      busy = true;
-      try {
-        activeApi = commandContext.ais;
-        activeDeadline = commandContext.deadlineAt;
-        const view = await hydrate(activeApi);
-        if (view.scene.id !== commandContext.sceneId) throw new Error("The active scene changed before this invocation");
-        return await callback();
-      } finally { activeApi = null; busy = false; }
+  if (!moduleProfile) {
+    // ───────────────────────── profile: foundry-v13-scene-tags-fx (0.1.0 behaviour) ─────────────────────────
+    globalThis.foundry = Object.freeze({ utils: Object.freeze({ getProperty, setProperty, mergeObject, isNewerVersion,
+      deepClone: clone, randomID }) });
+    globalThis.CONST = Object.freeze({ KEYBINDING_PRECEDENCE: Object.freeze({ PRIORITY: 0 }) });
+    globalThis.Actor = function Actor() { unsupported("Actor documents in this scene-only profile"); };
+    globalThis.Dialog = function Dialog() { unsupported("Foundry dialog/DOM applications"); };
+    globalThis.$ = () => unsupported("Foundry/jQuery configuration forms");
+    globalThis.game = Object.freeze({
+      version: "13", release: Object.freeze({ generation: 13 }),
+      user: Object.freeze({ id: "gm", name: "GM", isGM: true }),
+      modules: new Collection([{ id: config.id, version: config.version, active: true,
+        flags: { ais: { sourceHash: context.sourceHash, runtimeHash: context.runtimeHash } } },
+        { id: "sequencer", active: true, flags: { ais: { substitute: "transient-text-image-sound-v1" } } }]),
+      scenes: Object.freeze({
+        get: (id) => currentView?.scene.id === id ? currentView.scene : undefined,
+        [Symbol.iterator]: () => unsupported("all-scene iteration; only the active scene is projected"),
+      }),
+      get canvas() { return { id: currentView?.scene.id, scene: currentView?.scene, ready: !!currentView }; },
+      get actors() { return unsupported("world actors"); },
+      settings: Object.freeze({ register: () => unsupported("Foundry settings; use AIS storage in this first profile"),
+        get: () => unsupported("Foundry settings"), set: () => unsupported("Foundry settings") }),
+      // Declared exclusion: definitions are retained for diagnostics, not installed in parent UI.
+      keybindings: Object.freeze({ register: (scope, key, definition) => { bindings.set(`${scope}.${key}`, definition); } }),
+    });
+    Object.defineProperty(globalThis, "canvas", { configurable: true, get: () => ({
+      scene: currentView?.scene, tokens: currentView?.scene.tokens,
+      get app() { return unsupported("the host PIXI renderer"); },
+    }) });
+    globalThis.FoundryAdapter = Object.freeze({
+      async invoke(commandContext, callback) {
+        if (busy || !commandContext?.ais) throw new Error("An adapter invocation is already running or lacks scoped authority");
+        busy = true;
+        try {
+          activeApi = commandContext.ais;
+          activeDeadline = commandContext.deadlineAt;
+          const view = await hydrate(activeApi);
+          if (view.scene.id !== commandContext.sceneId) throw new Error("The active scene changed before this invocation");
+          return await callback();
+        } finally { activeApi = null; busy = false; }
+      },
+      info: () => ({ profile: context.profile, upstreamId: config.id, upstreamVersion: config.version,
+        sourceCommit: config.sourceCommit ?? null, runtimeHash: context.runtimeHash,
+        scope: "GM-local active-scene tags; transient FX; no Foundry UI, settings or actor/system emulation",
+        keybindingsRecordedNotDispatched: bindings.size, hookNames: [...hooks.keys()] }),
+    });
+    AIS.runtime.initialize(async () => {
+      await hydrate(AIS);
+      Hooks.callAll("init");
+      Hooks.callAll("setup");
+      Hooks.callAll("ready");
+    });
+    return;
+  }
+
+  // ═════════════════════════════ profile: foundry-module (0.2.0, D-482) ═════════════════════════════
+  const dist = context.distribution;
+  if (!dist || typeof dist.foundryId !== "string" || !Array.isArray(dist.files))
+    throw new Error("foundry-module profile needs runtimeContext.distribution (import the module.json archive through the package importer)");
+  const foundryId = dist.foundryId;
+  const diagnostics = { loaded: [], styles: [], languages: [], warnings: [], unsupportedCalls: [] };
+  const warn = (text) => { if (diagnostics.warnings.length < 64 && !diagnostics.warnings.includes(text)) diagnostics.warnings.push(text); console.warn(text); };
+  const unsupportedCall = (name) => {
+    if (diagnostics.unsupportedCalls.length < 64 && !diagnostics.unsupportedCalls.includes(name)) diagnostics.unsupportedCalls.push(name);
+    return unsupported(name);
+  };
+  /** A class whose instances exist (so `class X extends Y` and `instanceof` work) but cannot render/act. */
+  const stubClass = (name, base = Object) => {
+    const klass = { [name]: class extends base {
+      constructor(...args) { super(...(base === Object ? [] : args)); this._stubArgs = args; }
+    } }[name];
+    for (const method of ["render", "close", "submit", "activateListeners", "getData", "_render", "maximize", "minimize", "bringToTop", "setPosition"])
+      if (!Object.hasOwn(klass.prototype, method))
+        Object.defineProperty(klass.prototype, method, { configurable: true, writable: true, value: function () { return unsupportedCall(`${name}#${method} (Foundry application UI; R-04)`); } });
+    Object.defineProperty(klass, "defaultOptions", { configurable: true, get: () => ({ classes: [], template: null, width: 400, height: "auto" }) });
+    Object.defineProperty(klass, "DEFAULT_OPTIONS", { configurable: true, writable: true, value: {} });
+    Object.defineProperty(klass, "PARTS", { configurable: true, writable: true, value: {} });
+    return klass;
+  };
+
+  // ── i18n: the module's own language files (en first, then whatever the file list offers). ──
+  const translations = {};
+  const i18n = {
+    lang: "en",
+    translations,
+    has: (key) => typeof getProperty(translations, key) === "string",
+    localize: (key) => { const value = getProperty(translations, String(key)); return typeof value === "string" ? value : String(key); },
+    format: (key, data = {}) => i18n.localize(key).replace(/\{([^}]+)\}/g, (_m, name) => (data[name] === undefined ? `{${name}}` : String(data[name]))),
+    sortObjects: (rows, key) => [...rows].sort((a, b) => String(getProperty(a, key)).localeCompare(String(getProperty(b, key)))),
+  };
+  const shortText = (text, max) => { const t = String(text ?? "").replace(/\s+/g, " ").trim(); return t.length > max ? `${t.slice(0, max - 1)}…` : t; };
+
+  // ── game.settings over AIS declared settings (D-476/D-482): Foundry's sync API, cached locally. ──
+  const SETTING_KEY_RE = /^[a-z][a-zA-Z0-9_]{0,47}$/;
+  const fnv = (text) => { let h = 0x811c9dc5; for (const ch of text) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, "0"); };
+  /** Deterministic AIS key for `<namespace>.<key>` (Foundry keys allow dashes/dots/case the AIS schema does not). */
+  const aisSettingKey = (namespace, key) => {
+    const raw = `${namespace}_${key}`.replace(/[^a-zA-Z0-9_]/g, "_");
+    let candidate = (/^[a-z]/.test(raw) ? "" : "s_") + raw;
+    if (candidate.length > 48) candidate = `${candidate.slice(0, 39)}_${fnv(raw)}`;
+    if (!SETTING_KEY_RE.test(candidate)) candidate = `s_${fnv(raw)}`;
+    return candidate;
+  };
+  const settingRows = new Map(); // "<namespace>.<key>" → { namespace, key, data, aisKey, kind, scope, value, declaration }
+  const settingByAisKey = new Map();
+  const pendingRegistrations = [];
+  let settingsSynced = false;
+  const CHOICE_VALUE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+  const declarationFor = (namespace, key, data) => {
+    const aisKey = aisSettingKey(namespace, key);
+    const scope = data.scope === "world" ? "world" : "device";
+    const label = shortText(i18n.localize(data.name ?? key) || key, 48) || key;
+    const hint = data.hint ? shortText(i18n.localize(data.hint), 160) : undefined;
+    const hidden = data.config === false;
+    const type = data.type;
+    const base = { key: aisKey, scope, label, ...(hint ? { hint } : {}), ...(hidden ? { hidden: true } : {}) };
+    if (type === Boolean) return { kind: "boolean", declaration: { ...base, type: "boolean", default: data.default === true } };
+    if (type === Number) {
+      const range = data.range && Number.isFinite(data.range.min) && Number.isFinite(data.range.max) && data.range.min <= data.range.max ? data.range : null;
+      let fallback = Number.isFinite(data.default) ? data.default : (range ? range.min : 0);
+      if (range) fallback = Math.min(range.max, Math.max(range.min, fallback));
+      const step = range && Number.isFinite(range.step) && range.step > 0 && Math.abs((fallback - range.min) / range.step - Math.round((fallback - range.min) / range.step)) < 1e-9 ? range.step : null;
+      return { kind: "number", declaration: { ...base, type: "number", default: fallback,
+        ...(range ? { min: range.min, max: range.max, ...(step ? { step } : {}) } : {}) } };
+    }
+    if (type === String) {
+      const choices = isPlainObject(data.choices) ? Object.entries(data.choices) : [];
+      if (choices.length >= 2 && choices.length <= 32 && choices.every(([value]) => CHOICE_VALUE_RE.test(value))) {
+        const values = choices.map(([value, text]) => ({ value, label: shortText(i18n.localize(String(text)) || value, 48) || value }));
+        const fallback = values.some((row) => row.value === data.default) ? data.default : values[0].value;
+        return { kind: "choice", declaration: { ...base, type: "choice", default: fallback, choices: values } };
+      }
+      return { kind: "string", declaration: { ...base, type: "string", default: typeof data.default === "string" ? data.default.slice(0, 16384) : "", maxLength: 16384 } };
+    }
+    // Object / Array / DataModel / unspecified → JSON text in a hidden string setting.
+    let fallback = data.default;
+    if (typeof fallback === "function") { try { fallback = new fallback(); } catch { fallback = {}; } }
+    if (fallback === undefined) fallback = type === Array ? [] : {};
+    let text;
+    try { text = JSON.stringify(fallback); } catch { text = "{}"; }
+    if (typeof text !== "string") text = "null";
+    return { kind: "json", declaration: { ...base, hidden: true, type: "string", default: text.slice(0, 16384), maxLength: 16384 } };
+  };
+  const decodeSetting = (row, raw) => {
+    if (row.kind !== "json") return raw;
+    try { return JSON.parse(raw); } catch { return clone(row.data.default) ?? {}; }
+  };
+  const encodeSetting = (row, value) => {
+    if (row.kind !== "json") return value;
+    const text = JSON.stringify(value === undefined ? null : value);
+    if (text.length > 16384) throw new Error(`Setting ${row.namespace}.${row.key} exceeds the 16 KiB JSON cap`);
+    return text;
+  };
+  const settingsMenus = new Map();
+  const settings = {
+    /** Foundry exposes the registry as a Map keyed by "<namespace>.<key>". */
+    settings: settingRows,
+    menus: settingsMenus,
+    storage: new Map([["client", { getItem: () => null }], ["world", { get: () => undefined }]]),
+    register(namespace, key, data = {}) {
+      if (typeof namespace !== "string" || typeof key !== "string" || !namespace || !key) throw new Error("game.settings.register needs a namespace and a key");
+      const full = `${namespace}.${key}`;
+      if (settingRows.has(full)) throw new Error(`Setting ${full} is already registered`);
+      const { kind, declaration } = declarationFor(namespace, key, data);
+      const row = { namespace, key, data, aisKey: declaration.key, kind, scope: declaration.scope, declaration,
+        value: decodeSetting({ kind, data }, declaration.default), synced: false };
+      settingRows.set(full, row); settingByAisKey.set(declaration.key, row);
+      const registration = AIS.settings.register(declaration).then(() => { row.synced = true; }).catch((error) => {
+        warn(`Setting ${full} stays in-memory only: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      pendingRegistrations.push(registration);
+      if (settingsSynced) void registration.then(() => AIS.settings.get(declaration.key)).then((value) => { if (row.synced) row.value = decodeSetting(row, value); }).catch(() => undefined);
     },
-    info: () => ({ profile: context.profile, upstreamId: config.id, upstreamVersion: config.version,
-      sourceCommit: config.sourceCommit ?? null, runtimeHash: context.runtimeHash,
-      scope: "GM-local active-scene tags; transient FX; no Foundry UI, settings or actor/system emulation",
-      keybindingsRecordedNotDispatched: bindings.size, hookNames: [...hooks.keys()] }),
+    registerMenu(namespace, key, data = {}) { settingsMenus.set(`${namespace}.${key}`, data); },
+    get(namespace, key) {
+      const row = settingRows.get(`${namespace}.${key}`);
+      if (!row) throw new Error(`This is not a registered game setting: ${namespace}.${key}`);
+      return clone(row.value);
+    },
+    async set(namespace, key, value) {
+      const row = settingRows.get(`${namespace}.${key}`);
+      if (!row) throw new Error(`This is not a registered game setting: ${namespace}.${key}`);
+      if (typeof row.data.type === "function" && [Boolean, Number, String].includes(row.data.type)) value = row.data.type(value);
+      const previous = row.value;
+      row.value = clone(value);
+      await Promise.all(pendingRegistrations);
+      if (row.synced) {
+        try { await AIS.settings.set(row.aisKey, encodeSetting(row, value)); }
+        catch (error) { row.value = previous; throw error; }
+      }
+      if (typeof row.data.onChange === "function") { try { row.data.onChange(clone(row.value)); } catch (error) { console.error(error); } }
+      return clone(row.value);
+    },
+  };
+  const syncSettings = async () => {
+    await Promise.all(pendingRegistrations);
+    try {
+      const listed = await AIS.settings.list();
+      for (const entry of listed.settings) {
+        const row = settingByAisKey.get(entry.key);
+        if (row && row.synced) row.value = decodeSetting(row, entry.value);
+      }
+    } catch (error) { warn(`Settings could not be read: ${error instanceof Error ? error.message : String(error)}`); }
+    settingsSynced = true;
+    AIS.settings.onChange(({ key, value }) => {
+      const row = settingByAisKey.get(key);
+      if (!row) return;
+      const next = decodeSetting(row, value);
+      if (JSON.stringify(next) === JSON.stringify(row.value)) return;
+      row.value = next;
+      if (typeof row.data.onChange === "function") { try { row.data.onChange(clone(next)); } catch (error) { console.error(error); } }
+    });
+  };
+
+  // ── Notifications: ui.notifications → the shell's notice line, GM device. ──
+  let notificationId = 0;
+  const notify = (level) => (message, options = {}) => {
+    const text = options.localize ? i18n.localize(String(message)) : String(message);
+    const row = { id: ++notificationId, message: text, type: level, active: true, remove() { this.active = false; }, update() {} };
+    void AIS.ui.notify(shortText(text, 240), level === "warning" ? "warn" : level === "error" ? "error" : "info").catch((error) => console.warn(error));
+    if (options.console !== false) console[level === "error" ? "error" : level === "warning" ? "warn" : "info"](`Foundry | ${text}`);
+    return row;
+  };
+  globalThis.ui = {
+    notifications: { info: notify("info"), warn: notify("warning"), error: notify("error"), notify: (message, type = "info", options) => notify(type)(message, options),
+      success: notify("info"), clear() {}, render() {}, active: [] },
+    windows: {}, sidebar: { tabs: {}, render() {} }, controls: { controls: [], render() {} }, hotbar: { render() {} },
+    chat: { render() {} }, players: { render() {} }, nav: { render() {} }, menu: { render() {} },
+  };
+
+  // ── Document and application class stubs (exist for `extends`/`instanceof`; acting is R-02/R-04). ──
+  const Document = stubClass("Document");
+  Object.assign(Document, {
+    create: () => unsupportedCall("Document.create (document CRUD; R-02)"),
+    createDocuments: () => unsupportedCall("Document.createDocuments (document CRUD; R-02)"),
+    updateDocuments: () => unsupportedCall("Document.updateDocuments (document CRUD; R-02)"),
+    deleteDocuments: () => unsupportedCall("Document.deleteDocuments (document CRUD; R-02)"),
   });
-  AIS.runtime.initialize(async () => {
+  const documentClasses = {};
+  for (const name of ["Actor", "Item", "Scene", "TokenDocument", "ChatMessage", "Macro", "JournalEntry", "JournalEntryPage", "RollTable", "Playlist",
+    "Combat", "Combatant", "Folder", "User", "Cards", "Setting", "ActiveEffect", "AmbientLightDocument", "AmbientSoundDocument", "TileDocument",
+    "WallDocument", "DrawingDocument", "MeasuredTemplateDocument", "NoteDocument", "RegionDocument", "RegionBehavior", "Adventure", "FogExploration"]) {
+    documentClasses[name] = stubClass(name, Document);
+    globalThis[name] = documentClasses[name];
+  }
+  const PlaceableObject = stubClass("PlaceableObject");
+  globalThis.PlaceableObject = PlaceableObject;
+  for (const name of ["Token", "Tile", "Drawing", "Wall", "AmbientLight", "AmbientSound", "MeasuredTemplate", "Note", "Region"])
+    globalThis[name] = stubClass(name, PlaceableObject);
+  const Application = stubClass("Application");
+  const FormApplication = stubClass("FormApplication", Application);
+  const DocumentSheet = stubClass("DocumentSheet", FormApplication);
+  const Dialog = stubClass("Dialog", Application);
+  Object.assign(Dialog, {
+    confirm: () => unsupportedCall("Dialog.confirm (Foundry dialogs; R-04)"),
+    prompt: () => unsupportedCall("Dialog.prompt (Foundry dialogs; R-04)"),
+    wait: () => unsupportedCall("Dialog.wait (Foundry dialogs; R-04)"),
+  });
+  Object.assign(globalThis, { Application, FormApplication, DocumentSheet, Dialog,
+    ActorSheet: stubClass("ActorSheet", DocumentSheet), ItemSheet: stubClass("ItemSheet", DocumentSheet),
+    TokenConfig: stubClass("TokenConfig", DocumentSheet), SidebarTab: stubClass("SidebarTab", Application),
+    ContextMenu: stubClass("ContextMenu"), Draggable: stubClass("Draggable"), SearchFilter: stubClass("SearchFilter"),
+    Tabs: stubClass("Tabs"), FilePicker: stubClass("FilePicker", Application), SettingsConfig: stubClass("SettingsConfig", FormApplication),
+    KeybindingsConfig: stubClass("KeybindingsConfig", FormApplication), Roll: stubClass("Roll"), Collection,
+    Handlebars: { registerHelper() {}, registerPartial() {}, compile: () => () => "", helpers: {}, partials: {} },
+    loadTemplates: async () => [], getTemplate: async () => unsupportedCall("getTemplate (Handlebars templates; R-04)"),
+    renderTemplate: async () => unsupportedCall("renderTemplate (Handlebars templates; R-04)"),
+    fromUuid: async (uuid) => fromUuidSync(uuid), fromUuidSync: (uuid) => fromUuidSync(uuid),
+    $: () => unsupportedCall("jQuery (Foundry forms; R-04)"), jQuery: () => unsupportedCall("jQuery (Foundry forms; R-04)"),
+    duplicate: clone, mergeObject, getProperty, setProperty, hasProperty, expandObject, flattenObject, isNewerVersion, debounce,
+  });
+  globalThis.Dialog.prototype.render = function () { return unsupportedCall("Dialog#render (Foundry dialogs; R-04)"); };
+  function fromUuidSync(uuid) {
+    const parts = String(uuid).split(".");
+    if (parts[0] === "Scene" && currentView?.scene.id === parts[1]) {
+      if (parts.length === 2) return currentView.scene;
+      const key = Object.keys(types).find((key) => types[key] === parts[2]);
+      return key ? currentView.scene[key].get(parts[3]) ?? null : null;
+    }
+    return null;
+  }
+  const HandlebarsApplicationMixin = (Base) => class extends Base {};
+  const ApplicationV2 = stubClass("ApplicationV2");
+  globalThis.foundry = {
+    utils: { getProperty, setProperty, hasProperty, mergeObject, expandObject, flattenObject, isNewerVersion, deepClone: clone, duplicate: clone, randomID,
+      debounce, escapeHTML, isEmpty: (value) => value === undefined || value === null || (typeof value === "object" && Object.keys(value).length === 0) || value === "",
+      getType: (value) => value === null ? "null" : Array.isArray(value) ? "Array" : typeof value === "object" ? value.constructor?.name ?? "Object" : typeof value,
+      fetchJsonWithTimeout: () => unsupportedCall("foundry.utils.fetchJsonWithTimeout (network access)"),
+      diffObject: (original, other) => Object.fromEntries(Object.entries(flattenObject(other)).filter(([key, value]) => JSON.stringify(getProperty(original, key)) !== JSON.stringify(value))),
+      invertObject: (object) => Object.fromEntries(Object.entries(object).map(([key, value]) => [value, key])),
+      timeSince: () => "", formatFileSize: (bytes) => `${bytes} B`, Collection, parseUuid: (uuid) => ({ uuid, id: String(uuid).split(".").pop() }),
+      Semaphore: class { constructor(max = 1) { this.max = max; } add(fn, ...args) { return Promise.resolve().then(() => fn(...args)); } } },
+    applications: { api: { ApplicationV2, DialogV2: Object.assign(stubClass("DialogV2", ApplicationV2), {
+        confirm: () => unsupportedCall("DialogV2.confirm (Foundry dialogs; R-04)"), prompt: () => unsupportedCall("DialogV2.prompt (Foundry dialogs; R-04)"),
+        wait: () => unsupportedCall("DialogV2.wait (Foundry dialogs; R-04)"), input: () => unsupportedCall("DialogV2.input (Foundry dialogs; R-04)") }),
+      HandlebarsApplicationMixin, DocumentSheetV2: stubClass("DocumentSheetV2", ApplicationV2) },
+      sheets: { ActorSheetV2: stubClass("ActorSheetV2", ApplicationV2), ItemSheetV2: stubClass("ItemSheetV2", ApplicationV2) },
+      handlebars: { loadTemplates: async () => [], renderTemplate: async () => unsupportedCall("renderTemplate (Handlebars templates; R-04)") },
+      ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, TextEditor: { enrichHTML: async (html) => String(html ?? "") } },
+      apps: { FilePicker: globalThis.FilePicker }, ui: { Notifications: stubClass("Notifications") } },
+    documents: { ...documentClasses, collections: {} },
+    canvas: { placeables: { Token: globalThis.Token, Tile: globalThis.Tile, Drawing: globalThis.Drawing, Wall: globalThis.Wall, AmbientLight: globalThis.AmbientLight,
+      AmbientSound: globalThis.AmbientSound, MeasuredTemplate: globalThis.MeasuredTemplate, Note: globalThis.Note, Region: globalThis.Region }, layers: {} },
+    abstract: { DataModel: stubClass("DataModel"), TypeDataModel: stubClass("TypeDataModel"), Document },
+    data: { fields: {} },
+    dice: { Roll: globalThis.Roll },
+    helpers: { Hooks: globalThis.Hooks, Localization: stubClass("Localization") },
+    CONST: null,
+  };
+  globalThis.CONST = {
+    KEYBINDING_PRECEDENCE: { PRIORITY: 0, NORMAL: 1, DEFERRED: 2 },
+    USER_ROLES: { NONE: 0, PLAYER: 1, TRUSTED: 2, ASSISTANT: 3, GAMEMASTER: 4 }, USER_ROLE_NAMES: { 0: "NONE", 1: "PLAYER", 2: "TRUSTED", 3: "ASSISTANT", 4: "GAMEMASTER" },
+    DOCUMENT_OWNERSHIP_LEVELS: { INHERIT: -1, NONE: 0, LIMITED: 1, OBSERVER: 2, OWNER: 3 },
+    CHAT_MESSAGE_STYLES: { OTHER: 0, OOC: 1, IC: 2, EMOTE: 3 }, CHAT_MESSAGE_TYPES: { OTHER: 0, OOC: 1, IC: 2, EMOTE: 3, WHISPER: 4, ROLL: 5 },
+    TOKEN_DISPOSITIONS: { SECRET: -2, HOSTILE: -1, NEUTRAL: 0, FRIENDLY: 1 }, GRID_TYPES: { GRIDLESS: 0, SQUARE: 1, HEXODDR: 2, HEXEVENR: 3, HEXODDQ: 4, HEXEVENQ: 5 },
+    WALL_SENSE_TYPES: { NONE: 0, LIMITED: 10, NORMAL: 20, PROXIMITY: 30, DISTANCE: 40 }, WALL_DOOR_TYPES: { NONE: 0, DOOR: 1, SECRET: 2 },
+    DOCUMENT_TYPES: Object.keys(documentClasses), SOFTWARE_UPDATE_CHANNELS: {}, ASCII: "ArenaStar AIS Foundry profile",
+  };
+  globalThis.foundry.CONST = globalThis.CONST;
+  globalThis.CONFIG = { debug: { hooks: false }, compatibility: { mode: 0 }, ui: {}, Canvas: { layers: {} }, TextEditor: { enrichers: [] },
+    statusEffects: [], specialStatusEffects: {}, controlIcons: {}, sounds: {}, fontDefinitions: {}, Dice: { rolls: [globalThis.Roll], terms: {} },
+    ...Object.fromEntries(Object.keys(documentClasses).map((name) => [name.replace(/Document$/, ""), { documentClass: documentClasses[name], sheetClasses: {}, typeLabels: {}, dataModels: {} }])) };
+
+  // ── game ──
+  const user = { id: "gm", _id: "gm", name: "GM", isGM: true, isSelf: true, role: 4, active: true, character: null, color: "#e0b341",
+    targets: new Set(), viewedScene: null, flags: {}, getFlag: () => undefined, setFlag: () => unsupportedCall("User#setFlag (document CRUD; R-02)"),
+    can: () => true, hasRole: () => true, hasPermission: () => true, isTrusted: true, documentName: "User" };
+  const selfModule = { id: foundryId, title: dist.title ?? foundryId, version: dist.version ?? "", active: true, api: undefined, socket: dist.socket === true,
+    esmodules: new Set(dist.esmodules), scripts: new Set(dist.scripts), styles: new Set(dist.styles), languages: dist.languages, packs: dist.packs,
+    flags: { ais: { packageId: context.packageId, sourceHash: context.sourceHash, runtimeHash: context.runtimeHash } },
+    compatibility: {}, relationships: { systems: dist.systems, requires: dist.requires }, library: false };
+  const modules = new Collection([selfModule, { id: "sequencer", title: "Sequencer (ArenaStar transient FX substitute)", version: "0.0.0", active: true,
+    flags: { ais: { substitute: "transient-text-image-sound-v1" } } }]);
+  const emptyCollection = (name) => { const c = new Collection([]); c.documentName = name; c.projected = false; return c; };
+  const socketListeners = new Map();
+  const keybindingActions = new Map();
+  const game = {
+    version: "13.346", release: { generation: 13, build: 346 }, data: { version: "13.346", release: { generation: 13 } },
+    user, userId: user.id, users: new Collection([user]), ready: false, paused: false, debug: false,
+    world: { id: "arenastar", title: "ArenaStar world", system: "arenastar", version: "0.0.0" },
+    // Deliberately NOT a Foundry system id: modules that need `pf1` must say so and stay inert.
+    system: { id: "arenastar", title: "ArenaStar VTT", version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, template: {}, flags: {} },
+    modules, i18n, settings,
+    scenes: emptyCollection("Scene"), actors: emptyCollection("Actor"), items: emptyCollection("Item"), journal: emptyCollection("JournalEntry"),
+    tables: emptyCollection("RollTable"), macros: emptyCollection("Macro"), playlists: emptyCollection("Playlist"), combats: emptyCollection("Combat"),
+    folders: emptyCollection("Folder"), messages: emptyCollection("ChatMessage"), packs: emptyCollection("CompendiumCollection"), cards: emptyCollection("Cards"),
+    get combat() { return null; },
+    get canvas() { return globalThis.canvas; },
+    time: { worldTime: 0, serverTime: Date.now(), advance: () => unsupportedCall("game.time.advance (world clock; R-02)") },
+    keyboard: { isModifierActive: () => false, downKeys: new Set() }, mouse: {},
+    keybindings: { actions: keybindingActions, bindings: new Map(),
+      register: (namespace, action, definition) => { bindings.set(`${namespace}.${action}`, definition); keybindingActions.set(`${namespace}.${action}`, definition); },
+      get: (namespace, action) => bindings.get(`${namespace}.${action}`)?.editable ?? [], set: async () => undefined },
+    socket: { on: (event, handler) => { socketListeners.set(event, handler); }, off: (event) => { socketListeners.delete(event); },
+      emit: () => unsupportedCall("game.socket.emit (cross-device module socket; R-06)") },
+    audio: { play: () => unsupportedCall("game.audio.play (audio; R-07)"), pending: [] },
+    video: {}, tooltip: { activate() {}, deactivate() {} }, clipboard: {}, tours: { register() {} }, issues: { usabilityIssues: {} },
+    togglePause: () => unsupportedCall("game.togglePause"), activeTool: "select",
+  };
+  globalThis.game = game;
+  Object.defineProperty(globalThis, "canvas", { configurable: true, get: () => {
+    const scene = currentView?.scene;
+    const layer = (key) => ({ name: key, placeables: scene ? scene[key].contents : [], get: (id) => scene?.[key].get(id), controlled: [], active: false,
+      get documentCollection() { return scene?.[key]; } });
+    return { ready: !!scene, id: scene?.id, scene, dimensions: scene?.dimensions, grid: scene?.grid,
+      tokens: layer("tokens"), lighting: layer("lights"), sounds: layer("sounds"), templates: layer("templates"), tiles: layer("tiles"),
+      walls: layer("walls"), drawings: layer("drawings"), notes: layer("notes"), regions: layer("regions"),
+      stage: { addChild: () => unsupportedCall("canvas.stage (the host PIXI renderer)") },
+      get app() { return unsupportedCall("canvas.app (the host PIXI renderer)"); },
+      draw: () => unsupportedCall("canvas.draw"), pan: async () => undefined, animatePan: async () => undefined, hud: {}, perception: { update() {} } };
+  } });
+  const refreshScene = async () => {
     await hydrate(AIS);
+    game.scenes = new Collection([currentView.scene]);
+    game.scenes.active = currentView.scene; game.scenes.current = currentView.scene; game.scenes.viewed = currentView.scene; game.scenes.projected = true;
+    user.viewedScene = currentView.scene.id;
+  };
+
+  // ── The loader: resources → blobs → import map → classic scripts → ES modules → lifecycle hooks. ──
+  const resourceText = new Map();
+  const readAll = async (paths) => {
+    const queue = [...paths];
+    const worker = async () => {
+      for (let path = queue.shift(); path !== undefined; path = queue.shift()) resourceText.set(path, await AIS.resources.readText(path));
+    };
+    await Promise.all(Array.from({ length: Math.min(8, queue.length) }, worker));
+  };
+  const blobUrl = (text, type) => URL.createObjectURL(new Blob([text], { type }));
+  const loadLanguages = () => {
+    const ordered = [...dist.languages].sort((a, b) => (a.lang === "en" ? -1 : b.lang === "en" ? 1 : 0));
+    for (const language of ordered) {
+      const text = resourceText.get(language.path);
+      if (text === undefined) continue;
+      try { mergeObject(translations, expandObject(JSON.parse(text))); diagnostics.languages.push(language.lang); }
+      catch (error) { warn(`Language file ${language.path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`); }
+      if (language.lang === "en") break;
+    }
+  };
+  const installStyles = () => {
+    for (const path of dist.styles) {
+      const text = resourceText.get(path);
+      if (text === undefined) continue;
+      const style = document.createElement("style"); style.dataset.foundryStyle = path; style.textContent = text;
+      document.head.appendChild(style); diagnostics.styles.push(path);
+    }
+  };
+  const installImportMap = () => {
+    const imports = {};
+    for (const path of dist.files) {
+      if (!/\.m?js$/i.test(path)) continue;
+      const text = resourceText.get(path);
+      if (text === undefined) continue;
+      imports[`ais-foundry://${context.packageId}/${path}`] = blobUrl(text, "text/javascript");
+    }
+    const map = document.createElement("script"); map.type = "importmap"; map.textContent = JSON.stringify({ imports });
+    document.head.appendChild(map);
+    return imports;
+  };
+  const runClassicScript = (path, url) => new Promise((resolve, reject) => {
+    const script = document.createElement("script"); script.src = url; script.async = false;
+    script.onload = () => resolve(); script.onerror = () => reject(new Error(`Classic script ${path} failed to load`));
+    document.head.appendChild(script);
+  });
+  const loadModules = async (imports) => {
+    for (const path of dist.scripts) {
+      const url = imports[`ais-foundry://${context.packageId}/${path}`];
+      if (!url) throw new Error(`Script ${path} is missing from the distribution`);
+      await runClassicScript(path, url);
+      diagnostics.loaded.push({ path, kind: "script" });
+    }
+    for (const path of dist.esmodules) {
+      const url = imports[`ais-foundry://${context.packageId}/${path}`];
+      if (!url) throw new Error(`ES module ${path} is missing from the distribution`);
+      try { await import(/* @vite-ignore */ url); }
+      catch (error) { throw new Error(`Foundry module ${foundryId}: ${path} failed — ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`, { cause: error }); }
+      diagnostics.loaded.push({ path, kind: "esmodule" });
+    }
+  };
+  const jsonSafe = (value, depth = 0) => {
+    if (depth > 8) return "[depth]";
+    if (value === null || ["string", "number", "boolean"].includes(typeof value)) return value;
+    if (value === undefined || typeof value === "function" || typeof value === "symbol") return null;
+    if (typeof value?.toObject === "function") return jsonSafe(value.toObject(), depth + 1);
+    if (value instanceof Map) return jsonSafe([...value.values()], depth + 1);
+    if (value instanceof Set) return jsonSafe([...value], depth + 1);
+    if (Array.isArray(value)) return value.slice(0, 256).map((item) => jsonSafe(item, depth + 1));
+    if (typeof value === "object") {
+      const out = {};
+      for (const [key, item] of Object.entries(value).slice(0, 128)) out[key] = jsonSafe(item, depth + 1);
+      return out;
+    }
+    return String(value);
+  };
+  const FORBIDDEN_ROOTS = new Set(["AIS", "eval", "Function", "globalThis", "window", "self", "parent", "top", "document", "fetch", "XMLHttpRequest",
+    "WebSocket", "postMessage", "importScripts", "localStorage", "sessionStorage", "indexedDB", "location", "navigator", "history", "open"]);
+  const resolveApiPath = (path) => {
+    const parts = safeParts(path);
+    if (FORBIDDEN_ROOTS.has(parts[0])) throw new Error(`foundry.api cannot reach ${parts[0]}`);
+    let holder = globalThis, value = globalThis;
+    for (const part of parts) { holder = value; value = value?.[part]; }
+    if (value === undefined) {
+      // `game.modules.get(id).api.<fn>` is Foundry's conventional module API surface.
+      const api = selfModule.api;
+      holder = api; value = api;
+      for (const part of parts) { holder = value; value = value?.[part]; }
+      if (value === undefined) throw new Error(`foundry.api: ${path} is not defined by ${foundryId}`);
+    }
+    return { holder, value };
+  };
+
+  globalThis.FoundryAdapter = Object.freeze({
+    info: () => ({ profile: context.profile, foundryId, packageId: context.packageId, title: selfModule.title, version: selfModule.version,
+      runtimeHash: context.runtimeHash, systemId: game.system.id, declaredSystems: dist.systems, declaredRequires: dist.requires, socket: dist.socket === true,
+      loaded: diagnostics.loaded, styles: diagnostics.styles, languages: diagnostics.languages, unresolvedImports: dist.unresolved ?? [],
+      settings: [...settingRows.values()].map((row) => ({ key: `${row.namespace}.${row.key}`, aisKey: row.aisKey, scope: row.scope, kind: row.kind, synced: row.synced, hidden: row.declaration.hidden === true })),
+      keybindings: [...bindings.keys()], socketListeners: [...socketListeners.keys()], hookNames: [...hooks.keys()], hookErrors,
+      warnings: diagnostics.warnings, unsupportedCalls: diagnostics.unsupportedCalls, moduleApi: selfModule.api ? Object.keys(selfModule.api) : [],
+      globals: diagnostics.globals ?? [], loadMs: diagnostics.loadMs ?? null, ready: game.ready }),
+  });
+
+  AIS.commands.on("foundry.info", async () => FoundryAdapter.info());
+  // Arguments are JSON; "@uuid:Scene.<id>.Token.<id>" strings (also inside arrays) become the projected documents.
+  const materialize = (value, depth = 0) => {
+    if (typeof value === "string" && value.startsWith("@uuid:")) {
+      const document = fromUuidSync(value.slice(6));
+      if (!document) throw new Error(`foundry.api: ${value.slice(6)} is not in the projected scene`);
+      return document;
+    }
+    if (Array.isArray(value) && depth < 2) return value.map((item) => materialize(item, depth + 1));
+    return value;
+  };
+  AIS.commands.on("foundry.api", async (input) => {
+    if (!input || typeof input.path !== "string") throw new Error("foundry.api needs { path: \"Global.member\", args?: [] }");
+    await refreshScene();
+    const args = (Array.isArray(input.args) ? input.args : []).map((arg) => materialize(arg));
+    const { holder, value } = resolveApiPath(input.path);
+    const result = typeof value === "function" ? await value.apply(holder, args) : value;
+    return jsonSafe(result);
+  });
+
+  AIS.runtime.initialize(async () => {
+    const started = performance.now();
+    await readAll(dist.files);
+    loadLanguages();
+    installStyles();
+    const imports = installImportMap();
+    await refreshScene();
+    const before = new Set(Object.keys(globalThis));
+    await loadModules(imports);
+    diagnostics.loadMs = Math.round(performance.now() - started);
     Hooks.callAll("init");
+    Hooks.callAll("i18nInit");
+    await syncSettings();
     Hooks.callAll("setup");
+    game.ready = true;
     Hooks.callAll("ready");
+    Hooks.callAll("canvasInit", globalThis.canvas);
+    Hooks.callAll("canvasReady", globalThis.canvas);
+    // Globals the module installed itself (e.g. `window.Tagger`): the surface `foundry.api` reaches.
+    diagnostics.globals = Object.keys(globalThis).filter((key) => !before.has(key)).slice(0, 64);
   });
 })();

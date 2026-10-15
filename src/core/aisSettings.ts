@@ -20,6 +20,7 @@ import type {
   AisSettingDeclaration,
   AisSettingValue,
 } from "./automationInterconnect";
+import { AIS_MAX_SETTING_STRING } from "./automationInterconnect";
 import type { Json, SettingsDocument } from "./documents";
 import { OWNERSHIP_LEVELS } from "./documents";
 import type { Op } from "./ops";
@@ -98,7 +99,7 @@ export function aisSettingDeclarationError(raw: unknown, index: number): string 
   const where = `interconnect.settings[${index}]`;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `${where} must be an object`;
   const record = raw as Record<string, unknown>;
-  const allowed = ["key", "scope", "type", "label", "hint", "default", "min", "max", "step", "maxLength", "choices"];
+  const allowed = ["key", "scope", "type", "label", "hint", "default", "min", "max", "step", "maxLength", "choices", "hidden"];
   const unknown = Object.keys(record).find((key) => !allowed.includes(key));
   if (unknown) return `${where} has unsupported field ${unknown}`;
   if (typeof record.key !== "string" || !AIS_SETTING_KEY_RE.test(record.key))
@@ -119,8 +120,8 @@ export function aisSettingDeclarationError(raw: unknown, index: number): string 
       return `${where} (${key}) ${field} only applies to ${field === "maxLength" ? "string" : "number"} settings`;
     if (typeof v !== "number" || !Number.isFinite(v)) return `${where} (${key}) ${field} must be a finite number`;
     if (field === "step" && v <= 0) return `${where} (${key}) step must be positive`;
-    if (field === "maxLength" && (!Number.isInteger(v) || v < 1 || v > 512))
-      return `${where} (${key}) maxLength must be an integer 1–512`;
+    if (field === "maxLength" && (!Number.isInteger(v) || v < 1 || v > AIS_MAX_SETTING_STRING))
+      return `${where} (${key}) maxLength must be an integer 1–${AIS_MAX_SETTING_STRING}`;
     return null;
   };
   for (const field of ["min", "max", "step", "maxLength"] as const) {
@@ -129,6 +130,7 @@ export function aisSettingDeclarationError(raw: unknown, index: number): string 
   }
   if (typeof record.min === "number" && typeof record.max === "number" && record.min > record.max)
     return `${where} (${key}) min must not exceed max`;
+  if (record.hidden !== undefined && typeof record.hidden !== "boolean") return `${where} (${key}) hidden must be a boolean`;
   if (record.choices !== undefined) {
     if (record.type !== "choice") return `${where} (${key}) choices only apply to choice settings`;
     if (!Array.isArray(record.choices) || record.choices.length < 2 || record.choices.length > 32)
@@ -169,7 +171,18 @@ export function normalizeAisSettingDeclaration(record: Record<string, unknown>):
     ...(typeof record.step === "number" ? { step: record.step } : {}),
     ...(typeof record.maxLength === "number" ? { maxLength: record.maxLength } : {}),
     ...(choices ? { choices } : {}),
+    ...(record.hidden === true ? { hidden: true } : {}),
   };
+}
+
+/**
+ * D-482: one declaration arriving at runtime (`settings.register`, the Foundry adapter's
+ * `game.settings.register`). Same rules as the manifest; `index` only labels the error.
+ */
+export function parseRuntimeAisSettingDeclaration(raw: unknown): Result<AisSettingDeclaration> {
+  const error = aisSettingDeclarationError(raw, 0);
+  if (error) return err(error.replace("interconnect.settings[0]", "settings.register"));
+  return okVal(normalizeAisSettingDeclaration(raw as Record<string, unknown>));
 }
 
 function storedValues(doc: SettingsDocument | undefined): Record<string, unknown> {

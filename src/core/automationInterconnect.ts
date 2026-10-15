@@ -247,12 +247,20 @@ export interface AisSettingDeclaration {
   min?: number;
   max?: number;
   step?: number;
-  /** Strings: maximum length (≤ 512, default 256). */
+  /** Strings: maximum length (≤ 16 384, default 256). */
   maxLength?: number;
   /** Choices: 2–32 entries; the value must be one of them. */
   choices?: AisSettingChoice[];
+  /**
+   * D-482: not shown in the shells' forms (still listed by `settings.list`). The Foundry adapter
+   * uses it for `config: false` settings — module-internal state a Foundry module keeps in
+   * `game.settings` — which it stores as JSON text in a `string` setting.
+   */
+  hidden?: boolean;
 }
 export const AIS_MAX_SETTINGS = 32;
+/** D-482: `settings.register` at runtime may add this many declarations on top of the manifest's. */
+export const AIS_MAX_RUNTIME_SETTINGS = 64;
 export const AIS_MAX_SETTING_CHOICES = 32;
 
 /**
@@ -274,9 +282,10 @@ export function cloneAisSettingDeclaration(declaration: AisSettingDeclaration): 
     ...(declaration.step !== undefined ? { step: declaration.step } : {}),
     ...(declaration.maxLength !== undefined ? { maxLength: declaration.maxLength } : {}),
     ...(declaration.choices ? { choices: declaration.choices.map((choice) => ({ value: choice.value, label: choice.label })) } : {}),
+    ...(declaration.hidden ? { hidden: true } : {}),
   };
 }
-export const AIS_MAX_SETTING_STRING = 512;
+export const AIS_MAX_SETTING_STRING = 16_384;
 
 export interface AisPanelDeclaration {
   title: string;

@@ -162,7 +162,7 @@ describe("validatePackageManifest (§12)", () => {
       [[{ key: "r", scope: "world", type: "number", label: "R", default: 1, min: 5, max: 2 }], "min must not exceed max"],
       [[{ key: "r", scope: "world", type: "number", label: "R", default: 1, step: 0 }], "step must be positive"],
       [[{ key: "r", scope: "world", type: "boolean", label: "R", default: true, min: 1 }], "min only applies to number"],
-      [[{ key: "r", scope: "world", type: "string", label: "R", default: "x", maxLength: 1000 }], "maxLength must be an integer 1–512"],
+      [[{ key: "r", scope: "world", type: "string", label: "R", default: "x", maxLength: 20000 }], "maxLength must be an integer 1–16384"],
       [[{ key: "r", scope: "world", type: "choice", label: "R", default: "a" }], "choice settings need choices"],
       [[{ key: "r", scope: "world", type: "choice", label: "R", default: "a", choices: [{ value: "a", label: "A" }] }], "needs 2–32 choices"],
       [[{ key: "r", scope: "world", type: "choice", label: "R", default: "c", choices: [{ value: "a", label: "A" }, { value: "b", label: "B" }] }], "declared choices"],

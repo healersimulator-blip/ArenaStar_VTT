@@ -33,6 +33,7 @@ const allHandlers = (): AisModuleHandlers => ({
   "settings.list": vi.fn(async () => ({ settings: [] })),
   "settings.get": vi.fn(async () => ({ key: "k", scope: "device", value: true })),
   "settings.set": vi.fn(async () => ({ key: "k", scope: "device", value: true })),
+  "settings.register": vi.fn(async () => ({ key: "k", scope: "device", registered: true })),
   "compendium.list": vi.fn(async () => ({ packs: [] })),
   "compendium.search": vi.fn(async () => ({ hits: [] })),
   "compendium.get": vi.fn(async () => ({ packId: "p/x.json", id: "e", name: "E", type: "actor", data: {} })),
@@ -294,6 +295,43 @@ describe("AIS host handlers", () => {
     // Subscribing to one's own settings changes needs no observe grant; host events still do.
     await expect(handlers["events.subscribe"]({ event: "module.settings.changed" })).resolves.toEqual({ ok: true });
     await expect(handlers["events.subscribe"]({ event: "world.snapshot" })).rejects.toThrow("denied action.observe");
+
+    // D-482: runtime declarations (`settings.register`) — same schema, gated by the write capability,
+    // idempotent for an identical re-registration, refused for a changed shape, then readable/writable.
+    await expect(handlers["settings.register"]({ key: "fresh", scope: "device", type: "boolean", label: "Fresh", default: true }))
+      .rejects.toThrow("denied module.settings.write");
+    granted.add("module.settings.write");
+    const registered: AisSettingDeclaration[] = [];
+    const withRegister = createAisModuleHandlers({
+      worldId: "w-ais-settings", packageId: "torch", emittedEvents: [], db,
+      user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
+      select: async () => null, notify: () => undefined, emitModuleEvent: () => undefined,
+      newId: (prefix: string) => `${prefix}one`, submit: () => "tx", assertCapability: async () => undefined,
+      settings: {
+        get declarations() { return [...declarations, ...registered]; },
+        packageName: "Torch", worldDoc: () => worldDoc, canWriteWorld: () => true,
+        register: (declaration) => { registered.push(declaration); return null; },
+      },
+    });
+    await expect(withRegister["settings.register"]({ key: "Bad Key", scope: "device", type: "boolean", label: "x", default: true }))
+      .rejects.toThrow("settings.register needs a key matching");
+    await expect(withRegister["settings.register"]({ key: "fresh", scope: "device", type: "boolean", label: "Fresh", default: true, hidden: true }))
+      .resolves.toEqual({ key: "fresh", scope: "device", registered: true });
+    await expect(withRegister["settings.register"]({ key: "fresh", scope: "device", type: "boolean", label: "Fresh", default: true, hidden: true }))
+      .resolves.toEqual({ key: "fresh", scope: "device", registered: false });
+    await expect(withRegister["settings.register"]({ key: "fresh", scope: "world", type: "boolean", label: "Fresh", default: true }))
+      .rejects.toThrow("already declared with a different shape");
+    await expect(withRegister["settings.register"]({ key: "radius", scope: "world", type: "number", label: "Radius", default: 20, min: 0, max: 60, step: 5 }))
+      .resolves.toEqual({ key: "radius", scope: "world", registered: false });
+    expect(registered).toHaveLength(1);
+    const listedAfter = await withRegister["settings.list"]({}) as { settings: Array<{ key: string; hidden?: boolean; value: unknown }> };
+    expect(listedAfter.settings.at(-1)).toMatchObject({ key: "fresh", hidden: true, value: true });
+    await expect(withRegister["settings.set"]({ key: "fresh", value: false })).resolves.toEqual({ key: "fresh", scope: "device", value: false });
+    // A long hidden string (Foundry object settings as JSON text) fits the raised cap.
+    await expect(withRegister["settings.register"]({ key: "blob", scope: "world", type: "string", label: "Blob", default: "{}", maxLength: 16384, hidden: true }))
+      .resolves.toMatchObject({ registered: true });
+    await expect(withRegister["settings.register"]({ key: "huge", scope: "world", type: "string", label: "Huge", default: "", maxLength: 16385 }))
+      .rejects.toThrow("maxLength must be an integer 1–16384");
     // A module without declarations lists nothing and refuses keys.
     const bare = createAisModuleHandlers({
       worldId: "w-ais-settings", packageId: "bare", emittedEvents: [], db,

@@ -837,7 +837,8 @@
   /** D-476: a shared module's settings on this device (world values read-only, device values editable). */
   let aisSettingsViews = $state<Record<string, PlayerAisSettingsView>>({});
   function aisSettingsCount(packageId: string): number {
-    return playerAis?.currentProfile?.modules.find((module) => module.packageId === packageId)?.settings?.length ?? 0;
+    const declared = playerAis?.currentProfile?.modules.find((module) => module.packageId === packageId)?.settings?.length ?? 0;
+    return declared + (aisStatuses[packageId]?.settings ?? 0); // D-482: + runtime-registered
   }
   async function loadAisSettings(packageId: string): Promise<void> {
     const view = await playerAis?.moduleSettings(packageId);

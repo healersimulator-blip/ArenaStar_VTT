@@ -211,3 +211,19 @@ code. They are recorded here so the failure is visible instead of hiding in an u
    that the spec never performs. The spec's own docstring says the area cast was out of scope
    "because the tree does not implement it yet" — the tree implements it now. It needs rewriting
    against the aim flow, not a relaxed assertion.
+
+## Foundry modules unmodified (D-482, 2026-10-15)
+
+`e2e/ais_foundry_module.spec.ts` (2 tests) joins the AIS batch. Test 1 imports the pinned
+upstream Tagger as a Foundry-format zip (`dist/packages/foundry-tagger-upstream-1.5.4.zip`,
+`module.json` under one folder, no ArenaStar files), approves adapter 0.2.0 + the module, reloads,
+reads `foundry.info` (own ES module loaded, `Tagger` global, hooks, keybinding) and drives
+`Tagger.getByTag` / `Tagger.addTags` through `foundry.api` from a reviewed script macro with the
+write visible in the replicated token document; the hidden token and the `AIS` root are refused.
+Test 2 builds a module that speaks only Foundry core APIs (settings with `onChange`, i18n, classic
+script + nested/absolute ESM imports, styles, keybinding, Handlebars helper, notifications, hidden
+Object setting) and checks the GM's generated settings form (3 visible + 1 internal, labels from
+the lang file, step validation, a form edit reaching the module's `onChange`, a module write
+landing in the form). **Executed in a real browser on 2026-10-15: 48.0 s + 49.5 s.** The first run
+found two product defects (adapter `Collection` iterated Map entries; the frame's `ready` status
+dropped the runtime settings count) — both fixed before the run that passed.

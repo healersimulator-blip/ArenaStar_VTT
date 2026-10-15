@@ -18,11 +18,12 @@ import type {
   AisSettingValue,
   AisTokenLightSnapshot,
 } from "../core/automationInterconnect";
+import { cloneAisSettingDeclaration } from "../core/automationInterconnect";
 import type { AisModuleRequestContext } from "./aisModuleIframe";
 import type { Op } from "../core/ops";
 import type { CompendiumPack } from "../core/compendium";
 import { searchCompendia } from "../core/compendium";
-import { aisDeviceSettingsScope, aisWorldSettingOps, aisWorldSettingValues, coerceAisSettingValue } from "../core/aisSettings";
+import { aisDeviceSettingsScope, aisWorldSettingOps, aisWorldSettingValues, coerceAisSettingValue, parseRuntimeAisSettingDeclaration } from "../core/aisSettings";
 import type { SettingsDocument } from "../core/documents";
 import { parseLightAnimation } from "../core/lightAnimation";
 import { getAllSettings, getSetting, putSetting } from "../storage/idb";
@@ -71,6 +72,13 @@ export interface AisModuleSettingsContext {
   canWriteWorld: () => boolean;
   /** Raised after a device-scope write so the runtime can deliver `module.settings.changed`. */
   onDeviceChange?: (key: string, value: AisSettingValue) => void;
+  /**
+   * D-482: accept one runtime declaration (`settings.register`). The runtime appends it to the
+   * module's declaration list for this instance (not persisted — a module re-registers on every
+   * boot, exactly as a Foundry module does in its `init` hook) and refreshes the shell's form.
+   * Returns the error message for a rejected declaration, null when accepted.
+   */
+  register?: (declaration: AisSettingDeclaration) => string | null;
 }
 
 /** D-477: read-only compendium access (host device only; packs are not replicated to players). */
@@ -627,9 +635,29 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
           ...(declaration.hint === undefined ? {} : { hint: declaration.hint }),
           default: declaration.default,
           ...(declaration.choices ? { choices: declaration.choices.map((choice) => ({ ...choice })) } : {}),
+          ...(declaration.hidden ? { hidden: true } : {}),
           value: values[declaration.key] ?? declaration.default,
         })),
       };
+    },
+    // D-482: code-time declarations (the Foundry adapter's `game.settings.register`); same schema
+    // and limits as the manifest, same documents for the values, visible in the same forms.
+    "settings.register": async (args, commandContext) => {
+      await ctx.assertCapability("module.settings.write");
+      assertCommandActive(commandContext);
+      const parsed = parseRuntimeAisSettingDeclaration(args);
+      if (!parsed.ok) throw new Error(parsed.error);
+      const settings = ctx.settings;
+      if (!settings?.register) throw new Error("This device's runtime does not accept runtime setting declarations");
+      const existing = settings.declarations.find((candidate) => candidate.key === parsed.value.key);
+      if (existing) {
+        if (JSON.stringify(cloneAisSettingDeclaration(existing)) === JSON.stringify(parsed.value))
+          return { key: parsed.value.key, scope: parsed.value.scope, registered: false };
+        throw new Error(`setting ${parsed.value.key} is already declared with a different shape`);
+      }
+      const error = settings.register(parsed.value);
+      if (error) throw new Error(error);
+      return { key: parsed.value.key, scope: parsed.value.scope, registered: true };
     },
     "settings.get": async (args, commandContext) => {
       assertCommandActive(commandContext);

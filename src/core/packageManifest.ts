@@ -169,7 +169,7 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
       return err(`package ${id}: invalid runtime binding`);
     if (!requires.some((dependency) => dependency.id === spec.provider && dependency.version && !dependency.optional))
       return err(`package ${id}: runtime provider needs a required, exact-version dependency`);
-    if (spec.resources !== undefined && (!Array.isArray(spec.resources) || spec.resources.length > 64 ||
+    if (spec.resources !== undefined && (!Array.isArray(spec.resources) || spec.resources.length > 512 ||
         spec.resources.some((path) => typeof path !== "string" || !isSafePackagePath(path)) ||
         new Set(spec.resources).size !== spec.resources.length)) return err(`package ${id}: invalid runtime resources`);
     runtime = { provider: spec.provider, profile: spec.profile,

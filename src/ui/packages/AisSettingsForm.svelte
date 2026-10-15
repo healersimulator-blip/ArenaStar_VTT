@@ -52,7 +52,12 @@
 </script>
 
 <div class="ais-settings-form" data-ais-settings-form={packageId}>
-  {#each declarations as declaration (declaration.key)}
+  {#if declarations.some((declaration) => declaration.hidden)}
+    <p class="hint" data-ais-settings-hidden={declarations.filter((declaration) => declaration.hidden).length}>
+      {declarations.filter((declaration) => declaration.hidden).length} internal setting(s) are kept by the module itself and not shown here.
+    </p>
+  {/if}
+  {#each declarations.filter((declaration) => !declaration.hidden) as declaration (declaration.key)}
     {@const editable = editableScopes.includes(declaration.scope) && !disabled}
     {@const inputId = `ais-setting-${packageId}-${declaration.key}`}
     <div class="ais-setting" data-ais-setting={declaration.key} data-ais-setting-scope={declaration.scope}>

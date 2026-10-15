@@ -113,6 +113,8 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
         list: function () { return call("settings.list", {}); },
         get: function (key) { return call("settings.get", { key: key }).then(function (row) { return row.value; }); },
         set: function (key, value) { return call("settings.set", { key: key, value: value }); },
+        // D-482: declare a setting from code (same schema as interconnect.settings).
+        register: function (declaration) { return call("settings.register", declaration); },
         onChange: function (callback) {
           if (typeof callback !== "function") throw new TypeError("AIS.settings.onChange requires a callback");
           return api.events.on("module.settings.changed", callback);

@@ -41,6 +41,7 @@ export const AIS_MODULE_METHODS = [
   "settings.list",
   "settings.get",
   "settings.set",
+  "settings.register",
   "compendium.list",
   "compendium.search",
   "compendium.get",
@@ -76,6 +77,7 @@ export const AIS_METHOD_CAPABILITY: Record<AisModuleMethod, AisCapability | null
   "settings.list": null,
   "settings.get": null,
   "settings.set": "module.settings.write",
+  "settings.register": "module.settings.write",
   "compendium.list": "compendium.read",
   "compendium.search": "compendium.read",
   "compendium.get": "compendium.read",
@@ -328,6 +330,8 @@ export function createAisModuleDispatcher(
 export interface AisModuleRuntimeStatus {
   state: "starting" | "ready" | "failed" | "stopped" | "available" | "blocked";
   error?: string;
+  /** D-482: how many settings the module declared at runtime (`settings.register`) in this boot. */
+  settings?: number;
 }
 
 export interface AisModuleIframeOptions {
@@ -414,7 +418,10 @@ export class AisModuleIframe {
     frame.setAttribute("aria-hidden", "true");
     frame.setAttribute("title", `AIS module:${options.packageId}`);
     frame.style.display = "none";
-    const csp = "default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'";
+    // D-482: `blob:` lets the Foundry adapter evaluate a module's ES-module graph (one blob per
+    // file + an import map) inside this frame; blob URLs are only reachable by the frame that
+    // created them, so this widens nothing beyond the inline code the frame already runs.
+    const csp = "default-src 'none'; script-src 'unsafe-inline' blob:; connect-src 'none'; img-src 'none'; media-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'";
     frame.srcdoc = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><body><script>${escapeScript(aisModuleRuntimeSource(this.bootId, options.runtimeContext))}</script><script>${escapeScript(options.source)}</script><script>globalThis.AIS.__ready()</script></body>`;
     this.frame = frame;
     this.startupTimer = globalThis.setTimeout(() => this.stop("Module did not become ready", true), MAX_STARTUP_MS);

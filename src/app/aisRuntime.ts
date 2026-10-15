@@ -14,6 +14,8 @@ import {
   type AisEventPayloads,
   type AisSettingDeclaration,
   type AisSettingValue,
+  AIS_MAX_RUNTIME_SETTINGS,
+  AIS_MAX_SETTINGS,
   cloneAisSettingDeclaration,
 } from "../core/automationInterconnect";
 import {
@@ -106,6 +108,8 @@ export class AisRuntime {
   private providers: HostApp["automationBoot"]["resolution"]["providers"];
   private disposed = false;
   private readonly definitions = new Map<string, HostAutomationModuleBoot>();
+  /** D-482: declarations a module added at runtime through `settings.register` (per boot, not persisted). */
+  private readonly runtimeDeclarations = new Map<string, AisSettingDeclaration[]>();
   private readonly mutate = createAisMutationQueue();
   /** D-470: host-chromed windows around module iframes (one per module that declares a panel). */
   private readonly panels: AisPanelHost | null;
@@ -172,6 +176,8 @@ export class AisRuntime {
   }
 
   private start(module: HostAutomationModuleBoot, explicitAppearance = false): void {
+    // D-482: the settings context exposes a live getter (declarations grow at runtime).
+    const declarationsOf = (packageId: string): readonly AisSettingDeclaration[] => this.declarationsOf(packageId);
     if (this.disposed) throw new Error("AIS runtime was stopped");
     const options = this.options;
     const { app } = options;
@@ -217,7 +223,9 @@ export class AisRuntime {
             this.hosts.get(module.packageId)?.emit(event, { seq: app.store.seq });
         },
         onStatus: (status) => {
-          this.statuses[module.packageId] = status;
+          // D-482: keep the runtime-registered settings count across frame status transitions.
+          const registered = this.runtimeDeclarations.get(module.packageId)?.length ?? 0;
+          this.statuses[module.packageId] = registered ? { ...status, settings: registered } : status;
           if (status.state === "failed" || status.state === "stopped") {
             options.cancelChoice(module.packageId);
             for (const id of fxRuns.keys()) app.host.stopAisFx(id);
@@ -269,14 +277,16 @@ export class AisRuntime {
           newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID()}`,
           assertCapability,
           // D-476: the GM device writes world scope with GM authority; device scope stays local.
-          ...(module.settings?.length ? { settings: {
-            declarations: module.settings,
+          // D-482: always present — declarations may arrive at runtime (`settings.register`).
+          settings: {
+            get declarations() { return declarationsOf(module.packageId); },
             packageName: module.name,
             worldDoc: () => this.worldSettingsDoc(module.packageId),
             canWriteWorld: () => true,
             onDeviceChange: (key, value) =>
               this.hosts.get(module.packageId)?.emit("module.settings.changed", { scope: "device", key, value }),
-          } } : {}),
+            register: (declaration) => this.registerRuntimeSetting(module.packageId, declaration),
+          },
           // D-477: the GM device holds every imported pack (memoized per package record in HostPackages).
           compendia: () => app.packages.compendia(),
           // D-478: directory + kernel-routed invocation with GM authority.
@@ -293,6 +303,30 @@ export class AisRuntime {
         this.worldSettingValues.set(module.packageId, aisWorldSettingValues(this.worldSettingsDoc(module.packageId), module.settings));
   }
 
+  /** D-482: manifest declarations followed by the ones registered at runtime (this boot only). */
+  declarationsOf(packageId: string): readonly AisSettingDeclaration[] {
+    const module = this.definitions.get(packageId) ?? this.options.app.automationBoot.modules.find((entry) => entry.packageId === packageId);
+    return [...(module?.settings ?? []), ...(this.runtimeDeclarations.get(packageId) ?? [])];
+  }
+
+  private registerRuntimeSetting(packageId: string, declaration: AisSettingDeclaration): string | null {
+    const manifestCount = this.definitions.get(packageId)?.settings?.length ?? 0;
+    const rows = this.runtimeDeclarations.get(packageId) ?? [];
+    if (manifestCount + rows.length >= AIS_MAX_SETTINGS + AIS_MAX_RUNTIME_SETTINGS)
+      return `A module may declare at most ${AIS_MAX_SETTINGS + AIS_MAX_RUNTIME_SETTINGS} settings`;
+    rows.push(cloneAisSettingDeclaration(declaration));
+    this.runtimeDeclarations.set(packageId, rows);
+    // The world document may already hold a value for this key (an earlier session): seed the
+    // change detector so the first real change raises exactly one event.
+    this.worldSettingValues.set(packageId, aisWorldSettingValues(this.worldSettingsDoc(packageId), this.declarationsOf(packageId)));
+    const status = this.statuses[packageId];
+    if (status) {
+      this.statuses[packageId] = { ...status, settings: rows.length };
+      this.options.onStatus({ ...this.statuses });
+    }
+    return null;
+  }
+
   private worldSettingsDoc(packageId: string): SettingsDocument | undefined {
     return this.options.app.store.get("settings", aisSettingsDocId(packageId)) as SettingsDocument | undefined;
   }
@@ -300,9 +334,10 @@ export class AisRuntime {
   /** D-476: a committed batch touched a module's world-settings document → one event per changed key. */
   private emitWorldSettingChanges(ops: readonly Op[]): void {
     for (const module of this.definitions.values()) {
-      if (!module.settings?.length || !aisSettingsDocTouched(ops, module.packageId)) continue;
+      const declarations = this.declarationsOf(module.packageId);
+      if (!declarations.length || !aisSettingsDocTouched(ops, module.packageId)) continue;
       const previous = this.worldSettingValues.get(module.packageId) ?? {};
-      const next = aisWorldSettingValues(this.worldSettingsDoc(module.packageId), module.settings);
+      const next = aisWorldSettingValues(this.worldSettingsDoc(module.packageId), declarations);
       this.worldSettingValues.set(module.packageId, next);
       const frame = this.hosts.get(module.packageId);
       for (const [key, value] of Object.entries(next))
@@ -313,22 +348,23 @@ export class AisRuntime {
   /** D-476: declarations + effective values of one module (world from the store, device from IndexedDB). */
   async moduleSettings(packageId: string): Promise<AisModuleSettingsView | null> {
     const module = this.definitions.get(packageId) ?? this.options.app.automationBoot.modules.find((entry) => entry.packageId === packageId);
-    if (!module?.settings?.length) return null;
-    const values = aisWorldSettingValues(this.worldSettingsDoc(packageId), module.settings);
+    const declarations = this.declarationsOf(packageId);
+    if (!module || !declarations.length) return null;
+    const values = aisWorldSettingValues(this.worldSettingsDoc(packageId), declarations);
     const rows = await getAllSettings(this.options.app.db, aisDeviceSettingsScope(this.options.app.worldId, packageId));
-    for (const declaration of module.settings) {
+    for (const declaration of declarations) {
       if (declaration.scope !== "device") continue;
       const row = rows.find((candidate) => candidate.key === declaration.key);
       const coerced = row ? coerceAisSettingValue(declaration, row.value) : null;
       values[declaration.key] = coerced?.ok ? coerced.value : declaration.default;
     }
-    return { declarations: module.settings.map((declaration) => cloneAisSettingDeclaration(declaration)), values };
+    return { declarations: declarations.map((declaration) => cloneAisSettingDeclaration(declaration)), values };
   }
 
   /** D-476: the GM's form writes a value — world scope through a normal commit, device scope locally. */
   async setModuleSetting(packageId: string, key: string, value: unknown): Promise<AisSettingValue> {
     const module = this.definitions.get(packageId) ?? this.options.app.automationBoot.modules.find((entry) => entry.packageId === packageId);
-    const declaration = module?.settings?.find((candidate) => candidate.key === key);
+    const declaration = this.declarationsOf(packageId).find((candidate) => candidate.key === key);
     if (!module || !declaration) throw new Error(`${packageId} declares no setting ${key}`);
     const coerced = coerceAisSettingValue(declaration, value);
     if (!coerced.ok) throw new Error(coerced.error);

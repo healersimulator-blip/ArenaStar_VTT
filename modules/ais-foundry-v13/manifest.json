@@ -1,13 +1,13 @@
 {
   "id": "ais-foundry-v13",
-  "name": "Foundry v13 adapter — feasibility profile",
-  "version": "0.1.0",
+  "name": "Foundry v13 adapter — core-API profile",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Experimental GM-local scene tags and transient FX. Uses AIS, never Foundry core or the parent renderer. Approve each guest separately.",
+  "description": "Runs Foundry VTT modules through AIS. Profile foundry-module loads an unmodified module.json distribution (ES modules via blob URLs + import map) and maps Foundry core APIs — settings, i18n, modules, notifications, hooks, active-scene documents, transient FX — onto AIS services; profile foundry-v13-scene-tags-fx keeps the 0.1.0 bundled-guest behaviour. Never Foundry core code, never the parent renderer. Approve each guest separately.",
   "interconnect": {
     "api": "arena.ais/1",
     "entry": "runtime/adapter.js",
-    "runtimeProvider": { "contract": 1, "profiles": ["foundry-v13-scene-tags-fx"] },
-    "capabilities": ["runtime.execute", "scene.tags.read", "scene.tags.write", "fx.play"]
+    "runtimeProvider": { "contract": 1, "profiles": ["foundry-v13-scene-tags-fx", "foundry-module"] },
+    "capabilities": ["runtime.execute", "package.resources.read", "module.settings.write", "ui.notify", "scene.tags.read", "scene.tags.write", "fx.play"]
   }
 }

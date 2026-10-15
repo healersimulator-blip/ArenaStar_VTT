@@ -14837,3 +14837,113 @@ closed. The torch's build-signed hash changed with its code, as any first-party 
 (`approveExisting` in the specs re-approves it; existing worlds re-review it once). Route (b)
 holds: nothing in the kernel changed for this, only a module adopted the service. Residuals:
 R-09 (ESM module graphs) and R-02 (general document create/update) remain the next AIS gaps.
+
+## D-482 — Target A: unmodified Foundry `module.json` distributions run through AIS (kernel `settings.register` + `hidden`, Foundry import, ESM graph loader, adapter 0.2.0 `foundry-module` profile) (2026-10-15)
+
+**Owner decision (this round).** The main line is the AIS kernel and its Foundry adapter, not
+ArenaStar's own modules; D-481's torch slice was judged off-route. Asked for the end target, the
+owner chose **A — Foundry core-API modules run unmodified** (a Foundry-format distribution is
+imported untouched; the adapter maps Foundry *core* APIs onto AIS services). Modules that need
+the `pf1` system namespace stay outside this phase (Target B remains possible later). This entry
+delivers the first complete vertical slice of A, verified in Chromium.
+
+**What a GM can do now.** Drop a Foundry module's release zip (`module.json` at the root or inside
+one folder, icons/LevelDB packs and all) onto *Settings → packages*. It imports as an AIS module
+bound to `ais-foundry-v13@0.2.0` profile `foundry-module`; enable + review + approve as any module;
+after reload the module's **own** ES modules run inside the sandboxed frame, its `game.settings`
+appear in the generated settings form, and its global API is reachable from reviewed script macros
+through `api.ais.invoke(<id>, "foundry.api", { path, args })`. Proof: the pinned upstream Tagger
+1.5.4 source tree, zipped verbatim (`dist/packages/foundry-tagger-upstream-1.5.4.zip`, built by
+`buildAisDemo.mjs` from the provenance-checked files, no wrapper manifest, no bundling), imports,
+boots (`loaded: [scripts/module.js]`, `globals: ["Tagger"]`, hooks `preUpdateToken…`, keybinding
+`tagger.do-not-apply-tag-rules`), answers `Tagger.getByTag("Beacon")` with the two visible beacons
+and commits `Tagger.addTags(@uuid:…beacon-one, ["adapted"])` into the replicated token document.
+
+**Kernel (reusable by every module, not Foundry-specific).**
+- RPC method 27: `settings.register(declaration)` (capability `module.settings.write`) declares a
+  setting from code with exactly the manifest schema (`parseRuntimeAisSettingDeclaration`); an
+  identical re-registration answers `{ registered: false }`, a different shape for a known key is
+  refused, the per-module cap is `AIS_MAX_SETTINGS` (32 manifest) + `AIS_MAX_RUNTIME_SETTINGS`
+  (64 runtime). Both runtimes (`AisRuntime`, `PlayerAisRuntime`) keep `runtimeDeclarations`
+  per boot (`declarationsOf(packageId)` = manifest ⊕ runtime) and report the count in
+  `AisModuleRuntimeStatus.settings`, so the GM's `RulesetSection` and the player's guide drawer
+  render the settings block for modules whose manifest declares none and reload an open form when
+  the count grows. SDK: `AIS.settings.register(declaration)`.
+- Declarations gain `hidden: true` (kept and replicated, never rendered; the form says
+  "n internal setting(s)…", `data-ais-settings-hidden`). `AIS_MAX_SETTING_STRING` 512 → 16 384 so
+  Foundry `Object`/`Array`/`config: false` settings travel as JSON text in a hidden string setting
+  without widening `AisSettingValue` (a `json` type was considered and rejected: it would leak
+  into events, forms and IDB rows).
+- Manifest limits for real distributions: `runtime.resources` ≤ 512 entries (was 64; the byte
+  budget stays 2 MiB/file, 8 MiB total), `runtime.configuration` ≤ 64 KiB (was 16). CSP of the
+  module frame adds `blob:` to `script-src` so a module's own files can run as module scripts.
+
+**Import (`src/core/foundryModuleManifest.ts`, `packageLoader.ts`, `zipKind.ts`).** An archive
+with no `manifest.json` but a `module.json` (root or one nested folder) is *synthesized*: id slugged
+(`my_mod` → `my-mod`), title/version normalised (`v2.1` → `2.1.0`, placeholders → `0.0.0`),
+`type: "module"`, `interconnect.runtime = { provider: ais-foundry-v13, profile: foundry-module,
+configuration: module.json, resources: <every text file> }`, commands `foundry.info` +
+`foundry.api`, capabilities `runtime.execute, package.resources.read, module.settings.write,
+ui.notify, scene.tags.read/write, fx.play`, `sharing: host-only`. The module's files are stored
+**byte-identical**; two inert stubs (`ais-foundry/entry.js`, `ais-foundry/loader.js`) satisfy the
+kernel's entry/script requirements. Non-UTF-8 entries are skipped only on this path (an ArenaStar
+package with a binary still fails as before); missing/binary entry files, no `esmodules`/`scripts`,
+> 512 text files or traversal paths refuse the import with a named reason. `classifyZip` recognises
+the marker so the Settings importer no longer says "not a package".
+
+**ESM graph (`src/packages/foundryEsmGraph.ts`).** The sandbox is an opaque-origin `srcdoc`
+document: module code can only run from blob URLs minted inside the frame, and `blob:` is not a
+valid base for relative specifiers. `aisRuntimeResources()` therefore rewrites, in the kernel-side
+*resource view only*, every static/side-effect/dynamic import whose specifier the archive can
+serve (`./x.js`, `../x.js`, `/scripts/x.js`, `modules/<id>/x.js`) to the canonical pseudo-URL
+`ais-foundry://<package>/<path>`; bare specifiers, other packages' trees and URLs stay verbatim and
+are reported in `distribution.unresolved`. The adapter mints one blob per `.js/.mjs` resource and
+installs a single `<script type="importmap">` mapping those pseudo-URLs before the first module
+import. No transpiling, bundling or identifier changes. `runtimeContext.distribution` carries
+`esmodules/scripts/styles/languages/packs/systems/requires/socket/files/unresolved`.
+
+**Adapter 0.2.0 (`modules/ais-foundry-v13`).** Profile `foundry-v13-scene-tags-fx` keeps the
+0.1.0 behaviour (the wrapper guest's `requires` bumps to the exact 0.2.0; its e2e is unchanged).
+Profile `foundry-module`: reads all resources (8-way parallel `package.resource.read`), applies
+`styles[]` as `<style>`, loads `languages[]` (en first) into `game.i18n` (`localize/format/has`),
+runs `scripts[]` as classic scripts then `esmodules[]` via `import()`, then dispatches `init →
+i18nInit → (settings sync) → setup → ready → canvasInit/canvasReady`. Hook exceptions are logged
+and reported (`hookErrors`), not fatal — Foundry's behaviour. `game.settings.register/get/set/
+registerMenu` is real: `Boolean/Number(range)/String(choices)` → native typed declarations,
+everything else → hidden JSON text; keys are mapped deterministically to the AIS schema
+(`<ns>.<key>` → `ns_key`, FNV-suffixed when too long); `get` is synchronous from a local cache
+seeded by `settings.list` and kept current by `module.settings.changed` (a GM form edit reaches
+the module's `onChange`); `set` writes through `settings.set`. `game.modules` is a mutable
+`Collection` with the module's own entry (`.api` assignable); `game.user/users/world/system`
+(`game.system.id = "arenastar"` — deliberately never `pf1`), `game.scenes/canvas` over the
+projected active scene (Foundry collections iterate values), `game.keybindings/socket.on` recorded,
+`ui.notifications.*` → `ui.notify`, `foundry.utils` (merge/expand/flatten/diff/…), `CONST`, mutable
+`CONFIG`, and class stubs for every Document/Placeable/Application family so `class X extends
+FormApplication` and `instanceof Actor` work while rendering/CRUD fail explicitly with the open
+gap id (R-02 CRUD, R-04 application UI, R-06 socket emit, R-07 files). `foundry.api` resolves a
+dotted path on the module's globals or `game.modules.get(id).api`, materialises `@uuid:` arguments
+into projected documents, and returns JSON-safe results; the roots `AIS/eval/Function/window/
+document/fetch/…` are unreachable. `foundry.info` reports loaded files, languages, styles,
+settings (with AIS keys and sync state), keybindings, socket listeners, hooks, hook errors,
+warnings, unsupported calls, module globals and `loadMs`.
+
+**Measured (Chromium 153 headless shell, D-480 recipe).** New `e2e/ais_foundry_module.spec.ts`
+(2 tests, joins `test:e2e:ais`): upstream Tagger 48.0 s, core-API probe module (settings with
+`onChange`, i18n, classic script + nested ESM + absolute `/scripts/…` import, styles, keybinding,
+Handlebars helper, notifications, hidden Object setting persisted as JSON) 49.5 s. First run found
+two real defects, both fixed: the adapter's `Collection extends Map` iterated entries, not values
+(Tagger's `getFlag is not a function`), and the frame's `ready` status overwrote the runtime
+settings count (the GM form never appeared). Full AIS batch 20/20 (9.4 min + 1.6 min), player +
+package specs 7/7. Unit: `tests/packages/foundryModuleImport.test.ts` (5) incl. the real upstream
+tree zipped with a PNG and a LevelDB file; `settings.register` semantics in `aisModule.test.ts`;
+vitest 441 files / 5,843 passed / 36 skipped; tsc 0; eslint 0; `dist/index.html` 5,949,568 B
+(≈ +12 KB over D-481's 5,937,590 B).
+
+**Honest limits (what Target A does not yet give).** No Foundry UI (Application/Dialog/sheets,
+jQuery, Handlebars rendering) — modules that *are* a form do nothing visible yet (R-04); no
+document CRUD beyond tags/light (R-02); `game.socket.emit`, `game.actors/items/packs` are empty
+projections (R-06, R-01 player side); modules are host-only (GM device) in this phase; startup
+must finish within the kernel's 5 s budget (Tagger loads in well under a second); Foundry
+`packs/` (LevelDB) are listed, not loaded; module ids with characters outside the AIS slug are
+re-slugged (the Foundry id is kept for `game.modules`). Foundry core code is proprietary — every
+API above is an ArenaStar re-implementation of the surface, never copied code.

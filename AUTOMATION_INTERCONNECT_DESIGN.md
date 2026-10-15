@@ -193,6 +193,16 @@ shell UI → tests:
 - **Settings (D-476)** — `interconnect.settings[]` (≤ 32; `key`, `scope: world | device`,
   `type: boolean | number | string | choice`, `label`, `hint`, `default`, bounds/choices), validated
   with the manifest. RPC `settings.list / get / set`; writes need `module.settings.write`.
+  D-482 adds `settings.register` (same schema, declared from code, 64 per boot on top of the
+  manifest's 32) and `hidden: true` declarations (replicated, never rendered) so a Foundry
+  module's `game.settings.register` maps 1:1 onto the kernel service.
+- **Foundry distributions (D-482).** An archive with a `module.json` and no `manifest.json`
+  imports unmodified: the loader synthesizes the manifest (provider `ais-foundry-v13`, profile
+  `foundry-module`, every text file a resource), rewrites import specifiers in the resource view
+  to `ais-foundry://<pkg>/<path>` (`src/packages/foundryEsmGraph.ts`), and the adapter runs the
+  module's own ES modules from blob URLs behind one import map, mapping Foundry core APIs
+  (`game.settings`, `game.i18n`, `game.modules`, `ui.notifications`, hooks, projected scene
+  documents, transient FX) onto AIS services. `game.system.id` is `arenastar`, never `pf1`.
   World values are one replicated `settings` document per module (`ais-settings:<pkg>`,
   `flags.ais.values`, GM authority only — a player frame's world write is refused before any op is
   built), device values are per-device IndexedDB rows. Both runtimes raise

@@ -91,6 +91,7 @@ intersection with the player-runnable set) must have granted.
 | `AIS.storage.get(key)` / `.set(key, value)` | `module.storage.read` / `.write` | per device, per module: 128 KiB, 256 keys, 16 KiB per value |
 | `AIS.resources.readText(path)` | `package.resources.read` | files listed under `runtime.resources` |
 | `AIS.settings.list()` / `.get(key)` / `.set(key, value)` / `.onChange(cb)` | set: `module.settings.write` | D-476; world scope is GM-authority only — a player frame's world write fails with "GM authority" before any op is built |
+| `AIS.settings.register(declaration)` | `module.settings.write` | D-482; same schema as `interconnect.settings[]`, declared from code (per boot; 64 on top of the 32 manifest entries); identical re-registration → `{ registered: false }`, a different shape for a known key is refused; `hidden: true` keeps a setting out of the forms (JSON text up to 16 384 chars fits a `string`) |
 | `AIS.compendium.list()` / `.search(query, { packId?, limit? })` / `.get(packId, entryId)` | `compendium.read` | D-477; GM device only; pack ids are `<packageId>/<packFile>`; entries are copies ≤ 48 KiB |
 | `AIS.modules.list()` / `.invoke(moduleId, commandId, input)` | invoke: `modules.invoke` | D-478; target must be in your `requires`; depth ≤ 8; runs with the device's authority |
 

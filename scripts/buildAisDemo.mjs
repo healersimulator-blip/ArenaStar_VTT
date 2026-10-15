@@ -62,6 +62,13 @@ export async function buildAisDemo(outDir = join(root, "dist")) {
     const bytes = zip(Object.fromEntries(Object.entries(pkg.files).map(([path, text]) => [path, strToU8(text)])));
     writeFileSync(join(outDir, "packages", `${pkg.id}-${pkg.manifest.version}.zip`), bytes);
   }
+  // D-482: the SAME pinned upstream files as a Foundry-format distribution (module.json at the
+  // root of one folder, exactly like a GitHub release zip). No wrapper manifest, no bundling, no
+  // ArenaStar code inside: this is what a GM downloads from Foundry's package listing and imports.
+  const upstreamDir = join(guestDir, "upstream");
+  const upstream = Object.fromEntries(Object.entries(fileMap(upstreamDir)).map(([path, text]) => [`tagger/${path}`, strToU8(text)]));
+  const upstreamVersion = JSON.parse(readFileSync(join(guestDir, "compatibility.json"), "utf8")).version;
+  writeFileSync(join(outDir, "packages", `foundry-tagger-upstream-${upstreamVersion}.zip`), zip(upstream));
   const base = (id, type, name) => ({ _id: id, type, name, ownership: { default: 2 }, flags: {}, system: {} });
   const token = (id, x, tags, hidden = false) => ({ ...base(id, "token", id), x, y: 250,
     rotation: 0, width: 100, height: 100, img: "", hidden, disposition: "neutral", vision: true,

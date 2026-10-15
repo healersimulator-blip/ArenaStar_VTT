@@ -43,7 +43,7 @@ let guestZip: Uint8Array;
 beforeAll(() => {
   execFileSync(process.execPath, ["scripts/buildAisDemo.mjs", "--out", stage], { timeout: 60_000, stdio: "pipe" });
   archive = new Uint8Array(readFileSync(join(stage, "worlds/ais-foundry-feasibility-0.1.0.zip")));
-  providerZip = new Uint8Array(readFileSync(join(stage, "packages/ais-foundry-v13-0.1.0.zip")));
+  providerZip = new Uint8Array(readFileSync(join(stage, "packages/ais-foundry-v13-0.2.0.zip")));
   guestZip = new Uint8Array(readFileSync(join(stage, "packages/foundry-tagger-0.1.0.zip")));
 }, 65_000);
 afterAll(() => rmSync(stage, { recursive: true, force: true }));

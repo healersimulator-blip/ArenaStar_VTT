@@ -3,6 +3,7 @@ import type { Json } from "../core/documents";
 import type { PackageManifest } from "../core/packageManifest";
 import { boundedJson } from "../core/scriptMacros";
 import { packageContentHash } from "./packageHash";
+import { prepareFoundryDistribution, type FoundryDistribution } from "./foundryEsmGraph";
 
 export interface AisPackageSource {
   id: string;
@@ -33,8 +34,8 @@ export function aisRuntimeConfiguration(pkg: AisPackageSource): Json {
   let parsed: unknown;
   try { parsed = JSON.parse(pkg.files[path] ?? ""); }
   catch { throw new Error(`Invalid AIS runtime configuration: ${path}`); }
-  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object" || !boundedJson(parsed, 16_384))
-    throw new Error("AIS runtime configuration must be a bounded JSON object no larger than 16 KiB");
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object" || !boundedJson(parsed, 65_536))
+    throw new Error("AIS runtime configuration must be a bounded JSON object no larger than 64 KiB");
   return parsed as Json;
 }
 
@@ -54,12 +55,14 @@ export function aisRuntimePackage(pkg: AisPackageSource, packages: readonly AisP
     provider: packageContentHash(provider.files),
     profile: binding.profile,
   });
+  // D-482: a Foundry-format guest also carries its distribution description for the adapter.
+  const distribution = aisFoundryDistribution(pkg);
   return { provider, configuration, hash,
+    ...(distribution ? { distribution } : {}),
     source: aisOwnSource(provider) + aisOwnSource(pkg) };
 }
 
-/** Data-only resource index; no ambient file access or arbitrary package paths. */
-export function aisRuntimeResources(pkg: AisPackageSource): Record<string, string> {
+function rawRuntimeResources(pkg: AisPackageSource): Record<string, string> {
   const resources: Record<string, string> = Object.create(null) as Record<string, string>;
   let total = 0;
   for (const path of pkg.manifest.interconnect?.runtime?.resources ?? []) {
@@ -70,4 +73,18 @@ export function aisRuntimeResources(pkg: AisPackageSource): Record<string, strin
     resources[path] = text;
   }
   return resources;
+}
+
+/**
+ * Data-only resource index; no ambient file access or arbitrary package paths. For a Foundry
+ * import (D-482) the `.js` resources carry rewritten import specifiers (see foundryEsmGraph).
+ */
+export function aisRuntimeResources(pkg: AisPackageSource): Record<string, string> {
+  const resources = rawRuntimeResources(pkg);
+  return prepareFoundryDistribution(pkg.manifest, pkg.files, resources)?.resources ?? resources;
+}
+
+/** D-482: the distribution description of a Foundry import, null for every other package. */
+export function aisFoundryDistribution(pkg: AisPackageSource): FoundryDistribution | null {
+  return prepareFoundryDistribution(pkg.manifest, pkg.files, rawRuntimeResources(pkg))?.distribution ?? null;
 }

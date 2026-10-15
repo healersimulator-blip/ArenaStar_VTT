@@ -53,6 +53,15 @@
     }
   }
 
+  // D-482: a module that registers settings at runtime (the Foundry adapter) grows its form after
+  // boot; a view that is already loaded is refreshed when the runtime reports a new count.
+  $effect(() => {
+    for (const [id, status] of Object.entries(aisRuntimeStatuses)) {
+      void status.settings;
+      if (Object.hasOwn(aisSettingsViews, id)) void loadAisSettings(id);
+    }
+  });
+
   async function writeAisSetting(id: string, key: string, value: AisSettingValue): Promise<void> {
     if (!aisModules) throw new Error("The world has not booted yet.");
     await aisModules.setSetting(id, key, value);
@@ -474,9 +483,9 @@
             {/if}
           </p>
         {/if}
-        {#if p.settings.length > 0}
+        {#if p.settings.length + (aisRuntimeStatuses[p.id]?.settings ?? 0) > 0}
           <details class="ais-settings" data-ais-settings={p.id} ontoggle={(event) => { if (event.currentTarget.open) void loadAisSettings(p.id); }}>
-            <summary>Settings ({p.settings.length}) · world values replicate to players, device values stay here</summary>
+            <summary>Settings ({p.settings.length + (aisRuntimeStatuses[p.id]?.settings ?? 0)}) · world values replicate to players, device values stay here</summary>
             {#if !aisModules}
               <p class="hint">Settings become editable once the world has booted.</p>
             {:else if aisSettingsErrors[p.id]}

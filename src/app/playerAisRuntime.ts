@@ -26,6 +26,8 @@ import {
   type AisEventPayloads,
   type AisSettingDeclaration,
   type AisSettingValue,
+  AIS_MAX_RUNTIME_SETTINGS,
+  AIS_MAX_SETTINGS,
   cloneAisSettingDeclaration,
 } from "../core/automationInterconnect";
 import {
@@ -195,6 +197,8 @@ export class PlayerAisRuntime {
   private disposed = false;
   /** D-476: last world-scope values per running module (one `module.settings.changed` per key). */
   private readonly worldSettingValues = new Map<string, Record<string, AisSettingValue>>();
+  /** D-482: declarations added at runtime through `settings.register` (per boot, not persisted). */
+  private readonly runtimeDeclarations = new Map<string, AisSettingDeclaration[]>();
   /** D-478: in-flight module→module calls on this device. */
   private busDepth = 0;
   private busSeq = 0;
@@ -358,6 +362,8 @@ export class PlayerAisRuntime {
   }
 
   private start(module: AisSharedModule): void {
+    // D-482: the settings context exposes a live getter (declarations grow at runtime).
+    const declarationsOf = (packageId: string): readonly AisSettingDeclaration[] => this.declarationsOf(packageId);
     const { options } = this;
     const { client } = options;
     const assertCapability = (capability?: AisCapability): Promise<void> => this.assertModuleActive(module, capability);
@@ -383,7 +389,8 @@ export class PlayerAisRuntime {
         if (event === "world.snapshot") this.frames.get(module.packageId)?.emit(event, { seq: client.store.seq });
       },
       onStatus: (status) => {
-        this.statuses[module.packageId] = status;
+        const registered = this.runtimeDeclarations.get(module.packageId)?.length ?? 0; // D-482
+        this.statuses[module.packageId] = registered ? { ...status, settings: registered } : status;
         if (status.state === "failed" || status.state === "stopped") {
           options.cancelChoice(module.packageId);
           panels?.close(module.packageId);
@@ -414,14 +421,16 @@ export class PlayerAisRuntime {
         newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID()}`,
         assertCapability,
         // D-476: world scope is read from the replica; only device scope is writable here.
-        ...(module.settings?.length ? { settings: {
-          declarations: module.settings,
+        // D-482: always present — a module may declare settings at runtime (`settings.register`).
+        settings: {
+          get declarations() { return declarationsOf(module.packageId); },
           packageName: module.name,
           worldDoc: () => this.worldSettingsDoc(module.packageId),
           canWriteWorld: () => false,
           onDeviceChange: (key, value) =>
             this.frames.get(module.packageId)?.emit("module.settings.changed", { scope: "device", key, value }),
-        } } : {}),
+          register: (declaration) => this.registerRuntimeSetting(module.packageId, declaration),
+        },
         // D-477: no `compendia` — packs live on the GM device; the handler says so.
         // D-478: sibling modules running on this device, invoked with the player's authority.
         modules: {
@@ -444,12 +453,33 @@ export class PlayerAisRuntime {
     return this.options.client.store.get("settings", aisSettingsDocId(packageId)) as SettingsDocument | undefined;
   }
 
+  /** D-482: the profile's declarations followed by the ones this module registered at runtime. */
+  declarationsOf(packageId: string): readonly AisSettingDeclaration[] {
+    const module = this.running.get(packageId) ?? this.profile?.modules.find((candidate) => candidate.packageId === packageId);
+    return [...(module?.settings ?? []), ...(this.runtimeDeclarations.get(packageId) ?? [])];
+  }
+
+  private registerRuntimeSetting(packageId: string, declaration: AisSettingDeclaration): string | null {
+    const manifestCount = this.running.get(packageId)?.settings?.length ?? 0;
+    const rows = this.runtimeDeclarations.get(packageId) ?? [];
+    if (manifestCount + rows.length >= AIS_MAX_SETTINGS + AIS_MAX_RUNTIME_SETTINGS)
+      return `A module may declare at most ${AIS_MAX_SETTINGS + AIS_MAX_RUNTIME_SETTINGS} settings`;
+    rows.push(cloneAisSettingDeclaration(declaration));
+    this.runtimeDeclarations.set(packageId, rows);
+    this.worldSettingValues.set(packageId, aisWorldSettingValues(this.worldSettingsDoc(packageId), this.declarationsOf(packageId)));
+    const status = this.statuses[packageId];
+    if (status) this.statuses[packageId] = { ...status, settings: rows.length };
+    this.publish();
+    return null;
+  }
+
   /** D-476: a replicated commit touched a module's world-settings document → one event per changed key. */
   private emitWorldSettingChanges(ops: readonly Op[]): void {
-    for (const [packageId, module] of this.running) {
-      if (!module.settings?.length || !aisSettingsDocTouched(ops, packageId)) continue;
+    for (const [packageId] of this.running) {
+      const declarations = this.declarationsOf(packageId);
+      if (!declarations.length || !aisSettingsDocTouched(ops, packageId)) continue;
       const previous = this.worldSettingValues.get(packageId) ?? {};
-      const next = aisWorldSettingValues(this.worldSettingsDoc(packageId), module.settings);
+      const next = aisWorldSettingValues(this.worldSettingsDoc(packageId), declarations);
       this.worldSettingValues.set(packageId, next);
       const frame = this.frames.get(packageId);
       for (const [key, value] of Object.entries(next))
@@ -460,22 +490,22 @@ export class PlayerAisRuntime {
   /** D-476: declarations + effective values (world from the replica, device from this device). */
   async moduleSettings(packageId: string): Promise<PlayerAisSettingsView | null> {
     const module = this.profile?.modules.find((candidate) => candidate.packageId === packageId);
-    if (!module?.settings?.length) return null;
-    const values = aisWorldSettingValues(this.worldSettingsDoc(packageId), module.settings);
+    const declarations = this.declarationsOf(packageId);
+    if (!module || !declarations.length) return null;
+    const values = aisWorldSettingValues(this.worldSettingsDoc(packageId), declarations);
     const rows = await getAllSettings(this.options.db, aisDeviceSettingsScope(this.options.worldId, packageId));
-    for (const declaration of module.settings) {
+    for (const declaration of declarations) {
       if (declaration.scope !== "device") continue;
       const row = rows.find((candidate) => candidate.key === declaration.key);
       const coerced = row ? coerceAisSettingValue(declaration, row.value) : null;
       values[declaration.key] = coerced?.ok ? coerced.value : declaration.default;
     }
-    return { declarations: module.settings.map((declaration) => cloneAisSettingDeclaration(declaration)), values };
+    return { declarations: declarations.map((declaration) => cloneAisSettingDeclaration(declaration)), values };
   }
 
   /** D-476: the player's form writes a device-scope value (world scope is the GM's). */
   async setDeviceSetting(packageId: string, key: string, value: unknown): Promise<AisSettingValue> {
-    const module = this.profile?.modules.find((candidate) => candidate.packageId === packageId);
-    const declaration = module?.settings?.find((candidate) => candidate.key === key);
+    const declaration = this.declarationsOf(packageId).find((candidate) => candidate.key === key);
     if (!declaration) throw new Error(`${packageId} declares no setting ${key}`);
     if (declaration.scope !== "device") throw new Error("World-scope settings are changed by the GM");
     const coerced = coerceAisSettingValue(declaration, value);
