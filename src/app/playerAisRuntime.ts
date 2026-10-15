@@ -26,6 +26,7 @@ import {
   type AisEventPayloads,
   type AisSettingDeclaration,
   type AisSettingValue,
+  cloneAisSettingDeclaration,
 } from "../core/automationInterconnect";
 import {
   aisDeviceSettingsScope,
@@ -468,7 +469,7 @@ export class PlayerAisRuntime {
       const coerced = row ? coerceAisSettingValue(declaration, row.value) : null;
       values[declaration.key] = coerced?.ok ? coerced.value : declaration.default;
     }
-    return { declarations: module.settings.map((declaration) => structuredClone(declaration)), values };
+    return { declarations: module.settings.map((declaration) => cloneAisSettingDeclaration(declaration)), values };
   }
 
   /** D-476: the player's form writes a device-scope value (world scope is the GM's). */

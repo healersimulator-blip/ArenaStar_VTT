@@ -254,6 +254,28 @@ export interface AisSettingDeclaration {
 }
 export const AIS_MAX_SETTINGS = 32;
 export const AIS_MAX_SETTING_CHOICES = 32;
+
+/**
+ * A plain copy of one declaration. Shells keep `HostApp`/`PlayerApp` in Svelte `$state`, so a
+ * declaration read through the app is a reactive proxy — `structuredClone` and `postMessage`
+ * refuse proxies ("#<Object> could not be cloned"), which is exactly how the GM's settings form
+ * failed in the browser. Copy field by field instead; the result is always cloneable.
+ */
+export function cloneAisSettingDeclaration(declaration: AisSettingDeclaration): AisSettingDeclaration {
+  return {
+    key: declaration.key,
+    scope: declaration.scope,
+    type: declaration.type,
+    label: declaration.label,
+    ...(declaration.hint !== undefined ? { hint: declaration.hint } : {}),
+    default: declaration.default,
+    ...(declaration.min !== undefined ? { min: declaration.min } : {}),
+    ...(declaration.max !== undefined ? { max: declaration.max } : {}),
+    ...(declaration.step !== undefined ? { step: declaration.step } : {}),
+    ...(declaration.maxLength !== undefined ? { maxLength: declaration.maxLength } : {}),
+    ...(declaration.choices ? { choices: declaration.choices.map((choice) => ({ value: choice.value, label: choice.label })) } : {}),
+  };
+}
 export const AIS_MAX_SETTING_STRING = 512;
 
 export interface AisPanelDeclaration {

@@ -14,6 +14,7 @@ import {
   type AisEventPayloads,
   type AisSettingDeclaration,
   type AisSettingValue,
+  cloneAisSettingDeclaration,
 } from "../core/automationInterconnect";
 import {
   aisDeviceSettingsScope,
@@ -321,7 +322,7 @@ export class AisRuntime {
       const coerced = row ? coerceAisSettingValue(declaration, row.value) : null;
       values[declaration.key] = coerced?.ok ? coerced.value : declaration.default;
     }
-    return { declarations: module.settings.map((declaration) => structuredClone(declaration)), values };
+    return { declarations: module.settings.map((declaration) => cloneAisSettingDeclaration(declaration)), values };
   }
 
   /** D-476: the GM's form writes a value — world scope through a normal commit, device scope locally. */

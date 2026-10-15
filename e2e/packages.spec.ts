@@ -182,7 +182,8 @@ test.describe("Package loader (§12)", () => {
             return app ? app.rulesBoot() : null;
           }),
         )
-        .toEqual({ source: "package", packageId: "probe-rules", version: "9.9.9", error: null });
+        // D-471 `inPage` (the package's rules imported in-page) and D-475 `ui` (no ui.js declared).
+        .toEqual({ source: "package", packageId: "probe-rules", version: "9.9.9", error: null, inPage: "package", ui: "none" });
 
       // ── campaign under package rules ─────────────────────────────────────
       await chromeAction(page, "gm-extras");

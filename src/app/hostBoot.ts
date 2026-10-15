@@ -14,6 +14,7 @@ import {
   type AisResolution,
   type AisSettingDeclaration,
   type AisTokenActionDeclaration,
+  cloneAisSettingDeclaration,
 } from "../core/automationInterconnect";
 import { aisOwnSource, aisRuntimePackage, aisRuntimeResources } from "../packages/aisRuntimePackage";
 import { packageContentHash } from "../packages/packageHash";
@@ -441,7 +442,7 @@ function resolveAutomationState(
     const sharedWithPlayers = !hostOnly && world?.automationSharing?.[rec.id] !== false;
     const tokenActions = rec.manifest.interconnect.tokenActions ?? [];
     const panel = rec.manifest.interconnect.panel ? { ...rec.manifest.interconnect.panel } : undefined;
-    const settings = (rec.manifest.interconnect.settings ?? []).map((declaration) => structuredClone(declaration));
+    const settings = (rec.manifest.interconnect.settings ?? []).map((declaration) => cloneAisSettingDeclaration(declaration));
     const requires = (rec.manifest.interconnect.requires ?? []).map((requirement) => ({ ...requirement }));
     const provides = (rec.manifest.interconnect.provides ?? []).map((slot) => ({ ...slot }));
     let runtime: ReturnType<typeof aisRuntimePackage> = null;
@@ -488,7 +489,7 @@ function resolveAutomationState(
       ...(hostOnly ? { hostOnly: true } : {}),
       ...(tokenActions.length > 0 ? { tokenActions: tokenActions.map((action) => ({ ...action })) } : {}),
       ...(panel ? { panel: { ...panel } } : {}),
-      ...(settings.length > 0 ? { settings: settings.map((declaration) => structuredClone(declaration)) } : {}),
+      ...(settings.length > 0 ? { settings: settings.map((declaration) => cloneAisSettingDeclaration(declaration)) } : {}),
       ...(requires.length > 0 ? { requires } : {}),
       ...(provides.length > 0 ? { provides } : {}),
       source: runtime?.source ?? aisOwnSource(rec),

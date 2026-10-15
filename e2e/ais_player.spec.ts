@@ -61,7 +61,7 @@ test("a player lights and puts out the torch on their own token through the GM-s
       ]);
       return {
         sceneId: scene._id, tokenId: token._id, actorId: actor._id,
-        centre: { x: token.x + token.width / 2, y: token.y + token.height / 2 },
+        centre: { x: token.x, y: token.y }, // token x/y is the centre (src/canvas/tokens.ts tokenRect)
       };
     });
     const readLight = () => gm.evaluate(({ sceneId, tokenId, actorId }) => {
@@ -69,8 +69,10 @@ test("a player lights and puts out the torch on their own token through the GM-s
       const token = client.store.get("scenes", sceneId)?.tokens.find((row) => row._id === tokenId);
       const item = client.store.get("actors", actorId)?.items.find((row) => row._id === "ais-player-torch");
       if (!token || !item) throw new Error("fixture token or inventory is missing");
-      const flags = (token.flags as { ais?: Record<string, { light?: { source?: string } }> }).ais;
-      return { radius: token.light.radius, quantity: item.system.quantity, source: flags?.["pf1e-torch"]?.light?.source ?? null };
+      // The module's token state (src/packages/aisModuleHandlers.ts light.apply): sourceItemId + active.
+      const flags = (token.flags as { ais?: Record<string, { sourceItemId?: string; active?: boolean }> }).ais;
+      const state = flags?.["pf1e-torch"];
+      return { radius: token.light.radius, quantity: item.system.quantity, source: state?.sourceItemId ?? null, active: state?.active ?? null };
     }, target);
     await gm.locator('[data-window="settings"] [data-window-close]').click();
 
@@ -97,18 +99,22 @@ test("a player lights and puts out the torch on their own token through the GM-s
     await expect(consent).toHaveCount(0);
 
     // Right-click the owned token on the player's canvas: the light entries come from the module.
-    const screen = await surfaceCallArg<{ x: number; y: number } | null>(player, "playerCanvas", "screenOf", target.centre);
-    if (!screen) throw new Error("player token point unavailable");
+    // The point is re-read on every attempt: the consent banner leaving changes the layout and the
+    // player's camera can re-fit between a cached point and the click.
     const openMenu = async () => {
-      await player.mouse.click(screen.x, screen.y, { button: "right" });
-      await expect(player.locator(`[data-token-menu="${target.tokenId}"]`)).toBeVisible({ timeout: 10_000 });
+      await expect(async () => {
+        const screen = await surfaceCallArg<{ x: number; y: number } | null>(player, "playerCanvas", "screenOf", target.centre);
+        if (!screen) throw new Error("player token point unavailable");
+        await player.mouse.click(screen.x, screen.y, { button: "right" });
+        await expect(player.locator(`[data-token-menu="${target.tokenId}"]`)).toBeVisible({ timeout: 2_000 });
+      }).toPass({ timeout: 15_000 });
     };
     await openMenu();
     const toggle = player.locator('[data-token-menu-action="token-light-toggle"]');
     await expect(toggle).toHaveText("Turn carried light on");
     await expect(toggle).toBeEnabled();
     await toggle.click();
-    await expect.poll(readLight, { timeout: 20_000 }).toMatchObject({ source: "ais-player-torch", quantity: 1 });
+    await expect.poll(readLight, { timeout: 20_000 }).toMatchObject({ source: "ais-player-torch", active: true, quantity: 1 });
     expect((await readLight()).radius).toBeGreaterThan(0);
     await expect.poll(() => playerCall<{ txId: string } | null>(player, "lastRejected")).toBeNull();
 
@@ -116,7 +122,7 @@ test("a player lights and puts out the torch on their own token through the GM-s
     await openMenu();
     await expect(player.locator('[data-token-menu-action="token-light-toggle"]')).toContainText("Turn carried light off");
     await player.locator('[data-token-menu-action="token-light-off"]').click();
-    await expect.poll(readLight, { timeout: 20_000 }).toMatchObject({ radius: 0, source: null });
+    await expect.poll(readLight, { timeout: 20_000 }).toMatchObject({ radius: 0, active: false, quantity: 1 }); // putting out does not consume
 
     // The GM un-shares: the player's copy stops without a reload, and the entries explain why.
     await gm.locator("#gm-settings").click();

@@ -578,7 +578,10 @@ export class AisModuleIframe {
     if (this.disposed || !this.subscriptions.has(event)) return;
     void (async () => {
       await this.options.assertModuleActive?.();
-      if (this.options.isCapabilityCurrentlyGranted && !(await this.options.isCapabilityCurrentlyGranted("action.observe"))) return;
+      // D-476: a module's own settings need no observe grant — on subscription *and* on delivery
+      // (the first browser run of the settings form showed the delivery side still demanding it).
+      if (event !== "module.settings.changed" && this.options.isCapabilityCurrentlyGranted &&
+        !(await this.options.isCapabilityCurrentlyGranted("action.observe"))) return;
       if (!this.disposed && this.subscriptions.has(event)) {
         this.record({ at: Date.now(), kind: "event", name: event, ok: true });
         this.post({ vttAisRpc: AIS_RPC_TAG, kind: "event", event, payload });

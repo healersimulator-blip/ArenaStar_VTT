@@ -288,6 +288,16 @@ point `LD_LIBRARY_PATH` at the library directory and pass its `executablePath()`
 variable above. That is how the acceptance runs in this repository's own sandbox were made
 (repeatedly, after the CDN turned out to be unreachable).
 
+The one-command form of that recipe is `pnpm e2e:browser`
+(`scripts/e2e/installHeadlessChromium.mjs`): it reads the revision Playwright expects from
+`playwright-core/browsers.json`, fetches the matching `@sparticuz/chromium` release from the npm
+registry, and lays the headless shell, its Amazon Linux libraries, SwiftShader and fonts out in
+`~/.cache/ms-playwright/chromium_headless_shell-<revision>/` with Playwright's own markers — so
+`playwright test --project=chromium` needs no executable-path override. `playwright.config.ts`
+recognises that layout and sets `LD_LIBRARY_PATH`/`FONTCONFIG_PATH` itself (the shipped
+`fonts.conf` points at `/var/task`, which otherwise renders every glyph zero-width). Measured on
+2026-10-15: install 4.5 s, then `pnpm test:fx:prepare && pnpm test:e2e:ais` → 18/18 (D-480).
+
 **Unpack `swiftshader.tar.br` into the same directory as the `chromium` executable** (so
 `libEGL.so`, `libGLESv2.so`, `libvk_swiftshader.so` and `vk_swiftshader_icd.json` sit beside it).
 Chromium looks for them there; `LD_LIBRARY_PATH` or ANGLE flags alone are not enough. Without them

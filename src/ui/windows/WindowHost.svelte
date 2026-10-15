@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { AisRuntimeStatuses } from "../../app/aisRuntime";
+  import type { AisModuleShellApi, AisRuntimeStatuses } from "../../app/aisRuntime";
   import type { CloudBackupController } from "../../storage/cloud/cloudBackup";
   import type { SaveCoordinator } from "../../storage/saveCoordinator";
   /**
@@ -61,6 +61,8 @@
     rulesModule = null,
     uiModule = null,
     aisRuntimeStatuses = {},
+    onOpenAisPanel = null,
+    aisModules = null,
     agents = null,
     saves = null,
     cloud = null,
@@ -118,6 +120,10 @@
     /** D-475: the active system package's window components (null = package ships none / not loaded). */
     uiModule?: PackageUiModule | null;
     aisRuntimeStatuses?: AisRuntimeStatuses;
+    /** D-470: opens a module's `ui.panel` from Settings (null = no AIS runtime on this page). */
+    onOpenAisPanel?: ((packageId: string) => void) | null;
+    /** D-476/D-479: the settings form, Health and Restart of each module (null until the world booted). */
+    aisModules?: AisModuleShellApi | null;
     /** §3.2 the connector's agent desk (GM only; null hides the Agents section). */
     agents?: AgentManager | null;
     /** §10 keybinding map for the help window (D-256). */
@@ -336,6 +342,8 @@
             {packages}
             {rulesBoot}
             {aisRuntimeStatuses}
+            {onOpenAisPanel}
+            {aisModules}
             {agents}
             {presence}
             onOpenPlayers={() => manager.open({ id: "permissions", title: "Players & permissions", kind: "permissions", x: 64, y: 48, width: 560, height: 480 })}

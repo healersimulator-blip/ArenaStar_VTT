@@ -35,15 +35,22 @@
   } = $props();
 
   // D-476: settings views load lazily when the GM expands a module's settings block.
-  let aisSettingsViews = $state<Record<string, AisModuleSettingsView>>({});
+  let aisSettingsViews = $state<Record<string, AisModuleSettingsView | null>>({});
+  // A failed load is shown in place (never a "Loading…" that stays forever).
+  let aisSettingsErrors = $state<Record<string, string>>({});
   // D-479: health snapshots refresh when the block is expanded or after an action.
   let aisHealthViews = $state<Record<string, AisModuleDiagnostics | null>>({});
   let aisHealthNotice = $state<Record<string, string>>({});
 
   async function loadAisSettings(id: string): Promise<void> {
     if (!aisModules) return;
-    const view = await aisModules.settings(id);
-    if (view) aisSettingsViews = { ...aisSettingsViews, [id]: view };
+    try {
+      const view = await aisModules.settings(id);
+      aisSettingsViews = { ...aisSettingsViews, [id]: view };
+      aisSettingsErrors = Object.fromEntries(Object.entries(aisSettingsErrors).filter(([key]) => key !== id));
+    } catch (error) {
+      aisSettingsErrors = { ...aisSettingsErrors, [id]: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async function writeAisSetting(id: string, key: string, value: AisSettingValue): Promise<void> {
@@ -472,9 +479,13 @@
             <summary>Settings ({p.settings.length}) · world values replicate to players, device values stay here</summary>
             {#if !aisModules}
               <p class="hint">Settings become editable once the world has booted.</p>
+            {:else if aisSettingsErrors[p.id]}
+              <p class="error" data-ais-settings-error={p.id}>{aisSettingsErrors[p.id]}</p>
             {:else if aisSettingsViews[p.id]}
               <AisSettingsForm packageId={p.id} declarations={aisSettingsViews[p.id]?.declarations ?? []} values={aisSettingsViews[p.id]?.values ?? {}}
                 disabled={pkgBusy} onChange={(key, value) => writeAisSetting(p.id, key, value)} />
+            {:else if aisSettingsViews[p.id] === null}
+              <p class="hint" data-ais-settings-error={p.id}>This module did not boot on this device, so its settings cannot be edited here (enable and approve it, then reload).</p>
             {:else}
               <p class="hint">Loading…</p>
             {/if}

@@ -19,6 +19,7 @@
  * ordinary intent authorized by the host (`validateOps` + Foundry-default ownership).
  */
 import type { AisCapability } from "../core/automationInterconnect";
+import { cloneAisSettingDeclaration } from "../core/automationInterconnect";
 import type { AisProfileMsg, AisSharedModule } from "../core/messages";
 import type { HostAutomationBoot, HostAutomationModuleBoot } from "./hostBoot";
 
@@ -80,7 +81,7 @@ export function sharedModuleOf(module: HostAutomationModuleBoot): AisSharedModul
     emittedEvents: [...module.emittedEvents],
     ...(module.tokenActions && module.tokenActions.length > 0 ? { tokenActions: module.tokenActions.map((action) => ({ ...action })) } : {}),
     ...(module.panel ? { panel: { ...module.panel } } : {}),
-    ...(module.settings && module.settings.length > 0 ? { settings: module.settings.map((declaration) => structuredClone(declaration)) } : {}),
+    ...(module.settings && module.settings.length > 0 ? { settings: module.settings.map((declaration) => cloneAisSettingDeclaration(declaration)) } : {}),
     ...(module.requires && module.requires.length > 0 ? { requires: module.requires.map((requirement) => ({ ...requirement })) } : {}),
     ...(module.provides && module.provides.length > 0 ? { provides: module.provides.map((slot) => ({ ...slot })) } : {}),
   };

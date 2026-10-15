@@ -1,6 +1,6 @@
 # Browser batches — the runnable division of `e2e/`
 
-`pnpm test:e2e` runs **all 141 spec files** in one command and is the one command that does not meet
+`pnpm test:e2e` runs **all 146 spec files** in one command and is the one command that does not meet
 the 25-minute rule. The batches below are how the suite is actually run: pick one, run it, and know
 how long it may take. `FX_TEST_BATCHES.md` covers the older FX/canvas/multilevel groups the same way.
 
@@ -23,7 +23,7 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 - **`--global-timeout` caps every batch** (15–20 minutes). A cap fails the command; it never counts
   unfinished tests as passing.
 - **A spec belongs to exactly one batch**, and `tests/scripts/e2eBatchCoverage.test.ts` asserts it at
-  unit-test speed: all 143 files / 457 tests covered, no duplicates, no batch over the cap. Add a
+  unit-test speed: all 146 files / 464 tests covered (`playwright test --list`, 2026-10-15), no duplicates, no batch over the cap. Add a
   spec without a batch and that test fails.
 
 ## The batches
@@ -31,11 +31,11 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 | script | specs | tests | cap | measured | result |
 | --- | --- | --- | --- | --- | --- |
 | `test:e2e:core` | 19 | 48 | 20 min | 9.0 min | **48 passed** |
-| `test:e2e:table` | 20 | 40 | 20 min | 10.5 min (19 specs) | **39 passed** (+ `package_ui`, D-475, not yet run) |
+| `test:e2e:table` | 20 | 41 | 20 min | 10.0 min | **41 passed** (D-480, 2026-10-15; `packages.spec.ts` `rulesBoot` assertion updated for D-471/D-475) |
 | `test:e2e:hexcrawl` | 8 | 16 | 15 min | 8.2 min | **16 passed** |
 | `test:e2e:images` | 10 | 31 | 15 min | 4.9 min | **30 passed / 1 skipped** |
 | `test:e2e:net` | 4 | 5 | 15 min | 0.5 min | **4 passed** (+ `players_roster`, D-465) |
-| `test:e2e:ais` | 3 | 16 | 15 min | 6.6 min (2 specs) | **15 passed** (+ `ais_player`, D-468, not yet run) |
+| `test:e2e:ais` | 4 | 18 | 15 min | 5.8 min + 2.4 min (`ais_foundry` rerun after rebuilding `dist/worlds`) | **18 passed** (D-480, 2026-10-15) |
 | `test:e2e:ui-adapters` | 2 | 5 | 15 min | 1.6 min | **5 passed** |
 | `test:e2e:pf1e-combat` | 16 | 70 | 20 min | 12.7 min | 64 passed / **6 pre-existing failures** |
 | `test:e2e:pf1e-sheets` | 14 | 28 | 20 min | 4.3 min | 23 passed / **5 pre-existing failures** |
@@ -96,11 +96,39 @@ two torches; the player joins by manual signalling, is asked for consent naming
 "change the light carried by your tokens", allows, right-clicks the token, chooses
 *Turn carried light on* (host commit: radius > 0, torch consumed, `flags.ais.pf1e-torch`), puts it
 out again, and loses the module the moment the GM unticks sharing — with no reload and no
-`lastRejected`. **This spec has not been executed yet**: the authoring environment could not
-download Playwright browsers. Unit coverage of the same path is in
-`tests/app/playerAisRuntime.test.ts` (real `HostSync`↔`ClientSync`) and
-`tests/app/aisRuntimeSharing.test.ts` (booted `HostApp`). Run `pnpm test:e2e:ais` and record the
-result here before treating the batch as green.
+`lastRejected`. Unit coverage of the same path is in `tests/app/playerAisRuntime.test.ts` (real
+`HostSync`↔`ClientSync`) and `tests/app/aisRuntimeSharing.test.ts` (booted `HostApp`).
+
+**Executed in a real browser on 2026-10-15 (D-480): passes in 30.6 s.** The first run failed for
+a spec bug — the token centre was computed as `x + width / 2`, but a token's `x,y` *is* its centre
+(`src/canvas/tokens.ts` `tokenRect`), so the right-click landed on the token's corner — and the
+state assertion guessed `flags.ais.pf1e-torch.light.source` where the module writes
+`{ sourceId, sourceItemId, active, stateIndex }`. Both fixed; the product path needed no change.
+
+## AIS platform follow-up (D-476…D-479 → D-480, 2026-10-15)
+
+`e2e/ais_platform.spec.ts` (2 tests) joins the AIS batch: the GM's generated settings form
+(world → replicated `ais-settings:<pkg>` document, device → local), `compendium.list/search/get`
+over an imported content package, the module bus (`modules.invoke` along a declared `requires`,
+self-invocation refused), the `module.settings.changed` events, Health counters/trace and Restart;
+and a player who reads the GM's world value through the replica, edits a device value in the guide
+drawer, runs a module command against an owned token, and has a world write refused with
+"GM authority". **Its first browser run found three real product defects** that the 5,834 unit
+tests could not see (all fixed and unit-covered where a unit test can reach them):
+
+1. `WindowHost.svelte` never declared or forwarded `aisModules`/`onOpenAisPanel`, so the GM's
+   settings form, Health/Restart and "Open panel" were dead in the real Settings window.
+2. `AisRuntime.moduleSettings` cloned declarations with `structuredClone`; shells keep the app in
+   Svelte `$state`, so declarations arrive as proxies and cloning throws `DataCloneError` — the
+   block showed "Loading…" forever. `cloneAisSettingDeclaration` copies field by field, and the
+   block now shows a failure instead of a permanent "Loading…".
+3. `AisModuleIframe.emit` demanded a *current* `action.observe` grant for every event, including
+   `module.settings.changed`, which D-476 defined as subscribable without it — modules without
+   `action.observe` never heard their own settings change.
+
+Run order for a clean checkout: `pnpm e2e:browser` (once per sandbox), `pnpm test:fx:prepare`,
+then the batch. A bare `pnpm build` still wipes `dist/worlds` — `ais_foundry` fails with
+`ENOENT …/ais-foundry-feasibility-0.1.0.zip` until `build:ais-demo` runs again.
 
 ## UI adapter / self-opening preview follow-up (D-463)
 

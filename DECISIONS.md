@@ -14687,3 +14687,79 @@ Gates: `tsc` 0, `eslint` 0, svelte check 0 blocking, vitest **5,834 passed / 12 
 Readiness: R-01, R-03, R-05 closed; R-09 (ESM module graphs in the loader) and R-07 (binary
 resources) remain the known kernel residuals; R-08 is excluded by design. Author-facing summary of
 the whole surface: [AIS_MODULE_GUIDE.md](AIS_MODULE_GUIDE.md).
+
+## D-480 — Browser verification executed: npm-registry Chromium as a one-command install, the first real run of the AIS shells, and the defects it found (2026-10-15)
+
+**Context.** D-468…D-479 shipped with "browser specs were not run in the authoring sandbox", and
+the owner rightly refused that: an architecture whose GM/player shells were never opened in a
+browser is not "ready", and the repository already *documented* a working route (D-119, D-179,
+D-181, D-182, D-222: `@sparticuz/chromium` from the npm registry) which was not re-read before
+writing "cannot install browsers". That claim was false and is withdrawn.
+
+**Decision.**
+- **One-command browser install.** `pnpm e2e:browser` → `scripts/e2e/installHeadlessChromium.mjs`
+  reads the revision Playwright expects from `playwright-core/browsers.json` (1.63: revision 1243,
+  Chromium 153.0.8010.12), fetches the matching `@sparticuz/chromium` major from
+  `registry.npmjs.org` (153.0.0 = Chromium 153.0.8010.0, 69,995,309 B), brotli-decompresses the
+  headless shell, SwiftShader, the Amazon Linux 2023 libraries and the fonts, and lays them out in
+  `~/.cache/ms-playwright/chromium_headless_shell-<revision>/` with Playwright's
+  `INSTALLATION_COMPLETE`/`DEPENDENCIES_VALIDATED` markers — so plain `playwright test
+  --project=chromium` finds it (no `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`). The shipped
+  `fonts.conf` points at `/var/task`; it is rewritten to the extracted Open Sans plus
+  `/usr/share/fonts` (without this every glyph measures zero-width and layout specs fail).
+  `playwright.config.ts` detects that layout (Playwright's own download has no `al2023/` or
+  `fonts/` directory) and sets `LD_LIBRARY_PATH`/`FONTCONFIG_PATH` itself. Measured: install
+  4.5 s; smoke launch 91 ms, WebGL/WebGL2 available; `grids`+`chat` specs green with no manual
+  environment. CI is untouched (`playwright install` keeps working where the CDN is reachable).
+- **Component-prop guard.** `tests/scripts/svelteComponentProps.test.ts` parses every `.svelte`
+  file with the Svelte compiler and fails when a template passes a prop (`attr=` or `bind:attr`)
+  that the child's `$props()` does not declare (barrel re-exports resolved; rest-prop components
+  skipped). It reproduces the `WindowHost` defect below when it is reintroduced and found one
+  dead prop (`PF1eActorSheet` → `PF1eCompendiumPicker client`, removed).
+- **`cloneAisSettingDeclaration`** (`src/core/automationInterconnect.ts`) replaces
+  `structuredClone` on setting declarations everywhere (`hostBoot`, `aisRuntime`,
+  `playerAisRuntime`, `aisPlayerProfile`); the GM form shows a load error in place instead of a
+  permanent "Loading…".
+- **Event delivery** (`AisModuleIframe.emit`) exempts `module.settings.changed` from the live
+  `action.observe` check, matching the subscription rule of D-476.
+- `e2e/ais_platform.spec.ts` (2 tests) joins `test:e2e:ais` as the browser acceptance of
+  D-476…D-479; `E2E_BATCHES.md` and `README.md` carry the recipe and the results.
+
+**What the first real run found (and would never have been found by the 5,834 unit tests).**
+1. *Dead props in the GM shell.* `App.svelte` passed `aisModules` and `onOpenAisPanel` to
+   `WindowHost`, which never declared or forwarded them to `SettingsPanel` → the generated settings
+   form (D-476), Health/Restart (D-479) and "Open panel" (D-470) were inert in the real Settings
+   window; the block said "Settings become editable once the world has booted" forever. Svelte 5
+   drops unknown props silently and `.svelte` templates are not type-checked here.
+2. *`DataCloneError` on proxies.* `Root.svelte` keeps `HostApp` in `$state`, so declarations read
+   through it are Svelte proxies; `structuredClone(proxy)` throws "#<Object> could not be cloned"
+   and `moduleSettings` rejected — "Loading…" forever once (1) was fixed. Regression test:
+   `aisRuntimeSharing.test.ts` boots the runtime over a Svelte-like deep proxy (red with the old
+   code, green now).
+3. *Settings events never delivered.* The kernel allowed subscribing to `module.settings.changed`
+   without `action.observe` but `emit` demanded a current `action.observe` grant for every event,
+   so a module holding only `module.settings.write` heard nothing (`changes: []` in both shells).
+4. Spec-side errors in the never-run specs: the token centre computed as `x + width / 2` (a
+   token's `x,y` *is* its centre — `tokenRect`), the torch state read at `light.source` instead of
+   `{ sourceId, sourceItemId, active }`, `compendium.get` `type` expected as the pack type instead
+   of the entry type, the player's settings card not reached because the guide drawer
+   (`[data-player-setup]`) was never opened, and a re-opened Settings window starting collapsed.
+   `e2e/packages.spec.ts` also asserted the pre-D-471/D-475 `rulesBoot` shape (`inPage`, `ui`
+   missing) — stale since 2026-10-14.
+
+**Measured (real Chromium 153, 2 CPUs, one worker).** `test:e2e:ais` **18/18** — `ais_modules`
+12/12 (PF1e Torch 34.0 s / 36.0 s), `ais_foundry` 3/3 (Tagger adapter 58.4 s / 59.2 s),
+`ais_player` 1/1 (30.6 s), `ais_platform` 2/2 (27.3 s GM, 30.1 s player); batch 5.8 min
+(+2.4 min `ais_foundry` rerun after a bare `pnpm build` wiped `dist/worlds` — the D-222 footgun,
+still real). Adjacent: `ais_ui` 3/3, `package_ui` 1/1, `packages` 6/6, `join` 1/1, `pf1e_join`
+1/1; `test:e2e:table` **41/41 in 10.0 min** (its `package_ui` spec, D-475, had never run either).
+Gates: `tsc` 0, `eslint` 0, svelte check 0 blocking, vitest **5,836 passed / 12 skipped (5,848)**
+(+2: the proxy regression and the component-prop guard), `dist/index.html` **5,937,482 B**
+(gzip 1,894,407 B; +1,020 B for the field-wise clone and the error branch), headroom 353,974 B.
+
+**Consequences.** "Browser tests could not be run" is no longer an acceptable status line in this
+repository: the install is one command, documented in README/E2E_BATCHES, and every future
+D-entry that touches a shell reports the batch it ran. The unit suite's blind spots that this run
+exposed — cross-component prop wiring, Svelte proxies reaching structured-clone/postMessage
+boundaries, and iframe-side event delivery — now have a static guard, a proxy regression test and
+a browser spec respectively; iframe delivery stays browser-only by nature.

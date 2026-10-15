@@ -116,8 +116,9 @@ the GM can share modules, UI and sheets with players, and the first acceptance c
   the light entries; the GM's module review gains a per-module "Players run this module too" box.
 
 Verification: unit **5,775 passed / 12 skipped**, typecheck/lint/build clean, main file
-**5,723,400 B** (+24,504 B). The browser case `e2e/ais_player.spec.ts` joined `test:e2e:ais` but
-was not executed in the authoring sandbox. Later phases — player quickbar/chat commands, shared
+**5,723,400 B** (+24,504 B). The browser case `e2e/ais_player.spec.ts` joined `test:e2e:ais`;
+it was first executed on 2026-10-15 (D-480) and passes — a player lights and puts out the torch on
+their own token through the GM-shared module in a real Chromium. Later phases — player quickbar/chat commands, shared
 sheets/panels through a Svelte component-package contract, and moving the native PF1e logic into
 the world file — are planned there.
 
@@ -752,10 +753,15 @@ sibling blocks enabling with the reason; provider conflicts visible). 6 ✔ (pro
 no raw store). 7 ✔ (every write is an op through `validateOps`). 8 ✔ (reducer order tests). 9 ✔
 (reliability suite + D-479 breaker). 10 ✔ (panels/token actions/theme fallback; player shell runs
 without any module). 11 ✔ (D-479 trace: module, hash in status, RPC/command/event, error class,
-commit via the op log). 12 — unit coverage ✔ for every listed item except *multi-module browser
-behavior*, which exists as Playwright specs (`e2e/ais_*.spec.ts`, `package_ui.spec.ts`) that could
-not be executed in the authoring sandbox. Known residuals outside this list: ESM module graphs in
-the loader (R-09) and binary resources (R-07).
+commit via the op log). 12 ✔ — unit coverage for every listed item, and *multi-module browser
+behavior* executed in a real Chromium on 2026-10-15 (D-480): `test:e2e:ais` **18/18**
+(`ais_modules`, `ais_foundry`, `ais_player`, `ais_platform` — the last one boots three packages
+side by side: two modules along a declared `requires` and a content pack), plus `package_ui`,
+`ais_ui`, `packages`, `join`, `pf1e_join`. That first run found three shell/kernel defects the
+unit tests could not see (dead `WindowHost` props, `structuredClone` on Svelte-proxied
+declarations, `module.settings.changed` dropped at delivery without `action.observe`); all fixed
+and unit-covered where a unit test can reach them. Known residuals outside this list: ESM module
+graphs in the loader (R-09) and binary resources (R-07).
 
 ## 17. Open decisions to settle before coding
 

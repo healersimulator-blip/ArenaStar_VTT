@@ -11,6 +11,7 @@ import { strToU8, zipSync } from "fflate";
 import { describe, expect, test, vi } from "vitest";
 import { bootHostApp, BUILTIN_SYSTEM_ID, BUILTIN_SYSTEM_VERSION, type HostApp } from "../../src/app/hostBoot";
 import { AisRuntime } from "../../src/app/aisRuntime";
+import { buildAisPlayerProfile } from "../../src/app/aisPlayerProfile";
 import { ClientSync, type ClientEvents } from "../../src/client/sync";
 import { createEventBus } from "../../src/core/events";
 import type { AisProfileMsg, HelloMsg } from "../../src/core/messages";
@@ -293,6 +294,38 @@ describe("D-470 — GM-side sandboxed panels", () => {
       await settle();
       expect(panels.log.at(-1)).toBe("remove:kit");
       expect(runtime.panelEntries()).toEqual([]);
+    } finally { runtime.dispose(); await app.close(); }
+  });
+
+  test("declarations read through a Svelte-like state proxy stay cloneable (the GM form regression seen in the browser)", async () => {
+    // Root.svelte keeps HostApp in `$state`, so the shells hand the runtime a reactive proxy of the
+    // app: plain objects and arrays reached through it are proxies, and `structuredClone` (and
+    // `postMessage`) refuse proxies. The first browser run of the settings form died exactly there.
+    const reactive = <T>(value: T): T => {
+      if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
+      const proto = Object.getPrototypeOf(value) as unknown;
+      if (proto !== Object.prototype && proto !== Array.prototype) return value; // Svelte proxies only POJOs/arrays
+      return new Proxy(value as object, { get: (target, key) => reactive(Reflect.get(target, key)) }) as T;
+    };
+    let app = await freshApp();
+    const settings = [
+      { key: "radius", scope: "world", type: "number", label: "Radius", default: 20, min: 0, max: 60, step: 5 },
+      { key: "style", scope: "device", type: "choice", label: "Style", default: "warm", choices: [{ value: "warm", label: "Warm" }, { value: "cold", label: "Cold" }] },
+    ];
+    expect((await app.packages.importZip(moduleZip("torch", ["module.settings.write"], { settings }))).ok).toBe(true);
+    await approve(app, "torch", ["module.settings.write"]);
+    app = await reboot(app);
+    const runtime = runtimeFor(reactive(app));
+    try {
+      await settle();
+      const view = await runtime.moduleSettings("torch");
+      expect(view?.values).toEqual({ radius: 20, style: "warm" });
+      expect(() => structuredClone(view)).not.toThrow();
+      expect(structuredClone(view)?.declarations).toEqual(settings);
+      // The player profile is built from the same proxied definitions before it crosses the wire.
+      const module = reactive(app).automationBoot.modules.find((entry) => entry.packageId === "torch");
+      if (!module) throw new Error("torch not booted");
+      expect(() => structuredClone(buildAisPlayerProfile({ modules: [module], providers: [], assertConsent: () => undefined }))).not.toThrow();
     } finally { runtime.dispose(); await app.close(); }
   });
 });
