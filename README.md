@@ -298,6 +298,18 @@ recognises that layout and sets `LD_LIBRARY_PATH`/`FONTCONFIG_PATH` itself (the 
 `fonts.conf` points at `/var/task`, which otherwise renders every glyph zero-width). Measured on
 2026-10-15: install 4.5 s, then `pnpm test:fx:prepare && pnpm test:e2e:ais` → 18/18 (D-480).
 
+Environment facts for whoever runs this next (verified 2026-10-15): the agent sandbox is
+**Debian 12 (bookworm), glibc 2.36, kernel 6.1, 2 CPUs**, and only `registry.npmjs.org` /
+`pypi.org` / `github.com` are reachable. **Chromium 153.0.8010.0 runs on it with the bundled NSS
+libraries** — `ldd` on the headless shell shows exactly three libraries missing from the host,
+`libnss3.so`, `libnssutil3.so`, `libnspr4.so` (Debian's `libnss3` is not installed and `apt` has
+no egress); `al2023/lib` supplies them plus `libexpat.so.1`, `libplc4.so`, `libplds4.so`, and
+nothing else is needed (the rest resolves to the host's glibc). The Chromium sandbox starts
+normally — `PLAYWRIGHT_CHROMIUM_NO_SANDBOX` is **not** required here. A sandbox restore drops
+`node_modules`, `~/.cache` (the browser) and `/tmp`, and can rewind the local git HEAD:
+`git fetch && git reset origin/<branch> && corepack pnpm install --frozen-lockfile && pnpm
+e2e:browser` brings everything back in about ten seconds.
+
 **Unpack `swiftshader.tar.br` into the same directory as the `chromium` executable** (so
 `libEGL.so`, `libGLESv2.so`, `libvk_swiftshader.so` and `vk_swiftshader_icd.json` sit beside it).
 Chromium looks for them there; `LD_LIBRARY_PATH` or ANGLE flags alone are not enough. Without them

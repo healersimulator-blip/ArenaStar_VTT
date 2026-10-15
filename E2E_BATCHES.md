@@ -8,8 +8,17 @@ how long it may take. `FX_TEST_BATCHES.md` covers the older FX/canvas/multilevel
 
 ```sh
 corepack pnpm install --frozen-lockfile
+corepack pnpm e2e:browser         # once per sandbox: Chromium from the npm registry (D-480)
 corepack pnpm test:fx:prepare     # vite build + system packages + starter worlds
 ```
+
+The browser step exists because the sandbox cannot reach cdn.playwright.dev. It is Debian 12
+(bookworm, glibc 2.36, 2 CPUs); Chromium 153.0.8010.0 runs on it with the bundled NSS libraries
+(`libnss3`, `libnssutil3`, `libnspr4` are the only ones the host lacks — `al2023/lib` provides
+them), the Chromium sandbox starts without `PLAYWRIGHT_CHROMIUM_NO_SANDBOX`, and
+`playwright.config.ts` sets `LD_LIBRARY_PATH`/`FONTCONFIG_PATH` itself. After a sandbox restore
+(`node_modules`, `~/.cache`, `/tmp` gone, HEAD possibly rewound) the three commands above plus
+`git fetch && git reset origin/<branch>` recover the environment in about ten seconds.
 
 The specs primarily load built `dist/index.html` over `file://` (which doubles as the §15 boot
 check). The AIS batch also serves that same bundle from a test-owned HTTPS server with a temporary

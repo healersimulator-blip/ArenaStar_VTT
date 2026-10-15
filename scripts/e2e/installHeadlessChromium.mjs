@@ -21,6 +21,11 @@
  * the sparticuz version from the registry (highest release of that major) unless pinned.
  * Re-running is a no-op once the markers exist (use --force to reinstall). Nothing here touches
  * CI, which keeps using Playwright's own pinned download. See DECISIONS.md D-222 / D-480.
+ *
+ * Verified host (2026-10-15): Debian 12 bookworm, glibc 2.36, kernel 6.1, 2 CPUs. The headless
+ * shell links only glibc plus NSS; `libnss3.so`, `libnssutil3.so` and `libnspr4.so` are the only
+ * libraries the host lacks, and `al2023/lib` supplies them (with libexpat/libplc4/libplds4). The
+ * Chromium sandbox starts normally there — PLAYWRIGHT_CHROMIUM_NO_SANDBOX is not needed.
  */
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";

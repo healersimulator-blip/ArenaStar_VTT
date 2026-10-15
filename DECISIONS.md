@@ -14757,6 +14757,17 @@ Gates: `tsc` 0, `eslint` 0, svelte check 0 blocking, vitest **5,836 passed / 12 
 (+2: the proxy regression and the component-prop guard), `dist/index.html` **5,937,482 B**
 (gzip 1,894,407 B; +1,020 B for the field-wise clone and the error branch), headroom 353,974 B.
 
+**Environment facts (for later agents; verified 2026-10-15).** The sandbox is Debian 12
+(bookworm), glibc 2.36, kernel 6.1, 2 CPUs; egress only to `registry.npmjs.org`, `pypi.org`,
+`github.com`. **Chromium 153.0.8010.0 runs on it with the bundled NSS libraries**: `ldd` on the
+headless shell reports exactly `libnss3.so`, `libnssutil3.so`, `libnspr4.so` as missing from the
+host (Debian's `libnss3` is absent and `apt` has no egress); `al2023/lib` provides them plus
+`libexpat.so.1`/`libplc4.so`/`libplds4.so`; everything else resolves to the host glibc. The
+Chromium sandbox starts normally (no `PLAYWRIGHT_CHROMIUM_NO_SANDBOX`). A sandbox restore drops
+`node_modules`, `~/.cache` and `/tmp` and can rewind the local HEAD; `git fetch && git reset
+origin/<branch> && corepack pnpm install --frozen-lockfile && pnpm e2e:browser` recovers it in
+about ten seconds (measured: install 5.4 s, browser 4.2 s).
+
 **Consequences.** "Browser tests could not be run" is no longer an acceptable status line in this
 repository: the install is one command, documented in README/E2E_BATCHES, and every future
 D-entry that touches a shell reports the batch it ran. The unit suite's blind spots that this run
