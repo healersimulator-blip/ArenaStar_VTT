@@ -291,6 +291,9 @@ describe("AIS host handlers", () => {
     granted.clear();
     await expect(handlers["settings.set"]({ key: "sound", value: false })).rejects.toThrow("denied module.settings.write");
     await expect(handlers["settings.get"]({ key: "sound" })).resolves.toMatchObject({ value: true });
+    // Subscribing to one's own settings changes needs no observe grant; host events still do.
+    await expect(handlers["events.subscribe"]({ event: "module.settings.changed" })).resolves.toEqual({ ok: true });
+    await expect(handlers["events.subscribe"]({ event: "world.snapshot" })).rejects.toThrow("denied action.observe");
     // A module without declarations lists nothing and refuses keys.
     const bare = createAisModuleHandlers({
       worldId: "w-ais-settings", packageId: "bare", emittedEvents: [], db,

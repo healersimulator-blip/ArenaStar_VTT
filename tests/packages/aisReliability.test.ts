@@ -37,6 +37,20 @@ describe("AIS RPC admission and lifecycle", () => {
     expect(post).toHaveBeenCalledWith(expect.objectContaining({ ok: false, error: "approval revoked" }));
   });
 
+  test("D-476: hearing one's own settings change needs no observe grant; host events still do", async () => {
+    const calls = handlers();
+    const subscribe = vi.fn();
+    const post = vi.fn();
+    const dispatcher = createAisModuleDispatcher(calls, new Set(), subscribe);
+    dispatcher.onFrame(request(1, "events.subscribe", { event: "module.settings.changed" }), post);
+    dispatcher.onFrame(request(2, "events.subscribe", { event: "world.snapshot" }), post);
+    await tick();
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    expect(subscribe).toHaveBeenCalledWith("module.settings.changed");
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ id: 1, ok: true }));
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ id: 2, ok: false, error: "Capability not granted: action.observe" }));
+  });
+
   test("duplicate and replayed IDs cannot repeat a mutating request", async () => {
     const calls = handlers();
     const dispatcher = createAisModuleDispatcher(calls, new Set(["chat.post"]), vi.fn());

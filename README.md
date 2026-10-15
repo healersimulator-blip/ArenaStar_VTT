@@ -116,6 +116,14 @@ else's. Un-sharing or revoking stops the player's copy without a reload. The pro
 continues this (player commands, shared sheets, native PF1e into the world file) is
 [AIS_PLAYER_RUNTIME_PLAN.md](AIS_PLAYER_RUNTIME_PLAN.md).
 
+**For module authors (D-476…D-479).** [AIS_MODULE_GUIDE.md](AIS_MODULE_GUIDE.md) is the one-page
+contract: manifest, lifecycle on GM and player devices, the `AIS.*` API with its capabilities and
+bounds. Modules declare **settings** in the manifest (world scope replicates to players as a
+document the GM edits; device scope stays local; both shells render the form), read the world's
+**compendium** packs on the GM device, call declared commands of modules they **require** through
+the module bus, and every running module has a **Health** block (counters, trace, breaker) with
+**Restart** in Settings → Packages and in the player's *Shared modules* card.
+
 **Runnable feasibility demo:** [Foundry through AIS](AIS_FOUNDRY_FEASIBILITY.md) loads original,
 byte-pinned Tagger 1.5.4 code through a separately packaged adapter, with host-validated tag writes
 and a small Sequence-style interface to our existing native FX engine. `test:fx:prepare` also builds

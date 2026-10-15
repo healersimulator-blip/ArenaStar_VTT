@@ -179,6 +179,49 @@ sheet next). The player's one consent record covers the rules/ui pair (`uiHash`)
 needs both hashes. This is first-party-only by construction — a `ui.js` is bound to the shell's
 Svelte build — and sits beside, not instead of, P2a's sandboxed panels for third-party UI.
 
+### 0.5 Platform readiness slice: settings, compendium reads, module bus, diagnostics (D-476…D-479)
+
+After D-475 the kernel could run, share and show a module, but a module author still had nowhere
+to keep configuration, no way to read the world's content packs, no way to talk to a sibling
+module, and the GM had no view of what a running module was doing. The readiness review
+(`AIS_PF1E_MODULE_READINESS.md` §4.1) lists those as R-03, R-01 and R-05; §14 and §16.11 of this
+document ask for the diagnostics. One slice closed the four, with the same shape every time —
+manifest declaration → host validation → capability → RPC handler shared by both runtimes →
+shell UI → tests:
+
+- **Settings (D-476)** — `interconnect.settings[]` (≤ 32; `key`, `scope: world | device`,
+  `type: boolean | number | string | choice`, `label`, `hint`, `default`, bounds/choices), validated
+  with the manifest. RPC `settings.list / get / set`; writes need `module.settings.write`.
+  World values are one replicated `settings` document per module (`ais-settings:<pkg>`,
+  `flags.ais.values`, GM authority only — a player frame's world write is refused before any op is
+  built), device values are per-device IndexedDB rows. Both runtimes raise
+  `module.settings.changed { scope, key, value }`; players hear world changes through the replica.
+  `AisSettingsForm.svelte` renders the declarations in Settings → Packages (GM: both scopes) and in
+  the player's *Shared modules* card (device scope editable, world scope shown).
+- **Compendium reads (D-477)** — `compendium.list / search / get` over the packs of every imported
+  content package (`<packageId>/<packFile>` ids, bounded hits, 48 KiB entry cap, copies only).
+  Capability `compendium.read` is GM-device-only: players have no replica of the package store, so
+  the kernel refuses at the player rather than pretending.
+- **Module bus (D-478)** — `modules.list` (sibling modules: running state, commands, provides,
+  emits) and `modules.invoke { moduleId, commandId, input }` (capability `modules.invoke`), allowed
+  only toward a module named in the caller's `interconnect.requires`, depth ≤ 8, never toward
+  itself; the target runs the command exactly as a shell invocation would — with the device's
+  authority (`runAs: "gm"` on the host, `"player"` at the player), its own grant, and a
+  `requestId: ais-module:<caller>:<n>` it can log. `requires`/`provides` now ride in
+  `ais.profile` and in the packages view.
+- **Diagnostics (D-479)** — every frame keeps a 64-entry trace ring and counters (`requests`,
+  `failures`, `rejected`, `commands`, `commandFailures`, `events`) in `src/packages/aisHealth.ts`;
+  a breaker trips after 50 failed or rejected requests inside 10 s, stops the frame with the reason
+  in its status, and both shells offer **Restart** (from the frozen boot definition on the host;
+  with the existing consent at the player). The GM's module review shows a *Health* block
+  (counters, circuit state, last traces); `AisRuntime.diagnostics()` /
+  `PlayerAisRuntime.diagnostics()` expose the same data to tests and agents.
+
+What stayed as it was: the authority rule (every write is still an ordinary op the host
+validates), the budgets of §9, and the loader (one IIFE per module — R-09 remains the known
+residual; R-08, the `pf1.*` namespace, is excluded by design). The settings, compendium and bus
+contracts are listed for authors in [AIS_MODULE_GUIDE.md](AIS_MODULE_GUIDE.md).
+
 ## 1. Goals and non-goals
 
 ### Goals
@@ -603,7 +646,7 @@ The actual file layout may reuse `world.json`/`packages.json`, but it must be ve
 
 ### Configuration and migrations
 
-Package settings are namespaced by `worldId/packageId/schemaVersion`. Values are JSON, size/depth bounded, validated before persistence, and never share keys with other modules. Upgrade migrations are declarative where possible. Any executable migration runs in the same restricted context, is previewed as a diff, has an explicit backup/rollback plan, and runs only after GM confirmation. Imports never run migrations merely because an archive was opened.
+Package settings are namespaced by `worldId/packageId/schemaVersion`. Values are JSON, size/depth bounded, validated before persistence, and never share keys with other modules. **Implemented (D-476):** the schema is the manifest's `interconnect.settings[]`; world-scope values are a replicated `settings` document per module (`ais-settings:<packageId>`, `flags.ais.values`, exported with the world, written by GM authority only), device-scope values are per-device rows (`ais-settings:<worldId>:<packageId>`, never exported); every value is coerced against its declaration on read and on write, so a stale or hand-edited document degrades to defaults instead of crashing the module. Schema versioning is the `default`/`choices` of the *current* manifest: a key that disappears is ignored, a key that appears reads its default. Upgrade migrations are declarative where possible. Any executable migration runs in the same restricted context, is previewed as a diff, has an explicit backup/rollback plan, and runs only after GM confirmation. Imports never run migrations merely because an archive was opened.
 
 ### Compatibility negotiation
 
@@ -638,6 +681,8 @@ The manager should distinguish:
 - UI renderer unavailable / theme invalid / core fallback active.
 
 Each trace record should include `worldId`, package ID/version/hash, contribution ID, event contract, invocation/action ID, caller audience (or privacy-safe user key), phase, duration, result class, sanitized error, budget, and commit sequence if any. It must not store secret actor data, raw private script inputs, or another player's hidden state in a player-visible log.
+
+**Implemented (D-479):** each frame records a bounded trace (64 entries: RPC name, admission rejections, commands, events, lifecycle; duration; result class; sanitized error — no payloads) and counters, readable as `diagnostics(packageId)` on both runtimes and in the GM's module review (*Health*). A breaker stops a module after 50 failed/rejected requests inside 10 s with the reason in its status line; *Restart* starts it again from the approved boot definition (host) or the existing consent (player) without touching other modules.
 
 A single faulty optional module should be disableable without restarting the whole world. Package registration is staged before activation; if boot fails, core opens in safe mode with the last known-good profile and a clear explanation. Disabling a module cancels pending invocations/prompts and unregisters its callbacks. A trusted in-page legacy script is an exception: the app can stop calling it and remove visible globals, but cannot guarantee undo of arbitrary side effects already executed; mark it accordingly.
 
@@ -698,6 +743,19 @@ The first generally usable AIS release should meet all of these:
 10. A client without an optional theme/module can use the core UI; a module can add a panel/action without overriding core navigation or escaping its audience projection.
 11. Diagnostics identify the module, version/hash, event, failure, fallback, and whether a host commit occurred.
 12. Tests cover package validation, world profile migration, dependency graph, exclusive/additive arbitration, malicious RPC frames, bounds, permission changes, replay/dedup, player visibility, host/peer compatibility, theme fallback, and multi-module browser behavior.
+
+**Status (2026-10-15, after D-479).** 1 ✔ (size gate green; packages embedded as data, not code).
+2 ✔ (`aisRuntimeSharing` boots two modules with a declared dependency beside a content package; the default world runs the first-party system package as well, D-473). 3 ✔ (D-089/D-468
+consent; import never executes). 4 ✔ (profile/lock/hashes round-trip; local approvals do not;
+world-scope module settings are documents and round-trip with the world). 5 ✔ (missing required
+sibling blocks enabling with the reason; provider conflicts visible). 6 ✔ (projection + ownership;
+no raw store). 7 ✔ (every write is an op through `validateOps`). 8 ✔ (reducer order tests). 9 ✔
+(reliability suite + D-479 breaker). 10 ✔ (panels/token actions/theme fallback; player shell runs
+without any module). 11 ✔ (D-479 trace: module, hash in status, RPC/command/event, error class,
+commit via the op log). 12 — unit coverage ✔ for every listed item except *multi-module browser
+behavior*, which exists as Playwright specs (`e2e/ais_*.spec.ts`, `package_ui.spec.ts`) that could
+not be executed in the authoring sandbox. Known residuals outside this list: ESM module graphs in
+the loader (R-09) and binary resources (R-07).
 
 ## 17. Open decisions to settle before coding
 

@@ -1665,11 +1665,22 @@ interface AisSharedModule {
   emittedEvents: string[];
   tokenActions?: { id: string; label: string }[]; // D-469: manifest token-menu entries → ui.token.action
   panel?: { title: string; width: number; height: number }; // D-470: sandboxed panel the player shell chromes
+  settings?: AisSettingDeclaration[];              // D-476: the manifest's settings schema (≤ 32)
+  requires?: { id: string; version?: string; optional?: boolean }[]; // D-478: siblings this module may invoke
+  provides?: { id: string; mode: string; contract: number }[];       // D-478: contribution slots it fills
 }
 ```
 
 A module whose manifest declares `interconnect.sharing: "host-only"` is never part of
 `modules` (D-469), whatever the GM's sharing checkbox says.
+
+**Module settings (D-476)** need no message of their own. World-scope values live in one
+replicated `settings` document per module, `ais-settings:<packageId>` (`ownership.default: 1`,
+`flags.ais: { packageId, values }`), written only by GM authority through ordinary ops
+(update diffs `flags.ais.values.<key>`); every player replica carries it like any other
+limited-readable document and the player runtime raises `module.settings.changed` from the
+replica. Device-scope values never leave the device. The declarations themselves ride in
+`ais.profile` so a player shell can render the same form the GM sees.
 
 Delivery is not authority: a player's module runs in the same sandboxed iframe as on the host
 and every op it produces travels as an ordinary `intent`, so the host's `validateOps` and

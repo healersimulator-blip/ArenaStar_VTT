@@ -14548,3 +14548,142 @@ of the design still route foreign UI through P2a's sandboxed panels. Next: **T2 
 move** — the tactical dispatch contract and the PF1e sheets/combat UI leave together through
 `rules.js` + `ui.js` (actor-sheet slot next to `battleAnalysis`), which is the step that removes
 D-474's duplicated helpers and finally shrinks the download.
+
+## D-476 — AIS settings: a declared schema in the manifest, world scope as a replicated document, device scope local, one form in both shells (2026-10-15)
+
+**Context.** After D-475 the kernel could run, share and show a module, but a module author still
+had nowhere to keep configuration except `module.storage` — a per-device blob the GM cannot see,
+players cannot share and no form can render (the shipped torch module keeps four preferences in
+it behind `ui.select` menus). The readiness review listed this as R-03 (`game.settings.register/
+get/set`, world vs client scope, `onChange`); design §12 asked for namespaced, validated,
+bounded values that export with the world. The owner's instruction for this round was "AIS
+ready", not another slice of the PF1e move, so the platform gaps came first.
+
+**Decision.**
+1. **The manifest is the schema.** `interconnect.settings[]` (≤ 32 entries) declares
+   `{ key, scope: "world" | "device", type: "boolean" | "number" | "string" | "choice", label,
+   hint?, default, min?, max?, step?, maxLength?, choices? }`; `validateInterconnect` rejects
+   bad keys, scopes, types, labels, bounds, steps, choices and unknown fields by name
+   (`src/core/packageManifest.ts`, `aisSettingDeclarationError`), and `normalizeAisSettingDeclaration`
+   copies only the declared fields so no manifest extra reaches the runtime. There is no runtime
+   `register`: a key the manifest does not declare does not exist (`"declares no setting <key>"`).
+2. **World scope is a document, written by GM authority only.** Values live in one replicated
+   `settings` document per module, `ais-settings:<packageId>` (`ownership.default: 1`,
+   `flags.ais: { packageId, values }`), created/updated through ordinary ops
+   (`aisWorldSettingOps`, update diffs `flags.ais.values.<key>`, no-op writes submit nothing), so
+   they export with the world, undo like any edit and reach every player replica like any
+   limited-readable document. The player kernel refuses a world write **before any op is built**
+   (`"needs GM authority"`), because an op would merely be refused later by `validateOps`.
+   `flags.ais`, not `system`: `worldSettingsFrom` merges every settings document's `system` into
+   the core bag, and a module must never be able to shadow a core setting.
+3. **Device scope never leaves the device.** `ais-settings:<worldId>:<packageId>` rows in the
+   existing IndexedDB settings store; the GM's device values are as private as a player's.
+4. **One RPC surface for both runtimes.** `settings.list {}` → declarations with effective values;
+   `settings.get { key }`; `settings.set { key, value }` (capability `module.settings.write`;
+   `list/get` need none because the schema is the module's own manifest). Every value is coerced
+   against its declaration on read and write (`coerceAisSettingValue`: numbers snapped to
+   `min/max/step` or refused, choices checked, strings length-bounded), so a hand-edited document
+   degrades to defaults instead of crashing the module. Both runtimes raise
+   `module.settings.changed { scope, key, value }`: the host from its own `ops` bus
+   (`AisRuntime.emitWorldSettingChanges`, diffed per key), the player from the replica.
+   SDK: `AIS.settings.list/get/set/onChange`.
+5. **One form, two shells.** `src/ui/packages/AisSettingsForm.svelte` renders declarations
+   (checkbox / number / text / select, scope badge, hint, inline error from the runtime). The
+   GM's module review (Settings → Packages, `data-ais-settings`) edits both scopes through
+   `AisRuntime.moduleSettings/setModuleSetting` (exposed as `AisModuleShellApi`); the player's
+   *Shared modules* card (`data-player-ais-settings`) edits device scope and shows world scope,
+   because the declarations now ride in `ais.profile` (`AisSharedModule.settings`).
+
+**Proofs.** `tests/core/aisSettings.test.ts` (doc id, coercion matrix, op shapes, touched
+detection); `tests/packages/packageLoader.test.ts` (schema validation messages);
+`tests/packages/aisModule.test.ts` (handler contracts incl. refusals);
+`tests/app/aisRuntimeSharing.test.ts` (booted host: GM form writes world + device, module reads,
+player profile carries declarations and the replicated document);
+`tests/app/playerAisRuntime.test.ts` (player: defaults, world write refused with no op built,
+device write + event, GM commit → replica → `module.settings.changed` at the player).
+
+**Not done.** The torch module still keeps its preferences in `module.storage`; mapping them onto
+four declared settings is a module change (route (c)) and alters the demo's hash, so it waits for
+a turn in which the browser batch can be run.
+
+## D-477 — AIS compendium reads: `compendium.list / search / get` over the world's content packages, GM device only (2026-10-15)
+
+**Context.** R-01 was the first gap of every content-aware module: nothing in AIS could read a
+compendium pack, although the host already indexes every imported data package
+(`src/core/compendium.ts`, used by the browser, the agent bridge and the encounter tools).
+
+**Decision.** Three read-only methods behind one capability, `compendium.read`:
+`compendium.list {}` → `{ packs: [{ id, name, type, packageId, entries }] }` with
+`id = "<packageId>/<packFile>"`; `compendium.search { query 1–120, packId?, limit? 1–100 }` →
+scored hits `{ packId, entryId, name, type, score }`; `compendium.get { packId, entryId }` → a
+**copy** of the entry (`{ packId, id, name, img?, keywords?, type, data }`), refused above 48 KiB
+with the RPC-budget error. The capability is **GM-device-only**
+(`GM_DEVICE_ONLY_CAPABILITIES += "compendium.read"`): players have no replica of the package
+store, and the kernel says so (`"GM device only"`) instead of pretending with an empty list; a
+player-facing module asks its GM-side sibling through D-478 or receives the data by event.
+No UUID scheme, no `fromUuid`, no redirects — an adapter maps Foundry's
+`Compendium.<pkg>.<pack>.<Type>.<id>` onto pack id + entry id when a content guest is in scope.
+SDK: `AIS.compendium.list/search/get`.
+
+**Proofs.** `tests/packages/aisModule.test.ts` (list/search/get contracts, bounds, unknown
+pack/entry); `tests/app/aisRuntimeSharing.test.ts` (a booted host with a data package: list,
+search, get; the player profile strips the capability); `tests/app/aisPlayerProfile.test.ts`
+pins the GM-device-only set.
+
+## D-478 — AIS module bus: `modules.list` and `modules.invoke` along declared dependencies, with the device's authority (2026-10-15)
+
+**Context.** R-05: modules could not call each other except by broadcasting custom events.
+Design §7/§15 (P5) asked for "two real guest packages interoperating through a declared
+dependency". The manifest already had `interconnect.requires` (enabling a module fails until its
+required siblings are enabled) and `provides`; neither was visible to the modules themselves.
+
+**Decision.**
+- `modules.list {}` (no capability) → the other modules on this device: `{ packageId, name,
+  version, running, commands, provides, emits }`.
+- `modules.invoke { moduleId, commandId, input? }` (capability `modules.invoke`) runs a
+  **declared command** of a sibling exactly as a shell invocation would — through the kernel's
+  `invokeCommand`, so the target keeps its own grant, budgets and breaker — and returns
+  `{ result }`. The target must be named in the caller's `interconnect.requires`
+  (`"Declare <id> in interconnect.requires"`); a module cannot invoke itself; chains are capped at
+  depth 8; extra arguments are refused by name. The target sees
+  `requestId: "ais-module:<caller>:<n>"` for its logs and runs with the **device's** authority
+  (`runAs: "gm"` on the host, `"player"` at the player) — the bus never elevates.
+- `requires` / `provides` ride in `ais.profile` and in `PackageSummary`, so the GM's review and the
+  player's card show them (`data-ais-requires`, `data-ais-provides`). SDK: `AIS.modules.list/invoke`.
+
+**Proofs.** `tests/packages/aisModule.test.ts` (handler contract, self/undeclared/depth refusals);
+`tests/app/aisRuntimeSharing.test.ts` (host: torch invokes lamp, `requestId`, capability refusal
+for the un-granted direction); `tests/app/playerAisRuntime.test.ts` (player: the same with
+`runAs: "player"`).
+
+## D-479 — AIS diagnostics: per-module trace ring, counters, breaker and Restart in both shells (2026-10-15)
+
+**Context.** Design §14 and acceptance §16.11 ask that diagnostics identify module, event,
+failure and fallback, and that one faulty module be stoppable without restarting the world. The
+kernel enforced budgets but kept no record: a GM saw `failed` and an error string, nothing else.
+
+**Decision.** `src/packages/aisHealth.ts` (`createAisHealthMonitor`, DOM-free so it is unit-tested
+directly) keeps, per frame, a 64-entry trace ring — `{ at, kind: rpc | rejected | command | event |
+lifecycle, name, ok, ms?, error? }`, never payloads — and counters `{ requests, failures,
+rejected, commands, commandFailures, events }`. The dispatcher reports every admission and result
+to it (`createAisModuleDispatcher(…, onTrace)`). A breaker trips after **50 failed or rejected
+requests inside 10 s**; the frame stops with `"circuit open: 50 failed requests within 10 s"` in
+its status, other modules untouched. `AisRuntime.diagnostics(id)` / `restart(id)` (host; restart
+re-creates the frame from the frozen boot definition — new code or grants still need a reload) and
+`PlayerAisRuntime.diagnostics(id)` / `restart(id)` (player; re-reads consent, no new prompt). The
+GM's module review gains a *Health* block (`data-ais-health`: counters, circuit time, last ten
+traces, Refresh, Restart); the player's card shows **Restart** on a failed module.
+
+**Proofs.** `tests/packages/aisHealth.test.ts` (ring bound, counters, trip once, window);
+`tests/packages/aisReliability.test.ts` (dispatcher traces); `tests/app/aisRuntimeSharing.test.ts`
+and `tests/app/playerAisRuntime.test.ts` (diagnostics/restart through booted runtimes).
+
+**Measured (D-476…D-479 together).** RPC methods 18 → **26**, capabilities 18 → **21**, events +1
+(`module.settings.changed`). Bounds unchanged (RPC 64 KiB / 120 req/s / 30 cmd/s / 32 concurrent;
+command 16 KiB & 8 s; startup 5 s; storage 128 KiB / 256 keys). `dist/index.html`
+**5,902,756 → 5,936,462 B (+33,706 B raw; gzip 1,883,914 → 1,894,208 B)**, headroom 354,994 B.
+Gates: `tsc` 0, `eslint` 0, svelte check 0 blocking, vitest **5,834 passed / 12 skipped (5,846)**
+(+16 tests), `node scripts/size.mjs` OK. Browser specs were not run in the authoring sandbox.
+Readiness: R-01, R-03, R-05 closed; R-09 (ESM module graphs in the loader) and R-07 (binary
+resources) remain the known kernel residuals; R-08 is excluded by design. Author-facing summary of
+the whole surface: [AIS_MODULE_GUIDE.md](AIS_MODULE_GUIDE.md).

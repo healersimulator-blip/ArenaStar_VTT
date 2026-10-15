@@ -416,11 +416,15 @@ permissively licensed code among the five. Paizo CUP notice. Not in INVENTORY un
   (line starters/categories, source-superscript scrubbing), a `tests/` directory (jest).
 - Optional integrations: Roll Bonuses PF1 (pre-configured feat bonuses), Babele, The Forge.
 
-**AIS/adapter today: E (B is far).** Every family above maps to an unbuilt or explicitly
-excluded part of the proposal: documents and compendia (no AIS capability at all — R-01/R-02),
-settings (P4), DOM applications (§7.3 — recipes only, P4), sockets/player side (P5), file
-storage (binary resources not even in packages — P1 leftover, R-07), module-to-module API bus
-and system registries (R-05/R-08), ES-module import graphs and prototype extensions (R-09), and
+**AIS/adapter today: E (B is far).** *(Written before D-476…D-479; compendium reads, settings and
+the module bus now exist — see the struck rows in §4.1 — which moves the kernel but not the
+verdict: the data model and DOM families below are the ones that decide it.)* Every family above
+maps to an unbuilt or explicitly excluded part of the proposal: documents and compendia
+(~~no AIS capability at all~~ reads since D-477; creates/updates still R-02), settings (~~P4~~
+D-476), DOM applications (§7.3 — recipes only, P4), sockets/player side (D-468 for the player
+side; no raw sockets by design), file storage (binary resources not even in packages — P1
+leftover, R-07), module-to-module API bus (~~R-05~~ D-478) and system registries (R-08),
+ES-module import graphs and prototype extensions (R-09), and
 the staged prepare/commit path any "create actor with 40 embedded items" would need (P3). Even
 with all of that, the actor SBC produces is a **pf1-system document** — only meaningful inside
 the pf1 data model and derived-data pipeline that §3.1 rules out. Running SBC unchanged is
@@ -473,11 +477,11 @@ kernel slice.
 
 | ID | Gap | Needed by | Plan | Severity if a content/tool guest were ever in scope |
 |---|---|---|---|---|
-| R-01 | No compendium/document **read** surface: `game.packs`, `getIndex()` (+ `system.subType/associations/tags` index fields), `fromUuid`, `Compendium.<pkg>.<pack>.<Type>.<id>` UUIDs, `CONFIG.compendium.uuidRedirects` | 2, 4, 5 | not in §9; would be a new capability pair `compendium.read` / `compendium.index` with per-pack grants | High — every content-aware module starts here |
+| R-01 | ~~No compendium/document **read** surface~~ **Closed by D-477 (2026-10-15):** `compendium.list / search / get` behind `compendium.read` (GM device only; bounded hits, 48 KiB entries, copies). Still absent, by design: `fromUuid`-style cross-package UUIDs and `uuidRedirects` — an adapter maps `Compendium.<pkg>.<pack>.<Type>.<id>` onto `<packageId>/<packFile>` + entry id | 2, 4, 5 | done (kernel); adapter mapping when a content guest is in scope | — |
 | R-02 | No document **create/update/delete** beyond tags and light: `Actor.create`, `createEmbeddedDocuments("Item")`, `Folder`, `actor.delete()`, prototype token | 5 | P3 (prepare/commit) is the prerequisite; §5.3 "narrow intents" argues for an `actor.import` intent carrying the app's own `ImportedCharacter`, not pf1 documents | High |
-| R-03 | No settings service (`game.settings.register/get/set`, world vs client scope, `onChange`, `ModuleManagement.CONFIG_SETTING`) | 4 (dead code), 5 | §5.2, P4 | Medium |
+| R-03 | ~~No settings service~~ **Closed by D-476 (2026-10-15):** manifest `interconnect.settings[]` (register), `settings.list / get / set` (get/set), `scope: world | device` (world vs client), `module.settings.changed` (onChange), shell forms in both shells (config UI). An adapter maps `game.settings.register` onto the manifest schema at package-conversion time, not at runtime | 4 (dead code), 5 | done (kernel) | — |
 | R-04 | No application/DOM surface: `Application`/`ApplicationV2` + `HandlebarsApplicationMixin`, `renderTemplate`/`loadTemplates`, `Dialog`, jQuery, `ui.notifications`, `DocumentSheetConfig.registerSheet`, sidebar DOM injection (`renderActorDirectory`), ProseMirror/`TextEditor.enrichHTML` | 4, 5 | §7.3 — never raw DOM; P4 "supported HUD/settings/dialog recipe" | High for 5; the proposal's answer is recipes, not emulation |
-| R-05 | No module-to-module bus: `game.modules.get(id).api`, cross-guest `Hooks.callAll("sbc.*")`, system registries (`pf1RegisterSources/Materials`) | 2, 3, 4, 5 | P5 "two real guest packages interoperate through a declared dependency" | Medium |
+| R-05 | ~~No module-to-module bus~~ **Closed by D-478 (2026-10-15):** `modules.list` + `modules.invoke` behind `modules.invoke`, allowed only toward a module named in the caller's `interconnect.requires` (the "declared dependency" of P5), depth ≤ 8, target runs with the device's authority and its own grant. Cross-guest custom events already existed (`emits` + `action.observe`). System registries (`pf1RegisterSources`) remain R-08 territory | 2, 3, 4, 5 | done (kernel) | — |
 | R-06 | No sockets / player side (`game.socket`, `socket: true`, GM-relay patterns) | 5 | P5 | Medium |
 | R-07 | No file storage: `FilePicker.browse/upload`, S3, drag-drop art, `CONST.IMAGE_FILE_EXTENSIONS`; packages carry no binary resources | 5 | P1 leftover (binary-safe resources/VFS) | Medium |
 | R-08 | No `CONFIG`, `game.system`, `pf1.*` namespace (`pf1.utils.createTag`, `pf1.registry`, `pf1.config`), `CONST` beyond one key | 2, 5 | §7.4 — by design, never emulate the system | Low (by design) |
@@ -550,7 +554,7 @@ kernel slice.
 | 5 | **Converter: actor `items[]` via the shared item mapping** | C-04 | converted goblin/companion has attacks/feats/gear; same golden as `foundry.ts` |
 | 6 | **Native importer: SBC corpus + compendium linking** (first of the N-02 sub-slices) | N-02 (1, 6) | SBC's MIT fixtures replayed; unmatched names appear in the report; no invented fields |
 | 7 | **Builder: archetypes/prestige** | N-03, C-06 | product decision first |
-| — | **AIS/adapter** | R-01…R-11 | no slice proposed from this reading; revisit after P3/P4 land, with this table as the profile's requirement list |
+| — | **AIS/adapter** | R-01…R-11 | R-01/R-03/R-05 closed by D-476…D-478 (2026-10-15) as generic kernel features; R-02 partially (settings documents are the first module-authored documents), R-04/R-06/R-07/R-09/R-10/R-11 open, R-08 excluded by design |
 
 ## 7. Open questions for the owner
 

@@ -394,7 +394,8 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       return ctx.fx.stop(args.runId);
     },
     "events.subscribe": async ({ event }, commandContext) => {
-      await ctx.assertCapability("action.observe");
+      // D-476: `module.settings.changed` carries the module's own configuration; every host event needs the grant.
+      if (event !== "module.settings.changed") await ctx.assertCapability("action.observe");
       assertCommandActive(commandContext);
       if (typeof event !== "string" || !EVENT_NAMES.has(event as AisEventName))
         throw new Error("event is not part of the AIS v1 catalog");
