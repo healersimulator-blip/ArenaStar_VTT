@@ -209,6 +209,14 @@ shell UI → tests:
   `module.settings.changed { scope, key, value }`; players hear world changes through the replica.
   `AisSettingsForm.svelte` renders the declarations in Settings → Packages (GM: both scopes) and in
   the player's *Shared modules* card (device scope editable, world scope shown).
+- **Foundry application UI (D-483).** Imported Foundry modules are synthesized with `ui.panel` and
+  a 760×560 panel; the adapter's layered runtime (`runtimeProvider.scripts`: `hbs.js`, `jq.js`,
+  `ui.js`, evaluated before the provider's `entry`) implements `Application`/`FormApplication`/
+  `Dialog`/`ApplicationV2`/`HandlebarsApplicationMixin`/`DialogV2`, Handlebars and the jQuery subset
+  inside that frame. The kernel's ninth event, `ui.panel.closed { reason: "user" }`, is raised by
+  the chrome's Close button in both runtimes; subscription and delivery are gated per event
+  (`aisEventSubscriptionCapability`: host events `action.observe`, own settings none, own panel
+  `ui.panel`). The module iframe keeps no `allow-forms`; the layer synthesises `SubmitEvent`s.
 - **Compendium reads (D-477)** — `compendium.list / search / get` over the packs of every imported
   content package (`<packageId>/<packFile>` ids, bounded hits, 48 KiB entry cap, copies only).
   Capability `compendium.read` is GM-device-only: players have no replica of the package store, so

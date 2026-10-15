@@ -1,4 +1,4 @@
-# AIS Foundry v13 adapter (0.2.0)
+# AIS Foundry v13 adapter (0.3.0)
 
 ArenaStar-authored code, loaded inside the separately approved guest's opaque AIS iframe.
 The adapter is a runtime provider, not an in-page module and not Foundry core (which is
@@ -31,22 +31,39 @@ Foundry core APIs mapped onto AIS services:
 | `ui.notifications.info/warn/error` | `ui.notify` |
 | `Hooks`, `foundry.utils.*`, `CONST`, `CONFIG`, `randomID`, `Array#deepFlatten` | local implementations |
 | `Sequence`/`Sequencer.EffectManager` | the bounded transient-FX builder over `fx.play` |
-| `Application`, `FormApplication`, `Dialog`, `DocumentSheet`, `ApplicationV2`, `Actor`, `Item`, `Token`, … | class stubs: `extends`/`instanceof` work; `render`, `Dialog.confirm`, `Document.create` fail explicitly naming the gap (R-02 CRUD, R-04 UI, R-06 socket emit, R-07 files) |
+| `Application`, `FormApplication`, `DocumentSheet`, `Dialog`, `Tabs`, `FormDataExtended`, `ApplicationV2`, `HandlebarsApplicationMixin`, `DocumentSheetV2`, `DialogV2`, `renderTemplate`/`loadTemplates`, `ui.windows`, `game.settings.registerMenu` | **D-483:** real implementations (`runtime/ui.js`) rendering into the module's own sandboxed panel; templates are the module's own `.hbs` resources compiled by `runtime/hbs.js`; `html` is the jQuery subset in `runtime/jq.js`. Windows open the panel, the last close hides it, the shell's Close raises `ui.panel.closed` and closes every window with its hooks |
+| `Actor`, `Item`, `Token`, `Scene`, `ChatMessage`, … documents | class stubs: `extends`/`instanceof` work; CRUD beyond tags/light fails explicitly naming the gap (R-02); `game.socket.emit` (R-06) and `FilePicker` uploads (R-07) likewise |
 
 Commands every imported Foundry module exposes to reviewed script macros:
 
 - `foundry.info` — loader diagnostics (files loaded, languages, styles, settings with their AIS
   keys and sync state, keybindings, socket listeners, hooks, hook errors, warnings, unsupported
   calls, module globals, `loadMs`).
+- `foundry.ui { menu: "<namespace>.<key>" }` or `{ app: "Global.Class", args }` — open a registered
+  settings menu or render an Application class inside the module's panel; the result describes the
+  window and `windows` lists what is open (D-483).
 - `foundry.api { path, args }` — call the module's own global API the way a Foundry macro would
   (`{ path: "Tagger.getByTag", args: ["Beacon"] }`); a path that is not a global is looked up on
   `game.modules.get(id).api`; `"@uuid:Scene.<id>.Token.<id>"` arguments become projected
   documents; results are JSON-safe copies; the roots `AIS`, `eval`, `Function`, `window`,
   `document`, `fetch`, … are unreachable.
 
-Limits in this phase: host-only (GM device); startup within the kernel's 5 s budget; no Foundry
-UI rendering, no document CRUD beyond tags/light, no socket emit, no file storage; `packs/` are
-listed, not loaded; `game.actors/items/packs` are empty projections.
+Limits in this phase: host-only (GM device); startup within the kernel's 5 s budget; windows live
+inside the module's panel (no shell DOM: no sidebar injection, no canvas overlays); no FontAwesome,
+ProseMirror/`enrichHTML`, `FilePicker` (disabled control), `ContextMenu`, `DragDrop`; Foundry core
+`templates/…` are proprietary and unavailable — ship your own; no document CRUD beyond tags/light,
+no socket emit, no file storage; `packs/` are listed, not loaded; `game.actors/items/packs` are
+empty projections.
+
+## Layout (`runtimeProvider.scripts`, D-483)
+
+The manifest declares `runtimeProvider.scripts = ["runtime/hbs.js", "runtime/jq.js", "runtime/ui.js"]`
+— classic scripts the kernel evaluates in order inside the module frame before `runtime/adapter.js`
+(`entry`). Each publishes one factory (`__aisFoundryHbs`, `__aisFoundryJq`, `__aisFoundryUi`) that
+the adapter wires with its own `AIS`, `Hooks`, `game.i18n` and resource reader. No vendored
+Handlebars or jQuery: both are re-implementations of the surface Foundry modules use. The layer is
+unit-tested without a browser (`tests/packages/aisFoundryHbs.test.ts`) and in Chromium
+(`e2e/ais_foundry_ui_runtime.spec.ts`, `e2e/ais_foundry_module.spec.ts`).
 
 ## Profile `foundry-v13-scene-tags-fx` (0.1.0 behaviour, unchanged)
 

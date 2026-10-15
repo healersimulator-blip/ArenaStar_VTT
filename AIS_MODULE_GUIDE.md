@@ -76,7 +76,7 @@ intersection with the player-runnable set) must have granted.
 
 | Call | Capability | Notes |
 |---|---|---|
-| `AIS.events.on(event, cb)` → off | `action.observe` (host events) | `world.snapshot`, `world.ops.committed`, `scene.token.light.changed`, `turn.phase.changed`, `turn.report.committed`, `ui.token.action`, `module.event` (other modules' custom events), `module.settings.changed` (no capability) |
+| `AIS.events.on(event, cb)` → off | `action.observe` (host events) | `world.snapshot`, `world.ops.committed`, `scene.token.light.changed`, `turn.phase.changed`, `turn.report.committed`, `ui.token.action`, `module.event` (other modules' custom events), `module.settings.changed` (no capability), `ui.panel.closed` (your own panel; `ui.panel`) |
 | `AIS.events.emit(eventId, payload)` | `event.emit` | `eventId` must be in `emits`; payload ≤ 16 KiB |
 | `AIS.commands.on(commandId, (input, ctx) => …)` | — | `commandId` must be in `commands`; invoked by GM macros (`ais.invoke` grant), the shells' command runner, token actions and the module bus |
 | `AIS.scene.readVisible()` | `scene.read.visible` | the caller's projection, never the raw store |
@@ -87,7 +87,7 @@ intersection with the player-runnable set) must have granted.
 | `AIS.chat.post(content)` | `chat.post` | |
 | `AIS.ui.notify(message, level)` | `ui.notify` | |
 | `AIS.ui.select({ title, options, … })` | `ui.interaction` | a host-rendered choice dialog; waits for the human |
-| `AIS.ui.panel.open()` / `.close()` / `.root()` | `ui.panel` | your own document is the panel body (D-470); the shell draws the chrome |
+| `AIS.ui.panel.open()` / `.close()` / `.root()` | `ui.panel` | your own document is the panel body (D-470); the shell draws the chrome. When the user presses the chrome's Close you receive `ui.panel.closed { reason: "user" }` through `AIS.events.on` (D-483; needs only `ui.panel`, not `action.observe`) — the frame is hidden, not stopped |
 | `AIS.storage.get(key)` / `.set(key, value)` | `module.storage.read` / `.write` | per device, per module: 128 KiB, 256 keys, 16 KiB per value |
 | `AIS.resources.readText(path)` | `package.resources.read` | files listed under `runtime.resources` |
 | `AIS.settings.list()` / `.get(key)` / `.set(key, value)` / `.onChange(cb)` | set: `module.settings.write` | D-476; world scope is GM-authority only — a player frame's world write fails with "GM authority" before any op is built |

@@ -227,3 +227,19 @@ the lang file, step validation, a form edit reaching the module's `onChange`, a 
 landing in the form). **Executed in a real browser on 2026-10-15: 48.0 s + 49.5 s.** The first run
 found two product defects (adapter `Collection` iterated Map entries; the frame's `ready` status
 dropped the runtime settings count) — both fixed before the run that passed.
+
+## Foundry application UI inside the module panel (D-483, 2026-10-15)
+
+`e2e/ais_foundry_module.spec.ts` grows a third test and `e2e/ais_foundry_ui_runtime.spec.ts`
+(3 tests) joins the AIS batch. The runtime spec loads the adapter's `runtime/hbs.js`, `jq.js`,
+`ui.js` into a blank Chromium page with a fake `AIS` and checks the layer on its own in ≈1.5 s:
+Handlebars + Foundry helpers + the jQuery subset over a real DOM, the v1 `FormApplication`
+lifecycle (`submitOnChange`, `closeOnSubmit`, `Dialog` buttons, header buttons, drag) and V2
+(`PARTS`, tabs, form handlers, `DialogV2.prompt`). The module test imports a Foundry-format module
+whose `init` hook defines a `FormApplication` settings menu (own templates with a partial), an
+`ApplicationV2` panel and `Dialog`/`DialogV2` confirms, then drives them with **real clicks inside
+the module's iframe** (`page.frameLocator('iframe[title="AIS module:fsd-demo"]')`): the panel
+opens/hides with the windows, Save writes the replicated settings document, confirms resolve
+through the macro, the shell Close empties the module's windows via `ui.panel.closed`. **Executed
+2026-10-15: whole file 3 tests / 2.0 min; `test:e2e:ais` 24/24 in 9.9 min.** Five real defects
+surfaced and were fixed before the passing run (see D-483).

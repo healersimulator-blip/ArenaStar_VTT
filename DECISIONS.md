@@ -14947,3 +14947,112 @@ must finish within the kernel's 5 s budget (Tagger loads in well under a second)
 `packs/` (LevelDB) are listed, not loaded; module ids with characters outside the AIS slug are
 re-slugged (the Foundry id is kept for `game.modules`). Foundry core code is proprietary — every
 API above is an ArenaStar re-implementation of the surface, never copied code.
+
+## D-483 — Target A step 2: Foundry application UI (Application/FormApplication/Dialog/ApplicationV2, Handlebars, jQuery) runs inside the module sandbox; kernel `runtimeProvider.scripts` + `ui.panel.closed` (2026-10-15)
+
+**Why.** D-482 made unmodified Foundry distributions *boot* and expose their API, but every
+Foundry module that *is* a window — a settings menu, a confirm dialog, a HUD, a sheet — did nothing
+visible (R-04, the largest remaining Target-A gap). The owner's line is the kernel + adapter, so
+the answer is a reusable UI layer in the adapter, not per-module rework.
+
+**Decision.** The adapter `ais-foundry-v13` 0.3.0 ships Foundry's application surface as an
+ArenaStar re-implementation (no Foundry core code, no vendored Handlebars/jQuery) that renders into
+the module's own sandboxed frame — the D-470 panel — never into the shell's DOM:
+
+- `runtime/hbs.js` (522 lines): a Handlebars-compatible template engine (`compile`, `registerHelper`,
+  `registerPartial`, `SafeString`, `escapeExpression`, `{{#if/unless/each/with}}`, `else if`,
+  block params `as |item i|`, `../`/`@root`/`@index`/`@key`/`@first`/`@last`, sub-expressions,
+  dynamic and block partials, `~` whitespace control, standalone-line stripping, comments,
+  `noEscape`) plus Foundry's helpers (`localize`, `selectOptions` with `localize=true`/`blank`/
+  `valueAttr`/`labelAttr`, `checked`, `disabled`, `select`, `concat`, `eq/ne/lt/gt/lte/gte/and/or/not`,
+  `numberFormat`, `timeSince`, `rangePicker`, `editor`, `json`, `filePicker` (disabled control),
+  `formGroup`, `formInput`, `colorPicker`, `radioBoxes`). Depth and partial recursion
+  are bounded. Unit-tested in `tests/packages/aisFoundryHbs.test.ts` (42 cases).
+- `runtime/jq.js` (422 lines): the jQuery subset Foundry v1 code uses on `html` — selection,
+  traversal (`find/closest/parents/children/siblings/filter/not/first/last/eq/is`), attributes,
+  `data()` (camelCase + JSON), classes, `css`, `val` (number/select/multi), `prop`, `text/html/
+  append/prepend/before/after/replaceWith/remove/empty`, `show/hide/toggle`, `on/off/one` with
+  namespaces and delegation, `trigger` (synthetic `SubmitEvent` for forms), `serializeArray`,
+  `each/map/get/toArray`, `$.extend`, `$.fn.slideUp/slideDown` no-ops.
+- `runtime/ui.js` (1,252 lines): `Application` (render/close/`setPosition`/`bringToTop`/drag by
+  header/`_renderInner`/`activateListeners`/`getData`/`_getHeaderButtons`/`minimize`/`maximize`/
+  `render(force,{focus})`, `render*`/`close*`/`get<Class>HeaderButtons` hooks over the
+  inheritance chain), `FormApplication` (`submitOnChange`, `closeOnSubmit`, `_onChangeInput`,
+  `_updateObject`, `editable`, `FormDataExtended` with `data-dtype` coercion and `expandObject`),
+  `DocumentSheet` (over projected documents), `Dialog` incl. `confirm/prompt/wait` with v13
+  semantics, `Tabs`, and the V2 family: `ApplicationV2` (`DEFAULT_OPTIONS` merge over the class
+  chain, `{id}` substitution, `data-action` delegation, `actions`, `tabGroups`/`changeTab`/
+  `_prepareTabs`, `_prepareContext`, `_onRender`, `render({parts})`, `close`, `setPosition`,
+  `minimize/maximize`, event target), `HandlebarsApplicationMixin` (`PARTS`, `templates`, `forms`
+  handlers with `closeOnSubmit`/`submitOnChange`, per-part re-render), `DocumentSheetV2`,
+  `DialogV2` (`confirm/prompt/wait/input`, `rejectClose`, default button, `query` throws with the
+  gap). `ui.windows`, `ui.activeWindow`, `ui.notifications`, `renderTemplate/loadTemplates/getTemplate`
+  (templates are the module's own `.hbs` resources; `templates/` and `systems/` core paths fail
+  with a message that says why), `foundry.applications.api/ux/sheets` namespaces,
+  `game.settings.registerMenu` → `settingsMenus` + the `foundry.ui { menu }` command.
+- The frame's **window manager** keeps every window inside the panel viewport (cascade, clamp,
+  z-order, focus), asks the kernel to show the panel when the first window renders and to hide it
+  when the last one closes (`AIS.ui.panel.open/close`), and sizes from the frame (760×560 fallback
+  while hidden). The shell chrome's **Close** button now raises the new kernel event
+  **`ui.panel.closed { reason: "user" }`**, which the layer answers by really closing every window
+  (Foundry `close*` hooks run) — before this, a shell close only hid the frame and the next render
+  resurrected stale windows.
+- Sandbox form reality: the module iframe deliberately has no `allow-forms`, and browsers block
+  submission *before* `submit` fires. `ui.js` therefore synthesises `SubmitEvent` (bubbling,
+  cancelable, `submitter`, honouring `reportValidity`) for submit-button clicks and implicit Enter
+  submission, and `jq.trigger("submit")` does the same; nothing can navigate the frame.
+- Styling: a self-contained Foundry-shaped stylesheet (`.window-app`, `.window-header`,
+  `.form-group`, `.dialog-buttons`, `.application`, `.tabs`, …) and the module's own `styles[]`;
+  no FontAwesome — icon `<i>` elements render as empty boxes, which is honest, not pretty.
+
+**Kernel changes (generic).**
+- `runtimeProvider.scripts` (manifest): a provider may ship 1–16 layered classic scripts evaluated
+  in order before its `entry` (same path rules as `runtime.scripts`, validated by
+  `validatePackageManifest`, labelled per file in error stacks by `aisOwnSource`). Providers were
+  single-file before; vendoring the UI layer into `adapter.js` would have made a 3,000-line file.
+- Imported Foundry modules are synthesized with `ui.panel` + a panel (`title` = module title,
+  760×560, `foundryModuleManifest.ts`), and the `foundry.ui` command.
+- `AIS_EVENTS` gains `ui.panel.closed` (9th event). Subscription/delivery capability is now a
+  function of the event (`aisEventSubscriptionCapability`): host-state events need
+  `action.observe`, `module.settings.changed` nothing (D-476), `ui.panel.closed` the module's own
+  `ui.panel`. Both `AisRuntime` and `PlayerAisRuntime` emit it from the panel chrome's `onClose`.
+
+**Measured (Chromium 153 headless shell, 2026-10-15).** `e2e/ais_foundry_module.spec.ts` test 3
+(new): a Foundry-format module whose `init` hook defines `FsdConfig extends FormApplication`
+(own `templates/config.hbs` with a partial, `selectOptions localize=true`, `checked`, `each … as
+|item i|`, a module helper), registers it with `game.settings.registerMenu(…, {restricted: true})`,
+defines `FsdPanel extends HandlebarsApplicationMixin(ApplicationV2)` with a `data-action` handler,
+and uses `Dialog.confirm` / `DialogV2.confirm`. The GM opens the menu through `foundry.ui`, the
+panel appears (`data-ais-panel-open`), the window title/heading/CSS come from the module's lang
+file, template and stylesheet; two real clicks on the module's `+5` button, a select change and
+**Save** write `fsd_demo_radius: 30, fsd_demo_mode: "hard"` into the replicated settings document,
+`_updateObject` sees `{radius: 30, mode: "hard", enabled: true}`, `closeOnSubmit` closes the window
+and the panel hides; `Dialog.confirm` resolves `true` from a click on **Yes**, `DialogV2.confirm`
+resolves `false` from **No**, both delivered back through the macro; the V2 panel re-renders its
+PARTS from two `ping` actions (`pings: 2`) with `ui.notifications.info` landing in the shell's
+notice stack; the shell's Close empties `foundry.info().windows` and a new `foundry.ui { app }`
+instance renders into a clean frame. The whole file: **3 tests in 2.0 min**; the new
+`e2e/ais_foundry_ui_runtime.spec.ts` (3 tests: Handlebars+helpers+jQuery over a real DOM, v1
+`FormApplication` lifecycle incl. `submitOnChange`/`Dialog` buttons/`_getHeaderButtons`/drag, V2
+`PARTS`/tabs/forms/`DialogV2.prompt`) **1.5 s**. Batches: `test:e2e:ais` **24/24 (9.9 min)**,
+`ui-adapters` 5/5, `packages` 6/6; vitest **442 files / 5,887 passed / 12 skipped**; tsc 0;
+eslint 0; adapter zip 55,215 B; `dist/index.html` 5,950,392 B (+824 B over D-482 — the UI layer
+lives in the adapter package, not in the shell).
+
+**Defects the browser run found and fixed (all real, none in the test's expectations alone).**
+(1) `clone` used `structuredClone` and threw `DataCloneError` on option objects holding functions
+→ deepClone semantics. (2) the sandbox blocked native form submission before `submit` fired → the
+synthetic `SubmitEvent` path above. (3) a v1 subclass that overrides `activateListeners` without
+`super` lost the form listener — documented in the spec as Foundry's own contract. (4) a shell-side
+Close left the layer believing its panel was open → `ui.panel.closed`. (5) `foundry.ui { app }`
+constructs a fresh instance — the test originally expected the old instance's state.
+
+**Honest limits.** Still host-only (GM device) in this phase; the module's windows live inside
+*its* panel (one frame per module), not as free-floating shell windows — a Foundry module cannot
+draw over the canvas or inject into ArenaStar's sidebar (`renderActorDirectory` and friends fire
+with the module's own `html` only); no FontAwesome, ProseMirror, `TextEditor.enrichHTML` (plain
+text), `FilePicker` (disabled control), `ContextMenu`, `Draggable` beyond the header, `SearchFilter`,
+`DragDrop`; `DialogV2.query` (cross-user) throws; `DocumentSheet` renders projected documents
+read-only beyond tags/light (R-02); upstream Tagger has no templates, so the UI proof uses the
+spec's own Foundry-format module, exactly as a third party would ship it. Foundry's core templates
+(`templates/…`) are proprietary and not available — a module that relies on them must ship its own.
