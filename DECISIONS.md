@@ -14604,7 +14604,7 @@ device write + event, GM commit → replica → `module.settings.changed` at the
 
 **Not done.** The torch module still keeps its preferences in `module.storage`; mapping them onto
 four declared settings is a module change (route (c)) and alters the demo's hash, so it waits for
-a turn in which the browser batch can be run.
+a turn in which the browser batch can be run. *(Done in D-481, with the browser batch.)*
 
 ## D-477 — AIS compendium reads: `compendium.list / search / get` over the world's content packages, GM device only (2026-10-15)
 
@@ -14774,3 +14774,66 @@ D-entry that touches a shell reports the batch it ran. The unit suite's blind sp
 exposed — cross-component prop wiring, Svelte proxies reaching structured-clone/postMessage
 boundaries, and iframe-side event delivery — now have a static guard, a proxy regression test and
 a browser spec respectively; iframe delivery stays browser-only by nature.
+
+## D-481 — `pf1e-torch` policy as declared world settings: the GM's rules reach every player's copy; prepare-script embed order fixed (2026-10-15)
+
+**Context.** D-468 made the GM share modules with players and D-476 gave AIS a settings service,
+but the first-party torch still read its policy — inventory bypass, consumable consumption,
+fallback size, preferred source — from `module.storage`, which is per device. The acceptance
+example of the whole player-side effort ("a player lights the torch on their own token") therefore
+ran with the *module defaults* on every player's device regardless of what the GM had chosen in
+"Torch settings…". D-476 recorded this as "not done … waits for a turn in which the browser batch
+can be run"; D-480 made that turn possible.
+
+**Decision.**
+- **Manifest.** `modules/pf1e-torch/manifest.json` declares `interconnect.settings`: four world
+  keys — `ignoreInventory` (boolean, off), `consumeConsumables` (boolean, on), `fallbackLight`
+  (choice `10-20 | 20-40 | 30-60 | 60-120` ft, default `20-40`), `defaultSourceId` (choice of
+  the seven catalogue ids, default `torch`) — and one device key, `quietNotices` (boolean, off:
+  mutes the module's informational notices on that device; warnings always show). Capabilities:
+  `module.storage.read/write` dropped (nothing else used storage), `module.settings.write` added.
+- **Module.** `readPreferences` maps `AIS.settings.list()` onto the old preference shape before
+  every action, so a player's copy follows the replicated value with no cache to invalidate.
+  "Torch settings…" (the `settings` token action) keeps its text menu but writes through
+  `AIS.settings.set` — only the keys that changed; on a player's device the kernel refuses world
+  keys by name and the module answers with the GM's current policy ("Torch rules are the GM's
+  world settings; only the GM can change them. A matching carried item is required; consumables
+  are not consumed; fallback light 20 / 40 ft; preferred source torch."). The same document is
+  edited by the generated form under Settings → Packages → PF1e Torch (D-476), exports with the
+  world and undoes like any edit. The menu gains a per-device "Fewer torch notices" toggle.
+- **Prepare-script order (found by the first run).** `test:fx:prepare` ran `vite build` *before*
+  `buildSystemPackages.mjs`; the gitignored `systems/.first-party/` embed set is read by
+  `vite.config.ts` at build time, so a restored sandbox or fresh checkout produced a 5,727,665 B
+  shell with **no** first-party packages. That shell is a different product: players are prompted
+  for the GM's rules package (D-473's build-hash trust cannot match), the rules dialog sits where
+  the module-consent banner should be, and both player specs fail at `[data-ais-consent]`. The
+  script now builds the embed set first, `vite build`, then the system packages again (the Vite
+  build empties `dist/`), and `vite.config.ts` warns on a production build without the embed set.
+  D-480's measured 5,937,482 B was a shell *with* the embeds, built in a tree that still had them.
+- **Player readback.** `PlayerSurface.aisWorldSettings(packageId)` returns the replicated world
+  values of one module's settings document, so a spec can wait for replication instead of racing.
+
+**Measured (this sandbox, 2 CPUs, `corepack pnpm e2e:browser` Chromium 153.0.8010.0).**
+- First `test:e2e:ais` run against the embed-less shell: 16/18 in 10.4 min — the two failures were
+  the player specs at the consent step (the rules dialog, hash `0134b0294f6d07f6…`, on screen).
+- Second run after the prepare-order fix (shell 5,937,590 B, embeds present): **17/18 in 10.3 min**
+  — the platform player spec passed again, and the one failure was this entry's own new
+  assertion (`toHaveText("Turn carried light on")` where the entry correctly reads
+  "Turn carried light on · Torch" once a source is remembered). With `toContainText` the
+  extended `e2e/ais_player.spec.ts` passes in **42.4 s**: consent → light (2→1) → out →
+  GM unticks *Consume candles and torches when lit* → `ais-settings:pf1e-torch` =
+  `{ consumeConsumables: false }` on the player replica → light again, quantity stays 1 → out →
+  un-share. AIS batch therefore 18/18 across the two runs (16 + the player spec re-run).
+- `tests/modules/pf1eTorch.test.ts`: 10 tests (8 → 10): the player-device test asserts the
+  replicated policy is followed and the world write is refused with the GM-policy message; the
+  `quietNotices` test asserts info notices are muted and a warning still shows.
+- Gates: `tsc --noEmit` 0 errors; `eslint .` 0; `checkSvelte` 99 components, 0 blocking, 3 advisory;
+  `vitest run` **440 files passed / 2 skipped, 5,838 tests passed / 12 skipped (5,850)** in 3.0 min;
+  `dist/index.html` **5,937,590 B** (gzip 1,894,457), within the 6 MB budget.
+
+**Consequences.** The torch is the worked example for D-476 in `AIS_MODULE_GUIDE.md` §5; the
+module README carries the settings table and the player-side behaviour; D-476's "not done" is
+closed. The torch's build-signed hash changed with its code, as any first-party module edit does
+(`approveExisting` in the specs re-approves it; existing worlds re-review it once). Route (b)
+holds: nothing in the kernel changed for this, only a module adopted the service. Residuals:
+R-09 (ESM module graphs) and R-02 (general document create/update) remain the next AIS gaps.

@@ -8,22 +8,145 @@
     "api": "arena.ais/1",
     "entry": "automation/entry.js",
     "requires": [
-      { "id": "pf1e-mass-battles", "version": "1.0.0" }
+      {
+        "id": "pf1e-mass-battles",
+        "version": "1.0.0"
+      }
     ],
     "provides": [
-      { "id": "scene.token.light.action", "mode": "exclusive", "contract": 1 }
+      {
+        "id": "scene.token.light.action",
+        "mode": "exclusive",
+        "contract": 1
+      }
     ],
     "commands": [
-      { "id": "toggle", "contract": 1 },
-      { "id": "extinguish", "contract": 1 },
-      { "id": "current-source", "contract": 1 },
-      { "id": "current-state", "contract": 1 },
-      { "id": "equipped-sources", "contract": 1 },
-      { "id": "select-source", "contract": 1 },
-      { "id": "inventory", "contract": 1 },
-      { "id": "source-exhausted", "contract": 1 }
+      {
+        "id": "toggle",
+        "contract": 1
+      },
+      {
+        "id": "extinguish",
+        "contract": 1
+      },
+      {
+        "id": "current-source",
+        "contract": 1
+      },
+      {
+        "id": "current-state",
+        "contract": 1
+      },
+      {
+        "id": "equipped-sources",
+        "contract": 1
+      },
+      {
+        "id": "select-source",
+        "contract": 1
+      },
+      {
+        "id": "inventory",
+        "contract": 1
+      },
+      {
+        "id": "source-exhausted",
+        "contract": 1
+      }
     ],
-    "emits": ["torch.changed", "torch.selected"],
+    "emits": [
+      "torch.changed",
+      "torch.selected"
+    ],
+    "settings": [
+      {
+        "key": "ignoreInventory",
+        "scope": "world",
+        "type": "boolean",
+        "label": "Allow any listed light source",
+        "hint": "Off: a token needs a matching carried item (torch, candle, lantern…). On: any source or the fallback light can be lit without inventory.",
+        "default": false
+      },
+      {
+        "key": "consumeConsumables",
+        "scope": "world",
+        "type": "boolean",
+        "label": "Consume candles and torches when lit",
+        "hint": "Lighting a consumable source spends one item from the actor's inventory; putting it out never does.",
+        "default": true
+      },
+      {
+        "key": "fallbackLight",
+        "scope": "world",
+        "type": "choice",
+        "label": "Fallback personal light (bright / dim)",
+        "hint": "The free light a token can carry when it has no matching item.",
+        "default": "20-40",
+        "choices": [
+          {
+            "value": "10-20",
+            "label": "10 / 20 ft"
+          },
+          {
+            "value": "20-40",
+            "label": "20 / 40 ft"
+          },
+          {
+            "value": "30-60",
+            "label": "30 / 60 ft"
+          },
+          {
+            "value": "60-120",
+            "label": "60 / 120 ft"
+          }
+        ]
+      },
+      {
+        "key": "defaultSourceId",
+        "scope": "world",
+        "type": "choice",
+        "label": "Preferred source when several are carried",
+        "default": "torch",
+        "choices": [
+          {
+            "value": "torch",
+            "label": "Torch"
+          },
+          {
+            "value": "candle",
+            "label": "Candle"
+          },
+          {
+            "value": "lamp",
+            "label": "Lamp"
+          },
+          {
+            "value": "lantern",
+            "label": "Lantern"
+          },
+          {
+            "value": "bullseye-lantern",
+            "label": "Bullseye Lantern"
+          },
+          {
+            "value": "hooded-lantern",
+            "label": "Hooded Lantern"
+          },
+          {
+            "value": "miners-lantern",
+            "label": "Miner's Lantern"
+          }
+        ]
+      },
+      {
+        "key": "quietNotices",
+        "scope": "device",
+        "type": "boolean",
+        "label": "Fewer torch notices on this device",
+        "hint": "Skips the informational notices (lit, dimmed, extinguished); warnings still show.",
+        "default": false
+      }
+    ],
     "capabilities": [
       "action.observe",
       "event.emit",
@@ -31,8 +154,7 @@
       "actor.inventory.read",
       "actor.inventory.consume",
       "scene.token.light.manage",
-      "module.storage.read",
-      "module.storage.write",
+      "module.settings.write",
       "ui.interaction",
       "ui.notify"
     ]

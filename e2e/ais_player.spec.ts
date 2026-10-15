@@ -124,8 +124,32 @@ test("a player lights and puts out the torch on their own token through the GM-s
     await player.locator('[data-token-menu-action="token-light-off"]').click();
     await expect.poll(readLight, { timeout: 20_000 }).toMatchObject({ radius: 0, active: false, quantity: 1 }); // putting out does not consume
 
-    // The GM un-shares: the player's copy stops without a reload, and the entries explain why.
+    // D-481: the torch's rules are the GM's world settings. The GM unticks consumption in the
+    // generated form; the player's copy follows the replicated value on its very next action.
     await gm.locator("#gm-settings").click();
+    const torchSettings = gm.locator('[data-ais-module-review="pf1e-torch"] [data-ais-settings="pf1e-torch"]');
+    await torchSettings.locator("summary").click();
+    const consume = torchSettings.locator('[data-ais-setting="consumeConsumables"] input');
+    await expect(consume).toBeChecked();
+    await expect(torchSettings.locator('[data-ais-setting="consumeConsumables"]')).toHaveAttribute("data-ais-setting-scope", "world");
+    await consume.uncheck();
+    await expect.poll(() => gm.evaluate(() => {
+      const client = (globalThis as unknown as { __vttE2E: { app: { gm: { client: import("../src/client/sync").ClientSync } } } }).__vttE2E.app.gm.client;
+      const doc = client.store.get("settings", "ais-settings:pf1e-torch");
+      return doc ? (doc.flags as { ais: { values: Record<string, unknown> } }).ais.values : null;
+    })).toEqual({ consumeConsumables: false });
+    await expect.poll(() => surfaceCallArg<Record<string, unknown> | null>(player, "player", "aisWorldSettings", "pf1e-torch"), { timeout: 15_000 })
+      .toEqual({ consumeConsumables: false });
+    await openMenu();
+    // The entry remembers the last source ("… · Torch") once the token has been lit before.
+    await expect(player.locator('[data-token-menu-action="token-light-toggle"]')).toContainText("Turn carried light on");
+    await player.locator('[data-token-menu-action="token-light-toggle"]').click();
+    await expect.poll(readLight, { timeout: 20_000 }).toMatchObject({ source: "ais-player-torch", active: true, quantity: 1 }); // lit, not consumed
+    await openMenu();
+    await player.locator('[data-token-menu-action="token-light-off"]').click();
+    await expect.poll(readLight, { timeout: 20_000 }).toMatchObject({ radius: 0, active: false, quantity: 1 });
+
+    // The GM un-shares: the player's copy stops without a reload, and the entries explain why.
     await share.uncheck();
     await expect(player.locator('iframe[title="AIS module:pf1e-torch"]')).toHaveCount(0, { timeout: 15_000 });
     await openMenu();

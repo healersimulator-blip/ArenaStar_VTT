@@ -9,7 +9,7 @@ how long it may take. `FX_TEST_BATCHES.md` covers the older FX/canvas/multilevel
 ```sh
 corepack pnpm install --frozen-lockfile
 corepack pnpm e2e:browser         # once per sandbox: Chromium from the npm registry (D-480)
-corepack pnpm test:fx:prepare     # vite build + system packages + starter worlds
+corepack pnpm test:fx:prepare     # system packages (embed set) + vite build + system packages + starter worlds
 ```
 
 The browser step exists because the sandbox cannot reach cdn.playwright.dev. It is Debian 12
@@ -64,6 +64,11 @@ section, not the AIS version label), `e2e/fog.spec.ts`'s Settings toggle needed 
 now-longer panel, and `visionSmoke` read the fog key as a hand-built `"scene-1:gm"` string instead of
 `fogVersionKey(...)`. A bare `pnpm build` empties `dist/` — including `dist/worlds` and
 `dist/packages` — so re-run `pnpm test:fx:prepare` before any batch that opens a starter world.
+Since D-481 the prepare script also builds the system packages *before* `vite build`: the
+gitignored `systems/.first-party/` embed set is what makes the shell recognise its own PF1e
+package (D-473); a restored sandbox or fresh checkout without it produces a shell that prompts
+players for the GM's rules, and `e2e/ais_player.spec.ts` / `ais_platform.spec.ts` then fail at
+the module-consent step. `vite build` now warns when the embed set is missing.
 
 ## AIS reliability follow-up (D-461, 2026-10-13)
 
@@ -107,6 +112,10 @@ two torches; the player joins by manual signalling, is asked for consent naming
 out again, and loses the module the moment the GM unticks sharing — with no reload and no
 `lastRejected`. Unit coverage of the same path is in `tests/app/playerAisRuntime.test.ts` (real
 `HostSync`↔`ClientSync`) and `tests/app/aisRuntimeSharing.test.ts` (booted `HostApp`).
+D-481 adds the policy leg between "out again" and the un-share: the GM unticks *Consume candles
+and torches when lit* in the torch's generated settings form (world scope), the player's replica
+receives `ais-settings:pf1e-torch` (`player.aisWorldSettings`), and the player's next *Turn
+carried light on* lights without consuming (quantity stays 1).
 
 **Executed in a real browser on 2026-10-15 (D-480): passes in 30.6 s.** The first run failed for
 a spec bug — the token centre was computed as `x + width / 2`, but a token's `x,y` *is* its centre

@@ -1120,6 +1120,8 @@ export interface PlayerSurface {
   /** Last presentation cue/rejection observed by this replica; useful for browser-sync diagnosis. */
   lastFxCue(): { runId: string; macroId: string; sceneId: string } | null;
   lastRejected(): { txId: string; reason: string; detail: string } | null;
+  /** D-481: the replicated world values of one AIS module's settings document (null = defaults). */
+  aisWorldSettings(packageId: string): Record<string, unknown> | null;
   /** D-271: the cell keys this replica holds. A closed cell is never sent, so this is the
    *  reveal set and nothing else — the browser half of the projection rule. */
   hexCellKeys(): string[];
@@ -1853,6 +1855,11 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
     },
     lastFxCue: () => lastFxCue,
     lastRejected: () => lastRejected,
+    aisWorldSettings: (packageId) => {
+      const doc = client()?.store.get("settings", `ais-settings:${packageId}`);
+      const values = (doc?.flags as { ais?: { values?: Record<string, unknown> } } | undefined)?.ais?.values;
+      return values && typeof values === "object" ? { ...values } : null;
+    },
     hexCellKeys: () => {
       const scenes = client()?.store.getAll("scenes") ?? [];
       const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;

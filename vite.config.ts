@@ -18,7 +18,15 @@ import { fileURLToPath } from "node:url";
 function firstPartyPackages(): Array<Record<string, unknown>> {
   const dir = join(dirname(fileURLToPath(import.meta.url)), "systems", ".first-party");
   const indexPath = join(dir, "index.json");
-  if (!existsSync(indexPath)) return [];
+  if (!existsSync(indexPath)) {
+    // D-481: a shell built without the embed set is a different product (the default world cannot
+    // activate the first-party PF1e package and players are prompted for the GM's rules), so say
+    // so where a build log is read. `systems/.first-party/` is gitignored: a fresh checkout or a
+    // restored sandbox needs `node scripts/buildSystemPackages.mjs` *before* `vite build`.
+    if (process.env.NODE_ENV === "production" || process.argv.includes("build"))
+      console.warn("[vite.config] systems/.first-party/index.json is missing — building a shell with no first-party packages (run `pnpm build:systems` first)");
+    return [];
+  }
   const index = JSON.parse(readFileSync(indexPath, "utf8")) as Array<{
     id: string; name: string; version: string; type: string; dependencies: string[]; zip: string; rulesSha256: string | null; uiSha256?: string | null;
   }>;

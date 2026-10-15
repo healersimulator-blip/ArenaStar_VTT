@@ -117,6 +117,11 @@ window stops the module.
 - Values are coerced against your declaration on both read and write; a key not in the manifest
   does not exist. Keep `module.storage` for state that is not configuration (caches, last
   selections).
+- Worked example (D-481): `modules/pf1e-torch` declares four world keys (`ignoreInventory`,
+  `consumeConsumables`, `fallbackLight`, `defaultSourceId`) and one device key (`quietNotices`),
+  reads them with `AIS.settings.list()` before every action, and writes them from its own
+  "Torch settings…" menu with `AIS.settings.set` — the same document the generated form edits.
+  On a player's device the world writes are refused and the module explains whose rules they are.
 
 ## 6. Talking to other modules (D-478)
 
