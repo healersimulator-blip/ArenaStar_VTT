@@ -243,3 +243,23 @@ opens/hides with the windows, Save writes the replicated settings document, conf
 through the macro, the shell Close empties the module's windows via `ui.panel.closed`. **Executed
 2026-10-15: whole file 3 tests / 2.0 min; `test:e2e:ais` 24/24 in 9.9 min.** Five real defects
 surfaced and were fixed before the passing run (see D-483).
+
+## Foundry core resource library (D-484, 2026-10-15)
+
+Both Foundry specs grow a fourth test; the runtime spec now loads `runtime/core.js` and
+`runtime/fields.js` between `jq.js` and `ui.js`, as the manifest orders them, and its stub `i18n`
+falls back to the library's keys the way the adapter does. The layer test builds a V2 `tag: "form"`
+application whose tab strip and footer are the library's `templates/generic/tab-navigation.hbs` /
+`form-footer.hbs`, whose body is only `{{formGroup}}` helpers over `foundry.data.fields` and a
+`{{> "templates/generic/form-group.hbs"}}` partial, submits it through the core footer into a
+`DataModel.updateSource`, and checks a v1 `Dialog.confirm` rendered through
+`templates/hud/dialog.html` plus the "core template … is not in the AIS Foundry core library yet"
+error. The module test does the same end to end through the kernel: the fixture module registers a
+`type: FsdPrefs` (DataModel) setting, reads core keys (`COMMON.Yes`, `SETTINGS.Save`),
+`Actor.TYPES`, `CONST.TOKEN_DISPLAY_MODES`, renders `templates/dice/roll.html`, and its V2 form is
+driven by real clicks in the module iframe; Save replicates `fsd_demo_prefs` as the model's JSON,
+an out-of-range `game.settings.set` is refused, and `foundry.info.templates` lists what the module
+used from the library and what it asked for that the library lacks. Test 2's expectations gain the
+fifth (hidden) setting. **Executed 2026-10-15: `ais_foundry_ui_runtime.spec.ts` 4/4 in 2.4 s;
+`ais_foundry_module.spec.ts` 4/4 in 2.6 min (new test 36.5 s alone).** Eight layer defects were
+fixed before the passing runs (see D-484). **`test:e2e:ais` (now 26 tests): 26/26 in 10.1 min.**

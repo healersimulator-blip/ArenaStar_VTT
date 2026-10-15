@@ -15056,3 +15056,145 @@ text), `FilePicker` (disabled control), `ContextMenu`, `Draggable` beyond the he
 read-only beyond tags/light (R-02); upstream Tagger has no templates, so the UI proof uses the
 spec's own Foundry-format module, exactly as a third party would ship it. Foundry's core templates
 (`templates/…`) are proprietary and not available — a module that relies on them must ship its own.
+
+## D-484 — Target A step 3: the adapter emulates Foundry's *resource* surface — ArenaStar's own core template library, core language keys, base CSS, `foundry.data.fields`/`DataModel` (adapter 0.4.0) (2026-10-15)
+
+**Why.** D-483's closing limit — "Foundry's core templates are proprietary; a module that relies
+on them must ship its own" — was wrong as a product position and the owner rejected it. Modules
+do not ship `templates/generic/tab-navigation.hbs`, `templates/hud/dialog.html`, the
+`COMMON.*`/`SETTINGS.*` keys or `foundry.data.fields`: the Foundry *host* provides them, and a
+module written for Foundry simply references them. A GitHub code search over the module corpus
+(2026-10-15) put the shape of that dependency beyond doubt: `templates/generic/tab-navigation.hbs`
+appears in ≈700 module files across 77 sampled repositories and `templates/generic/form-footer.hbs`
+in ≈672 / 75; then `sidebar/document-create.html` (23 repos), combat-tracker parts (13), `hud/
+dialog.html` (12), `dice/roll.html` (8) + `dice/tooltip.html` (7), `journal/toc.hbs` (7),
+`scene/token/*.hbs` (5), `sidebar/entity-create.html` (4), `sidebar/chat-message.html` (3). An
+emulator that boots a module and then fails on its first `PARTS` entry is not running the module.
+
+**Decision.** The adapter is an emulator of Foundry's resource surface, not only its API surface.
+It provides *ArenaStar's own* implementation of each resource modules reference, derived from the
+contract they depend on — the path, the context shape a module passes, the DOM markers and class
+names a module selects on afterwards (`nav.tabs[data-group] > a.item[data-tab]`, `.dialog-button
+[data-button]`, `.dice-total`, …), the language key names — and never from Foundry's files.
+Reverse-engineer the contract and make it our own; do not copy.
+
+- **`runtime/core.js` (410 lines, `__aisFoundryCore`).** Ten templates — `templates/generic/
+  {tab-navigation,form-footer,form-group,form-fields}.hbs`, `templates/hud/dialog.html`,
+  `templates/dice/{roll,tooltip,table-result}.html`, `templates/sidebar/{document-create,
+  chat-message}.html` — plus 12 aliases so every Foundry generation's name for an entry resolves to
+  the same template (`hud/dialog.hbs`, `sidebar/entity-create.html`, `chat/chat-message.hbs`,
+  `generic/*.html`, …). The templates are deliberately *better* where the contract allows it: the
+  roll card masks formula/total itself when `isPrivate`, the tooltip derives `die d<faces>` when a
+  part carries no `classes`, tab navigation honours both the v11 `cssClass` and the v13 `active`
+  shapes, dialog buttons mark the `default` one. 496 core language keys (`Yes`, `COMMON.Cancel`,
+  `SETTINGS.Save` → "Save Changes", `DOCUMENT.Actor`, `TYPES.Actor.npc`, `FOLDER.*`, `OWNERSHIP.*`,
+  `PERMISSION.*`, `KEYBINDINGS.*`, `SIDEBAR.*`, `TOKEN.*`, `COMBAT.*`, `CHAT.*`, …) in our words
+  under Foundry's key names; a base stylesheet for the classes the library's templates emit
+  (`.standard-form`, `.form-group/.form-fields/.hint`, vertical tabs, dice cards, table draws, chat
+  message, `color-picker`/`file-picker`/`range-picker` elements) with no `url()`/`@import`/
+  `@font-face` — the sandbox CSP has no `font-src`/`img-src`, and the unit test enforces it.
+- **`runtime/fields.js` (550 lines, `__aisFoundryFields`).** `foundry.data.fields`: `DataField`
+  (`clean`/`validate`/`initialize`/`toObject`/`toInput`/`toFormGroup`/`fieldPath`/`getInitialValue`,
+  `required`/`nullable`/`initial`/`label`/`hint`/`validate` options), `SchemaField` (`getField` by
+  dotted path, iteration), `BooleanField`, `NumberField` (`min/max/step/integer/positive/choices`),
+  `StringField` (`blank/trim/choices` incl. function choices), `ObjectField`, `ArrayField`,
+  `SetField`, `EmbeddedDataField` (initialises to model instances), `ColorField`, `FilePathField`,
+  `AngleField` (normalised), `AlphaField`, `HueField`, `HTMLField`, `JSONField`, `DocumentIdField`,
+  `DocumentUUIDField`, `ForeignDocumentField`, `IntegerSortField`, `DocumentOwnershipField`,
+  `DocumentTypeField`, `DocumentStatsField`, `TypedSchemaField`, `TypedObjectField`,
+  `EmbeddedCollectionField`, `EmbeddedDocumentField`, `AnyField`;
+  `foundry.data.validation.DataModelValidationFailure/Error`. `foundry.abstract.DataModel`/
+  `TypeDataModel`: `defineSchema`, cached `schema`, `migrateData → cleanData → shimData` on
+  construction, strict validation (`"Prefs validation errors: radius must be at most 60"`),
+  `updateSource` (schema-walking diff, ignores keys outside the schema as Foundry does, nested
+  diff result, `dryRun`/`fallback`), `validate`, `toObject`, `toJSON`, `clone`, `reset`,
+  `fromSource`, `fromJSON`. `foundry.applications.fields`: `createSelectInput/MultiSelect/Number/
+  Text/Textarea/Checkbox/Editor/Color/FilePath/Range`, `createFormGroup`,
+  `prepareSelectOptionGroups` — values set as *attributes* so the nodes survive `outerHTML`
+  serialisation by the Handlebars helpers (`formGroup`, `formField`, `formInput` now render through
+  this layer; duck-typed field objects still work).
+- **`runtime/ui.js`.** Template resolution: the module's own files first, then the library
+  (`core:<canonical>` compile key); `renderTemplate`, `loadTemplates`, `getTemplate`, `{{> …}}`
+  partials and V2 `PARTS` all take that path. A `templates/…` path the library lacks fails with
+  `Core template <path> is not in the AIS Foundry core library yet (10 core templates are); report
+  it with the module name so it can be added.`, `systems/…` paths name Target B. `Dialog` renders
+  through `templates/hud/dialog.html` (`options.template` overrides it, as modules do). The core CSS
+  is injected after the base sheet, before the module's own styles. `foundry.info.templates =
+  { compiled, core: [library paths the module used], missing: [core paths it asked for that the
+  library lacks] }` replaces the bare count.
+- **`runtime/adapter.js`.** `game.i18n` is seeded with the core keys and the module's language
+  files are merged over them (module keys win). `foundry.abstract.DataModel/TypeDataModel`,
+  `foundry.data.fields/validation`, `foundry.applications.fields` come from the layer (the D-482
+  stubs are gone). `game.settings.register(…, { type: SomeDataModel })` stores the model's source as
+  the hidden JSON setting (default = `new type().toObject()` or the declared instance), `get`
+  returns a fresh instance, `set` accepts an instance or source and constructs strictly (an invalid
+  source throws before anything is written); replicated updates decode to instances. `Actor.TYPES`
+  = `["base","character","npc"]`, `Item.TYPES` = `["base"]`, `JournalEntryPage/Cards/Macro` types,
+  `game.documentTypes`, `game.release {generation, build, version}`, and the `CONST` enumerations
+  modules turn into form choices (`TOKEN_DISPLAY_MODES`, `TOKEN_TURN_MARKER_MODES`,
+  `ACTIVE_EFFECT_MODES`, `DICE_ROLL_MODES`, `MACRO_TYPES`, `MEASURED_TEMPLATE_TYPES`, wall/door/
+  playlist/table/lighting/region enumerations, document-type lists).
+- **Manifest/kernel.** Adapter 0.4.0, `runtimeProvider.scripts = [hbs, jq, core, fields, ui]`;
+  `FOUNDRY_ADAPTER.version` 0.4.0 in `foundryModuleManifest.ts` (synthesised Foundry modules bind
+  to the exact adapter version); `foundry-tagger` requires 0.4.0. No new kernel capability, event or
+  RPC — the whole step lives in the adapter package, which is the point of route (b).
+
+**Measured (Chromium 153 headless shell, 2026-10-15).**
+- `e2e/ais_foundry_module.spec.ts` test 4 (new, **36.5 s** alone; file **4/4 in 2.6 min**): the
+  spec's Foundry-format module (`fsd-demo`, unchanged in kind — module.json, ESM, lang file, no
+  AIS call) gains `class FsdPrefs extends foundry.abstract.DataModel` with `NumberField`/
+  `StringField`/`BooleanField`, `game.settings.register(…, { type: FsdPrefs, default: new
+  FsdPrefs() })`, and `FsdPrefsApp extends HandlebarsApplicationMixin(ApplicationV2)` with `tag:
+  "form"` and `PARTS = { tabs: "templates/generic/tab-navigation.hbs", body: its own
+  `prefs.hbs` (only `{{formGroup field …}}` helpers and a `{{> "templates/generic/form-group.hbs"}}`
+  partial), footer: "templates/generic/form-footer.hbs" }` — it ships none of the core files. In the
+  ready hook `game.i18n.localize("COMMON.Yes")` → "Yes", `"SETTINGS.Save"` → "Save Changes",
+  `game.i18n.has("COMMON.No")` true while the module's own `FSD.Title` still resolves; `Actor.TYPES`,
+  `CONST.TOKEN_DISPLAY_MODES`, `game.release.generation === 13`; the setting reads back as a model
+  instance; `renderTemplate("templates/dice/roll.html")` yields `.dice-formula`/`.dice-total`;
+  `templates/sidebar/apps/compendium.html` fails with the diagnosable message and
+  `foundry.info.templates` reports `{ core: ["templates/dice/roll.html"], missing: [that path] }`.
+  `foundry.ui { app }` renders the form in the module's panel: the core tab strip (2 items, icon
+  glyph, `General` active), number input with `type/min/max` and value 20 under the module's own
+  "Light radius"/"In feet", select with "Soft"/"Hard", checked checkbox, "Actor" from a core key,
+  footer buttons "Save Changes"/"Reset Defaults"; clicking the `About` tab shows the core
+  `AreYouSure` text; filling 35 + `hard` and pressing the core **Save Changes** runs the module's
+  handler → `updateSource` → `game.settings.set` → replicated `fsd_demo_prefs =
+  {"radius":35,"mode":"hard","enabled":true}`, `closeOnSubmit` closes the window; a
+  `game.settings.set(…, { radius: 999 })` from the macro is refused with `radius must be at most
+  60` and the document is unchanged; the library usage list ends as `[dice/roll, generic/
+  form-footer, generic/form-group, generic/tab-navigation]`.
+- `e2e/ais_foundry_ui_runtime.spec.ts` test 4 (new; file **4/4 in 2.4 s**): the same shape against
+  the raw layer (no kernel), plus v1 `Dialog.confirm` through `templates/hud/dialog.html` and the
+  `.hbs`/`.html` alias equivalence.
+- `tests/packages/aisFoundryCore.test.ts` (new, 12 tests): every core template rendered through
+  `hbs.js` with its contract context and asserted on the DOM markers modules use; aliases;
+  no-Foundry-text and no-remote-resource guards; 496 keys; the DataField/DataModel contract without
+  a DOM (casting, validation messages, `updateSource` nested diff and schema filtering,
+  `migrateData` ordering, embedded models).
+- Gates: vitest **443 files / 5,899 passed / 12 skipped** (+12 tests), `tsc --noEmit` 0,
+  `eslint .` 0 (the runtime `.js` files are linted too), adapter zip **78,787 B** (+23,572 B over
+  0.3.0 — the library and the data layer), `dist/index.html` **5,950,392 B (unchanged)**: nothing
+  of this lives in the shell. `test:e2e:ais` batch (now 26 tests): **26/26 in 10.1 min**.
+
+**Defects the tests found and fixed (in the layer, not in the expectations).** (1) input values
+were set as DOM *properties*, which `outerHTML` drops — the Handlebars helpers rendered empty
+inputs → attributes. (2) `fieldPath` carried the model name (`Prefs.nested.x`), which would have
+mis-named every form input → root schema unnamed, model name moved into the validation error.
+(3) `updateSource` returned a flat `{"nested.y": null}` diff and accepted keys outside the schema
+(a form's extra inputs leaked into the stored source) → nested diff, schema filtering, recursion
+only through `SchemaField`s. (4) `EmbeddedDataField` initialised to plain objects → instances.
+(5) `DataModel.cleanData` skipped the schema → Foundry's migrate → clean → shim order. (6)
+`DocumentIdField` accepted any non-empty string. (7) the `form-group` template printed
+`[object Object]` for a `fields` context key → `input` is the contract. (8) a `foundry.info`
+duplicate key and a `no-prototype-builtins` violation caught by eslint on the new files.
+
+**Honest limits.** The library is the *head* of the distribution, not all of it: combat-tracker
+parts, active-effect config parts, `journal/toc.hbs`, `scene/token/*.hbs`, `sidebar/apps/*` and the
+long tail are not provided yet — a module asking for one gets a message naming the path and the
+adapter reports it in `foundry.info.templates.missing`, which is the queue for the next additions.
+Icons are text glyphs for the common `fa-*` names (`ui.js`), not a FontAwesome-compatible set.
+`DataModel` covers what settings/forms use; `Document`-level behaviour (`_preCreate`, embedded
+collections, `validateJoint` chains) stays out until R-02 CRUD exists. Everything else from D-483's
+limits list still holds (host-only, panel-confined windows, no ProseMirror/`enrichHTML`/FilePicker/
+ContextMenu/DragDrop, R-02/R-06/R-07, pf1-dependent modules = Target B).
