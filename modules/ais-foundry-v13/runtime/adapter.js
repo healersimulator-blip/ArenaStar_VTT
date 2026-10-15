@@ -415,8 +415,8 @@
     return klass;
   };
 
-  // ── i18n: the module's own language files (en first, then whatever the file list offers). ──
-  const translations = {};
+  // ── i18n: the emulator's core keys first (D-484), then the module's own language files (which win). ──
+  const translations = globalThis.__aisFoundryCore ? expandObject(clone(globalThis.__aisFoundryCore.lang)) : {};
   const i18n = {
     lang: "en",
     translations,
@@ -471,20 +471,29 @@
     }
     // Object / Array / DataModel / unspecified → JSON text in a hidden string setting.
     let fallback = data.default;
-    if (typeof fallback === "function") { try { fallback = new fallback(); } catch { fallback = {}; } }
+    if (fallback && typeof fallback.toObject === "function") fallback = fallback.toObject();
+    else if (typeof fallback === "function") { try { fallback = new fallback(); } catch { fallback = {}; } }
+    if (fallback === undefined && isDataModelClass(type)) { try { fallback = new type({}, { strict: false }).toObject(); } catch { fallback = {}; } }
     if (fallback === undefined) fallback = type === Array ? [] : {};
     let text;
     try { text = JSON.stringify(fallback); } catch { text = "{}"; }
     if (typeof text !== "string") text = "null";
     return { kind: "json", declaration: { ...base, hidden: true, type: "string", default: text.slice(0, 16384), maxLength: 16384 } };
   };
+  /** D-484: `type: SomeDataModel` settings travel as the model's source JSON and come back as instances. */
+  let dataModelCheck = null; // bound once the UI layer (which owns foundry.abstract.DataModel) is installed below
+  const isDataModelClass = (type) => typeof dataModelCheck === "function" && dataModelCheck(type);
   const decodeSetting = (row, raw) => {
     if (row.kind !== "json") return raw;
-    try { return JSON.parse(raw); } catch { return clone(row.data.default) ?? {}; }
+    let value;
+    try { value = JSON.parse(raw); } catch { value = clone(row.data.default) ?? {}; }
+    if (isDataModelClass(row.data.type)) { try { return new row.data.type(value && typeof value === "object" ? value : {}, { strict: false }); } catch { return value; } }
+    return value;
   };
   const encodeSetting = (row, value) => {
     if (row.kind !== "json") return value;
-    const text = JSON.stringify(value === undefined ? null : value);
+    const source = value && typeof value.toObject === "function" ? value.toObject() : value;
+    const text = JSON.stringify(source === undefined ? null : source);
     if (text.length > 16384) throw new Error(`Setting ${row.namespace}.${row.key} exceeds the 16 KiB JSON cap`);
     return text;
   };
@@ -512,12 +521,14 @@
     get(namespace, key) {
       const row = settingRows.get(`${namespace}.${key}`);
       if (!row) throw new Error(`This is not a registered game setting: ${namespace}.${key}`);
-      return clone(row.value);
+      return isDataModelClass(row.data.type) && row.value && typeof row.value.clone === "function" ? row.value.clone() : clone(row.value);
     },
     async set(namespace, key, value) {
       const row = settingRows.get(`${namespace}.${key}`);
       if (!row) throw new Error(`This is not a registered game setting: ${namespace}.${key}`);
       if (typeof row.data.type === "function" && [Boolean, Number, String].includes(row.data.type)) value = row.data.type(value);
+      // D-484: DataModel-typed settings accept an instance or its source; invalid source throws like Foundry's strict construction.
+      else if (isDataModelClass(row.data.type) && !(value instanceof row.data.type)) value = new row.data.type(value && typeof value === "object" ? (typeof value.toObject === "function" ? value.toObject() : value) : {});
       const previous = row.value;
       row.value = clone(value);
       await Promise.all(pendingRegistrations);
@@ -622,6 +633,7 @@
       timeSince: () => "", formatFileSize: (bytes) => `${bytes} B`, Collection, parseUuid: (uuid) => ({ uuid, id: String(uuid).split(".").pop() }),
       Semaphore: class { constructor(max = 1) { this.max = max; } add(fn, ...args) { return Promise.resolve().then(() => fn(...args)); } } },
     applications: { api: { ApplicationV2, DialogV2, HandlebarsApplicationMixin, DocumentSheetV2, Application, FormApplication, DocumentSheet, Dialog },
+      fields: uiLayer.fields ? uiLayer.fields.applications : {},
       sheets: { ActorSheetV2: stubClass("ActorSheetV2", DocumentSheetV2), ItemSheetV2: stubClass("ItemSheetV2", DocumentSheetV2) },
       handlebars: { loadTemplates, renderTemplate, getTemplate },
       ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, Tabs, FormDataExtended,
@@ -630,8 +642,8 @@
     documents: { ...documentClasses, collections: {} },
     canvas: { placeables: { Token: globalThis.Token, Tile: globalThis.Tile, Drawing: globalThis.Drawing, Wall: globalThis.Wall, AmbientLight: globalThis.AmbientLight,
       AmbientSound: globalThis.AmbientSound, MeasuredTemplate: globalThis.MeasuredTemplate, Note: globalThis.Note, Region: globalThis.Region }, layers: {} },
-    abstract: { DataModel: stubClass("DataModel"), TypeDataModel: stubClass("TypeDataModel"), Document },
-    data: { fields: {} },
+    abstract: { DataModel: uiLayer.fields ? uiLayer.fields.DataModel : stubClass("DataModel"), TypeDataModel: uiLayer.fields ? uiLayer.fields.TypeDataModel : stubClass("TypeDataModel"), Document },
+    data: { fields: uiLayer.fields ? uiLayer.fields.fields : {}, validation: uiLayer.fields ? uiLayer.fields.validation : {} },
     dice: { Roll: globalThis.Roll },
     helpers: { Hooks: globalThis.Hooks, Localization: stubClass("Localization") },
     CONST: null,
@@ -644,7 +656,38 @@
     TOKEN_DISPOSITIONS: { SECRET: -2, HOSTILE: -1, NEUTRAL: 0, FRIENDLY: 1 }, GRID_TYPES: { GRIDLESS: 0, SQUARE: 1, HEXODDR: 2, HEXEVENR: 3, HEXODDQ: 4, HEXEVENQ: 5 },
     WALL_SENSE_TYPES: { NONE: 0, LIMITED: 10, NORMAL: 20, PROXIMITY: 30, DISTANCE: 40 }, WALL_DOOR_TYPES: { NONE: 0, DOOR: 1, SECRET: 2 },
     DOCUMENT_TYPES: Object.keys(documentClasses), SOFTWARE_UPDATE_CHANNELS: {}, ASCII: "ArenaStar AIS Foundry profile",
+    // D-484: the enumerations modules turn into form choices (`foundry.utils.invertObject(CONST.X)`).
+    TOKEN_DISPLAY_MODES: { NONE: 0, CONTROL: 10, OWNER_HOVER: 20, HOVER: 30, OWNER: 40, ALWAYS: 50 },
+    TOKEN_TURN_MARKER_MODES: { DISABLED: 0, DEFAULT: 1, CUSTOM: 2 },
+    TOKEN_SHAPES: { ELLIPSE_1: 0, ELLIPSE_2: 1, TRAPEZOID_1: 2, TRAPEZOID_2: 3, RECTANGLE_1: 4, RECTANGLE_2: 5 },
+    ACTIVE_EFFECT_MODES: { CUSTOM: 0, MULTIPLY: 1, ADD: 2, DOWNGRADE: 3, UPGRADE: 4, OVERRIDE: 5 },
+    DICE_ROLL_MODES: { PUBLIC: "publicroll", PRIVATE: "gmroll", BLIND: "blindroll", SELF: "selfroll" },
+    MACRO_TYPES: { SCRIPT: "script", CHAT: "chat" }, MACRO_SCOPES: ["global", "actors", "actor"],
+    MEASURED_TEMPLATE_TYPES: { CIRCLE: "circle", CONE: "cone", RECTANGLE: "rect", RAY: "ray" },
+    DRAWING_FILL_TYPES: { NONE: 0, SOLID: 1, PATTERN: 2 }, TEXT_ANCHOR_POINTS: { CENTER: 0, BOTTOM: 1, TOP: 2, LEFT: 3, RIGHT: 4 },
+    WALL_DIRECTIONS: { BOTH: 0, LEFT: 1, RIGHT: 2 }, WALL_DOOR_STATES: { CLOSED: 0, OPEN: 1, LOCKED: 2 },
+    WALL_MOVEMENT_TYPES: { NONE: 0, NORMAL: 20 }, WALL_RESTRICTION_TYPES: ["light", "sight", "sound", "move"],
+    PLAYLIST_MODES: { DISABLED: -1, SEQUENTIAL: 0, SHUFFLE: 1, SIMULTANEOUS: 2 }, PLAYLIST_SORT_MODES: { ALPHABETICAL: "a", MANUAL: "m" },
+    TABLE_RESULT_TYPES: { TEXT: "text", DOCUMENT: "document", COMPENDIUM: "pack" }, FOLDER_MAX_DEPTH: 4, FOLDER_DOCUMENT_TYPES: ["Actor", "Item", "Scene", "JournalEntry", "Playlist", "RollTable", "Cards", "Macro", "Compendium"],
+    LIGHTING_LEVELS: { DARKNESS: -2, HALFDARK: -1, UNLIT: 0, DIM: 1, BRIGHT: 2, BRIGHTEST: 3 },
+    CANVAS_PERFORMANCE_MODES: { LOW: 0, MED: 1, HIGH: 2, MAX: 3 },
+    DEFAULT_TOKEN: "icons/svg/mystery-man.svg", DEFAULT_MACRO_ICON: "icons/svg/dice-target.svg",
+    USER_PERMISSIONS: { ACTOR_CREATE: { label: "Create Actors", defaultRole: 3 }, BROADCAST_AUDIO: { label: "Broadcast Audio", defaultRole: 2 }, SETTINGS_MODIFY: { label: "Modify Settings", defaultRole: 3 }, TOKEN_CREATE: { label: "Create Tokens", defaultRole: 3 } },
+    WORLD_DOCUMENT_TYPES: ["Actor", "Cards", "ChatMessage", "Combat", "FogExploration", "Folder", "Item", "JournalEntry", "Macro", "Playlist", "RollTable", "Scene", "Setting", "User"],
+    COMPENDIUM_DOCUMENT_TYPES: ["Actor", "Adventure", "Cards", "Item", "JournalEntry", "Macro", "Playlist", "RollTable", "Scene"],
+    PRIMARY_DOCUMENT_TYPES: ["Actor", "Adventure", "Cards", "ChatMessage", "Combat", "FogExploration", "Folder", "Item", "JournalEntry", "Macro", "Playlist", "RollTable", "Scene", "Setting", "User"],
+    EMBEDDED_DOCUMENT_TYPES: ["ActiveEffect", "ActorDelta", "AmbientLight", "AmbientSound", "Card", "Combatant", "Drawing", "Item", "JournalEntryPage", "MeasuredTemplate", "Note", "PlaylistSound", "Region", "RegionBehavior", "TableResult", "Tile", "Token", "Wall"],
+    CORE_SUPPORTED_LANGUAGES: ["en"], SYSTEM_SPECIFIC_COMPENDIUM_TYPES: ["Actor", "Item"],
+    TOKEN_HEXAGONAL_SHAPES: { ELLIPSE_1: 0, ELLIPSE_2: 1, TRAPEZOID_1: 2, TRAPEZOID_2: 3, RECTANGLE_1: 4, RECTANGLE_2: 5 },
+    REGION_VISIBILITY: { LAYER: 0, GAMEMASTER: 1, ALWAYS: 2 }, REGION_EVENTS: { BEHAVIOR_ACTIVATED: "behaviorActivated", TOKEN_ENTER: "tokenEnter", TOKEN_EXIT: "tokenExit", TOKEN_MOVE_IN: "tokenMoveIn", TOKEN_MOVE_OUT: "tokenMoveOut" },
   };
+  // D-484: document type lists modules iterate (`Actor.TYPES.forEach(...)`, `game.documentTypes`).
+  const documentTypes = { Actor: ["base", "character", "npc"], Item: ["base"], JournalEntryPage: ["text", "image", "pdf", "video"], Cards: ["deck", "hand", "pile"], Macro: ["script", "chat"], ChatMessage: ["base"], Combatant: ["base"], ActiveEffect: ["base"], RegionBehavior: ["base"], Card: ["base"], TableResult: ["base"] };
+  for (const [name, types] of Object.entries(documentTypes)) {
+    const klass = documentClasses[name];
+    if (klass) { Object.defineProperty(klass, "TYPES", { configurable: true, get: () => [...types] }); Object.defineProperty(klass, "documentName", { configurable: true, value: name }); }
+  }
+  if (uiLayer.fields) dataModelCheck = uiLayer.fields.isDataModelClass;
   globalThis.foundry.CONST = globalThis.CONST;
   globalThis.CONFIG = { debug: { hooks: false }, compatibility: { mode: 0 }, ui: {}, Canvas: { layers: {} }, TextEditor: { enrichers: [] },
     statusEffects: [], specialStatusEffects: {}, controlIcons: {}, sounds: {}, fontDefinitions: {}, Dice: { rolls: [globalThis.Roll], terms: {} },
@@ -664,7 +707,7 @@
   const socketListeners = new Map();
   const keybindingActions = new Map();
   const game = {
-    version: "13.346", release: { generation: 13, build: 346 }, data: { version: "13.346", release: { generation: 13 } },
+    version: "13.346", release: { generation: 13, build: 346, version: "13.346", maxGeneration: 13, maxStableGeneration: 13 }, data: { version: "13.346", release: { generation: 13 } }, documentTypes,
     user, userId: user.id, users: new Collection([user]), ready: false, paused: false, debug: false,
     world: { id: "arenastar", title: "ArenaStar world", system: "arenastar", version: "0.0.0" },
     // Deliberately NOT a Foundry system id: modules that need `pf1` must say so and stay inert.
@@ -805,7 +848,7 @@
       warnings: diagnostics.warnings, unsupportedCalls: diagnostics.unsupportedCalls, moduleApi: selfModule.api ? Object.keys(selfModule.api) : [],
       globals: diagnostics.globals ?? [], loadMs: diagnostics.loadMs ?? null, ready: game.ready,
       windows: uiLayer.describeWindows(), menus: [...settingsMenus].map(([key, menu]) => ({ key, name: menu.name ?? "", label: menu.label ?? "", type: menu.type?.name ?? null, restricted: menu.restricted === true })),
-      templates: uiLayer.templateCount() }),
+      templates: uiLayer.describeTemplates ? uiLayer.describeTemplates() : { count: uiLayer.templateCount() } }),
   });
 
   AIS.commands.on("foundry.info", async () => FoundryAdapter.info());

@@ -39,15 +39,23 @@ const runtime = (name: string) => readFileSync(fileURLToPath(new URL(`../modules
 
 async function bootLayer(page: Page): Promise<void> {
   await page.setContent("<!doctype html><html><head><meta charset=\"utf-8\"></head><body></body></html>");
-  for (const file of ["hbs.js", "jq.js", "ui.js"]) await page.addScriptTag({ content: runtime(file) });
+  for (const file of ["hbs.js", "jq.js", "core.js", "fields.js", "ui.js"]) await page.addScriptTag({ content: runtime(file) });
   await page.evaluate(() => {
     const w = globalThis as unknown as Record<string, unknown>;
     const panel: string[] = [];
     const hooks: Record<string, unknown[][]> = {};
-    const translations: Record<string, string> = { "T.Title": "Config window", "T.Save": "Save", "T.Soft": "Soft", "T.Hard": "Hard", "T.Hello": "Hello, {name}", Yes: "Yes", No: "No" };
+    const translations: Record<string, string> = { "T.Title": "Config window", "T.Save": "Save", "T.Soft": "Soft", "T.Hard": "Hard", "T.Hello": "Hello, {name}", "T.Radius": "Radius", "T.RadiusHint": "In feet", "T.Mode": "Mode", "T.General": "General", "T.Advanced": "Advanced", Yes: "Yes", No: "No" };
+    // D-484: like the adapter, the module's own keys win over the emulator's core keys (nested, `COMMON.Yes`).
+    const coreLang = (w.__aisFoundryCore as { lang: Record<string, unknown> }).lang;
+    const lookup = (key: string): string => {
+      if (translations[key] !== undefined) return translations[key];
+      const value = key.split(".").reduce<unknown>((o, k) => (o && typeof o === "object" ? (o as Record<string, unknown>)[k] : undefined), coreLang);
+      return typeof value === "string" ? value : key;
+    };
     const i18n = {
-      localize: (key: string) => translations[key] ?? key,
-      format: (key: string, data: Record<string, unknown>) => (translations[key] ?? key).replace(/\{(\w+)\}/g, (_m: string, k: string) => String(data[k])),
+      localize: lookup,
+      format: (key: string, data: Record<string, unknown>) => lookup(key).replace(/\{(\w+)\}/g, (_m: string, k: string) => String(data[k])),
+      has: (key: string) => lookup(key) !== key,
     };
     const Hooks = {
       callAll: (name: string, ...args: unknown[]) => { (hooks[name] ??= []).push(args); return true; },
@@ -69,6 +77,11 @@ async function bootLayer(page: Page): Promise<void> {
         + "<section class=\"tab {{tabs.one.cssClass}}\" data-group=\"primary\" data-tab=\"one\">one:{{count}}</section><section class=\"tab {{tabs.two.cssClass}}\" data-group=\"primary\" data-tab=\"two\">two</section>"
         + "<button type=\"button\" data-action=\"inc\">+</button></section>"],
       ["templates/v2-form.hbs", "<form class=\"v2-form\"><input name=\"label\" value=\"{{label}}\"><input type=\"checkbox\" name=\"flag\" {{checked flag}}><button type=\"submit\">Go</button></form>"],
+      // D-484: a module body part that leans entirely on the emulator — DataField helpers + core partial + core i18n keys.
+      ["templates/prefs.hbs", "<div class=\"prefs-body\"><section class=\"tab prefs-general {{tabs.general.cssClass}}\" data-group=\"primary\" data-tab=\"general\">"
+        + "{{formGroup fields.radius value=source.radius localize=true}}{{formGroup fields.mode value=source.mode localize=true}}{{formField fields.enabled value=source.enabled localize=true label=\"COMMON.Yes\"}}"
+        + "{{> \"templates/generic/form-group.hbs\" label=\"DOCUMENT.Actor\" input=actorInput localize=true}}"
+        + "</section><section class=\"tab prefs-advanced {{tabs.advanced.cssClass}}\" data-group=\"primary\" data-tab=\"advanced\"><p class=\"hint\">{{localize \"AreYouSure\"}}</p></section></div>"],
     ]);
     const isPlain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
     const mergeObject = (original: Record<string, unknown>, other: Record<string, unknown> = {}, options: { inplace?: boolean } = {}): Record<string, unknown> => {
@@ -171,7 +184,7 @@ test("hbs: Foundry core helpers, partials by module path, jQuery subset", async 
   expect(out.helpers.editor).toContain('<textarea class="editor-content" name="notes"');
   expect(out.helpers.filePicker).toContain("disabled");
   expect(out.helpers.selectArray).toBe('<select><option value="">—</option><option value="1">One</option><option value="2" selected>Two</option></select>');
-  expect(out.helpers.formGroup).toContain('<select name="f"><option value="a">A</option><option value="b" selected>B</option></select>');
+  expect(out.helpers.formGroup).toMatch(/<select name="f"><option value="a">A<\/option><option value="b" selected(="")?>B<\/option><\/select>/);
   expect(out.helpers.formGroup).toContain('<p class="hint">H</p>');
   expect(out.jq).toMatchObject({
     length: 1, isForm: true, radius: "42", modeText: "Soft", changed: ["soft"], clicks: ["bump:bump"],
@@ -299,5 +312,127 @@ test("ApplicationV2 + HandlebarsApplicationMixin: PARTS, data-action handlers, t
   await win.locator('[data-action="close"]').click();
   await expect(page.locator(".application")).toHaveCount(0);
   expect(await page.evaluate(() => (globalThis as unknown as { panel: string[] }).panel)).toEqual(["open", "close"]);
+  expect(await page.evaluate(() => (globalThis as unknown as { __errors: string[] }).__errors)).toEqual([]);
+});
+
+test("core library (D-484): V2 form from core tab-navigation/form-footer parts + DataField inputs; Dialog v1 through templates/hud/dialog.html; missing core templates fail loudly", async ({ page }) => {
+  await bootLayer(page);
+  const boot = await page.evaluate(async () => {
+    interface FieldLike { fieldPath: string; label: string }
+    interface Model { schema: { fields: Record<string, FieldLike> }; toObject(): Record<string, unknown>; updateSource(c: Record<string, unknown>): Record<string, unknown>; radius: number; mode: string; enabled: boolean }
+    interface Layer {
+      ApplicationV2: unknown; HandlebarsApplicationMixin: (b: unknown) => unknown; Dialog: { confirm(o: unknown): Promise<unknown> };
+      renderTemplate(p: string, d: unknown): Promise<string>; describeTemplates(): { compiled: number; core: string[]; missing: string[] };
+      fields: { fields: Record<string, new (...a: unknown[]) => FieldLike>; DataModel: new (d?: unknown, o?: unknown) => Model; isDataModelClass(v: unknown): boolean; applications: { createTextInput(c: unknown): HTMLElement } };
+      core: { templatePaths: readonly string[] };
+    }
+    const w = globalThis as unknown as { layer: Layer; submitted: unknown[]; prefs: unknown; dialogHtml: string; missing: string };
+    const layer = w.layer;
+    const F = layer.fields.fields;
+    const NumberField = F.NumberField as new (o: unknown) => FieldLike;
+    const StringField = F.StringField as new (o: unknown) => FieldLike;
+    const BooleanField = F.BooleanField as new (o: unknown) => FieldLike;
+    class Prefs extends layer.fields.DataModel {
+      static defineSchema(): Record<string, FieldLike> {
+        return {
+          radius: new NumberField({ required: true, integer: true, min: 0, max: 60, step: 5, initial: 20, label: "T.Radius", hint: "T.RadiusHint" }),
+          mode: new StringField({ required: true, choices: { soft: "T.Soft", hard: "T.Hard" }, initial: "soft", label: "T.Mode" }),
+          enabled: new BooleanField({ initial: true }),
+        };
+      }
+    }
+    const Base = layer.HandlebarsApplicationMixin(layer.ApplicationV2) as new (o?: unknown) => { render(o: unknown): Promise<unknown>; _prepareTabs(g: string): unknown; model: Model };
+    class PrefsApp extends Base {
+      static DEFAULT_OPTIONS = { id: "prefs", classes: ["prefs-app"], tag: "form", window: { title: "T.Title" }, position: { width: 380 }, form: { handler: PrefsApp.onSubmit, closeOnSubmit: false } };
+      static PARTS = {
+        tabs: { template: "templates/generic/tab-navigation.hbs" },
+        body: { template: "modules/fsd/templates/prefs.hbs" },
+        footer: { template: "templates/generic/form-footer.hbs" },
+      };
+      static TABS = { primary: { tabs: [{ id: "general", label: "T.General", icon: "fa-solid fa-gear" }, { id: "advanced", label: "T.Advanced" }], initial: "general" } };
+      override model: Model = new Prefs({ radius: 25 });
+      static async onSubmit(this: PrefsApp, _event: unknown, _form: unknown, formData: { object: Record<string, unknown> }) {
+        this.model.updateSource(formData.object);
+        w.submitted.push(this.model.toObject());
+      }
+      async _prepareContext() {
+        return {
+          tabs: this._prepareTabs("primary"), fields: this.model.schema.fields, source: this.model.toObject(),
+          actorInput: layer.fields.applications.createTextInput({ name: "actor", value: "Mara" }).outerHTML,
+          buttons: [{ type: "submit", icon: "fa-solid fa-save", label: "SETTINGS.Save" }, { type: "button", action: "reset", label: "SETTINGS.Reset" }],
+        };
+      }
+    }
+    w.submitted = [];
+    const app = new PrefsApp();
+    w.prefs = app;
+    await app.render({ force: true });
+    // A v13 `.hbs` alias and a v11 `.html` name resolve to the same core entry; a core path the library lacks names itself.
+    w.dialogHtml = await layer.renderTemplate("templates/hud/dialog.hbs", { content: "<p>Keep?</p>", buttons: { yes: { label: "Yes" }, no: { label: "No" } }, default: "yes" });
+    try { await layer.renderTemplate("templates/sidebar/apps/compendium.html", {}); w.missing = "rendered"; } catch (error) { w.missing = (error as Error).message; }
+    return { isModel: layer.fields.isDataModelClass(Prefs), corePaths: layer.core.templatePaths.length, diagnostics: layer.describeTemplates() };
+  });
+  expect(boot.isModel).toBe(true);
+  expect(boot.corePaths).toBeGreaterThanOrEqual(10);
+  expect(boot.diagnostics.core).toEqual(["templates/generic/form-footer.hbs", "templates/generic/form-group.hbs", "templates/generic/tab-navigation.hbs", "templates/hud/dialog.html"]);
+  expect(boot.diagnostics.missing).toEqual(["templates/sidebar/apps/compendium.html"]);
+  const win = page.locator("form.application.prefs-app");
+  await expect(win).toBeVisible();
+  await expect(win.locator(".window-title")).toHaveText("Config window");
+  // Core tab-navigation part drives the module's own tab sections through the V2 tab machinery.
+  const nav = win.locator('nav.tabs[data-application-part="tabs"][data-group="primary"]');
+  await expect(nav.locator("a.item")).toHaveCount(2);
+  await expect(nav.locator('a.item.active[data-tab="general"]')).toContainText("General");
+  await expect(nav.locator('a.item[data-tab="general"] i.fa-solid.fa-gear')).toHaveCount(1);
+  await expect(win.locator(".prefs-general.tab.active")).toBeVisible();
+  // DataField-driven inputs: NumberField → number input with constraints, StringField choices → select, BooleanField → checkbox, labels localized through module + core keys.
+  const radius = win.locator('input[name="radius"]');
+  await expect(radius).toHaveAttribute("type", "number");
+  await expect(radius).toHaveAttribute("min", "0");
+  await expect(radius).toHaveAttribute("max", "60");
+  await expect(radius).toHaveValue("25");
+  const radiusGroup = win.locator(".form-group", { has: page.locator('input[name="radius"]') });
+  await expect(radiusGroup.locator("label")).toHaveText("Radius");
+  await expect(radiusGroup.locator("p.hint")).toHaveText("In feet");
+  await expect(win.locator('select[name="mode"] option')).toHaveText(["Soft", "Hard"]);
+  await expect(win.locator('select[name="mode"]')).toHaveValue("soft");
+  await expect(win.locator('input[name="enabled"]')).toBeChecked();
+  await expect(win.locator(".form-group", { has: page.locator('input[name="enabled"]') }).locator("label")).toHaveText("Yes");
+  await expect(win.locator(".form-group", { has: page.locator('input[name="actor"]') }).locator("label")).toHaveText("Actor");
+  await expect(win.locator('input[name="actor"]')).toHaveValue("Mara");
+  // Core form-footer part: localized core keys, icons, data-action on non-submit buttons.
+  const footer = win.locator('footer.form-footer[data-application-part="footer"]');
+  await expect(footer.locator('button[type="submit"]')).toContainText("Save Changes");
+  await expect(footer.locator('button[type="submit"] i.fa-save')).toHaveCount(1);
+  await expect(footer.locator('button[type="button"][data-action="reset"]')).toContainText("Reset Defaults");
+  await nav.locator('a.item[data-tab="advanced"]').click();
+  await expect(win.locator(".prefs-advanced.tab.active p.hint")).toHaveText("Are you sure?");
+  await expect(nav.locator('a.item.active[data-tab="advanced"]')).toHaveCount(1);
+  await nav.locator('a.item[data-tab="general"]').click();
+  // Submit through the core footer: the DataModel validates/casts (number stays a number) and refuses out-of-range values.
+  await radius.fill("40");
+  await win.locator('select[name="mode"]').selectOption("hard");
+  await footer.locator('button[type="submit"]').click();
+  expect(await page.evaluate(() => (globalThis as unknown as { submitted: unknown[] }).submitted)).toEqual([{ radius: 40, mode: "hard", enabled: true }]);
+  const rejected = await page.evaluate(() => {
+    const prefs = (globalThis as unknown as { prefs: { model: { updateSource(c: Record<string, unknown>): unknown; radius: number } } }).prefs;
+    try { prefs.model.updateSource({ radius: 999 }); return "accepted"; } catch (error) { return `${(error as Error).message} | radius=${prefs.model.radius}`; }
+  });
+  expect(rejected).toContain("radius must be at most 60");
+  expect(rejected).toContain("radius=40");
+  // Dialog v1 renders through the core dialog template (same markup a module gets from renderTemplate).
+  const dialogHtml = await page.evaluate(() => (globalThis as unknown as { dialogHtml: string }).dialogHtml);
+  expect(dialogHtml).toContain('<div class="dialog-content"><p>Keep?</p></div>');
+  expect(dialogHtml).toContain('class="dialog-button yes default bright" data-button="yes"');
+  const confirm = page.evaluate(() => (globalThis as unknown as { layer: { Dialog: { confirm: (o: unknown) => Promise<unknown> } } }).layer.Dialog.confirm({ title: "Keep?", content: "<p>Keep it?</p>" }));
+  const dialog = page.locator(".window-app.dialog");
+  await expect(dialog.locator(".dialog-content")).toHaveText("Keep it?");
+  await expect(dialog.locator("button.dialog-button.yes.default")).toContainText("Yes");
+  await dialog.locator("button.dialog-button.yes").click();
+  expect(await confirm).toBe(true);
+  await expect(page.locator(".window-app.dialog")).toHaveCount(0);
+  expect(await page.evaluate(() => (globalThis as unknown as { missing: string }).missing)).toContain("templates/sidebar/apps/compendium.html is not in the AIS Foundry core library yet");
+  await win.locator('[data-action="close"]').click();
+  await expect(page.locator(".application")).toHaveCount(0);
   expect(await page.evaluate(() => (globalThis as unknown as { __errors: string[] }).__errors)).toEqual([]);
 });

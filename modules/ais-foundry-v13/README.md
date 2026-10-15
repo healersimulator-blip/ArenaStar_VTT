@@ -1,4 +1,4 @@
-# AIS Foundry v13 adapter (0.3.0)
+# AIS Foundry v13 adapter (0.4.0)
 
 ArenaStar-authored code, loaded inside the separately approved guest's opaque AIS iframe.
 The adapter is a runtime provider, not an in-page module and not Foundry core (which is
@@ -49,21 +49,62 @@ Commands every imported Foundry module exposes to reviewed script macros:
   `document`, `fetch`, … are unreachable.
 
 Limits in this phase: host-only (GM device); startup within the kernel's 5 s budget; windows live
-inside the module's panel (no shell DOM: no sidebar injection, no canvas overlays); no FontAwesome,
-ProseMirror/`enrichHTML`, `FilePicker` (disabled control), `ContextMenu`, `DragDrop`; Foundry core
-`templates/…` are proprietary and unavailable — ship your own; no document CRUD beyond tags/light,
-no socket emit, no file storage; `packs/` are listed, not loaded; `game.actors/items/packs` are
-empty projections.
+inside the module's panel (no shell DOM: no sidebar injection, no canvas overlays); icons are the
+core library's own glyph set for the common `fa-*` names, not FontAwesome; no ProseMirror/
+`enrichHTML`, `FilePicker` (disabled control), `ContextMenu`, `DragDrop`; the core template
+library covers the paths modules reference most (below) — a core path it lacks fails with a
+message naming the path, and `foundry.info.templates.missing` lists it; no document CRUD beyond
+tags/light, no socket emit, no file storage; `packs/` are listed, not loaded; `game.actors/items/
+packs` are empty projections.
 
-## Layout (`runtimeProvider.scripts`, D-483)
+## Core resource library (`runtime/core.js`, `runtime/fields.js`, D-484)
 
-The manifest declares `runtimeProvider.scripts = ["runtime/hbs.js", "runtime/jq.js", "runtime/ui.js"]`
+Foundry modules reference resources the Foundry *host* provides and never ship themselves:
+`templates/generic/tab-navigation.hbs`, `templates/hud/dialog.html`, the `COMMON.*`/`SETTINGS.*`/
+`DOCUMENT.*` language keys, the base form CSS classes, `foundry.data.fields.*` and
+`foundry.abstract.DataModel`. The adapter is an emulator of that surface: it provides ArenaStar's
+own implementation of each, derived from the contract modules depend on (the path, the context
+shape, the DOM markers and class names modules select on, the key names) — never Foundry's files.
+
+- Templates (10 entries, 12 aliases so every generation's name resolves to one entry):
+  `templates/generic/{tab-navigation,form-footer,form-group,form-fields}.hbs`,
+  `templates/hud/dialog.html`, `templates/dice/{roll,tooltip,table-result}.html`,
+  `templates/sidebar/{document-create,chat-message}.html`. Resolution order: the module's own
+  files, then the library. `renderTemplate`, `loadTemplates`, `getTemplate`, `{{> "templates/…"}}`
+  partials and V2 `PARTS` all go through it; `Dialog` renders through `templates/hud/dialog.html`
+  (`options.template` overrides).
+- Language keys: 496 core keys (`Yes`, `COMMON.Cancel`, `SETTINGS.Save`, `DOCUMENT.Actor`,
+  `TYPES.Actor.npc`, `KEYBINDINGS.*`, `PERMISSION.*`, …) seeded under the module's own files, which
+  win on conflict.
+- CSS: `.standard-form`, `.form-group/.form-fields/.hint`, `.flexrow/.flexcol`, tabs, dialog
+  buttons, dice cards, chat message, table draws, `color-picker`/`file-picker`/`range-picker`
+  elements; `ui.js`'s base sheet maps the common `fa-*` icon names to text glyphs — all
+  self-contained (the sandbox CSP has no `font-src`/`img-src`).
+- Data layer: `foundry.data.fields` (`DataField`, `SchemaField`, `BooleanField`, `NumberField`,
+  `StringField`, `ObjectField`, `ArrayField`, `SetField`, `EmbeddedDataField`, `ColorField`,
+  `FilePathField`, `AngleField`, `AlphaField`, `HTMLField`, `JSONField`, `DocumentIdField`,
+  `ForeignDocumentField`, `TypedSchemaField`, `TypedObjectField`, `DocumentStatsField`, …) with
+  `clean/validate/initialize/toInput/toFormGroup`; `foundry.abstract.DataModel`/`TypeDataModel`
+  (`defineSchema`, `schema`, `cleanData`, `migrateData`, `updateSource` → nested diff, `validate`,
+  `toObject`, `clone`, `fromSource`); `foundry.applications.fields.create*Input/createFormGroup/
+  prepareSelectOptionGroups`; the `formGroup`/`formField`/`formInput` helpers render through it.
+  A `game.settings.register` with `type: SomeDataModel` stores the model's source as hidden JSON and
+  `get` returns an instance; `set` accepts an instance or source and validates strictly.
+- Also from this release: `Actor.TYPES`/`Item.TYPES`/`game.documentTypes`, `game.release`,
+  `CONST.TOKEN_DISPLAY_MODES`, `ACTIVE_EFFECT_MODES`, `DICE_ROLL_MODES`, `MACRO_TYPES`,
+  `MEASURED_TEMPLATE_TYPES`, wall/playlist/table enumerations.
+- `foundry.info.templates = { compiled, core: [paths used from the library], missing: [core paths asked for that the library lacks] }`.
+
+## Layout (`runtimeProvider.scripts`, D-483/D-484)
+
+The manifest declares `runtimeProvider.scripts = ["runtime/hbs.js", "runtime/jq.js", "runtime/core.js", "runtime/fields.js", "runtime/ui.js"]`
 — classic scripts the kernel evaluates in order inside the module frame before `runtime/adapter.js`
-(`entry`). Each publishes one factory (`__aisFoundryHbs`, `__aisFoundryJq`, `__aisFoundryUi`) that
-the adapter wires with its own `AIS`, `Hooks`, `game.i18n` and resource reader. No vendored
-Handlebars or jQuery: both are re-implementations of the surface Foundry modules use. The layer is
-unit-tested without a browser (`tests/packages/aisFoundryHbs.test.ts`) and in Chromium
-(`e2e/ais_foundry_ui_runtime.spec.ts`, `e2e/ais_foundry_module.spec.ts`).
+(`entry`). Each publishes one factory (`__aisFoundryHbs`, `__aisFoundryJq`, `__aisFoundryCore`,
+`__aisFoundryFields`, `__aisFoundryUi`) that the adapter wires with its own `AIS`, `Hooks`,
+`game.i18n` and resource reader. No vendored Handlebars or jQuery and no Foundry files: every layer
+is a re-implementation of the surface Foundry modules use. The layers are unit-tested without a
+browser (`tests/packages/aisFoundryHbs.test.ts`, `tests/packages/aisFoundryCore.test.ts`) and in
+Chromium (`e2e/ais_foundry_ui_runtime.spec.ts`, `e2e/ais_foundry_module.spec.ts`).
 
 ## Profile `foundry-v13-scene-tags-fx` (0.1.0 behaviour, unchanged)
 

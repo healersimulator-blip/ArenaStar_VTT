@@ -13,6 +13,11 @@
  *   templates/partials, jQuery listeners and `_updateObject` → game.settings.set; Dialog.confirm;
  *   an ApplicationV2 + HandlebarsApplicationMixin window with data-action handlers — renders
  *   inside the module's own sandboxed panel and is driven by real clicks in that frame.
+ * Part 4 (D-484): the emulator's own core resource library — the module references
+ *   `templates/generic/tab-navigation.hbs` / `form-footer.hbs` / `templates/dice/roll.html`,
+ *   core language keys (`COMMON.Yes`, `SETTINGS.Save`), `foundry.data.fields` + a DataModel-typed
+ *   setting, `Actor.TYPES`, `CONST.TOKEN_DISPLAY_MODES` — and ships none of it, exactly as modules
+ *   written for Foundry do; a core path the library lacks fails with a diagnosable error.
  */
 import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
@@ -113,6 +118,15 @@ function foundryCoreApiModuleZip(): Buffer {
       `  game.settings.register(MODULE_ID, "enabled", { name: "FSD.Enabled", scope: "client", config: true, type: Boolean, default: true });`,
       `  game.settings.register(MODULE_ID, "mode", { name: "FSD.Mode", scope: "world", config: true, type: String, choices: { soft: "FSD.Soft", hard: "FSD.Hard" }, default: "soft" });`,
       `  game.settings.register(MODULE_ID, "state", { scope: "world", config: false, type: Object, default: { seen: [] } });`,
+      // D-484: a DataModel-typed setting and a V2 form assembled from the emulator's core parts + DataField helpers.
+      `  const { NumberField, StringField, BooleanField } = foundry.data.fields;`,
+      `  class FsdPrefs extends foundry.abstract.DataModel {`,
+      `    static defineSchema() { return {`,
+      `      radius: new NumberField({ required: true, integer: true, min: 0, max: 60, step: 5, initial: 20, label: "FSD.Radius", hint: "FSD.RadiusHint" }),`,
+      `      mode: new StringField({ required: true, choices: { soft: "FSD.Soft", hard: "FSD.Hard" }, initial: "soft", label: "FSD.Mode" }),`,
+      `      enabled: new BooleanField({ initial: true, label: "FSD.Enabled" }) }; }`,
+      `  }`,
+      `  game.settings.register(MODULE_ID, "prefs", { scope: "world", config: false, type: FsdPrefs, default: new FsdPrefs() });`,
       `  game.keybindings.register(MODULE_ID, "toggle", { name: "Toggle", editable: [{ key: "KeyT" }], onDown: () => {} });`,
       `  Handlebars.registerHelper("fsdUpper", (text) => String(text).toUpperCase());`,
       `  CONFIG.debug.fsd = true;`,
@@ -140,7 +154,22 @@ function foundryCoreApiModuleZip(): Buffer {
       `    static ping(event, target) { this.pings = (this.pings ?? 0) + 1; state.pingTarget = target.dataset.action; ui.notifications.info("FSD ping " + this.pings); return this.render({ parts: ["body"] }); }`,
       `    async _prepareContext() { return { pings: this.pings ?? 0, radius: game.settings.get(MODULE_ID, "radius"), mode: game.settings.get(MODULE_ID, "mode") }; }`,
       `  }`,
-      `  globalThis.FsdUi = { FsdConfig, FsdPanel,`,
+      `  class FsdPrefsApp extends HandlebarsApplicationMixin(ApplicationV2) {`,
+      `    static DEFAULT_OPTIONS = { id: "fsd-prefs", classes: ["fsd-prefs"], tag: "form", window: { title: "FSD.PrefsTitle" }, position: { width: 400 },`,
+      `      form: { handler: FsdPrefsApp.onSubmit, closeOnSubmit: true } };`,
+      `    static PARTS = { tabs: { template: "templates/generic/tab-navigation.hbs" }, body: { template: "modules/fsd-demo/templates/prefs.hbs" }, footer: { template: "templates/generic/form-footer.hbs" } };`,
+      `    static TABS = { primary: { tabs: [{ id: "general", label: "FSD.General", icon: "fa-solid fa-gear" }, { id: "about", label: "FSD.About" }], initial: "general" } };`,
+      `    static async onSubmit(event, form, formData) {`,
+      `      const prefs = game.settings.get(MODULE_ID, "prefs");`,
+      `      prefs.updateSource(formData.object);`,
+      `      await game.settings.set(MODULE_ID, "prefs", prefs);`,
+      `      state.prefsSaved = game.settings.get(MODULE_ID, "prefs").toObject();`,
+      `      state.prefsIsModelAfter = game.settings.get(MODULE_ID, "prefs") instanceof FsdPrefs;`,
+      `    }`,
+      `    async _prepareContext() { const prefs = game.settings.get(MODULE_ID, "prefs"); return { tabs: this._prepareTabs("primary"), fields: prefs.schema.fields, prefs: prefs.toObject(),`,
+      `      buttons: [{ type: "submit", icon: "fa-solid fa-save", label: "SETTINGS.Save" }, { type: "button", action: "reset", label: "SETTINGS.Reset" }] }; }`,
+      `  }`,
+      `  globalThis.FsdUi = { FsdConfig, FsdPanel, FsdPrefsApp,`,
       `    confirm: () => Dialog.confirm({ title: game.i18n.localize("FSD.Sure"), content: '<p class="fsd">Apply?</p>' }),`,
       `    confirmV2: () => DialogV2.confirm({ window: { title: "FSD.Sure" }, content: "<p>Apply v2?</p>", rejectClose: false }),`,
       `    openPanel: () => new FsdPanel().render({ force: true }).then((app) => app.toObject()) };`,
@@ -156,6 +185,12 @@ function foundryCoreApiModuleZip(): Buffer {
       `  const saved = game.settings.get(MODULE_ID, "state");`,
       `  await game.settings.set(MODULE_ID, "state", { seen: [...saved.seen, "boot"] });`,
       `  state.persisted = game.settings.get(MODULE_ID, "state");`,
+      // D-484 probes: core i18n keys, document type lists, CONST enumerations, a core template render, and a core path the library lacks.
+      `  state.coreI18n = [game.i18n.localize("COMMON.Yes"), game.i18n.localize("SETTINGS.Save"), game.i18n.has("COMMON.No"), game.i18n.localize("FSD.Title")];`,
+      `  state.actorTypes = Actor.TYPES; state.displayModes = Object.keys(CONST.TOKEN_DISPLAY_MODES); state.release = game.release.generation;`,
+      `  const prefs = game.settings.get(MODULE_ID, "prefs"); state.prefsIsModel = prefs instanceof foundry.abstract.DataModel; state.prefs = prefs.toObject();`,
+      `  state.rollCard = await renderTemplate("templates/dice/roll.html", { formula: "1d20 + 5", total: 17, tooltip: "" });`,
+      `  try { await renderTemplate("templates/sidebar/apps/compendium.html", {}); state.missing = "rendered"; } catch (error) { state.missing = error.message; }`,
       `  ui.notifications.info(game.i18n.localize("FSD.Ready"));`,
       `  game.modules.get(MODULE_ID).api = { state: () => state, radius: () => game.settings.get(MODULE_ID, "radius"),`,
       `    setRadius: (value) => game.settings.set(MODULE_ID, "radius", value) };`,
@@ -164,7 +199,8 @@ function foundryCoreApiModuleZip(): Buffer {
     ].join("\n"),
     "lang/en.json": JSON.stringify({ FSD: { Title: "Foundry Settings Demo", Radius: "Light radius", RadiusHint: "In feet", Enabled: "Enabled on this device",
       Mode: "Mode", Soft: "Soft", Hard: "Hard", Hello: "Hello, {name}!", Ready: "Demo is ready",
-      ConfigTitle: "Settings demo config", Open: "Open config", OpenHint: "Opens the demo window", PanelTitle: "Demo panel", Save: "Save changes", Sure: "Are you sure?" } }),
+      ConfigTitle: "Settings demo config", Open: "Open config", OpenHint: "Opens the demo window", PanelTitle: "Demo panel", Save: "Save changes", Sure: "Are you sure?",
+      PrefsTitle: "Demo preferences", General: "General", About: "About" } }),
     "styles/demo.css": ".fsd { color: red; }\n",
     // D-483: templates exactly as a Foundry module ships them (module-absolute partial path, core helpers).
     "templates/config.hbs": [
@@ -179,6 +215,11 @@ function foundryCoreApiModuleZip(): Buffer {
     ].join("\n"),
     "templates/parts/number.hbs": "<div class=\"form-group\"><label>{{localize label}}</label><div class=\"form-fields\"><input type=\"number\" name=\"{{name}}\" value=\"{{value}}\" step=\"5\" data-dtype=\"Number\"></div></div>",
     "templates/panel.hbs": "<section class=\"fsd-panel\"><p class=\"fsd-pings\">pings: {{pings}}</p><p class=\"fsd-radius\">radius: {{radius}} ({{mode}})</p><button type=\"button\" data-action=\"ping\">Ping</button></section>",
+    // D-484: the body part uses only DataField helpers + a core partial; the tab strip and footer are core parts the module never ships.
+    "templates/prefs.hbs": "<div class=\"fsd-prefs-body\"><section class=\"tab {{tabs.general.cssClass}}\" data-group=\"primary\" data-tab=\"general\">"
+      + "{{formGroup fields.radius value=prefs.radius localize=true}}{{formGroup fields.mode value=prefs.mode localize=true}}{{formGroup fields.enabled value=prefs.enabled localize=true}}"
+      + "{{> \"templates/generic/form-group.hbs\" label=\"DOCUMENT.Actor\" input=\"<input name='actor' value='Mara'>\" localize=true}}"
+      + "</section><section class=\"tab {{tabs.about.cssClass}}\" data-group=\"primary\" data-tab=\"about\"><p class=\"fsd-about\">{{localize \"AreYouSure\"}}</p></section></div>",
   };
   const entries: Record<string, Uint8Array> = {};
   for (const [path, text] of Object.entries(files)) entries[`fsd-demo/${path}`] = strToU8(text);
@@ -247,6 +288,7 @@ test("D-482: a module written against Foundry core APIs boots; its game.settings
     { key: "fsd-demo.enabled", aisKey: "fsd_demo_enabled", scope: "device", kind: "boolean", synced: true, hidden: false },
     { key: "fsd-demo.mode", aisKey: "fsd_demo_mode", scope: "world", kind: "choice", synced: true, hidden: false },
     { key: "fsd-demo.state", aisKey: "fsd_demo_state", scope: "world", kind: "json", synced: true, hidden: true },
+    { key: "fsd-demo.prefs", aisKey: "fsd_demo_prefs", scope: "world", kind: "json", synced: true, hidden: true },
   ]);
   const state = await result(page, "fsd-demo", "foundry.api", { path: "state" }); // game.modules.get(id).api.state()
   expect(state).toMatchObject({ ready: true, classic: "object", side: true, clamp: 10, title: "Foundry Settings Demo", hello: "Hello, GM!",
@@ -259,11 +301,11 @@ test("D-482: a module written against Foundry core APIs boots; its game.settings
   await page.locator("#gm-settings").click();
   const review = page.locator('[data-ais-module-review="fsd-demo"]');
   const block = review.locator('[data-ais-settings="fsd-demo"]');
-  await expect(block.locator("summary")).toContainText("Settings (4)");
+  await expect(block.locator("summary")).toContainText("Settings (5)");
   await block.locator("summary").click();
   const form = block.locator('[data-ais-settings-form="fsd-demo"]');
   await expect(form.locator("[data-ais-setting]")).toHaveCount(3);
-  await expect(form.locator("[data-ais-settings-hidden]")).toHaveAttribute("data-ais-settings-hidden", "1");
+  await expect(form.locator("[data-ais-settings-hidden]")).toHaveAttribute("data-ais-settings-hidden", "2");
   const radius = form.locator('[data-ais-setting="fsd_demo_radius"]');
   await expect(radius).toContainText("Light radius");
   await expect(radius).toContainText("In feet");
@@ -366,4 +408,71 @@ test("D-483: the module's Foundry windows (FormApplication menu, Dialog.confirm,
   await expect(panel).toHaveAttribute("data-ais-panel-open", "true");
   await expect(frame.locator(".application.fsd")).toHaveCount(1);
   await expect(frame.locator(".fsd-pings")).toHaveText("pings: 0"); // foundry.ui {app} constructs a fresh instance
+});
+
+test("D-484: the emulator's own core resource library — core templates, core i18n keys, foundry.data.fields/DataModel settings — serves a module that ships none of it", async ({ page }) => {
+  test.setTimeout(180_000);
+  await openWorld(page);
+  await page.locator("#gm-settings").click();
+  await importPackage(page, "fsd-demo-1.0.0.zip", foundryCoreApiModuleZip(), "fsd-demo");
+  await approve(page, "ais-foundry-v13");
+  await approve(page, "fsd-demo");
+  await reloadAndWaitReady(page, ["fsd-demo"]);
+  const panel = page.locator('[data-ais-panel="fsd-demo"]');
+  const frame = page.frameLocator('iframe[title="AIS module:fsd-demo"]');
+
+  // Ready-hook probes: core keys resolve (module keys still win), type lists and enumerations exist,
+  // the DataModel-typed setting comes back as an instance, a core template renders, a missing one names itself.
+  const state = await result(page, "fsd-demo", "foundry.api", { path: "state" });
+  expect(state).toMatchObject({
+    coreI18n: ["Yes", "Save Changes", true, "Foundry Settings Demo"], actorTypes: ["base", "character", "npc"], release: 13,
+    displayModes: ["NONE", "CONTROL", "OWNER_HOVER", "HOVER", "OWNER", "ALWAYS"],
+    prefsIsModel: true, prefs: { radius: 20, mode: "soft", enabled: true },
+  });
+  expect(state.rollCard).toContain('<div class="dice-formula">1d20 + 5</div>');
+  expect(state.rollCard).toContain('<h4 class="dice-total">17</h4>');
+  expect(state.missing).toContain("Core template templates/sidebar/apps/compendium.html is not in the AIS Foundry core library yet");
+  const info = await result(page, "fsd-demo", "foundry.info");
+  expect(info.templates).toMatchObject({ core: ["templates/dice/roll.html"], missing: ["templates/sidebar/apps/compendium.html"] });
+  expect(info.settings).toContainEqual({ key: "fsd-demo.prefs", aisKey: "fsd_demo_prefs", scope: "world", kind: "json", synced: true, hidden: true });
+
+  // The V2 form: tab strip and footer are core parts; the inputs come from DataFields; labels from module + core keys.
+  const opened = await result(page, "fsd-demo", "foundry.ui", { app: "FsdUi.FsdPrefsApp" });
+  expect(opened).toMatchObject({ id: "fsd-prefs", class: "FsdPrefsApp", title: "Demo preferences", rendered: true });
+  await expect(panel).toHaveAttribute("data-ais-panel-open", "true");
+  const win = frame.locator("form#fsd-prefs.application");
+  await expect(win.locator(".window-title")).toHaveText("Demo preferences");
+  const nav = win.locator('nav.tabs[data-application-part="tabs"][data-group="primary"]');
+  await expect(nav.locator("a.item")).toHaveCount(2);
+  await expect(nav.locator('a.item.active[data-tab="general"]')).toContainText("General");
+  const radius = win.locator('input[name="radius"]');
+  await expect(radius).toHaveAttribute("type", "number");
+  await expect(radius).toHaveAttribute("max", "60");
+  await expect(radius).toHaveValue("20");
+  const radiusGroup = win.locator(".form-group", { has: frame.locator('input[name="radius"]') });
+  await expect(radiusGroup.locator("label")).toHaveText("Light radius");
+  await expect(radiusGroup.locator("p.hint")).toHaveText("In feet");
+  await expect(win.locator('select[name="mode"] option')).toHaveText(["Soft", "Hard"]);
+  await expect(win.locator('input[name="enabled"]')).toBeChecked();
+  await expect(win.locator(".form-group", { has: frame.locator('input[name="actor"]') }).locator("label")).toHaveText("Actor");
+  const footer = win.locator('footer.form-footer[data-application-part="footer"]');
+  await expect(footer.locator('button[type="submit"]')).toContainText("Save Changes");
+  await expect(footer.locator('button[data-action="reset"]')).toContainText("Reset Defaults");
+  await nav.locator('a.item[data-tab="about"]').click();
+  await expect(win.locator('.tab.active[data-tab="about"] .fsd-about')).toHaveText("Are you sure?");
+  await nav.locator('a.item[data-tab="general"]').click();
+  // Submit through the core footer → DataModel.updateSource (cast + validated) → game.settings.set → replicated world settings.
+  await radius.fill("35");
+  await win.locator('select[name="mode"]').selectOption("hard");
+  await footer.locator('button[type="submit"]').click();
+  await expect(frame.locator("#fsd-prefs")).toHaveCount(0); // closeOnSubmit
+  await expect.poll(() => settingsDoc(page, "fsd-demo")).toMatchObject({ fsd_demo_prefs: JSON.stringify({ radius: 35, mode: "hard", enabled: true }) });
+  const after = await result(page, "fsd-demo", "foundry.api", { path: "state" });
+  expect(after).toMatchObject({ prefsSaved: { radius: 35, mode: "hard", enabled: true }, prefsIsModelAfter: true });
+  // Out-of-range source is refused by the model before anything is written.
+  const rejected = await invoke(page, "fsd-demo", "foundry.api", { path: "game.settings.set", args: ["fsd-demo", "prefs", { radius: 999 }] });
+  await expect(rejected.getByRole("status")).toContainText("radius must be at most 60");
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+  expect(await settingsDoc(page, "fsd-demo")).toMatchObject({ fsd_demo_prefs: JSON.stringify({ radius: 35, mode: "hard", enabled: true }) });
+  expect((await result(page, "fsd-demo", "foundry.info")).templates.core).toEqual(["templates/dice/roll.html", "templates/generic/form-footer.hbs", "templates/generic/form-group.hbs", "templates/generic/tab-navigation.hbs"]);
 });

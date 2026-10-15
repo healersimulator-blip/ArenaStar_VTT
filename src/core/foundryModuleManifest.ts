@@ -27,7 +27,7 @@ import { isSafePackagePath, validatePackageManifest, type PackageManifest } from
 import { AIS_API_VERSION } from "./automationInterconnect";
 
 /** The runtime provider every synthesized Foundry module binds to, exact version. */
-export const FOUNDRY_ADAPTER = Object.freeze({ id: "ais-foundry-v13", version: "0.3.0", profile: "foundry-module" });
+export const FOUNDRY_ADAPTER = Object.freeze({ id: "ais-foundry-v13", version: "0.4.0", profile: "foundry-module" });
 /** Path under which the synthesized ArenaStar manifest is written into the imported files. */
 export const FOUNDRY_SYNTHESIZED_MANIFEST = "manifest.json";
 /** Inert stubs the AIS kernel requires (entry + runtime script); the adapter does the loading. */

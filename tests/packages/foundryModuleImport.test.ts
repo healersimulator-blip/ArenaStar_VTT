@@ -116,7 +116,7 @@ describe("D-482: Foundry module.json import", () => {
       id: "tagger", name: "Tagger", version: "0.0.0", type: "module",
       interconnect: {
         entry: "ais-foundry/entry.js",
-        requires: [{ id: "ais-foundry-v13", version: "0.3.0" }],
+        requires: [{ id: "ais-foundry-v13", version: "0.4.0" }],
         runtime: { provider: "ais-foundry-v13", profile: "foundry-module", scripts: ["ais-foundry/loader.js"], configuration: "module.json" },
         commands: [{ id: "foundry.info", contract: 1 }, { id: "foundry.api", contract: 1 }, { id: "foundry.ui", contract: 1 }],
         // D-483: Foundry windows render inside the module's own sandboxed panel.

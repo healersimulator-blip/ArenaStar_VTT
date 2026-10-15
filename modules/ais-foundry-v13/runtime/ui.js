@@ -18,6 +18,9 @@
     const { mergeObject, expandObject, escapeHTML } = utils;
     const doc = document;
     const SafeString = Handlebars.SafeString;
+    // D-484: the emulator's core resource library (templates/lang/css) and the data-field layer.
+    const core = globalThis.__aisFoundryCore ?? null;
+    const fieldsLayer = globalThis.__aisFoundryFields ? globalThis.__aisFoundryFields.install({ i18n, escapeHTML, doc }) : null;
 
     // ═══════════════════════════ templates ═══════════════════════════
     const compiledTemplates = new Map();
@@ -27,18 +30,30 @@
       if (p.startsWith(prefix)) p = p.slice(prefix.length);
       return p;
     };
+    /** D-484: templates the module used from the core library, and core paths it asked for that the library lacks. */
+    const templateDiagnostics = { core: new Set(), missing: new Set() };
     const templateSource = (path) => {
       const key = normalizeTemplatePath(path);
-      if (resources.has(key)) return { key, source: resources.get(key) };
-      if (resources.has(path)) return { key: path, source: resources.get(path) };
+      if (resources.has(key)) return { key, source: resources.get(key), origin: "module" };
+      if (resources.has(path)) return { key: path, source: resources.get(path), origin: "module" };
+      // Resolution order: the module's own files, then the emulator's core library (every Foundry
+      // generation's name for a template resolves to the same entry) — modules never ship core files.
+      const canonical = core?.resolveTemplate(key);
+      if (canonical) return { key: `core:${canonical}`, source: core.templates[canonical], origin: "core", canonical };
       return null;
     };
     const compileTemplate = (path) => {
       const found = templateSource(path);
       if (!found) {
-        const core = /^(templates|systems)\//.test(normalizeTemplatePath(path)) ? " Foundry core and system templates are not available in the AIS sandbox; ship the template with the module." : "";
-        throw new Error(`Template ${path} is not part of ${foundryId}'s distribution.${core}`);
+        const normalized = normalizeTemplatePath(path);
+        if (/^templates\//.test(normalized)) {
+          templateDiagnostics.missing.add(normalized);
+          throw new Error(`Core template ${normalized} is not in the AIS Foundry core library yet (${core ? core.templatePaths.length : 0} core templates are); report it with the module name so it can be added.`);
+        }
+        if (/^systems\//.test(normalized)) throw new Error(`Template ${normalized} belongs to a game system; system templates are outside the Foundry core-API target (Target B).`);
+        throw new Error(`Template ${path} is not part of ${foundryId}'s distribution.`);
       }
+      if (found.origin === "core") templateDiagnostics.core.add(found.canonical);
       let fn = compiledTemplates.get(found.key);
       if (!fn) {
         fn = Handlebars.compile(found.source);
@@ -46,7 +61,12 @@
       }
       return fn;
     };
-    Handlebars.partialResolver = (name) => templateSource(name)?.source;
+    Handlebars.partialResolver = (name) => {
+      const found = templateSource(name);
+      if (found?.origin === "core") templateDiagnostics.core.add(found.canonical);
+      return found?.source;
+    };
+    const describeTemplates = () => ({ compiled: compiledTemplates.size, core: [...templateDiagnostics.core].sort(), missing: [...templateDiagnostics.missing].sort() });
     const getTemplate = async (path) => compileTemplate(path);
     const renderTemplate = async (path, data = {}) => compileTemplate(path)(data, { allowProtoMethodsByDefault: true, allowProtoPropertiesByDefault: true });
     const loadTemplates = async (paths) => {
@@ -172,9 +192,9 @@
         const hash = options?.hash ?? {};
         return new SafeString(`<button type="button" class="file-picker" disabled${attr("data-type", hash.type)}${attr("data-target", hash.target)} title="File pickers are not available in the AIS sandbox"><i class="fas fa-file-import fa-fw"></i></button>`);
       },
-      formInput(field, options) { return new SafeString(formInputHtml(field, options?.hash ?? {})); },
-      formField(field, options) { return new SafeString(formGroupHtml(field, options?.hash ?? {})); },
-      formGroup(field, options) { return new SafeString(formGroupHtml(field, options?.hash ?? {})); },
+      formInput(field, options) { return new SafeString(fieldsLayer ? fieldsLayer.html(fieldsLayer.renderInput(field, options?.hash ?? {})) : formInputHtml(field, options?.hash ?? {})); },
+      formField(field, options) { return new SafeString(fieldsLayer ? fieldsLayer.html(fieldsLayer.renderGroup(field, options?.hash ?? {})) : formGroupHtml(field, options?.hash ?? {})); },
+      formGroup(field, options) { return new SafeString(fieldsLayer ? fieldsLayer.html(fieldsLayer.renderGroup(field, options?.hash ?? {})) : formGroupHtml(field, options?.hash ?? {})); },
       formFieldset(options) { return new SafeString(`<fieldset>${options?.hash?.legend ? `<legend>${escapeHTML(localizeText(options.hash.legend))}</legend>` : ""}${options?.fn ? options.fn(this) : ""}</fieldset>`); },
       object(options) { return options?.hash ?? {}; },
       array(...args) { args.pop(); return args; },
@@ -308,6 +328,12 @@
     style.dataset.aisFoundryUi = "base";
     style.textContent = STYLE;
     doc.head.appendChild(style);
+    if (core?.css) {
+      const coreStyle = doc.createElement("style");
+      coreStyle.dataset.aisFoundryUi = "core";
+      coreStyle.textContent = core.css;
+      doc.head.appendChild(coreStyle);
+    }
 
     const windowRegistry = new Map();   // key → { app, element, v2 }
     let zCounter = 100;
@@ -689,16 +715,15 @@
         this.data = data;
         this._submitted = false;
       }
-      static get defaultOptions() { return mergeObject(super.defaultOptions, { classes: ["dialog"], width: 400, jQuery: true }); }
+      static get defaultOptions() { return mergeObject(super.defaultOptions, { classes: ["dialog"], width: 400, jQuery: true, template: "templates/hud/dialog.html" }); }
       get title() { return this.data.title ?? "Dialog"; }
       async _renderInner() {
         const content = await Promise.resolve(typeof this.data.content === "function" ? this.data.content() : this.data.content);
-        const buttons = Object.entries(this.data.buttons ?? {}).filter(([, button]) => button && button.condition !== false && (typeof button.condition !== "function" || button.condition()));
-        let html = `<div class="dialog-content">${content ?? ""}</div>`;
-        if (buttons.length) {
-          html += `<div class="dialog-buttons">${buttons.map(([key, button]) =>
-            `<button type="button" class="dialog-button ${escapeHTML(key)}${key === this.data.default ? " default bright" : ""}" data-button="${escapeHTML(key)}">${button.icon ?? ""}<span>${button.label ?? ""}</span></button>`).join("")}</div>`;
-        }
+        const buttons = {};
+        for (const [key, button] of Object.entries(this.data.buttons ?? {}))
+          if (button && button.condition !== false && (typeof button.condition !== "function" || button.condition())) buttons[key] = button;
+        // D-484: the same core template a module may override through `options.template` or render itself.
+        const html = await renderTemplate(this.options.template || "templates/hud/dialog.html", { content: content ?? "", buttons, default: this.data.default });
         return $(`<div class="dialog-body">${html}</div>`).contents();
       }
       activateListeners(html) {
@@ -1244,8 +1269,8 @@
     return Object.freeze({
       Application, FormApplication, DocumentSheet, Dialog, Tabs, FormDataExtended,
       ApplicationV2, HandlebarsApplicationMixin, DocumentSheetV2, DialogV2,
-      renderTemplate, loadTemplates, getTemplate, templateCount: () => compiledTemplates.size,
-      ui, instances: v2Instances, openMenu, describeWindows, syncPanel, closeAll,
+      renderTemplate, loadTemplates, getTemplate, templateCount: () => compiledTemplates.size, describeTemplates,
+      ui, instances: v2Instances, openMenu, describeWindows, syncPanel, closeAll, fields: fieldsLayer, core,
     });
   };
   globalThis.__aisFoundryUi = Object.freeze({ install });

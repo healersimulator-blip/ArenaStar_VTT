@@ -7,7 +7,7 @@
   "interconnect": {
     "api": "arena.ais/1",
     "entry": "automation/commands.js",
-    "requires": [{ "id": "ais-foundry-v13", "version": "0.3.0" }],
+    "requires": [{ "id": "ais-foundry-v13", "version": "0.4.0" }],
     "runtime": {
       "provider": "ais-foundry-v13",
       "profile": "foundry-v13-scene-tags-fx",
