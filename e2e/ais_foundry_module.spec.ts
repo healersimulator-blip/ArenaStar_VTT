@@ -193,8 +193,28 @@ function foundryCoreApiModuleZip(): Buffer {
       `  try { await renderTemplate("templates/sidebar/apps/compendium.html", {}); state.missing = "rendered"; } catch (error) { state.missing = error.message; }`,
       `  ui.notifications.info(game.i18n.localize("FSD.Ready"));`,
       `  game.modules.get(MODULE_ID).api = { state: () => state, radius: () => game.settings.get(MODULE_ID, "radius"),`,
-      `    setRadius: (value) => game.settings.set(MODULE_ID, "radius", value) };`,
+      `    setRadius: (value) => game.settings.set(MODULE_ID, "radius", value), documents: probeDocuments, docEvents: () => state.docEvents,`,
+      `    actorView: (id) => { const actor = game.actors.get(id); return actor ? { name: actor.name, hp: actor.system.hp?.value ?? null, flags: actor.flags[MODULE_ID] ?? null, items: actor.items.map((item) => item.name) } : null; } };`,
       `});`,
+      // D-485 probes: plain Foundry document code — classes, embedded collections, flags, uuids and the create*/update*/delete* hooks.
+      `state.docEvents = [];`,
+      `for (const hook of ["createActor", "updateActor", "deleteActor", "createItem", "updateItem", "deleteItem", "createJournalEntry"])`,
+      `  Hooks.on(hook, (doc, changes, options, userId) => state.docEvents.push({ hook, name: doc.name, uuid: doc.uuid, changes: hook.startsWith("update") ? changes : null, userId: hook.startsWith("delete") ? options : userId }));`,
+      `async function probeDocuments() {`,
+      `  const before = { actors: game.actors.size, users: game.users.size, isGM: game.user.isGM, userId: game.user.id, userName: game.user.name, userDoc: game.user instanceof User };`,
+      `  const actor = await Actor.create({ name: "FSD Guard", type: "npc", system: { hp: { value: 5, max: 5 } }, flags: { [MODULE_ID]: { origin: "probe" } },`,
+      `    items: [{ name: "Shield", type: "equipment" }] });`,
+      `  const [torch] = await actor.createEmbeddedDocuments("Item", [{ name: "Torch", type: "weapon", system: { lit: false } }]);`,
+      `  await torch.update({ "system.lit": true });`,
+      `  await actor.setFlag(MODULE_ID, "count", 1);`,
+      `  await actor.update({ name: "FSD Guard II", "system.hp.value": 4 });`,
+      `  const journal = await JournalEntry.create({ name: "FSD Notes", pages: [{ name: "Plan", type: "text", text: { content: "<p>Hold the gate</p>" } }] });`,
+      `  const resolved = { torchSync: fromUuidSync(torch.uuid) === torch, actorAsync: (await fromUuid(actor.uuid)) === actor, pageType: journal.pages.contents[0].type,`,
+      `    pageText: journal.pages.contents[0].text.content, byName: game.actors.getName("FSD Guard II") === actor, inCollection: game.actors.get(actor.id) === actor };`,
+      `  return { before, actorId: actor.id, uuid: actor.uuid, type: actor.type, name: actor.name, hp: actor.system.hp.value, isOwner: actor.isOwner, flags: actor.flags[MODULE_ID],`,
+      `    items: actor.items.map((item) => ({ name: item.name, type: item.type, lit: item.system.lit ?? null, uuid: item.uuid })), itemTypes: Object.keys(actor.itemTypes).sort(),`,
+      `    journalId: journal.id, resolved, after: { actors: game.actors.size, journal: game.journal.size } };`,
+      `}`,
       "",
     ].join("\n"),
     "lang/en.json": JSON.stringify({ FSD: { Title: "Foundry Settings Demo", Radius: "Light radius", RadiusHint: "In feet", Enabled: "Enabled on this device",
@@ -475,4 +495,75 @@ test("D-484: the emulator's own core resource library — core templates, core i
   await page.locator('[data-window="macros"] [data-window-close]').click();
   expect(await settingsDoc(page, "fsd-demo")).toMatchObject({ fsd_demo_prefs: JSON.stringify({ radius: 35, mode: "hard", enabled: true }) });
   expect((await result(page, "fsd-demo", "foundry.info")).templates.core).toEqual(["templates/dice/roll.html", "templates/generic/form-footer.hbs", "templates/generic/form-group.hbs", "templates/generic/tab-navigation.hbs"]);
+});
+
+test("D-485: world documents — a Foundry module creates/updates Actors, embedded Items and a JournalEntry through the generic document service; hooks follow replication both ways", async ({ page }) => {
+  test.setTimeout(180_000);
+  await openWorld(page);
+  await page.locator("#gm-settings").click();
+  await importPackage(page, "fsd-demo-1.0.0.zip", foundryCoreApiModuleZip(), "fsd-demo");
+  await approve(page, "ais-foundry-v13");
+  await approve(page, "fsd-demo");
+  await reloadAndWaitReady(page, ["fsd-demo"]);
+
+  // The replica hydrated before `init`: the GM device's user and collections are real documents.
+  const info = await result(page, "fsd-demo", "foundry.info");
+  expect(info.documents).toMatchObject({ userName: expect.any(String), events: expect.any(Number), writes: 0, rejectedWrites: 0, hookErrors: [] });
+  expect(typeof info.documents.hydrateMs).toBe("number");
+  expect(info.documents.collections.users).toBeGreaterThanOrEqual(1);
+  const hydratedActors: number = info.documents.collections.actors;
+
+  // Plain Foundry document code, run inside the module: create → embedded create → update → flags → journal with inline page.
+  const probe = await result(page, "fsd-demo", "foundry.api", { path: "documents" });
+  expect(probe.before).toMatchObject({ actors: hydratedActors, isGM: true, userDoc: true, userName: info.documents.userName });
+  expect(probe).toMatchObject({
+    uuid: `Actor.${probe.actorId}`, type: "npc", name: "FSD Guard II", hp: 4, isOwner: true, flags: { origin: "probe", count: 1 },
+    itemTypes: ["equipment", "weapon"],
+    resolved: { torchSync: true, actorAsync: true, pageType: "text", pageText: "<p>Hold the gate</p>", byName: true, inCollection: true },
+    after: { actors: hydratedActors + 1 },
+  });
+  expect(probe.items).toEqual([
+    { name: "Shield", type: "equipment", lit: null, uuid: expect.stringMatching(new RegExp(`^Actor\\.${probe.actorId}\\.Item\\.`)) },
+    { name: "Torch", type: "weapon", lit: true, uuid: expect.stringMatching(new RegExp(`^Actor\\.${probe.actorId}\\.Item\\.`)) },
+  ]);
+
+  // The shell's own store holds store-shaped documents: kind markers, subtype flag, creator ownership, completed embedded rows.
+  const stored = await page.evaluate(({ actorId, journalId }) => {
+    const client = (globalThis as unknown as { __vttE2E: { app: { gm: { client: import("../src/client/sync").ClientSync } } } }).__vttE2E.app.gm.client;
+    const actor = client.store.get("actors", actorId) as import("../src/core/documents").ActorDocument | undefined;
+    const journal = client.store.get("journals", journalId) as import("../src/core/documents").JournalDocument | undefined;
+    return { actor: actor && { type: actor.type, name: actor.name, flags: actor.flags, system: actor.system, ownerLevels: Object.values(actor.ownership),
+      items: actor.items.map((item) => ({ type: item.type, name: item.name, system: item.system, hasId: typeof item._id === "string" && item._id.length > 0, effects: item.effects })) },
+      journal: journal && { type: journal.type, pages: journal.pages.map((p) => ({ type: p.type, name: p.name, text: p.text, src: p.src })) }, userId: client.user?.id };
+  }, { actorId: probe.actorId, journalId: probe.journalId });
+  expect(stored.actor).toEqual({
+    type: "actor", name: "FSD Guard II", flags: { "fsd-demo": { origin: "probe", count: 1 }, "ais-foundry": { type: "npc" } }, system: { hp: { value: 4, max: 5 } },
+    ownerLevels: expect.arrayContaining([3]),
+    items: [
+      { type: "item", name: "Shield", system: {}, hasId: true, effects: [] },
+      { type: "item", name: "Torch", system: { lit: true }, hasId: true, effects: [] },
+    ],
+  });
+  expect(stored.journal).toEqual({ type: "journal", pages: [{ type: "page", name: "Plan", text: "<p>Hold the gate</p>", src: null }] });
+  expect(probe.before.userId).toBe(stored.userId);
+
+  // Post hooks fired once per replicated change, Foundry-shaped `(doc, changes, options, userId)`.
+  const events = await result(page, "fsd-demo", "foundry.api", { path: "docEvents" });
+  const names = events.map((row: { hook: string; name: string }) => `${row.hook}:${row.name}`);
+  expect(names).toEqual(["createActor:FSD Guard", "createItem:Torch", "updateItem:Torch", "updateActor:FSD Guard", "updateActor:FSD Guard II", "createJournalEntry:FSD Notes"]);
+  expect(events[2]).toMatchObject({ changes: { system: { lit: true } }, userId: stored.userId });
+  expect(events[3]).toMatchObject({ changes: { flags: { "fsd-demo": { count: 1 } } } });
+  expect(events[4]).toMatchObject({ changes: { name: "FSD Guard II", system: { hp: { value: 4 } } } });
+
+  // The other direction: the shell edits the actor; the module's instance refreshes in place and `updateActor` fires.
+  await page.evaluate(async (actorId) => {
+    const client = (globalThis as unknown as { __vttE2E: { app: { gm: { client: import("../src/client/sync").ClientSync } } } }).__vttE2E.app.gm.client;
+    await client.submitAndWait([{ kind: "update", ref: { coll: "actors", id: actorId }, diff: { "system.hp.value": 9 } }]);
+  }, probe.actorId);
+  await expect.poll(async () => (await result(page, "fsd-demo", "foundry.api", { path: "actorView", args: [probe.actorId] })).hp, { timeout: 15_000 }).toBe(9);
+  const afterShell = await result(page, "fsd-demo", "foundry.api", { path: "docEvents" });
+  expect(afterShell.at(-1)).toMatchObject({ hook: "updateActor", name: "FSD Guard II", changes: { system: { hp: { value: 9 } } } });
+  const finalInfo = await result(page, "fsd-demo", "foundry.info");
+  expect(finalInfo.documents).toMatchObject({ writes: 6, rejectedWrites: 0, hookErrors: [] });
+  expect(finalInfo.unsupportedCalls).toEqual([]);
 });

@@ -28,6 +28,8 @@ export const AIS_EVENTS = [
   "module.settings.changed",
   /** D-483: the user closed this module's own panel from the host chrome (the frame is hidden, not stopped). */
   "ui.panel.closed",
+  /** D-485: a committed transaction touched documents of a collection exposed to modules (per-root entries). */
+  "documents.changed",
 ] as const;
 export type AisEventName = (typeof AIS_EVENTS)[number];
 
@@ -39,6 +41,8 @@ export type AisEventName = (typeof AIS_EVENTS)[number];
 export function aisEventSubscriptionCapability(event: AisEventName): AisCapability | null {
   if (event === "module.settings.changed") return null;
   if (event === "ui.panel.closed") return "ui.panel";
+  // D-485: document change notifications carry document ids and diffs — the read grant covers them.
+  if (event === "documents.changed") return "documents.read";
   return "action.observe";
 }
 
@@ -92,6 +96,8 @@ export interface AisEventPayloads {
     /** Only the host chrome's Close button raises this; `ui.panel.close` from the module itself does not. */
     reason: "user";
   };
+  /** D-485: see `aisDocumentChanges` — one entry per op on an exposed collection, root-filtered. */
+  "documents.changed": import("./aisDocuments").AisDocumentsChangedPayload;
 }
 
 export interface AisTokenLightChangeRef { sceneId: string; tokenId: string }
@@ -162,6 +168,10 @@ export const AIS_CAPABILITIES = [
   "compendium.read",
   // D-478: call a declared command of another running module through the kernel (AIS.modules.invoke).
   "modules.invoke",
+  // D-485: read the world documents this device's user can see (actors, items, journals, …) and
+  // observe their changes; write them as ordinary transactions under that user's authority.
+  "documents.read",
+  "documents.write",
 ] as const;
 export type AisCapability = (typeof AIS_CAPABILITIES)[number];
 

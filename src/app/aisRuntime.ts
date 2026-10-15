@@ -7,6 +7,7 @@ import type { AisProfileMsg } from "../core/messages";
 import { buildAisPlayerProfile } from "./aisPlayerProfile";
 import type { Json, SceneDocument, SettingsDocument, TokenDocument, ActorDocument } from "../core/documents";
 import type { Op } from "../core/ops";
+import { aisDocumentChanges } from "../core/aisDocuments";
 import {
   aisTokenLightChanges,
   type AisCapability,
@@ -100,6 +101,15 @@ export function assertAisModuleConsent(
   }
 }
 
+function jsonByteLength(value: unknown): number | null {
+  try {
+    const text = JSON.stringify(value);
+    return text === undefined ? null : new TextEncoder().encode(text).byteLength;
+  } catch {
+    return null;
+  }
+}
+
 export class AisRuntime {
   private readonly hosts = new Map<string, AisModuleIframe>();
   private readonly statuses: Record<string, AisModuleRuntimeStatus> = {};
@@ -153,6 +163,9 @@ export class AisRuntime {
       app.gm.bus.on("ops", (message) => {
         this.emit("world.ops.committed", { seq: message.envelope.seq, operationCount: message.envelope.ops.length });
         this.emitWorldSettingChanges(message.envelope.ops);
+        // D-485: per-root document change notifications (frames only receive them after a `documents.read` subscription).
+        const documentChanges = aisDocumentChanges(message.envelope.seq, message.envelope.by, message.envelope.ops, jsonByteLength);
+        if (documentChanges) this.emit("documents.changed", documentChanges);
         const scene = this.scene();
         if (!scene) return;
         for (const change of aisTokenLightChanges(message.envelope.ops)) {
@@ -296,6 +309,11 @@ export class AisRuntime {
             requires: module.requires ?? [],
             list: () => this.moduleDirectory(),
             invoke: (target, commandId, input, lifetime) => this.invokeFromModule(module.packageId, target, commandId, input, lifetime),
+          },
+          // D-485: the GM device's full world; writes run as the GM through `submit`.
+          documents: {
+            getAll: (collection) => app.store.getAll(collection),
+            get: (collection, id) => app.store.get(collection, id),
           },
         }),
       });

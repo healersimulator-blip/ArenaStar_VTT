@@ -139,6 +139,18 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
             .then(function (row) { return row.result; });
         }
       }),
+      // D-485: generic documents (this device user's view; writes validated by the host).
+      documents: Object.freeze({
+        context: function () { return call("documents.context", {}); },
+        list: function (collection, offset, limit) {
+          var request = { collection: collection };
+          if (offset !== undefined) request.offset = offset;
+          if (limit !== undefined) request.limit = limit;
+          return call("documents.list", request);
+        },
+        get: function (ref) { return call("documents.get", ref).then(function (row) { return row.document; }); },
+        mutate: function (ops) { return call("documents.mutate", { ops: ops }); }
+      }),
       chat: Object.freeze({ post: function (content) { return call("chat.post", { content: content }); } }),
       ui: Object.freeze({
         notify: function (message, level) { return call("ui.notify", { message: String(message), level: level || "info" }); },

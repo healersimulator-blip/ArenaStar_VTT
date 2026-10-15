@@ -13,6 +13,10 @@ import { openVttDb } from "../../src/storage/idb";
 
 const allHandlers = (): AisModuleHandlers => ({
   "package.resource.read": vi.fn(async () => ({ text: "", next: null })),
+  "documents.context": vi.fn(async () => ({ userId: "gm", userName: "GM", collections: [], limits: {} })),
+  "documents.list": vi.fn(async () => ({ collection: "actors", total: 0, offset: 0, rows: [], next: null })),
+  "documents.get": vi.fn(async () => ({ document: null })),
+  "documents.mutate": vi.fn(async () => ({ txId: "tx", created: [], seq: null })),
   "scene.tags.snapshot": vi.fn(async () => null),
   "scene.tags.update": vi.fn(async () => ({ ok: true })),
   "fx.play": vi.fn(async () => ({ ok: true })),

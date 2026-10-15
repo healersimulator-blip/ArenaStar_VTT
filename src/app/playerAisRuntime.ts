@@ -40,6 +40,7 @@ import {
 import type { ActorDocument, Json, SceneDocument, SettingsDocument, TokenDocument } from "../core/documents";
 import type { AisProfileMsg, AisSharedModule } from "../core/messages";
 import type { Op } from "../core/ops";
+import { aisDocumentChanges } from "../core/aisDocuments";
 import {
   AisModuleIframe,
   type AisModuleDiagnostics,
@@ -178,7 +179,18 @@ export function describeAisCapability(capability: AisCapability): string {
     case "module.settings.write": return "change its own declared settings on this device";
     case "compendium.read": return "read compendium packs (GM device only; nothing on yours)";
     case "modules.invoke": return "ask other shared modules on this device to run their commands";
+    case "documents.read": return "read the actors, items, journals and tables you can see, and watch them change";
+    case "documents.write": return "create, edit and delete documents as you (only what you may edit yourself)";
     default: return capability;
+  }
+}
+
+function jsonByteLength(value: unknown): number | null {
+  try {
+    const text = JSON.stringify(value);
+    return text === undefined ? null : new TextEncoder().encode(text).byteLength;
+  } catch {
+    return null;
   }
 }
 
@@ -213,6 +225,9 @@ export class PlayerAisRuntime {
       bus.on("ops", (message) => {
         this.emit("world.ops.committed", { seq: message.envelope.seq, operationCount: message.envelope.ops.length });
         this.emitWorldSettingChanges(message.envelope.ops);
+        // D-485: the player's envelopes are already projected by the host; notify per touched root.
+        const documentChanges = aisDocumentChanges(message.envelope.seq, message.envelope.by, message.envelope.ops, jsonByteLength);
+        if (documentChanges) this.emit("documents.changed", documentChanges);
         const scene = options.activeScene();
         if (!scene) return;
         for (const change of aisTokenLightChanges(message.envelope.ops)) {
@@ -438,6 +453,11 @@ export class PlayerAisRuntime {
           requires: module.requires ?? [],
           list: () => this.moduleDirectory(),
           invoke: (target, commandId, input, lifetime) => this.invokeFromModule(module.packageId, target, commandId, input, lifetime),
+        },
+        // D-485: the player's projected world; writes run as the player through `submit`.
+        documents: {
+          getAll: (collection) => client.store.getAll(collection),
+          get: (collection, id) => client.store.get(collection, id),
         },
       }),
     };

@@ -48,6 +48,10 @@ export const AIS_MODULE_METHODS = [
   "compendium.get",
   "modules.list",
   "modules.invoke",
+  "documents.context",
+  "documents.list",
+  "documents.get",
+  "documents.mutate",
 ] as const;
 export type AisModuleMethod = (typeof AIS_MODULE_METHODS)[number];
 
@@ -84,6 +88,10 @@ export const AIS_METHOD_CAPABILITY: Record<AisModuleMethod, AisCapability | null
   "compendium.get": "compendium.read",
   "modules.list": null,
   "modules.invoke": "modules.invoke",
+  "documents.context": "documents.read",
+  "documents.list": "documents.read",
+  "documents.get": "documents.read",
+  "documents.mutate": "documents.write",
 };
 
 export interface AisModuleRequest {

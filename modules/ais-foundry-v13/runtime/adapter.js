@@ -576,21 +576,27 @@
     chat: { render() {} }, players: { render() {} }, nav: { render() {} }, menu: { render() {} },
   };
 
-  // ── Document and application class stubs (exist for `extends`/`instanceof`; acting is R-02/R-04). ──
-  const Document = stubClass("Document");
-  Object.assign(Document, {
-    create: () => unsupportedCall("Document.create (document CRUD; R-02)"),
-    createDocuments: () => unsupportedCall("Document.createDocuments (document CRUD; R-02)"),
-    updateDocuments: () => unsupportedCall("Document.updateDocuments (document CRUD; R-02)"),
-    deleteDocuments: () => unsupportedCall("Document.deleteDocuments (document CRUD; R-02)"),
-  });
-  const documentClasses = {};
-  for (const name of ["Actor", "Item", "Scene", "TokenDocument", "ChatMessage", "Macro", "JournalEntry", "JournalEntryPage", "RollTable", "Playlist",
-    "Combat", "Combatant", "Folder", "User", "Cards", "Setting", "ActiveEffect", "AmbientLightDocument", "AmbientSoundDocument", "TileDocument",
-    "WallDocument", "DrawingDocument", "MeasuredTemplateDocument", "NoteDocument", "RegionDocument", "RegionBehavior", "Adventure", "FogExploration"]) {
+  // ── D-485: world documents over the kernel's generic document service (documents.js, loaded before this file). ──
+  const documentsLayer = globalThis.__aisFoundryDocuments.install({ AIS, Hooks: globalThis.Hooks, warn, clone, flattenObject, expandObject, getProperty, mergeObject,
+    Collection, game: () => globalThis.game });
+  const Document = documentsLayer.AISDocument;
+  const documentClasses = { ...documentsLayer.classes };
+  // Scene/placeable/other documents still only exist for `extends`/`instanceof` (scene services stay dedicated; slice 2).
+  for (const name of ["Scene", "TokenDocument", "Cards", "Setting", "AmbientLightDocument", "AmbientSoundDocument", "TileDocument",
+    "WallDocument", "DrawingDocument", "MeasuredTemplateDocument", "NoteDocument", "RegionDocument", "RegionBehavior", "Adventure", "FogExploration"])
     documentClasses[name] = stubClass(name, Document);
-    globalThis[name] = documentClasses[name];
-  }
+  for (const [name, klass] of Object.entries(documentClasses)) globalThis[name] = klass;
+  // Chat messages are host-stamped: `ChatMessage.create({ content })` posts through the chat service as this user.
+  const postChat = async (data = {}) => {
+    const content = String(data.content ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (!content) throw new Error("ChatMessage.create needs content");
+    await AIS.chat.post(content.slice(0, 2000));
+    return new documentClasses.ChatMessage({ content: data.content ?? "", flags: data.flags ?? {}, speaker: data.speaker ?? {} }, { fromSource: true });
+  };
+  documentClasses.ChatMessage.create = postChat;
+  documentClasses.ChatMessage.createDocuments = async (rows = []) => { const out = []; for (const row of rows) out.push(await postChat(row)); return out; };
+  documentClasses.ChatMessage.getSpeaker = ({ actor, token, alias } = {}) => ({ actor: actor?.id ?? null, token: token?.id ?? null, alias: alias ?? actor?.name ?? null, scene: null });
+  documentClasses.ChatMessage.applyRollMode = (data) => data;
   const PlaceableObject = stubClass("PlaceableObject");
   globalThis.PlaceableObject = PlaceableObject;
   for (const name of ["Token", "Tile", "Drawing", "Wall", "AmbientLight", "AmbientSound", "MeasuredTemplate", "Note", "Region"])
@@ -621,7 +627,7 @@
       const key = Object.keys(types).find((key) => types[key] === parts[2]);
       return key ? currentView.scene[key].get(parts[3]) ?? null : null;
     }
-    return null;
+    return documentsLayer.fromUuidSync(uuid);
   }
   globalThis.foundry = {
     utils: { getProperty, setProperty, hasProperty, mergeObject, expandObject, flattenObject, isNewerVersion, deepClone: clone, duplicate, randomID,
@@ -639,7 +645,8 @@
       ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, Tabs, FormDataExtended,
         TextEditor: { enrichHTML: async (html) => String(html ?? ""), implementation: { enrichHTML: async (html) => String(html ?? "") } } },
       apps: { FilePicker: globalThis.FilePicker }, ui: { Notifications: stubClass("Notifications") }, instances: uiLayer.instances },
-    documents: { ...documentClasses, collections: {} },
+    documents: { ...documentClasses, collections: { WorldCollection: documentsLayer.WorldCollection, ...Object.fromEntries(["Actors", "Items", "Journal", "RollTables", "Macros", "Folders",
+      "Playlists", "CombatEncounters", "Users", "Messages"].map((name) => [name, documentsLayer.WorldCollection])) }, abstract: { Document } },
     canvas: { placeables: { Token: globalThis.Token, Tile: globalThis.Tile, Drawing: globalThis.Drawing, Wall: globalThis.Wall, AmbientLight: globalThis.AmbientLight,
       AmbientSound: globalThis.AmbientSound, MeasuredTemplate: globalThis.MeasuredTemplate, Note: globalThis.Note, Region: globalThis.Region }, layers: {} },
     abstract: { DataModel: uiLayer.fields ? uiLayer.fields.DataModel : stubClass("DataModel"), TypeDataModel: uiLayer.fields ? uiLayer.fields.TypeDataModel : stubClass("TypeDataModel"), Document },
@@ -685,7 +692,7 @@
   const documentTypes = { Actor: ["base", "character", "npc"], Item: ["base"], JournalEntryPage: ["text", "image", "pdf", "video"], Cards: ["deck", "hand", "pile"], Macro: ["script", "chat"], ChatMessage: ["base"], Combatant: ["base"], ActiveEffect: ["base"], RegionBehavior: ["base"], Card: ["base"], TableResult: ["base"] };
   for (const [name, types] of Object.entries(documentTypes)) {
     const klass = documentClasses[name];
-    if (klass) { Object.defineProperty(klass, "TYPES", { configurable: true, get: () => [...types] }); Object.defineProperty(klass, "documentName", { configurable: true, value: name }); }
+    if (klass && !Object.hasOwn(documentsLayer.classes, name)) { Object.defineProperty(klass, "TYPES", { configurable: true, get: () => [...types] }); Object.defineProperty(klass, "documentName", { configurable: true, value: name }); }
   }
   if (uiLayer.fields) dataModelCheck = uiLayer.fields.isDataModelClass;
   globalThis.foundry.CONST = globalThis.CONST;
@@ -708,15 +715,18 @@
   const keybindingActions = new Map();
   const game = {
     version: "13.346", release: { generation: 13, build: 346, version: "13.346", maxGeneration: 13, maxStableGeneration: 13 }, data: { version: "13.346", release: { generation: 13 } }, documentTypes,
-    user, userId: user.id, users: new Collection([user]), ready: false, paused: false, debug: false,
+    // D-485: `game.user` is this device's User document once the replica is hydrated; the frozen GM row only bridges boot.
+    get user() { return documentsLayer.me() ?? user; }, get userId() { return documentsLayer.userId() ?? user.id; },
+    users: documentsLayer.collections.users, ready: false, paused: false, debug: false,
     world: { id: "arenastar", title: "ArenaStar world", system: "arenastar", version: "0.0.0" },
     // Deliberately NOT a Foundry system id: modules that need `pf1` must say so and stay inert.
     system: { id: "arenastar", title: "ArenaStar VTT", version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, template: {}, flags: {} },
     modules, i18n, settings,
-    scenes: emptyCollection("Scene"), actors: emptyCollection("Actor"), items: emptyCollection("Item"), journal: emptyCollection("JournalEntry"),
-    tables: emptyCollection("RollTable"), macros: emptyCollection("Macro"), playlists: emptyCollection("Playlist"), combats: emptyCollection("Combat"),
-    folders: emptyCollection("Folder"), messages: emptyCollection("ChatMessage"), packs: emptyCollection("CompendiumCollection"), cards: emptyCollection("Cards"),
-    get combat() { return null; },
+    scenes: emptyCollection("Scene"), actors: documentsLayer.collections.actors, items: documentsLayer.collections.items, journal: documentsLayer.collections.journals,
+    tables: documentsLayer.collections.rollTables, macros: documentsLayer.collections.macros, playlists: documentsLayer.collections.playlists,
+    combats: documentsLayer.collections.combats, folders: documentsLayer.collections.folders, messages: documentsLayer.collections.messages,
+    packs: emptyCollection("CompendiumCollection"), cards: emptyCollection("Cards"),
+    get combat() { return documentsLayer.collections.combats.find((row) => (row._source.round ?? 0) > 0) ?? null; },
     get canvas() { return globalThis.canvas; },
     time: { worldTime: 0, serverTime: Date.now(), advance: () => unsupportedCall("game.time.advance (world clock; R-02)") },
     keyboard: { isModifierActive: () => false, downKeys: new Set() }, mouse: {},
@@ -848,7 +858,8 @@
       warnings: diagnostics.warnings, unsupportedCalls: diagnostics.unsupportedCalls, moduleApi: selfModule.api ? Object.keys(selfModule.api) : [],
       globals: diagnostics.globals ?? [], loadMs: diagnostics.loadMs ?? null, ready: game.ready,
       windows: uiLayer.describeWindows(), menus: [...settingsMenus].map(([key, menu]) => ({ key, name: menu.name ?? "", label: menu.label ?? "", type: menu.type?.name ?? null, restricted: menu.restricted === true })),
-      templates: uiLayer.describeTemplates ? uiLayer.describeTemplates() : { count: uiLayer.templateCount() } }),
+      templates: uiLayer.describeTemplates ? uiLayer.describeTemplates() : { count: uiLayer.templateCount() },
+      documents: diagnostics.documents?.error ? diagnostics.documents : documentsLayer.describe() }),
   });
 
   AIS.commands.on("foundry.info", async () => FoundryAdapter.info());
@@ -891,7 +902,10 @@
 
   AIS.runtime.initialize(async () => {
     const started = performance.now();
-    await readAll(dist.files);
+    // D-485: the document replica hydrates alongside the module's own files; a missing grant degrades to empty collections.
+    const hydrateDocuments = documentsLayer.hydrate().then((row) => { diagnostics.documents = row; })
+      .catch((error) => { diagnostics.documents = { error: String(error?.message ?? error) }; warn(`World documents unavailable: ${error?.message ?? error}`); });
+    await Promise.all([readAll(dist.files), hydrateDocuments]);
     loadLanguages();
     installStyles();
     const imports = installImportMap();

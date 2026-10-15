@@ -2,12 +2,24 @@ import { aisTagSnapshot, parseAisTagUpdate } from "../core/aisScene";
 import type { IDBPDatabase } from "idb";
 import type {
   ActorDocument,
+  BaseDocument,
   Json,
   LightAnimation,
   MessageDocument,
   SceneDocument,
   TokenDocument,
 } from "../core/documents";
+import {
+  AIS_DOCUMENTS_LIMITS,
+  AIS_DOCUMENT_COLLECTIONS,
+  AIS_DOCUMENT_COLLECTION_NAMES,
+  isAisDocumentCollection,
+  isPlainRecord,
+  normalizeAisDocumentMutations,
+  pageAisDocuments,
+  resolveAisDocumentRef,
+} from "../core/aisDocuments";
+import type { AisDocumentCollection } from "../core/aisDocuments";
 import type {
   AisCapability,
   AisContributionDeclaration,
@@ -44,6 +56,7 @@ const EVENT_NAMES = new Set<AisEventName>([
   "module.event",
   "module.settings.changed",
   "ui.panel.closed",
+  "documents.changed",
 ]);
 /** D-477: one compendium entry payload must fit the RPC frame with room for the envelope. */
 const MAX_COMPENDIUM_ENTRY_BYTES = 48 * 1024;
@@ -116,6 +129,11 @@ export interface AisModuleHandlerContext {
   compendia?: AisCompendiumSource;
   /** D-478: module directory + kernel-routed invocation. */
   modules?: AisModuleBusContext;
+  /**
+   * D-485: this device's replicated document store (the GM's full world, a player's projected
+   * world). Reads are exactly what the device's own UI may show; writes go through `submit`.
+   */
+  documents?: AisModuleDocumentSource;
   /** Private host-side scene view; each read API returns only an explicit projection. */
   activeScene: () => SceneDocument | null;
   /** Host-side actor lookup; module APIs expose only bounded inventory fields. */
@@ -141,6 +159,11 @@ export interface AisModuleHandlerContext {
   newId: (prefix: string) => string;
   /** Re-checks the exact profile lock and local hash-bound consent on each host request. */
   assertCapability: (capability: AisCapability) => Promise<void>;
+}
+
+export interface AisModuleDocumentSource {
+  getAll: (collection: AisDocumentCollection) => readonly BaseDocument[];
+  get: (collection: AisDocumentCollection, id: string) => BaseDocument | undefined;
 }
 
 export type AisMutationQueue = <T>(job: () => Promise<T>) => Promise<T>;
@@ -190,6 +213,36 @@ function boundedJson(value: unknown, depth = 0, seen = new Set<object>()): value
   }
   seen.delete(value);
   return valid;
+}
+
+function requireDocuments(ctx: AisModuleHandlerContext): AisModuleDocumentSource {
+  if (!ctx.documents) throw new Error("The document service is unavailable on this device");
+  return ctx.documents;
+}
+
+/** Walk a module ref chain (root → embedded) through the device store without exposing the store itself. */
+function findAisDocument(
+  source: AisModuleDocumentSource,
+  ref: Record<string, unknown>,
+  root: AisDocumentCollection,
+): BaseDocument | null {
+  const chain: Array<{ collection: string; id: string }> = [];
+  let cursor: unknown = ref;
+  while (isPlainRecord(cursor) && typeof cursor.collection === "string" && typeof cursor.id === "string") {
+    chain.unshift({ collection: cursor.collection, id: cursor.id });
+    cursor = cursor.parent;
+  }
+  const head = chain.shift();
+  if (!head) return null;
+  let document: BaseDocument | undefined = source.get(root, head.id);
+  for (const level of chain) {
+    const embedded = (document as Record<string, unknown> | undefined)?.[level.collection];
+    document = Array.isArray(embedded)
+      ? (embedded as BaseDocument[]).find((entry) => isPlainRecord(entry) && entry._id === level.id)
+      : undefined;
+    if (!document) return null;
+  }
+  return document ?? null;
 }
 
 function storageScope(ctx: AisModuleHandlerContext): string {
@@ -778,6 +831,68 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       const result = await bus.invoke(moduleId, commandId, input, commandContext);
       assertCommandActive(commandContext);
       return { result };
+    },
+    // D-485: generic document service. Reads come from this device's own store; writes are
+    // ordinary transactions submitted with this device user's authority and validated by the host.
+    "documents.context": async (_args, commandContext) => {
+      await ctx.assertCapability("documents.read");
+      assertCommandActive(commandContext);
+      const source = requireDocuments(ctx);
+      const user = ctx.user();
+      return {
+        userId: user.id,
+        userName: user.name,
+        collections: AIS_DOCUMENT_COLLECTION_NAMES.map((collection) => ({
+          collection,
+          writable: AIS_DOCUMENT_COLLECTIONS[collection].writable,
+          embedded: Object.keys(AIS_DOCUMENT_COLLECTIONS[collection].embedded),
+          size: source.getAll(collection).length,
+        })),
+        limits: { ...AIS_DOCUMENTS_LIMITS },
+      };
+    },
+    "documents.list": async (args, commandContext) => {
+      await ctx.assertCapability("documents.read");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).some((key) => !["collection", "offset", "limit"].includes(key)))
+        throw new Error("documents.list accepts collection, offset and limit");
+      if (!isAisDocumentCollection(args.collection))
+        throw new Error(`collection "${String(args.collection)}" is not exposed to AIS modules`);
+      return pageAisDocuments(args.collection, requireDocuments(ctx).getAll(args.collection), args.offset, args.limit, byteLength);
+    },
+    "documents.get": async (args, commandContext) => {
+      await ctx.assertCapability("documents.read");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).some((key) => !["collection", "id", "parent"].includes(key)))
+        throw new Error("documents.get accepts collection, id and parent");
+      const resolved = resolveAisDocumentRef(args.collection, args.parent);
+      if (!resolved.ok) throw new Error(resolved.error);
+      if (typeof args.id !== "string" || args.id.length === 0 || args.id.length > 64) throw new Error("documents.get needs an id");
+      const document = findAisDocument(requireDocuments(ctx), args, resolved.value.root);
+      if (!document) return { document: null };
+      if ((byteLength(document) ?? Infinity) > AIS_DOCUMENTS_LIMITS.documentBytes)
+        throw new Error(`document ${args.id} exceeds the ${AIS_DOCUMENTS_LIMITS.documentBytes}-byte module read limit`);
+      return { document };
+    },
+    "documents.mutate": async (args, commandContext) => {
+      await ctx.assertCapability("documents.write");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).some((key) => key !== "ops")) throw new Error("documents.mutate accepts ops");
+      if ((byteLength(args.ops) ?? Infinity) > AIS_DOCUMENTS_LIMITS.mutationBytes)
+        throw new Error(`documents.mutate request exceeds ${AIS_DOCUMENTS_LIMITS.mutationBytes} bytes`);
+      const normalized = normalizeAisDocumentMutations(args.ops, {
+        userId: ctx.user().id,
+        newId: () => ctx.newId("doc-"),
+        boundedJson,
+      });
+      if (!normalized.ok) throw new Error(normalized.error);
+      const run = async () => {
+        await ctx.assertCapability("documents.write");
+        assertCommandActive(commandContext);
+        const txId = await ctx.submit(normalized.value.ops);
+        return { txId, created: normalized.value.created, seq: ctx.sequence?.() ?? null };
+      };
+      return ctx.mutate ? ctx.mutate(run) : run();
     },
     "ui.select": async (args, commandContext) => {
       await ctx.assertCapability("ui.interaction");
