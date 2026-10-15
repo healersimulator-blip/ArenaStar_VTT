@@ -1,5 +1,6 @@
 import {
   AIS_EVENTS,
+  aisEventSubscriptionCapability,
   type AisCapability,
   type AisEventName,
   type AisEventPayloads,
@@ -280,9 +281,9 @@ export function createAisModuleDispatcher(
         }
       }
       const args = asRecord(request.args) ?? {};
-      // D-476: a module's own settings are not host state — hearing them change needs no observe grant.
-      const required = request.method === "events.subscribe" && args.event === "module.settings.changed"
-        ? null : AIS_METHOD_CAPABILITY[request.method];
+      // D-476/D-483: a module's own settings and panel are not host state — those events need no observe grant.
+      const required = request.method === "events.subscribe" && isAisEventName(args.event)
+        ? aisEventSubscriptionCapability(args.event) : AIS_METHOD_CAPABILITY[request.method];
       if (required !== null && !grantedCapabilities.has(required)) {
         respondError(`Capability not granted: ${required}`);
         return;
@@ -585,10 +586,11 @@ export class AisModuleIframe {
     if (this.disposed || !this.subscriptions.has(event)) return;
     void (async () => {
       await this.options.assertModuleActive?.();
-      // D-476: a module's own settings need no observe grant — on subscription *and* on delivery
-      // (the first browser run of the settings form showed the delivery side still demanding it).
-      if (event !== "module.settings.changed" && this.options.isCapabilityCurrentlyGranted &&
-        !(await this.options.isCapabilityCurrentlyGranted("action.observe"))) return;
+      // D-476/D-483: the subscription capability is re-checked on delivery as well, so revocation
+      // takes effect without a reload (the first browser run of the settings form caught the gap).
+      const required = aisEventSubscriptionCapability(event);
+      if (required && this.options.isCapabilityCurrentlyGranted &&
+        !(await this.options.isCapabilityCurrentlyGranted(required))) return;
       if (!this.disposed && this.subscriptions.has(event)) {
         this.record({ at: Date.now(), kind: "event", name: event, ok: true });
         this.post({ vttAisRpc: AIS_RPC_TAG, kind: "event", event, payload });

@@ -149,12 +149,18 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
   if (value.runtimeProvider !== undefined) {
     const spec = value.runtimeProvider;
     if (!isRecord(spec) || Array.isArray(spec) ||
-        Object.keys(spec).some((key) => !["contract", "profiles"].includes(key)) || spec.contract !== 1 ||
+        Object.keys(spec).some((key) => !["contract", "profiles", "scripts"].includes(key)) || spec.contract !== 1 ||
         !Array.isArray(spec.profiles) || spec.profiles.length < 1 || spec.profiles.length > 16 ||
         spec.profiles.some((profile) => typeof profile !== "string" || !AIS_SLOT_RE.test(profile)) ||
         new Set(spec.profiles).size !== spec.profiles.length)
       return err(`package ${id}: invalid runtimeProvider contract/profiles`);
-    runtimeProvider = { contract: 1, profiles: [...spec.profiles] as string[] };
+    // D-483: a provider may split its source into layers loaded before the entry (same review surface).
+    if (spec.scripts !== undefined && (!Array.isArray(spec.scripts) || spec.scripts.length < 1 || spec.scripts.length > 16 ||
+        spec.scripts.some((path) => typeof path !== "string" || !isSafePackagePath(path) || path === value.entry) ||
+        new Set(spec.scripts).size !== spec.scripts.length))
+      return err(`package ${id}: invalid runtimeProvider scripts`);
+    runtimeProvider = { contract: 1, profiles: [...spec.profiles] as string[],
+      ...(spec.scripts ? { scripts: [...spec.scripts] as string[] } : {}) };
   }
   if (value.runtime !== undefined) {
     const spec = value.runtime;

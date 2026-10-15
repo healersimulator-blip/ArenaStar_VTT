@@ -18,7 +18,7 @@ import type {
   AisSettingValue,
   AisTokenLightSnapshot,
 } from "../core/automationInterconnect";
-import { cloneAisSettingDeclaration } from "../core/automationInterconnect";
+import { aisEventSubscriptionCapability, cloneAisSettingDeclaration } from "../core/automationInterconnect";
 import type { AisModuleRequestContext } from "./aisModuleIframe";
 import type { Op } from "../core/ops";
 import type { CompendiumPack } from "../core/compendium";
@@ -43,6 +43,7 @@ const EVENT_NAMES = new Set<AisEventName>([
   "ui.token.action",
   "module.event",
   "module.settings.changed",
+  "ui.panel.closed",
 ]);
 /** D-477: one compendium entry payload must fit the RPC frame with room for the envelope. */
 const MAX_COMPENDIUM_ENTRY_BYTES = 48 * 1024;
@@ -402,11 +403,12 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       return ctx.fx.stop(args.runId);
     },
     "events.subscribe": async ({ event }, commandContext) => {
-      // D-476: `module.settings.changed` carries the module's own configuration; every host event needs the grant.
-      if (event !== "module.settings.changed") await ctx.assertCapability("action.observe");
-      assertCommandActive(commandContext);
       if (typeof event !== "string" || !EVENT_NAMES.has(event as AisEventName))
         throw new Error("event is not part of the AIS v1 catalog");
+      // D-476/D-483: a module's own settings and panel need no observe grant; every host event does.
+      const required = aisEventSubscriptionCapability(event as AisEventName);
+      if (required) await ctx.assertCapability(required);
+      assertCommandActive(commandContext);
       return { ok: true };
     },
     "events.emit": async ({ eventId: rawEventId, payload }, commandContext) => {

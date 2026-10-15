@@ -201,7 +201,9 @@ export class AisRuntime {
       // inside it and never re-parented (re-parenting reloads an iframe = module navigation).
       const panelBody = module.panel && this.panels
         ? this.panels.mount(module.packageId, { title: module.panel.title, moduleName: module.name,
-          width: module.panel.width, height: module.panel.height, onClose: () => {} })
+          width: module.panel.width, height: module.panel.height,
+          // D-483: the module learns about the chrome's Close button so its windows can really close.
+          onClose: () => this.hosts.get(module.packageId)?.emit("ui.panel.closed", { reason: "user" }) })
         : undefined;
       const panels = this.panels;
       const frame = new AisModuleIframe({

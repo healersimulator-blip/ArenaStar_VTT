@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   AIS_API_VERSION,
   AIS_EVENTS,
+  aisEventSubscriptionCapability,
   aisTokenLightChanges,
   emptyAisProfile,
   resolveAisProfile,
@@ -41,6 +42,14 @@ const profile = (...packages: AisPackageCandidate[]): AisActivationProfile => ({
 });
 
 describe("AIS v1 package profile resolution", () => {
+  test("D-483: event subscriptions are gated by the capability that owns the event", () => {
+    expect(AIS_EVENTS).toContain("ui.panel.closed");
+    expect(aisEventSubscriptionCapability("module.settings.changed")).toBeNull();
+    expect(aisEventSubscriptionCapability("ui.panel.closed")).toBe("ui.panel");
+    for (const event of AIS_EVENTS)
+      if (event !== "module.settings.changed" && event !== "ui.panel.closed") expect(aisEventSubscriptionCapability(event)).toBe("action.observe");
+  });
+
   test("publishes a typed token-light source-change hook and identifies only committed light writes", () => {
     expect(AIS_EVENTS).toContain("scene.token.light.changed");
     const scene = { coll: "scenes" as const, id: "scene-1" };

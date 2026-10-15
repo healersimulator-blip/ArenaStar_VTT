@@ -26,8 +26,21 @@ export const AIS_EVENTS = [
   "module.event",
   /** D-476: one of this module's own declared settings changed (world scope via a commit, device scope locally). */
   "module.settings.changed",
+  /** D-483: the user closed this module's own panel from the host chrome (the frame is hidden, not stopped). */
+  "ui.panel.closed",
 ] as const;
 export type AisEventName = (typeof AIS_EVENTS)[number];
+
+/**
+ * Capability a module needs to subscribe to an event. Host-state events need `action.observe`;
+ * a module's own settings carry no host state (D-476), and its own panel is covered by the
+ * `ui.panel` grant that made the panel exist (D-483).
+ */
+export function aisEventSubscriptionCapability(event: AisEventName): AisCapability | null {
+  if (event === "module.settings.changed") return null;
+  if (event === "ui.panel.closed") return "ui.panel";
+  return "action.observe";
+}
 
 /** Safe light projection delivered to AIS observers; it contains no token or actor document. */
 export interface AisTokenLightSnapshot {
@@ -74,6 +87,10 @@ export interface AisEventPayloads {
     key: string;
     /** The effective value after the change (already coerced to the declaration). */
     value: AisSettingValue;
+  };
+  "ui.panel.closed": {
+    /** Only the host chrome's Close button raises this; `ui.panel.close` from the module itself does not. */
+    reason: "user";
   };
 }
 
@@ -176,6 +193,8 @@ export interface AisModuleCommandDeclaration {
 export interface AisRuntimeProviderDeclaration {
   contract: 1;
   profiles: string[];
+  /** D-483: provider source files evaluated before `entry`, in order (each a safe package path). */
+  scripts?: string[];
 }
 
 export interface AisRuntimeBinding {

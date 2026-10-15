@@ -295,6 +295,13 @@ describe("AIS host handlers", () => {
     // Subscribing to one's own settings changes needs no observe grant; host events still do.
     await expect(handlers["events.subscribe"]({ event: "module.settings.changed" })).resolves.toEqual({ ok: true });
     await expect(handlers["events.subscribe"]({ event: "world.snapshot" })).rejects.toThrow("denied action.observe");
+    // D-483: the module's own panel close is covered by the `ui.panel` grant, not by observe.
+    await expect(handlers["events.subscribe"]({ event: "ui.panel.closed" })).rejects.toThrow("denied ui.panel");
+    granted.add("ui.panel");
+    await expect(handlers["events.subscribe"]({ event: "ui.panel.closed" })).resolves.toEqual({ ok: true });
+    await expect(handlers["events.subscribe"]({ event: "world.snapshot" })).rejects.toThrow("denied action.observe");
+    await expect(handlers["events.subscribe"]({ event: "ui.panel.opened" })).rejects.toThrow("not part of the AIS v1 catalog");
+    granted.delete("ui.panel");
 
     // D-482: runtime declarations (`settings.register`) — same schema, gated by the write capability,
     // idempotent for an identical re-registration, refused for a changed shape, then readable/writable.

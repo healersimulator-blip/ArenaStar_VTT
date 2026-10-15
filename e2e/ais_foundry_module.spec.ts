@@ -9,6 +9,10 @@
  *   game.i18n + lang file, classic script + nested ESM imports, styles, keybindings, Handlebars
  *   helper, ui.notifications, game.modules api) boots; its `config: true` settings appear in the
  *   GM's generated settings form and a change made there reaches the module's onChange.
+ * Part 3 (D-483): the same module's Foundry UI — a FormApplication settings menu with `.hbs`
+ *   templates/partials, jQuery listeners and `_updateObject` → game.settings.set; Dialog.confirm;
+ *   an ApplicationV2 + HandlebarsApplicationMixin window with data-action handlers — renders
+ *   inside the module's own sandboxed panel and is driven by real clicks in that frame.
  */
 import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
@@ -112,6 +116,34 @@ function foundryCoreApiModuleZip(): Buffer {
       `  game.keybindings.register(MODULE_ID, "toggle", { name: "Toggle", editable: [{ key: "KeyT" }], onDown: () => {} });`,
       `  Handlebars.registerHelper("fsdUpper", (text) => String(text).toUpperCase());`,
       `  CONFIG.debug.fsd = true;`,
+      // D-483: a v1 FormApplication settings menu, exactly as a Foundry module writes one.
+      `  class FsdConfig extends FormApplication {`,
+      `    static get defaultOptions() { return foundry.utils.mergeObject(super.defaultOptions, { id: "fsd-config", title: "FSD.ConfigTitle",`,
+      `      template: "modules/fsd-demo/templates/config.hbs", width: 440, closeOnSubmit: true }); }`,
+      `    getData() { return { user: game.user.name, radius: game.settings.get(MODULE_ID, "radius"), mode: game.settings.get(MODULE_ID, "mode"),`,
+      `      modes: { soft: "FSD.Soft", hard: "FSD.Hard" }, enabled: game.settings.get(MODULE_ID, "enabled"), items: [{ name: "alpha", hot: true }, { name: "beta", hot: false }] }; }`,
+      `    activateListeners(html) {`,
+      `      super.activateListeners(html);`,
+      `      html.find("[data-action=bump]").click((event) => { event.preventDefault(); const input = html.find("input[name=radius]"); input.val(Number(input.val()) + 5); });`,
+      `    }`,
+      `    async _updateObject(event, formData) {`,
+      `      await game.settings.set(MODULE_ID, "radius", formData.radius);`,
+      `      await game.settings.set(MODULE_ID, "mode", formData.mode);`,
+      `      state.submitted = formData;`,
+      `    }`,
+      `  }`,
+      `  game.settings.registerMenu(MODULE_ID, "config", { name: "FSD.ConfigTitle", label: "FSD.Open", hint: "FSD.OpenHint", icon: "fas fa-cog", type: FsdConfig, restricted: true });`,
+      `  const { ApplicationV2, HandlebarsApplicationMixin, DialogV2 } = foundry.applications.api;`,
+      `  class FsdPanel extends HandlebarsApplicationMixin(ApplicationV2) {`,
+      `    static DEFAULT_OPTIONS = { id: "fsd-panel", classes: ["fsd"], window: { title: "FSD.PanelTitle" }, position: { width: 320 }, actions: { ping: FsdPanel.ping } };`,
+      `    static PARTS = { body: { template: "modules/fsd-demo/templates/panel.hbs" } };`,
+      `    static ping(event, target) { this.pings = (this.pings ?? 0) + 1; state.pingTarget = target.dataset.action; ui.notifications.info("FSD ping " + this.pings); return this.render({ parts: ["body"] }); }`,
+      `    async _prepareContext() { return { pings: this.pings ?? 0, radius: game.settings.get(MODULE_ID, "radius"), mode: game.settings.get(MODULE_ID, "mode") }; }`,
+      `  }`,
+      `  globalThis.FsdUi = { FsdConfig, FsdPanel,`,
+      `    confirm: () => Dialog.confirm({ title: game.i18n.localize("FSD.Sure"), content: '<p class="fsd">Apply?</p>' }),`,
+      `    confirmV2: () => DialogV2.confirm({ window: { title: "FSD.Sure" }, content: "<p>Apply v2?</p>", rejectClose: false }),`,
+      `    openPanel: () => new FsdPanel().render({ force: true }).then((app) => app.toObject()) };`,
       `});`,
       `Hooks.once("ready", async () => {`,
       `  state.ready = true;`,
@@ -131,8 +163,22 @@ function foundryCoreApiModuleZip(): Buffer {
       "",
     ].join("\n"),
     "lang/en.json": JSON.stringify({ FSD: { Title: "Foundry Settings Demo", Radius: "Light radius", RadiusHint: "In feet", Enabled: "Enabled on this device",
-      Mode: "Mode", Soft: "Soft", Hard: "Hard", Hello: "Hello, {name}!", Ready: "Demo is ready" } }),
+      Mode: "Mode", Soft: "Soft", Hard: "Hard", Hello: "Hello, {name}!", Ready: "Demo is ready",
+      ConfigTitle: "Settings demo config", Open: "Open config", OpenHint: "Opens the demo window", PanelTitle: "Demo panel", Save: "Save changes", Sure: "Are you sure?" } }),
     "styles/demo.css": ".fsd { color: red; }\n",
+    // D-483: templates exactly as a Foundry module ships them (module-absolute partial path, core helpers).
+    "templates/config.hbs": [
+      "<form class=\"fsd-config flexcol\" autocomplete=\"off\">",
+      "  <h2 class=\"fsd\">{{localize \"FSD.ConfigTitle\"}} — {{localize \"FSD.Hello\" name=user}}</h2>",
+      "  {{> \"modules/fsd-demo/templates/parts/number.hbs\" name=\"radius\" label=\"FSD.Radius\" value=radius}}",
+      "  <div class=\"form-group\"><label>{{localize \"FSD.Mode\"}}</label><div class=\"form-fields\"><select name=\"mode\">{{selectOptions modes selected=mode localize=true}}</select></div></div>",
+      "  <div class=\"form-group\"><label>{{localize \"FSD.Enabled\"}}</label><input type=\"checkbox\" name=\"enabled\" {{checked enabled}}></div>",
+      "  <ul class=\"fsd-items\">{{#each items as |item i|}}<li data-index=\"{{i}}\" class=\"{{#if item.hot}}hot{{/if}}\">{{fsdUpper item.name}}</li>{{/each}}</ul>",
+      "  <footer class=\"sheet-footer flexrow\"><button type=\"button\" data-action=\"bump\">+5</button><button type=\"submit\"><i class=\"fas fa-save\"></i> {{localize \"FSD.Save\"}}</button></footer>",
+      "</form>",
+    ].join("\n"),
+    "templates/parts/number.hbs": "<div class=\"form-group\"><label>{{localize label}}</label><div class=\"form-fields\"><input type=\"number\" name=\"{{name}}\" value=\"{{value}}\" step=\"5\" data-dtype=\"Number\"></div></div>",
+    "templates/panel.hbs": "<section class=\"fsd-panel\"><p class=\"fsd-pings\">pings: {{pings}}</p><p class=\"fsd-radius\">radius: {{radius}} ({{mode}})</p><button type=\"button\" data-action=\"ping\">Ping</button></section>",
   };
   const entries: Record<string, Uint8Array> = {};
   for (const [path, text] of Object.entries(files)) entries[`fsd-demo/${path}`] = strToU8(text);
@@ -240,4 +286,84 @@ test("D-482: a module written against Foundry core APIs boots; its game.settings
   const reopened = page.locator('[data-ais-module-review="fsd-demo"] [data-ais-settings="fsd-demo"]');
   if (!(await reopened.evaluate((element) => (element as HTMLDetailsElement).open))) await reopened.locator("summary").click();
   await expect(reopened.locator('[data-ais-setting="fsd_demo_radius"] input')).toHaveValue("30");
+});
+
+test("D-483: the module's Foundry windows (FormApplication menu, Dialog.confirm, ApplicationV2) render in its own sandboxed panel and act on real clicks", async ({ page }) => {
+  test.setTimeout(180_000);
+  await openWorld(page);
+  await page.locator("#gm-settings").click();
+  await importPackage(page, "fsd-demo-1.0.0.zip", foundryCoreApiModuleZip(), "fsd-demo");
+  await approve(page, "ais-foundry-v13");
+  await approve(page, "fsd-demo");
+  await reloadAndWaitReady(page, ["fsd-demo"]);
+  const panel = page.locator('[data-ais-panel="fsd-demo"]');
+  const frame = page.frameLocator('iframe[title="AIS module:fsd-demo"]');
+  await expect(panel).toHaveAttribute("data-ais-panel-open", "false");
+
+  // The registered settings menu opens as a v1 FormApplication window inside the module's panel.
+  const info = await result(page, "fsd-demo", "foundry.info");
+  expect(info.menus).toEqual([{ key: "fsd-demo.config", name: "FSD.ConfigTitle", label: "FSD.Open", type: "FsdConfig", restricted: true }]);
+  expect(info.windows).toEqual([]);
+  const opened = await result(page, "fsd-demo", "foundry.ui", { menu: "fsd-demo.config" });
+  expect(opened).toMatchObject({ id: "fsd-config", class: "FsdConfig", title: "Settings demo config", rendered: true, windows: [{ id: "fsd-config", api: "Application" }] });
+  await expect(panel).toHaveAttribute("data-ais-panel-open", "true");
+  await expect(panel).toBeVisible();
+  const config = frame.locator("#fsd-config");
+  await expect(config.locator(".window-title")).toHaveText("Settings demo config");
+  await expect(config.locator("h2.fsd")).toHaveText("Settings demo config — Hello, GM!");
+  await expect(config.locator("h2.fsd")).toHaveCSS("color", "rgb(255, 0, 0)"); // the module's own styles.css applies in its frame
+  await expect(config.locator("input[name=radius]")).toHaveValue("20");
+  await expect(config.locator("select[name=mode] option")).toHaveText(["Soft", "Hard"]);
+  await expect(config.locator("ul.fsd-items li")).toHaveText(["ALPHA", "BETA"]);
+  await expect(config.locator("ul.fsd-items li.hot")).toHaveCount(1);
+  await expect(config.locator("button[type=submit]")).toContainText("Save changes");
+  // jQuery listener from activateListeners, then the form submit → _updateObject → game.settings.set → replicated world settings.
+  await config.locator("[data-action=bump]").click();
+  await config.locator("[data-action=bump]").click();
+  await expect(config.locator("input[name=radius]")).toHaveValue("30");
+  await config.locator("select[name=mode]").selectOption("hard");
+  await config.locator("button[type=submit]").click();
+  await expect(frame.locator("#fsd-config")).toHaveCount(0);               // closeOnSubmit
+  await expect(panel).toHaveAttribute("data-ais-panel-open", "false");      // last window closed → panel hidden
+  await expect.poll(() => settingsDoc(page, "fsd-demo")).toMatchObject({ fsd_demo_radius: 30, fsd_demo_mode: "hard" });
+  const state = await result(page, "fsd-demo", "foundry.api", { path: "state" });
+  expect(state.submitted).toEqual({ radius: 30, mode: "hard", enabled: true });
+  expect(state.changes).toEqual([["radius", 30]]);
+
+  // Dialog.confirm: the macro waits on the dialog; the GM's click in the frame resolves it.
+  const pending = await invoke(page, "fsd-demo", "foundry.api", { path: "FsdUi.confirm" });
+  const dialog = frame.locator(".window-app.dialog");
+  await expect(dialog.locator(".window-title")).toHaveText("Are you sure?");
+  await expect(dialog.locator(".dialog-content")).toHaveText("Apply?");
+  await dialog.locator("button.dialog-button.yes").click();
+  await expect(pending.getByRole("status")).toContainText("Script completed", { timeout: 12_000 });
+  expect(JSON.parse(await pending.locator("details pre").innerText())).toBe(true);
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+  const pendingV2 = await invoke(page, "fsd-demo", "foundry.api", { path: "FsdUi.confirmV2" });
+  await frame.locator('.application.dialog button[data-action="no"]').click();
+  await expect(pendingV2.getByRole("status")).toContainText("Script completed", { timeout: 12_000 });
+  expect(JSON.parse(await pendingV2.locator("details pre").innerText())).toBe(false);
+  await page.locator('[data-window="macros"] [data-window-close]').click();
+
+  // ApplicationV2 + HandlebarsApplicationMixin: PARTS re-render from a data-action handler.
+  const v2 = await result(page, "fsd-demo", "foundry.api", { path: "FsdUi.openPanel" });
+  expect(v2).toMatchObject({ id: "fsd-panel", class: "FsdPanel", title: "Demo panel", rendered: true });
+  const v2Window = frame.locator("#fsd-panel");
+  await expect(v2Window.locator(".window-title")).toHaveText("Demo panel");
+  await expect(v2Window.locator(".fsd-radius")).toHaveText("radius: 30 (hard)");
+  await v2Window.locator("[data-action=ping]").click();
+  await v2Window.locator("[data-action=ping]").click();
+  await expect(v2Window.locator(".fsd-pings")).toHaveText("pings: 2");
+  await expect(page.locator("[data-notify]").last()).toContainText("FSD ping 2"); // ui.notifications.info → the shell's notice stack
+  expect((await result(page, "fsd-demo", "foundry.info")).windows).toEqual([expect.objectContaining({ id: "fsd-panel", api: "ApplicationV2", rendered: true })]);
+  // The shell's own panel chrome closes the panel without touching the module's document; its window survives for the next open.
+  await panel.locator("[data-ais-panel-close]").click();
+  await expect(panel).toHaveAttribute("data-ais-panel-open", "false");
+  // D-483 `ui.panel.closed`: the chrome's Close button really closes the module's windows (close hooks run),
+  // so the next render starts from a clean frame instead of resurrecting stale windows.
+  await expect.poll(async () => (await result(page, "fsd-demo", "foundry.info")).windows).toEqual([]);
+  await result(page, "fsd-demo", "foundry.ui", { app: "FsdUi.FsdPanel" });
+  await expect(panel).toHaveAttribute("data-ais-panel-open", "true");
+  await expect(frame.locator(".application.fsd")).toHaveCount(1);
+  await expect(frame.locator(".fsd-pings")).toHaveText("pings: 0"); // foundry.ui {app} constructs a fresh instance
 });

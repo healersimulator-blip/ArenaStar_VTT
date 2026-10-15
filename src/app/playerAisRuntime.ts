@@ -371,7 +371,8 @@ export class PlayerAisRuntime {
     const panels = this.panels;
     const panelBody = module.panel && panels
       ? panels.mount(module.packageId, { title: module.panel.title, moduleName: module.name,
-        width: module.panel.width, height: module.panel.height, onClose: () => this.publish() })
+        width: module.panel.width, height: module.panel.height,
+        onClose: () => { this.frames.get(module.packageId)?.emit("ui.panel.closed", { reason: "user" }); this.publish(); } })
       : undefined;
     const frameOptions: AisModuleIframeOptions = {
       packageId: module.packageId,

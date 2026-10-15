@@ -15,7 +15,7 @@ export interface AisPackageSource {
 export function aisOwnSource(pkg: AisPackageSource): string {
   const spec = pkg.manifest.interconnect;
   if (!spec) throw new Error(`Not an AIS module: ${pkg.id}`);
-  const paths = [...(spec.runtime?.scripts ?? []), spec.entry];
+  const paths = [...(spec.runtime?.scripts ?? spec.runtimeProvider?.scripts ?? []), spec.entry];
   let source = "";
   for (const path of paths) {
     const text = pkg.files[path];

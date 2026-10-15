@@ -19,7 +19,19 @@
   if (!moduleProfile && (!config || typeof config.id !== "string" || typeof config.version !== "string"))
     throw new Error("Runtime configuration needs upstream id/version");
   const unsupported = (name) => { throw new Error(`Foundry compatibility profile does not support ${name}`); };
-  const clone = (value) => value === undefined ? undefined : structuredClone(value);
+  /** Foundry `deepClone` semantics: plain data is copied, class instances/functions/DOM nodes are shared. */
+  const clone = (value, depth = 0) => {
+    if (value === null || typeof value !== "object") return value;
+    if (depth > 100) throw new Error("deepClone: maximum depth exceeded");
+    if (Array.isArray(value)) return value.map((item) => clone(item, depth + 1));
+    if (value instanceof Date) return new Date(value.getTime());
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return value;
+    const out = {};
+    for (const [key, item] of Object.entries(value)) out[key] = clone(item, depth + 1);
+    return out;
+  };
+  const duplicate = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
   const safeParts = (path) => {
     const parts = String(path).split(".");
     if (parts.some((part) => !part || ["__proto__", "constructor", "prototype"].includes(part))) throw new Error("Unsafe property path");
@@ -378,7 +390,7 @@
     return;
   }
 
-  // ═════════════════════════════ profile: foundry-module (0.2.0, D-482) ═════════════════════════════
+  // ═════════════════════════════ profile: foundry-module (0.2.0 D-482, UI layer 0.3.0 D-483) ═════════════════════════════
   const dist = context.distribution;
   if (!dist || typeof dist.foundryId !== "string" || !Array.isArray(dist.files))
     throw new Error("foundry-module profile needs runtimeContext.distribution (import the module.json archive through the package importer)");
@@ -572,29 +584,25 @@
   globalThis.PlaceableObject = PlaceableObject;
   for (const name of ["Token", "Tile", "Drawing", "Wall", "AmbientLight", "AmbientSound", "MeasuredTemplate", "Note", "Region"])
     globalThis[name] = stubClass(name, PlaceableObject);
-  const Application = stubClass("Application");
-  const FormApplication = stubClass("FormApplication", Application);
-  const DocumentSheet = stubClass("DocumentSheet", FormApplication);
-  const Dialog = stubClass("Dialog", Application);
-  Object.assign(Dialog, {
-    confirm: () => unsupportedCall("Dialog.confirm (Foundry dialogs; R-04)"),
-    prompt: () => unsupportedCall("Dialog.prompt (Foundry dialogs; R-04)"),
-    wait: () => unsupportedCall("Dialog.wait (Foundry dialogs; R-04)"),
-  });
-  Object.assign(globalThis, { Application, FormApplication, DocumentSheet, Dialog,
+  // ── D-483: Foundry application UI (hbs.js + jq.js + ui.js, loaded before this file). ──
+  const resourceText = new Map();
+  const Handlebars = globalThis.__aisFoundryHbs.create();
+  const $ = globalThis.__aisFoundryJq.create(document);
+  const uiLayer = globalThis.__aisFoundryUi.install({ AIS, game: null, Hooks: globalThis.Hooks, i18n, warn, resources: resourceText, foundryId, Handlebars, $,
+    utils: { mergeObject, expandObject, getProperty, escapeHTML } });
+  const { Application, FormApplication, DocumentSheet, Dialog, Tabs, FormDataExtended, ApplicationV2, HandlebarsApplicationMixin, DocumentSheetV2, DialogV2,
+    renderTemplate, loadTemplates, getTemplate } = uiLayer;
+  globalThis.ui.windows = uiLayer.ui.windows;
+  Object.defineProperty(globalThis.ui, "activeWindow", { configurable: true, get: () => uiLayer.ui.activeWindow, set: (value) => { uiLayer.ui.activeWindow = value; } });
+  Object.assign(globalThis, { Application, FormApplication, DocumentSheet, Dialog, Tabs, FormDataExtended, Handlebars, renderTemplate, loadTemplates, getTemplate, $, jQuery: $,
     ActorSheet: stubClass("ActorSheet", DocumentSheet), ItemSheet: stubClass("ItemSheet", DocumentSheet),
     TokenConfig: stubClass("TokenConfig", DocumentSheet), SidebarTab: stubClass("SidebarTab", Application),
     ContextMenu: stubClass("ContextMenu"), Draggable: stubClass("Draggable"), SearchFilter: stubClass("SearchFilter"),
-    Tabs: stubClass("Tabs"), FilePicker: stubClass("FilePicker", Application), SettingsConfig: stubClass("SettingsConfig", FormApplication),
+    FilePicker: stubClass("FilePicker", Application), SettingsConfig: stubClass("SettingsConfig", FormApplication),
     KeybindingsConfig: stubClass("KeybindingsConfig", FormApplication), Roll: stubClass("Roll"), Collection,
-    Handlebars: { registerHelper() {}, registerPartial() {}, compile: () => () => "", helpers: {}, partials: {} },
-    loadTemplates: async () => [], getTemplate: async () => unsupportedCall("getTemplate (Handlebars templates; R-04)"),
-    renderTemplate: async () => unsupportedCall("renderTemplate (Handlebars templates; R-04)"),
     fromUuid: async (uuid) => fromUuidSync(uuid), fromUuidSync: (uuid) => fromUuidSync(uuid),
-    $: () => unsupportedCall("jQuery (Foundry forms; R-04)"), jQuery: () => unsupportedCall("jQuery (Foundry forms; R-04)"),
-    duplicate: clone, mergeObject, getProperty, setProperty, hasProperty, expandObject, flattenObject, isNewerVersion, debounce,
+    duplicate, mergeObject, getProperty, setProperty, hasProperty, expandObject, flattenObject, isNewerVersion, debounce,
   });
-  globalThis.Dialog.prototype.render = function () { return unsupportedCall("Dialog#render (Foundry dialogs; R-04)"); };
   function fromUuidSync(uuid) {
     const parts = String(uuid).split(".");
     if (parts[0] === "Scene" && currentView?.scene.id === parts[1]) {
@@ -604,10 +612,8 @@
     }
     return null;
   }
-  const HandlebarsApplicationMixin = (Base) => class extends Base {};
-  const ApplicationV2 = stubClass("ApplicationV2");
   globalThis.foundry = {
-    utils: { getProperty, setProperty, hasProperty, mergeObject, expandObject, flattenObject, isNewerVersion, deepClone: clone, duplicate: clone, randomID,
+    utils: { getProperty, setProperty, hasProperty, mergeObject, expandObject, flattenObject, isNewerVersion, deepClone: clone, duplicate, randomID,
       debounce, escapeHTML, isEmpty: (value) => value === undefined || value === null || (typeof value === "object" && Object.keys(value).length === 0) || value === "",
       getType: (value) => value === null ? "null" : Array.isArray(value) ? "Array" : typeof value === "object" ? value.constructor?.name ?? "Object" : typeof value,
       fetchJsonWithTimeout: () => unsupportedCall("foundry.utils.fetchJsonWithTimeout (network access)"),
@@ -615,14 +621,12 @@
       invertObject: (object) => Object.fromEntries(Object.entries(object).map(([key, value]) => [value, key])),
       timeSince: () => "", formatFileSize: (bytes) => `${bytes} B`, Collection, parseUuid: (uuid) => ({ uuid, id: String(uuid).split(".").pop() }),
       Semaphore: class { constructor(max = 1) { this.max = max; } add(fn, ...args) { return Promise.resolve().then(() => fn(...args)); } } },
-    applications: { api: { ApplicationV2, DialogV2: Object.assign(stubClass("DialogV2", ApplicationV2), {
-        confirm: () => unsupportedCall("DialogV2.confirm (Foundry dialogs; R-04)"), prompt: () => unsupportedCall("DialogV2.prompt (Foundry dialogs; R-04)"),
-        wait: () => unsupportedCall("DialogV2.wait (Foundry dialogs; R-04)"), input: () => unsupportedCall("DialogV2.input (Foundry dialogs; R-04)") }),
-      HandlebarsApplicationMixin, DocumentSheetV2: stubClass("DocumentSheetV2", ApplicationV2) },
-      sheets: { ActorSheetV2: stubClass("ActorSheetV2", ApplicationV2), ItemSheetV2: stubClass("ItemSheetV2", ApplicationV2) },
-      handlebars: { loadTemplates: async () => [], renderTemplate: async () => unsupportedCall("renderTemplate (Handlebars templates; R-04)") },
-      ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, TextEditor: { enrichHTML: async (html) => String(html ?? "") } },
-      apps: { FilePicker: globalThis.FilePicker }, ui: { Notifications: stubClass("Notifications") } },
+    applications: { api: { ApplicationV2, DialogV2, HandlebarsApplicationMixin, DocumentSheetV2, Application, FormApplication, DocumentSheet, Dialog },
+      sheets: { ActorSheetV2: stubClass("ActorSheetV2", DocumentSheetV2), ItemSheetV2: stubClass("ItemSheetV2", DocumentSheetV2) },
+      handlebars: { loadTemplates, renderTemplate, getTemplate },
+      ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, Tabs, FormDataExtended,
+        TextEditor: { enrichHTML: async (html) => String(html ?? ""), implementation: { enrichHTML: async (html) => String(html ?? "") } } },
+      apps: { FilePicker: globalThis.FilePicker }, ui: { Notifications: stubClass("Notifications") }, instances: uiLayer.instances },
     documents: { ...documentClasses, collections: {} },
     canvas: { placeables: { Token: globalThis.Token, Tile: globalThis.Tile, Drawing: globalThis.Drawing, Wall: globalThis.Wall, AmbientLight: globalThis.AmbientLight,
       AmbientSound: globalThis.AmbientSound, MeasuredTemplate: globalThis.MeasuredTemplate, Note: globalThis.Note, Region: globalThis.Region }, layers: {} },
@@ -702,7 +706,6 @@
   };
 
   // ── The loader: resources → blobs → import map → classic scripts → ES modules → lifecycle hooks. ──
-  const resourceText = new Map();
   const readAll = async (paths) => {
     const queue = [...paths];
     const worker = async () => {
@@ -800,7 +803,9 @@
       settings: [...settingRows.values()].map((row) => ({ key: `${row.namespace}.${row.key}`, aisKey: row.aisKey, scope: row.scope, kind: row.kind, synced: row.synced, hidden: row.declaration.hidden === true })),
       keybindings: [...bindings.keys()], socketListeners: [...socketListeners.keys()], hookNames: [...hooks.keys()], hookErrors,
       warnings: diagnostics.warnings, unsupportedCalls: diagnostics.unsupportedCalls, moduleApi: selfModule.api ? Object.keys(selfModule.api) : [],
-      globals: diagnostics.globals ?? [], loadMs: diagnostics.loadMs ?? null, ready: game.ready }),
+      globals: diagnostics.globals ?? [], loadMs: diagnostics.loadMs ?? null, ready: game.ready,
+      windows: uiLayer.describeWindows(), menus: [...settingsMenus].map(([key, menu]) => ({ key, name: menu.name ?? "", label: menu.label ?? "", type: menu.type?.name ?? null, restricted: menu.restricted === true })),
+      templates: uiLayer.templateCount() }),
   });
 
   AIS.commands.on("foundry.info", async () => FoundryAdapter.info());
@@ -821,6 +826,24 @@
     const { holder, value } = resolveApiPath(input.path);
     const result = typeof value === "function" ? await value.apply(holder, args) : value;
     return jsonSafe(result);
+  });
+
+  // D-483: open a Foundry window from the shell — a registered settings menu or any Application class the module defined.
+  AIS.commands.on("foundry.ui", async (input) => {
+    if (!input || (typeof input.menu !== "string" && typeof input.app !== "string")) throw new Error("foundry.ui needs { menu: \"<namespace>.<key>\" } or { app: \"Global.Class\", args?: [] }");
+    await refreshScene();
+    let app;
+    if (typeof input.menu === "string") app = uiLayer.openMenu(input.menu, settingsMenus).app;
+    else {
+      const { value } = resolveApiPath(input.app);
+      if (typeof value !== "function" || typeof value.prototype?.render !== "function") throw new Error(`foundry.ui: ${input.app} is not an Application class`);
+      const args = (Array.isArray(input.args) ? input.args : []).map((arg) => materialize(arg));
+      app = new value(...args);
+      app.render(true);
+    }
+    if (app instanceof ApplicationV2) await app.render(true);
+    else await new Promise((resolve) => setTimeout(resolve, 0));
+    return { ...app.toObject(), windows: uiLayer.describeWindows() };
   });
 
   AIS.runtime.initialize(async () => {

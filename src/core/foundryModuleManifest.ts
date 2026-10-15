@@ -27,7 +27,7 @@ import { isSafePackagePath, validatePackageManifest, type PackageManifest } from
 import { AIS_API_VERSION } from "./automationInterconnect";
 
 /** The runtime provider every synthesized Foundry module binds to, exact version. */
-export const FOUNDRY_ADAPTER = Object.freeze({ id: "ais-foundry-v13", version: "0.2.0", profile: "foundry-module" });
+export const FOUNDRY_ADAPTER = Object.freeze({ id: "ais-foundry-v13", version: "0.3.0", profile: "foundry-module" });
 /** Path under which the synthesized ArenaStar manifest is written into the imported files. */
 export const FOUNDRY_SYNTHESIZED_MANIFEST = "manifest.json";
 /** Inert stubs the AIS kernel requires (entry + runtime script); the adapter does the loading. */
@@ -201,15 +201,30 @@ export function synthesizeFoundryPackageManifest(foundry: FoundryModuleManifest,
         configuration: FOUNDRY_MANIFEST_PATH,
         resources: [...resources],
       },
-      // `foundry.info`: loader diagnostics; `foundry.api`: call the module's own globals/API from a reviewed script macro.
-      commands: [{ id: "foundry.info", contract: 1 }, { id: "foundry.api", contract: 1 }],
+      // `foundry.info`: loader diagnostics; `foundry.api`: call the module's own globals/API from a reviewed
+      // script macro; `foundry.ui` (D-483): open one of its settings menus or Application classes.
+      commands: [{ id: "foundry.info", contract: 1 }, { id: "foundry.api", contract: 1 }, { id: "foundry.ui", contract: 1 }],
       capabilities: [
         "runtime.execute", "package.resources.read", "module.settings.write", "ui.notify",
-        "scene.tags.read", "scene.tags.write", "fx.play",
+        "scene.tags.read", "scene.tags.write", "fx.play", "ui.panel",
       ],
+      // D-483: Foundry Application / Dialog windows render inside the module's own sandboxed panel.
+      panel: { title: foundryPanelTitle(foundry.title), width: FOUNDRY_PANEL_WIDTH, height: FOUNDRY_PANEL_HEIGHT },
       sharing: "host-only",
     },
   };
+}
+
+/** Panel size for imported Foundry modules: large enough for a Foundry sheet, inside the kernel's 240–960 × 160–720 box. */
+export const FOUNDRY_PANEL_WIDTH = 760;
+export const FOUNDRY_PANEL_HEIGHT = 560;
+
+/** `interconnect.panel.title` must be 1–48 printable characters (packageManifest). */
+export function foundryPanelTitle(title: string): string {
+  const printable = Array.from(title, (ch) => { const code = ch.charCodeAt(0); return code < 0x20 || code === 0x7f ? " " : ch; })
+    .join("").replace(/\s+/g, " ").trim();
+  const base = printable || "Foundry module";
+  return base.length <= 48 ? base : `${base.slice(0, 47).trimEnd()}…`;
 }
 
 export interface SynthesizedFoundryPackage {
