@@ -29,6 +29,8 @@ export const GM_DEVICE_ONLY_CAPABILITIES: ReadonlySet<AisCapability> = new Set<A
   "fx.play",
   "scene.tags.write",
   "ui.theme",
+  // D-477: compendium packs are host-side package records, never replicated to players.
+  "compendium.read",
 ]);
 
 export function playerRunnableCapabilities(capabilities: readonly AisCapability[]): AisCapability[] {
@@ -78,6 +80,9 @@ export function sharedModuleOf(module: HostAutomationModuleBoot): AisSharedModul
     emittedEvents: [...module.emittedEvents],
     ...(module.tokenActions && module.tokenActions.length > 0 ? { tokenActions: module.tokenActions.map((action) => ({ ...action })) } : {}),
     ...(module.panel ? { panel: { ...module.panel } } : {}),
+    ...(module.settings && module.settings.length > 0 ? { settings: module.settings.map((declaration) => structuredClone(declaration)) } : {}),
+    ...(module.requires && module.requires.length > 0 ? { requires: module.requires.map((requirement) => ({ ...requirement })) } : {}),
+    ...(module.provides && module.provides.length > 0 ? { provides: module.provides.map((slot) => ({ ...slot })) } : {}),
   };
 }
 

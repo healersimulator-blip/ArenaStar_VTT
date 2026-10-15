@@ -59,7 +59,7 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   }
   function createApi(commandId) {
     var call = function (method, args) { return rpc(method, args, commandId); };
-    return Object.freeze({
+    var api = {
       events: Object.freeze({
         on: function (event, callback) {
           if (typeof event !== "string" || typeof callback !== "function") throw new TypeError("AIS.events.on requires an event and callback");
@@ -108,6 +108,35 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
         get: function (key) { return call("module.storage.get", { key: key }); },
         set: function (key, value) { return call("module.storage.set", { key: key, value: value }); }
       }),
+      // D-476: schema-declared settings (interconnect.settings); world scope is GM-authored.
+      settings: Object.freeze({
+        list: function () { return call("settings.list", {}); },
+        get: function (key) { return call("settings.get", { key: key }).then(function (row) { return row.value; }); },
+        set: function (key, value) { return call("settings.set", { key: key, value: value }); },
+        onChange: function (callback) {
+          if (typeof callback !== "function") throw new TypeError("AIS.settings.onChange requires a callback");
+          return api.events.on("module.settings.changed", callback);
+        }
+      }),
+      // D-477: read-only compendium access (GM device; players get an explanatory error).
+      compendium: Object.freeze({
+        list: function () { return call("compendium.list", {}).then(function (row) { return row.packs; }); },
+        search: function (query, options) {
+          var request = { query: query };
+          if (options && options.packId !== undefined) request.packId = options.packId;
+          if (options && options.limit !== undefined) request.limit = options.limit;
+          return call("compendium.search", request).then(function (row) { return row.hits; });
+        },
+        get: function (packId, entryId) { return call("compendium.get", { packId: packId, entryId: entryId }); }
+      }),
+      // D-478: other modules on this device — public contract and kernel-routed invocation.
+      modules: Object.freeze({
+        list: function () { return call("modules.list", {}).then(function (row) { return row.modules; }); },
+        invoke: function (moduleId, commandId, input) {
+          return call("modules.invoke", { moduleId: moduleId, commandId: commandId, input: input === undefined ? null : input })
+            .then(function (row) { return row.result; });
+        }
+      }),
       chat: Object.freeze({ post: function (content) { return call("chat.post", { content: content }); } }),
       ui: Object.freeze({
         notify: function (message, level) { return call("ui.notify", { message: String(message), level: level || "info" }); },
@@ -119,7 +148,8 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
           root: function () { return document.body; }
         })
       })
-    });
+    };
+    return Object.freeze(api);
   }
   function boundedJson(value, depth, seen) {
     if (depth > 12) return false;

@@ -5,23 +5,57 @@ import { UI_THEME_CAPABILITIES, UI_THEME_COMMAND } from "../core/uiTheme";
 import type { HostApp, HostAutomationModuleBoot } from "./hostBoot";
 import type { AisProfileMsg } from "../core/messages";
 import { buildAisPlayerProfile } from "./aisPlayerProfile";
-import type { Json, SceneDocument, TokenDocument, ActorDocument } from "../core/documents";
+import type { Json, SceneDocument, SettingsDocument, TokenDocument, ActorDocument } from "../core/documents";
+import type { Op } from "../core/ops";
 import {
   aisTokenLightChanges,
   type AisCapability,
   type AisEventName,
   type AisEventPayloads,
+  type AisSettingDeclaration,
+  type AisSettingValue,
 } from "../core/automationInterconnect";
-import { getWorld, type WorldsRecord } from "../storage/idb";
-import { AisModuleIframe, type AisModuleRuntimeStatus } from "../packages/aisModuleIframe";
+import {
+  aisDeviceSettingsScope,
+  aisSettingsDocId,
+  aisSettingsDocTouched,
+  aisWorldSettingOps,
+  aisWorldSettingValues,
+  coerceAisSettingValue,
+} from "../core/aisSettings";
+import { getAllSettings, getWorld, putSetting, type WorldsRecord } from "../storage/idb";
+import {
+  AisModuleIframe,
+  type AisModuleDiagnostics,
+  type AisModuleRequestContext,
+  type AisModuleRuntimeStatus,
+} from "../packages/aisModuleIframe";
 import {
   createAisModuleHandlers,
   createAisMutationQueue,
   projectAisTokenLight,
+  type AisModuleDirectoryEntry,
   type AisModuleSelectRequest,
 } from "../packages/aisModuleHandlers";
 
+/** D-476: what a shell form needs to render one module's settings. */
+export interface AisModuleSettingsView {
+  declarations: AisSettingDeclaration[];
+  values: Record<string, AisSettingValue>;
+}
+
 export type AisRuntimeStatuses = Readonly<Record<string, AisModuleRuntimeStatus>>;
+
+/**
+ * D-476/D-479: what a shell's packages view needs from a runtime to render a module's settings
+ * form and health block. Both runtimes (GM and player) satisfy it; the player's `restart` is async.
+ */
+export interface AisModuleShellApi {
+  settings(packageId: string): Promise<AisModuleSettingsView | null>;
+  setSetting(packageId: string, key: string, value: AisSettingValue): Promise<AisSettingValue>;
+  diagnostics(packageId: string): AisModuleDiagnostics | null;
+  restart(packageId: string): boolean | Promise<boolean>;
+}
 
 export interface AisRuntimeOptions {
   app: HostApp;
@@ -76,6 +110,11 @@ export class AisRuntime {
   private readonly panels: AisPanelHost | null;
   /** D-468: the last published player-facing module set (empty until consent is verified). */
   private playerProfileBody: Omit<AisProfileMsg, "kind" | "seq" | "worldId"> = { providers: {}, modules: [] };
+  /** D-476: last world-scope values seen per module, so a commit raises one change per key. */
+  private readonly worldSettingValues = new Map<string, Record<string, AisSettingValue>>();
+  /** D-478: in-flight module→module invocations (a chain deeper than this is a bug, not a feature). */
+  private busDepth = 0;
+  private busSeq = 0;
 
   constructor(options: AisRuntimeOptions) {
     this.options = options;
@@ -108,6 +147,7 @@ export class AisRuntime {
       app.gm.bus.on("snapshot", (message) => this.emit("world.snapshot", { seq: message.seq })),
       app.gm.bus.on("ops", (message) => {
         this.emit("world.ops.committed", { seq: message.envelope.seq, operationCount: message.envelope.ops.length });
+        this.emitWorldSettingChanges(message.envelope.ops);
         const scene = this.scene();
         if (!scene) return;
         for (const change of aisTokenLightChanges(message.envelope.ops)) {
@@ -227,10 +267,142 @@ export class AisRuntime {
           emitModuleEvent: (eventId, payload) => this.emitModuleEvent(module.packageId, eventId, payload),
           newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID()}`,
           assertCapability,
+          // D-476: the GM device writes world scope with GM authority; device scope stays local.
+          ...(module.settings?.length ? { settings: {
+            declarations: module.settings,
+            packageName: module.name,
+            worldDoc: () => this.worldSettingsDoc(module.packageId),
+            canWriteWorld: () => true,
+            onDeviceChange: (key, value) =>
+              this.hosts.get(module.packageId)?.emit("module.settings.changed", { scope: "device", key, value }),
+          } } : {}),
+          // D-477: the GM device holds every imported pack (memoized per package record in HostPackages).
+          compendia: () => app.packages.compendia(),
+          // D-478: directory + kernel-routed invocation with GM authority.
+          modules: {
+            requires: module.requires ?? [],
+            list: () => this.moduleDirectory(),
+            invoke: (target, commandId, input, lifetime) => this.invokeFromModule(module.packageId, target, commandId, input, lifetime),
+          },
         }),
       });
       if (panelBody) panels?.attach(module.packageId, frame);
       this.hosts.set(module.packageId, frame);
+      if (module.settings?.length)
+        this.worldSettingValues.set(module.packageId, aisWorldSettingValues(this.worldSettingsDoc(module.packageId), module.settings));
+  }
+
+  private worldSettingsDoc(packageId: string): SettingsDocument | undefined {
+    return this.options.app.store.get("settings", aisSettingsDocId(packageId)) as SettingsDocument | undefined;
+  }
+
+  /** D-476: a committed batch touched a module's world-settings document → one event per changed key. */
+  private emitWorldSettingChanges(ops: readonly Op[]): void {
+    for (const module of this.definitions.values()) {
+      if (!module.settings?.length || !aisSettingsDocTouched(ops, module.packageId)) continue;
+      const previous = this.worldSettingValues.get(module.packageId) ?? {};
+      const next = aisWorldSettingValues(this.worldSettingsDoc(module.packageId), module.settings);
+      this.worldSettingValues.set(module.packageId, next);
+      const frame = this.hosts.get(module.packageId);
+      for (const [key, value] of Object.entries(next))
+        if (previous[key] !== value) frame?.emit("module.settings.changed", { scope: "world", key, value });
+    }
+  }
+
+  /** D-476: declarations + effective values of one module (world from the store, device from IndexedDB). */
+  async moduleSettings(packageId: string): Promise<AisModuleSettingsView | null> {
+    const module = this.definitions.get(packageId) ?? this.options.app.automationBoot.modules.find((entry) => entry.packageId === packageId);
+    if (!module?.settings?.length) return null;
+    const values = aisWorldSettingValues(this.worldSettingsDoc(packageId), module.settings);
+    const rows = await getAllSettings(this.options.app.db, aisDeviceSettingsScope(this.options.app.worldId, packageId));
+    for (const declaration of module.settings) {
+      if (declaration.scope !== "device") continue;
+      const row = rows.find((candidate) => candidate.key === declaration.key);
+      const coerced = row ? coerceAisSettingValue(declaration, row.value) : null;
+      values[declaration.key] = coerced?.ok ? coerced.value : declaration.default;
+    }
+    return { declarations: module.settings.map((declaration) => structuredClone(declaration)), values };
+  }
+
+  /** D-476: the GM's form writes a value — world scope through a normal commit, device scope locally. */
+  async setModuleSetting(packageId: string, key: string, value: unknown): Promise<AisSettingValue> {
+    const module = this.definitions.get(packageId) ?? this.options.app.automationBoot.modules.find((entry) => entry.packageId === packageId);
+    const declaration = module?.settings?.find((candidate) => candidate.key === key);
+    if (!module || !declaration) throw new Error(`${packageId} declares no setting ${key}`);
+    const coerced = coerceAisSettingValue(declaration, value);
+    if (!coerced.ok) throw new Error(coerced.error);
+    if (declaration.scope === "world") {
+      const ops = aisWorldSettingOps(this.worldSettingsDoc(packageId), packageId, module.name, key, coerced.value);
+      if (ops.length > 0) await this.options.app.gm.client.submitAndWait(ops);
+    } else {
+      await putSetting(this.options.app.db, { scope: aisDeviceSettingsScope(this.options.app.worldId, packageId), key, value: coerced.value });
+      this.hosts.get(packageId)?.emit("module.settings.changed", { scope: "device", key, value: coerced.value });
+    }
+    return coerced.value;
+  }
+
+  /** D-478: the public contract of every booted module on this device (running or not). */
+  private moduleDirectory(): AisModuleDirectoryEntry[] {
+    return this.options.app.automationBoot.modules
+      .filter((module) => !module.runtimeProvider && !module.appearance)
+      .map((module) => ({
+        packageId: module.packageId, name: module.name, version: module.version,
+        running: this.hosts.get(module.packageId)?.status.state === "ready",
+        commands: module.commands, provides: module.provides ?? [], emits: module.emittedEvents,
+      }));
+  }
+
+  /** D-478: route a module's request to a sibling's declared command, with this device's (GM) authority. */
+  private async invokeFromModule(
+    callerPackageId: string,
+    targetId: string,
+    commandId: string,
+    input: Json,
+    lifetime: AisModuleRequestContext | undefined,
+  ): Promise<Json> {
+    const frame = this.hosts.get(targetId);
+    if (!frame) throw new Error(`AIS module ${targetId} is not running on this device`);
+    if (this.busDepth >= 8) throw new Error("AIS module bus depth exceeded");
+    this.busDepth++;
+    try {
+      return await frame.invokeCommand(commandId, input, {
+        sceneId: this.options.activeSceneId() ?? "",
+        callerId: this.options.app.gm.client.user?.id ?? "gm",
+        requestId: `ais-module:${callerPackageId}:${++this.busSeq}`,
+        runAs: "gm",
+        isActive: () => !this.disposed && lifetime?.isActive() !== false,
+      });
+    } finally { this.busDepth--; }
+  }
+
+  /** The GM shell's view of settings + health, bound so Svelte props can hold it. */
+  shellApi(): AisModuleShellApi {
+    return {
+      settings: (packageId) => this.moduleSettings(packageId),
+      setSetting: (packageId, key, value) => this.setModuleSetting(packageId, key, value),
+      diagnostics: (packageId) => this.diagnostics(packageId),
+      restart: (packageId) => this.restart(packageId),
+    };
+  }
+
+  /** D-479: health counters and the bounded trace of one module (null when it never started here). */
+  diagnostics(packageId: string): AisModuleDiagnostics | null {
+    return this.hosts.get(packageId)?.diagnostics() ?? null;
+  }
+
+  /**
+   * D-479: stop and start one module again from its frozen boot definition (after a circuit trip
+   * or a module-side failure). New code or grants still require a reload: the definition is the
+   * one the GM approved at boot.
+   */
+  restart(packageId: string): boolean {
+    if (this.disposed) return false;
+    const module = this.definitions.get(packageId);
+    if (!module || module.appearance || module.runtimeProvider) return false;
+    this.hosts.get(packageId)?.dispose("Restarted from Settings → Packages");
+    this.hosts.delete(packageId);
+    this.start(module);
+    return true;
   }
 
   /** D-470: panels of modules that declared one, with their open state (for shell buttons). */

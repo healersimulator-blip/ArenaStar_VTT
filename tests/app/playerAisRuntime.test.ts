@@ -22,6 +22,8 @@ import { createEventBus, type EventBus } from "../../src/core/events";
 import { DocumentStore, OpLog, UndoStack, type StoreMeta } from "../../src/core";
 import type { AisProfileMsg, AisSharedModule, HelloMsg } from "../../src/core/messages";
 import type { Op, OpEnvelope } from "../../src/core/ops";
+import type { AisSettingDeclaration } from "../../src/core/automationInterconnect";
+import { aisWorldSettingOps } from "../../src/core/aisSettings";
 import type { Json, SceneDocument, TokenDocument, UserDocument } from "../../src/core/documents";
 import type { AisModuleIframeOptions, AisModuleInvocationOptions } from "../../src/packages/aisModuleIframe";
 import { openVttDb, getSetting } from "../../src/storage/idb";
@@ -81,6 +83,8 @@ interface Harness {
   host: HostSync;
   hostStore: DocumentStore;
   hostBus: EventBus<HostEvents>;
+  /** The GM's own client (GM-authority commits, e.g. world-scope module settings). */
+  gm: ClientSync;
   profileBody: Omit<AisProfileMsg, "kind" | "seq" | "worldId">;
   addPlayer: (pubkey: string, name: string) => Promise<{ client: ClientSync; bus: EventBus<ClientEvents>; profiles: AisProfileMsg[] }>;
 }
@@ -112,11 +116,11 @@ async function setup(): Promise<Harness> {
 
   const gmPair = createTransportPair();
   host.addSession("gm", gmPair.a, gmSessionUser(GM_ID));
-  new ClientSync({ transport: gmPair.b, bus: createEventBus<ClientEvents>(), meta });
+  const gm = new ClientSync({ transport: gmPair.b, bus: createEventBus<ClientEvents>(), meta });
   await flushMicrotasks();
 
   const harness: Harness = {
-    host, hostStore, hostBus,
+    host, hostStore, hostBus, gm,
     profileBody: { providers: { "scene.token.light.action": "pf1e-torch/light" }, modules: [torchModule()] },
     addPlayer: async (pubkey, name) => {
       const pair = createTransportPair();
@@ -523,6 +527,68 @@ describe("D-468 — host authority over a player's torch", () => {
       const visible = await handlers["scene.read.visible"]({}) as { id: string; tokens: Array<{ id: string }> };
       expect(visible.id).toBe("s1");
       expect(visible.tokens.map((t) => t.id).sort()).toEqual([IVY, REX].sort());
+      r.runtime.dispose();
+    } finally { db.close(); }
+  });
+
+  test("D-476/D-477/D-478/D-479: world settings come from the replica, only device scope is writable, siblings run with player authority", async () => {
+    const h = await setup();
+    const settings: AisSettingDeclaration[] = [
+      { key: "radius", scope: "world", type: "number", label: "Radius", default: 20, min: 0, max: 60, step: 5 },
+      { key: "sound", scope: "device", type: "boolean", label: "Sound", default: true },
+    ];
+    h.profileBody = { providers: {}, modules: [
+      { ...torchModule(), capabilities: ["action.observe", "module.settings.write", "modules.invoke"], settings, requires: [{ id: "lamp" }] },
+      { packageId: "lamp", name: "Lamp", version: "1.0.0", hash: "h-lamp", source: "", commands: [{ id: "poke", contract: 1 }], capabilities: [], emittedEvents: [] },
+    ] };
+    const rex = await h.addPlayer(REX_OWNER, "Rex");
+    const db = await openVttDb();
+    try {
+      const r = runtimeFor(rex, db);
+      await r.runtime.settled();
+      await r.runtime.allow("pf1e-torch");
+      await r.runtime.allow("lamp");
+      const torch = must(r.frames.find((frame) => frame.options.packageId === "pf1e-torch"));
+      const lamp = must(r.frames.find((frame) => frame.options.packageId === "lamp"));
+      const handlers = torch.options.handlers;
+
+      // Defaults; the shell form and the module read the same values.
+      expect((await r.runtime.moduleSettings("pf1e-torch"))?.values).toEqual({ radius: 20, sound: true });
+      expect(await r.runtime.moduleSettings("lamp")).toBeNull();
+      await expect(handlers["settings.get"]({ key: "radius" })).resolves.toEqual({ key: "radius", scope: "world", value: 20 });
+      // World scope is the GM's: refused here before any op is built.
+      await expect(handlers["settings.set"]({ key: "radius", value: 30 })).rejects.toThrow("GM authority");
+      await expect(r.runtime.setDeviceSetting("pf1e-torch", "radius", 30)).rejects.toThrow("changed by the GM");
+      expect(h.hostStore.get("settings", "ais-settings:pf1e-torch")).toBeUndefined();
+      // Device scope: local row + change event, from the module and from the shell form.
+      await expect(handlers["settings.set"]({ key: "sound", value: false })).resolves.toEqual({ key: "sound", scope: "device", value: false });
+      expect(torch.events).toContainEqual({ event: "module.settings.changed", payload: { scope: "device", key: "sound", value: false } });
+      await r.runtime.setDeviceSetting("pf1e-torch", "sound", true);
+      expect(torch.events.at(-1)).toEqual({ event: "module.settings.changed", payload: { scope: "device", key: "sound", value: true } });
+      expect((await r.runtime.moduleSettings("pf1e-torch"))?.values).toEqual({ radius: 20, sound: true });
+      // The GM commits the world document → it replicates → the player's module hears the change.
+      await h.gm.submitAndWait(aisWorldSettingOps(undefined, "pf1e-torch", "Torch", "radius", 35));
+      await flushMicrotasks();
+      expect(rex.client.store.get("settings", "ais-settings:pf1e-torch")).toMatchObject({ flags: { ais: { values: { radius: 35 } } } });
+      expect(torch.events).toContainEqual({ event: "module.settings.changed", payload: { scope: "world", key: "radius", value: 35 } });
+      expect(lamp.events.some((entry) => entry.event === "module.settings.changed")).toBe(false);
+      await expect(handlers["settings.get"]({ key: "radius" })).resolves.toEqual({ key: "radius", scope: "world", value: 35 });
+
+      // Module bus with player authority; compendia stay on the GM device.
+      await expect(handlers["modules.list"]({})).resolves.toEqual({ modules: [
+        { packageId: "lamp", name: "Lamp", version: "1.0.0", running: true, commands: [{ id: "poke", contract: 1 }], provides: [], emits: [] },
+      ] });
+      await expect(handlers["modules.invoke"]({ moduleId: "lamp", commandId: "poke", input: 1 })).resolves.toEqual({ result: { ok: true, commandId: "poke" } });
+      expect(lamp.commands[0]).toMatchObject({ commandId: "poke", input: 1, options: { runAs: "player", requestId: "ais-module:pf1e-torch:1" } });
+      await expect(lamp.options.handlers["modules.invoke"]({ moduleId: "pf1e-torch", commandId: "light.toggle" })).rejects.toThrow("modules.invoke is not shared");
+      await expect(handlers["compendium.list"]({})).rejects.toThrow("compendium.read is not shared");
+
+      // Diagnostics are absent in the frame double; restart re-reads consent and re-creates the frame.
+      expect(r.runtime.diagnostics("pf1e-torch")).toBeNull();
+      expect(await r.runtime.restart("pf1e-torch")).toBe(true);
+      expect(r.frames.filter((frame) => frame.options.packageId === "pf1e-torch")).toHaveLength(2);
+      expect(torch.disposedWith).toBe("Restarted on this device");
+      expect(await r.runtime.restart("nobody")).toBe(false);
       r.runtime.dispose();
     } finally { db.close(); }
   });

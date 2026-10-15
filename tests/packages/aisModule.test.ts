@@ -1,13 +1,14 @@
 import "fake-indexeddb/auto";
 import { describe, expect, test, vi } from "vitest";
-import type { AisCapability } from "../../src/core/automationInterconnect";
+import type { AisCapability, AisSettingDeclaration } from "../../src/core/automationInterconnect";
 import {
   AIS_RPC_TAG,
   createAisModuleDispatcher,
   type AisModuleHandlers,
 } from "../../src/packages/aisModuleIframe";
 import { createAisModuleHandlers } from "../../src/packages/aisModuleHandlers";
-import type { ActorDocument, SceneDocument } from "../../src/core/documents";
+import type { ActorDocument, SceneDocument, SettingsDocument } from "../../src/core/documents";
+import type { CompendiumPack } from "../../src/core/compendium";
 import { openVttDb } from "../../src/storage/idb";
 
 const allHandlers = (): AisModuleHandlers => ({
@@ -29,6 +30,14 @@ const allHandlers = (): AisModuleHandlers => ({
   "ui.select": vi.fn(async () => ({ selected: null })),
   "ui.panel.open": vi.fn(async () => ({ open: true })),
   "ui.panel.close": vi.fn(async () => ({ open: false })),
+  "settings.list": vi.fn(async () => ({ settings: [] })),
+  "settings.get": vi.fn(async () => ({ key: "k", scope: "device", value: true })),
+  "settings.set": vi.fn(async () => ({ key: "k", scope: "device", value: true })),
+  "compendium.list": vi.fn(async () => ({ packs: [] })),
+  "compendium.search": vi.fn(async () => ({ hits: [] })),
+  "compendium.get": vi.fn(async () => ({ packId: "p/x.json", id: "e", name: "E", type: "actor", data: {} })),
+  "modules.list": vi.fn(async () => ({ modules: [] })),
+  "modules.invoke": vi.fn(async () => ({ result: null })),
 });
 
 function sampleScene(): SceneDocument {
@@ -215,6 +224,163 @@ describe("AIS host handlers", () => {
     granted.clear();
     await expect(withPanel["ui.panel.open"]({})).rejects.toThrow("denied ui.panel");
     expect(calls).toHaveLength(2);
+    db.close();
+  });
+
+  test("D-476: settings.get/list need no capability, settings.set coerces and routes by scope", async () => {
+    const db = await openVttDb();
+    const granted = new Set<string>(["module.settings.write"]);
+    const submitted: unknown[][] = [];
+    const deviceChanges: unknown[] = [];
+    let worldDoc: SettingsDocument | undefined;
+    let canWriteWorld = true;
+    const declarations: AisSettingDeclaration[] = [
+      { key: "radius", scope: "world", type: "number", label: "Radius", default: 20, min: 0, max: 60, step: 5 },
+      { key: "sound", scope: "device", type: "boolean", label: "Sound", default: true },
+      { key: "mode", scope: "world", type: "choice", label: "Mode", default: "soft", choices: [{ value: "soft", label: "Soft" }, { value: "hard", label: "Hard" }] },
+    ];
+    const handlers = createAisModuleHandlers({
+      worldId: "w-ais-settings", packageId: "torch", emittedEvents: [], db,
+      user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
+      select: async () => null, notify: () => undefined, emitModuleEvent: () => undefined,
+      newId: (prefix: string) => `${prefix}one`,
+      submit: (ops) => {
+        submitted.push(ops);
+        const op = ops[0];
+        if (op?.kind === "create") worldDoc = op.data as SettingsDocument;
+        else if (op?.kind === "update" && worldDoc) {
+          const values = ((worldDoc.flags.ais as Record<string, unknown>).values as Record<string, unknown>);
+          for (const [path, value] of Object.entries(op.diff)) values[path.replace("flags.ais.values.", "")] = value;
+        }
+        return "tx-settings";
+      },
+      assertCapability: async (capability: string) => { if (!granted.has(capability)) throw new Error(`denied ${capability}`); },
+      settings: {
+        declarations, packageName: "Torch", worldDoc: () => worldDoc, canWriteWorld: () => canWriteWorld,
+        onDeviceChange: (key, value) => deviceChanges.push({ key, value }),
+      },
+    });
+    // Defaults before anything is stored; no capability involved.
+    await expect(handlers["settings.get"]({ key: "radius" })).resolves.toEqual({ key: "radius", scope: "world", value: 20 });
+    const listed = await handlers["settings.list"]({}) as { settings: Array<{ key: string; value: unknown }> };
+    expect(listed.settings.map((row) => [row.key, row.value])).toEqual([["radius", 20], ["sound", true], ["mode", "soft"]]);
+    await expect(handlers["settings.get"]({ key: "nope" })).rejects.toThrow("declares no setting nope");
+    // World scope: coerced against the declaration, then one create op with the namespace in flags.
+    await expect(handlers["settings.set"]({ key: "radius", value: 7 })).rejects.toThrow("steps of 5");
+    await expect(handlers["settings.set"]({ key: "radius", value: 65 })).rejects.toThrow("between 0 and 60");
+    await expect(handlers["settings.set"]({ key: "mode", value: "loud" })).rejects.toThrow("declared choices");
+    await expect(handlers["settings.set"]({ key: "radius", value: 30 })).resolves.toEqual({ key: "radius", scope: "world", value: 30 });
+    expect(submitted[0]).toMatchObject([{ kind: "create", coll: "settings",
+      data: { _id: "ais-settings:torch", ownership: { default: 1 }, system: {}, flags: { ais: { packageId: "torch", values: { radius: 30 } } } } }]);
+    await expect(handlers["settings.set"]({ key: "mode", value: "hard" })).resolves.toEqual({ key: "mode", scope: "world", value: "hard" });
+    expect(submitted[1]).toEqual([{ kind: "update", ref: { coll: "settings", id: "ais-settings:torch" }, diff: { "flags.ais.values.mode": "hard" } }]);
+    await expect(handlers["settings.get"]({ key: "mode" })).resolves.toEqual({ key: "mode", scope: "world", value: "hard" });
+    // A no-op write submits nothing.
+    await handlers["settings.set"]({ key: "mode", value: "hard" });
+    expect(submitted).toHaveLength(2);
+    // Device scope: IndexedDB row + change callback, never an op.
+    await expect(handlers["settings.set"]({ key: "sound", value: false })).resolves.toEqual({ key: "sound", scope: "device", value: false });
+    expect(deviceChanges).toEqual([{ key: "sound", value: false }]);
+    expect(submitted).toHaveLength(2);
+    await expect(handlers["settings.get"]({ key: "sound" })).resolves.toEqual({ key: "sound", scope: "device", value: false });
+    // Player authority refuses world writes before the host would.
+    canWriteWorld = false;
+    await expect(handlers["settings.set"]({ key: "radius", value: 10 })).rejects.toThrow("GM authority");
+    await expect(handlers["settings.set"]({ key: "sound", value: true })).resolves.toMatchObject({ value: true });
+    // The write capability gates every set; reads keep working without it.
+    granted.clear();
+    await expect(handlers["settings.set"]({ key: "sound", value: false })).rejects.toThrow("denied module.settings.write");
+    await expect(handlers["settings.get"]({ key: "sound" })).resolves.toMatchObject({ value: true });
+    // A module without declarations lists nothing and refuses keys.
+    const bare = createAisModuleHandlers({
+      worldId: "w-ais-settings", packageId: "bare", emittedEvents: [], db,
+      user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
+      select: async () => null, submit: () => "tx", notify: () => undefined, emitModuleEvent: () => undefined,
+      newId: (prefix: string) => `${prefix}one`, assertCapability: async () => undefined,
+    });
+    await expect(bare["settings.list"]({})).resolves.toEqual({ settings: [] });
+    await expect(bare["settings.set"]({ key: "x", value: 1 })).rejects.toThrow("declares no setting x");
+    db.close();
+  });
+
+  test("D-477: compendium.list/search/get read imported packs read-only and only on devices that have them", async () => {
+    const db = await openVttDb();
+    const granted = new Set<string>(["compendium.read"]);
+    const pack: CompendiumPack = { name: "Bestiary", type: "actors", entries: [
+      { id: "goblin", name: "Goblin", keywords: ["humanoid"], data: { type: "character", name: "Goblin", system: { cr: 0.33 } } },
+      { id: "ogre", name: "Ogre", data: { type: "character", name: "Ogre", system: { cr: 3 } } },
+      { id: "huge", name: "Huge Entry", data: { type: "character", name: "Huge Entry", system: { blob: "x".repeat(50 * 1024) } } },
+    ] };
+    const base = {
+      worldId: "w-ais-compendium", packageId: "reader", emittedEvents: [], db,
+      user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
+      select: async () => null, submit: () => "tx", notify: () => undefined, emitModuleEvent: () => undefined,
+      newId: (prefix: string) => `${prefix}one`,
+      assertCapability: async (capability: string) => { if (!granted.has(capability)) throw new Error(`denied ${capability}`); },
+    };
+    const handlers = createAisModuleHandlers({ ...base, compendia: async () => [{ packageId: "pf1e-core", packFile: "packs/bestiary.json", pack }] });
+    await expect(handlers["compendium.list"]({})).resolves.toEqual({ packs: [
+      { id: "pf1e-core/packs/bestiary.json", name: "Bestiary", type: "actors", packageId: "pf1e-core", entries: 3 },
+    ] });
+    const hits = await handlers["compendium.search"]({ query: "gob" }) as { hits: Array<Record<string, unknown>> };
+    expect(hits.hits).toMatchObject([{ packId: "pf1e-core/packs/bestiary.json", entryId: "goblin", name: "Goblin", type: "character" }]);
+    await expect(handlers["compendium.search"]({ query: "ogre", packId: "pf1e-core/packs/other.json" })).rejects.toThrow("Unknown compendium pack");
+    await expect(handlers["compendium.search"]({ query: "", limit: 5 })).rejects.toThrow("1–120 characters");
+    await expect(handlers["compendium.search"]({ query: "o", limit: 1000 })).rejects.toThrow("limit must be an integer 1–100");
+    await expect(handlers["compendium.get"]({ packId: "pf1e-core/packs/bestiary.json", entryId: "ogre" })).resolves.toEqual({
+      packId: "pf1e-core/packs/bestiary.json", id: "ogre", name: "Ogre", type: "character",
+      data: { type: "character", name: "Ogre", system: { cr: 3 } },
+    });
+    // Returned payloads are copies: a module cannot mutate the host's parsed pack through them.
+    const got = await handlers["compendium.get"]({ packId: "pf1e-core/packs/bestiary.json", entryId: "goblin" }) as { keywords: string[] };
+    got.keywords.push("mutated");
+    expect(pack.entries[0]?.keywords).toEqual(["humanoid"]);
+    await expect(handlers["compendium.get"]({ packId: "pf1e-core/packs/bestiary.json", entryId: "huge" })).rejects.toThrow("RPC budget");
+    await expect(handlers["compendium.get"]({ packId: "pf1e-core/packs/bestiary.json", entryId: "none" })).rejects.toThrow("Unknown compendium entry");
+    await expect(handlers["compendium.get"]({ packId: "../etc", entryId: "ogre" })).rejects.toThrow("<packageId>/<pack file>");
+    granted.clear();
+    await expect(handlers["compendium.list"]({})).rejects.toThrow("denied compendium.read");
+    granted.add("compendium.read");
+    const player = createAisModuleHandlers(base);
+    await expect(player["compendium.list"]({})).rejects.toThrow("GM device only");
+    db.close();
+  });
+
+  test("D-478: modules.list is public metadata; modules.invoke needs the capability, a declared requirement and a running target", async () => {
+    const db = await openVttDb();
+    const granted = new Set<string>(["modules.invoke"]);
+    const invoked: unknown[] = [];
+    const directory = () => [
+      { packageId: "caller", name: "Caller", version: "1.0.0", running: true, commands: [], provides: [], emits: [] },
+      { packageId: "torch", name: "Torch", version: "2.0.0", running: true,
+        commands: [{ id: "light", contract: 1 }], provides: [{ id: "scene.token.light.action", mode: "exclusive" as const, contract: 1 }], emits: ["torch.changed"] },
+    ];
+    const handlers = createAisModuleHandlers({
+      worldId: "w-ais-bus", packageId: "caller", emittedEvents: [], db,
+      user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
+      select: async () => null, submit: () => "tx", notify: () => undefined, emitModuleEvent: () => undefined,
+      newId: (prefix: string) => `${prefix}one`,
+      assertCapability: async (capability: string) => { if (!granted.has(capability)) throw new Error(`denied ${capability}`); },
+      modules: {
+        requires: [{ id: "torch" }],
+        list: directory,
+        invoke: async (target, commandId, input) => { invoked.push({ target, commandId, input }); return { lit: true }; },
+      },
+    });
+    // The caller never appears in its own directory listing.
+    await expect(handlers["modules.list"]({})).resolves.toEqual({ modules: [
+      { packageId: "torch", name: "Torch", version: "2.0.0", running: true, commands: [{ id: "light", contract: 1 }],
+        provides: [{ id: "scene.token.light.action", mode: "exclusive", contract: 1 }], emits: ["torch.changed"] },
+    ] });
+    await expect(handlers["modules.invoke"]({ moduleId: "torch", commandId: "light", input: { tokenId: "token-1" } }))
+      .resolves.toEqual({ result: { lit: true } });
+    expect(invoked).toEqual([{ target: "torch", commandId: "light", input: { tokenId: "token-1" } }]);
+    await expect(handlers["modules.invoke"]({ moduleId: "caller", commandId: "light" })).rejects.toThrow("cannot invoke itself");
+    await expect(handlers["modules.invoke"]({ moduleId: "other", commandId: "light" })).rejects.toThrow("Declare other in interconnect.requires");
+    await expect(handlers["modules.invoke"]({ moduleId: "torch", commandId: "light", extra: 1 })).rejects.toThrow("accepts moduleId, commandId and input");
+    granted.clear();
+    await expect(handlers["modules.invoke"]({ moduleId: "torch", commandId: "light" })).rejects.toThrow("denied modules.invoke");
+    await expect(handlers["modules.list"]({})).resolves.toMatchObject({ modules: [{ packageId: "torch" }] });
     db.close();
   });
 

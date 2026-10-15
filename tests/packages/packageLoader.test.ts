@@ -132,6 +132,53 @@ describe("validatePackageManifest (§12)", () => {
       .toMatchObject({ ok: false, error: "package typed-module: interconnect.panel requires the ui.panel capability" });
   });
 
+  test("D-476: interconnect.settings is a bounded, typed schema with validated defaults", () => {
+    const base = {
+      id: "typed-module", name: "Typed Module", version: "1.0.0", type: "module",
+      interconnect: { api: "arena.ais/1", entry: "module.js", capabilities: ["module.settings.write"] },
+    };
+    const withSettings = (settings: unknown) => validatePackageManifest({ ...base, interconnect: { ...base.interconnect, settings } });
+    expect(withSettings([
+      { key: "radius", scope: "world", type: "number", label: " Radius ", hint: "In feet", default: 20, min: 0, max: 60, step: 5 },
+      { key: "sound", scope: "device", type: "boolean", label: "Sound", default: true },
+      { key: "mode", scope: "world", type: "choice", label: "Mode", default: "soft", choices: [{ value: "soft", label: " Soft " }, { value: "hard", label: "Hard" }] },
+      { key: "note", scope: "device", type: "string", label: "Note", default: "", maxLength: 40 },
+    ])).toMatchObject({ ok: true, value: { interconnect: { settings: [
+      { key: "radius", scope: "world", type: "number", label: "Radius", hint: "In feet", default: 20, min: 0, max: 60, step: 5 },
+      { key: "sound", scope: "device", type: "boolean", label: "Sound", default: true },
+      { key: "mode", scope: "world", type: "choice", label: "Mode", default: "soft", choices: [{ value: "soft", label: "Soft" }, { value: "hard", label: "Hard" }] },
+      { key: "note", scope: "device", type: "string", label: "Note", default: "", maxLength: 40 },
+    ] } } });
+    // A manifest without settings keeps the field absent.
+    const plain = validatePackageManifest(base);
+    expect(plain.ok && !Object.hasOwn(plain.value.interconnect ?? {}, "settings")).toBe(true);
+    const bad: Array<[unknown, string]> = [
+      [[{ key: "Radius", scope: "world", type: "number", label: "R", default: 1 }], "key matching"],
+      [[{ key: "r", scope: "global", type: "number", label: "R", default: 1 }], "scope must be"],
+      [[{ key: "r", scope: "world", type: "colour", label: "R", default: 1 }], "type must be"],
+      [[{ key: "r", scope: "world", type: "number", label: "", default: 1 }], "label of 1–48"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: "1" }], "default: setting r must be a finite number"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: 99, max: 10 }], "default: setting r must be between"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: 1, min: 5, max: 2 }], "min must not exceed max"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: 1, step: 0 }], "step must be positive"],
+      [[{ key: "r", scope: "world", type: "boolean", label: "R", default: true, min: 1 }], "min only applies to number"],
+      [[{ key: "r", scope: "world", type: "string", label: "R", default: "x", maxLength: 1000 }], "maxLength must be an integer 1–512"],
+      [[{ key: "r", scope: "world", type: "choice", label: "R", default: "a" }], "choice settings need choices"],
+      [[{ key: "r", scope: "world", type: "choice", label: "R", default: "a", choices: [{ value: "a", label: "A" }] }], "needs 2–32 choices"],
+      [[{ key: "r", scope: "world", type: "choice", label: "R", default: "c", choices: [{ value: "a", label: "A" }, { value: "b", label: "B" }] }], "declared choices"],
+      [[{ key: "r", scope: "world", type: "choice", label: "R", default: "a", choices: [{ value: "a", label: "A" }, { value: "a", label: "B" }] }], "repeats choice a"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: 1, icon: "x" }], "unsupported field icon"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: 1 }, { key: "r", scope: "device", type: "boolean", label: "S", default: false }], "repeats key r"],
+      [Array.from({ length: 33 }, (_, i) => ({ key: `k${i}`, scope: "device", type: "boolean", label: "K", default: false })), "at most 32 entries"],
+      [{ key: "r" }, "must be an array"],
+    ];
+    for (const [settings, message] of bad) {
+      const result = withSettings(settings);
+      expect(result.ok, JSON.stringify(settings)).toBe(false);
+      if (!result.ok) expect(result.error).toContain(message);
+    }
+  });
+
   test("rejects bad ids, names, versions, types", () => {
     expect(validatePackageManifest(systemManifest({ id: "Bad_ID" })).ok).toBe(false);
     expect(validatePackageManifest(systemManifest({ id: "x" })).ok).toBe(false); // too short

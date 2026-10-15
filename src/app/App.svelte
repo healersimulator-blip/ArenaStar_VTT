@@ -117,7 +117,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import WorkspaceDirectory, { type DirectoryItem } from "../ui/workspace/WorkspaceDirectory.svelte";
   import { workspaceUi, setWorkspacePanel, resetWorkspaceUi } from "../ui/workspace/state";
   import { workspaceTabLabel, workspaceToolInset } from "../core/workspaceUi";
-  import { AisRuntime, type AisRuntimeStatuses } from "./aisRuntime";
+  import { AisRuntime, type AisModuleShellApi, type AisRuntimeStatuses } from "./aisRuntime";
   import { aisPanelLayer } from "../packages/aisPanel";
   import type { AisModuleSelectRequest } from "../packages/aisModuleHandlers";
   import { dice3dStats, diceInfoFromRecord, showDice3D } from "../dice/dice3d";
@@ -1336,6 +1336,8 @@ const WALL_PICK_RADIUS = 12;
     }
   }
   let aisRuntimeStatuses = $state.raw<AisRuntimeStatuses>({});
+  /** D-476/D-479: the packages view's handle on module settings + health (null until the runtime exists). */
+  let aisModulesApi = $state.raw<AisModuleShellApi | null>(null);
 
   /** The active encounter of the active scene (null before any is activated). */
   function activeCombat(): CombatDocument | null {
@@ -4099,6 +4101,7 @@ const WALL_PICK_RADIUS = 12;
       appearance?.dispose(); appearance = null;
       aisRuntime?.dispose();
       aisRuntime = null;
+      aisModulesApi = null;
       if (rtSampleTimer !== null) globalThis.clearInterval(rtSampleTimer);
       offSimBus?.();
       if (fogTimer !== null) globalThis.clearInterval(fogTimer);
@@ -5173,6 +5176,7 @@ const WALL_PICK_RADIUS = 12;
           onStatus: (statuses) => { aisRuntimeStatuses = statuses; },
           panelLayer: aisPanelLayer(),
         });
+        aisModulesApi = aisRuntime.shellApi();
         appearance = new AisAppearance(current, aisRuntime);
         offAppearance = appearance.subscribe((state) => { appearanceState = state; });
         globalThis.addEventListener("keydown", emergencyAppearance);
@@ -6273,6 +6277,7 @@ const WALL_PICK_RADIUS = 12;
           rulesBoot={app.rulesBoot}
           {aisRuntimeStatuses}
           onOpenAisPanel={(packageId) => { aisRuntime?.openPanel(packageId); }}
+          aisModules={aisModulesApi}
           {agents}
           bindings={DEFAULT_BINDINGS}
           isGM={true}

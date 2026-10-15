@@ -24,19 +24,37 @@ import {
   type AisCapability,
   type AisEventName,
   type AisEventPayloads,
+  type AisSettingDeclaration,
+  type AisSettingValue,
 } from "../core/automationInterconnect";
-import type { ActorDocument, Json, SceneDocument, TokenDocument } from "../core/documents";
+import {
+  aisDeviceSettingsScope,
+  aisSettingsDocId,
+  aisSettingsDocTouched,
+  aisWorldSettingValues,
+  coerceAisSettingValue,
+} from "../core/aisSettings";
+import type { ActorDocument, Json, SceneDocument, SettingsDocument, TokenDocument } from "../core/documents";
 import type { AisProfileMsg, AisSharedModule } from "../core/messages";
-import { AisModuleIframe, type AisModuleIframeOptions, type AisModuleInvocationOptions, type AisModuleRuntimeStatus } from "../packages/aisModuleIframe";
+import type { Op } from "../core/ops";
+import {
+  AisModuleIframe,
+  type AisModuleDiagnostics,
+  type AisModuleIframeOptions,
+  type AisModuleInvocationOptions,
+  type AisModuleRequestContext,
+  type AisModuleRuntimeStatus,
+} from "../packages/aisModuleIframe";
 import {
   createAisModuleHandlers,
   createAisMutationQueue,
   projectAisTokenLight,
+  type AisModuleDirectoryEntry,
   type AisModuleSelectRequest,
 } from "../packages/aisModuleHandlers";
 import { packageContentHash } from "../packages/packageHash";
 import { createAisPanelHost, type AisPanelEntry, type AisPanelHost } from "../packages/aisPanel";
-import { getSetting, putSetting } from "../storage/idb";
+import { getAllSettings, getSetting, putSetting } from "../storage/idb";
 import type { TokenModuleAction } from "../ui/combat/tokenContextMenu";
 
 export type PlayerAisStatuses = Readonly<Record<string, AisModuleRuntimeStatus>>;
@@ -94,7 +112,15 @@ export interface PlayerAisFrame {
   invokeCommand(commandId: string, input: Json, options: AisModuleInvocationOptions): Promise<Json>;
   /** D-470: visibility of the module's own document inside its panel. */
   setVisible?(visible: boolean): void;
+  /** D-479: health counters and trace (absent in the test seam). */
+  diagnostics?(): AisModuleDiagnostics;
   dispose(reason: string): void;
+}
+
+/** D-476: what the player shell's device-settings form renders for one shared module. */
+export interface PlayerAisSettingsView {
+  declarations: AisSettingDeclaration[];
+  values: Record<string, AisSettingValue>;
 }
 
 export interface PlayerAisRuntimeOptions {
@@ -146,6 +172,9 @@ export function describeAisCapability(capability: AisCapability): string {
     case "package.resources.read": return "read its own bundled files";
     case "ui.theme": return "restyle the interface";
     case "ui.panel": return "show its own panel in a window on your screen";
+    case "module.settings.write": return "change its own declared settings on this device";
+    case "compendium.read": return "read compendium packs (GM device only; nothing on yours)";
+    case "modules.invoke": return "ask other shared modules on this device to run their commands";
     default: return capability;
   }
 }
@@ -163,6 +192,11 @@ export class PlayerAisRuntime {
   private profile: AisProfileMsg | null = null;
   private applying: Promise<void> = Promise.resolve();
   private disposed = false;
+  /** D-476: last world-scope values per running module (one `module.settings.changed` per key). */
+  private readonly worldSettingValues = new Map<string, Record<string, AisSettingValue>>();
+  /** D-478: in-flight module→module calls on this device. */
+  private busDepth = 0;
+  private busSeq = 0;
 
   constructor(options: PlayerAisRuntimeOptions) {
     this.options = options;
@@ -173,6 +207,7 @@ export class PlayerAisRuntime {
       bus.on("snapshot", (message) => this.emit("world.snapshot", { seq: message.seq })),
       bus.on("ops", (message) => {
         this.emit("world.ops.committed", { seq: message.envelope.seq, operationCount: message.envelope.ops.length });
+        this.emitWorldSettingChanges(message.envelope.ops);
         const scene = options.activeScene();
         if (!scene) return;
         for (const change of aisTokenLightChanges(message.envelope.ops)) {
@@ -377,6 +412,22 @@ export class PlayerAisRuntime {
         emitModuleEvent: (eventId, payload) => this.emitModuleEvent(module.packageId, eventId, payload),
         newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID()}`,
         assertCapability,
+        // D-476: world scope is read from the replica; only device scope is writable here.
+        ...(module.settings?.length ? { settings: {
+          declarations: module.settings,
+          packageName: module.name,
+          worldDoc: () => this.worldSettingsDoc(module.packageId),
+          canWriteWorld: () => false,
+          onDeviceChange: (key, value) =>
+            this.frames.get(module.packageId)?.emit("module.settings.changed", { scope: "device", key, value }),
+        } } : {}),
+        // D-477: no `compendia` — packs live on the GM device; the handler says so.
+        // D-478: sibling modules running on this device, invoked with the player's authority.
+        modules: {
+          requires: module.requires ?? [],
+          list: () => this.moduleDirectory(),
+          invoke: (target, commandId, input, lifetime) => this.invokeFromModule(module.packageId, target, commandId, input, lifetime),
+        },
       }),
     };
     const frame = (options.createFrame ?? ((frameOptionsIn) => new AisModuleIframe(frameOptionsIn)))(frameOptions);
@@ -384,6 +435,104 @@ export class PlayerAisRuntime {
     this.frames.set(module.packageId, frame);
     this.running.set(module.packageId, module);
     this.statuses[module.packageId] = frame.status;
+    if (module.settings?.length)
+      this.worldSettingValues.set(module.packageId, aisWorldSettingValues(this.worldSettingsDoc(module.packageId), module.settings));
+  }
+
+  private worldSettingsDoc(packageId: string): SettingsDocument | undefined {
+    return this.options.client.store.get("settings", aisSettingsDocId(packageId)) as SettingsDocument | undefined;
+  }
+
+  /** D-476: a replicated commit touched a module's world-settings document → one event per changed key. */
+  private emitWorldSettingChanges(ops: readonly Op[]): void {
+    for (const [packageId, module] of this.running) {
+      if (!module.settings?.length || !aisSettingsDocTouched(ops, packageId)) continue;
+      const previous = this.worldSettingValues.get(packageId) ?? {};
+      const next = aisWorldSettingValues(this.worldSettingsDoc(packageId), module.settings);
+      this.worldSettingValues.set(packageId, next);
+      const frame = this.frames.get(packageId);
+      for (const [key, value] of Object.entries(next))
+        if (previous[key] !== value) frame?.emit("module.settings.changed", { scope: "world", key, value });
+    }
+  }
+
+  /** D-476: declarations + effective values (world from the replica, device from this device). */
+  async moduleSettings(packageId: string): Promise<PlayerAisSettingsView | null> {
+    const module = this.profile?.modules.find((candidate) => candidate.packageId === packageId);
+    if (!module?.settings?.length) return null;
+    const values = aisWorldSettingValues(this.worldSettingsDoc(packageId), module.settings);
+    const rows = await getAllSettings(this.options.db, aisDeviceSettingsScope(this.options.worldId, packageId));
+    for (const declaration of module.settings) {
+      if (declaration.scope !== "device") continue;
+      const row = rows.find((candidate) => candidate.key === declaration.key);
+      const coerced = row ? coerceAisSettingValue(declaration, row.value) : null;
+      values[declaration.key] = coerced?.ok ? coerced.value : declaration.default;
+    }
+    return { declarations: module.settings.map((declaration) => structuredClone(declaration)), values };
+  }
+
+  /** D-476: the player's form writes a device-scope value (world scope is the GM's). */
+  async setDeviceSetting(packageId: string, key: string, value: unknown): Promise<AisSettingValue> {
+    const module = this.profile?.modules.find((candidate) => candidate.packageId === packageId);
+    const declaration = module?.settings?.find((candidate) => candidate.key === key);
+    if (!declaration) throw new Error(`${packageId} declares no setting ${key}`);
+    if (declaration.scope !== "device") throw new Error("World-scope settings are changed by the GM");
+    const coerced = coerceAisSettingValue(declaration, value);
+    if (!coerced.ok) throw new Error(coerced.error);
+    await putSetting(this.options.db, { scope: aisDeviceSettingsScope(this.options.worldId, packageId), key, value: coerced.value });
+    this.frames.get(packageId)?.emit("module.settings.changed", { scope: "device", key, value: coerced.value });
+    return coerced.value;
+  }
+
+  /** D-478: the public contract of every shared module on this device. */
+  private moduleDirectory(): AisModuleDirectoryEntry[] {
+    return (this.profile?.modules ?? []).map((module) => ({
+      packageId: module.packageId, name: module.name, version: module.version,
+      running: this.running.has(module.packageId) && this.frames.get(module.packageId)?.status.state === "ready",
+      commands: module.commands, provides: module.provides ?? [], emits: module.emittedEvents,
+    }));
+  }
+
+  /** D-478: route to a sibling's declared command with this player's authority. */
+  private async invokeFromModule(
+    callerPackageId: string,
+    targetId: string,
+    commandId: string,
+    input: Json,
+    lifetime: AisModuleRequestContext | undefined,
+  ): Promise<Json> {
+    const frame = this.running.has(targetId) ? this.frames.get(targetId) : undefined;
+    if (!frame) throw new Error(`AIS module ${targetId} is not running on this device`);
+    if (this.busDepth >= 8) throw new Error("AIS module bus depth exceeded");
+    const scene = this.options.activeScene();
+    this.busDepth++;
+    try {
+      return await frame.invokeCommand(commandId, input, {
+        sceneId: scene?._id ?? "",
+        callerId: this.options.client.user?.id ?? "player",
+        requestId: `ais-module:${callerPackageId}:${++this.busSeq}`,
+        runAs: "player",
+        isActive: () => !this.disposed && this.frames.get(targetId) === frame && lifetime?.isActive() !== false,
+      });
+    } finally { this.busDepth--; }
+  }
+
+  /** D-479: health counters and trace of one running module (null when not running or in the test seam). */
+  diagnostics(packageId: string): AisModuleDiagnostics | null {
+    const frame = this.running.has(packageId) ? this.frames.get(packageId) : undefined;
+    return frame?.diagnostics?.() ?? null;
+  }
+
+  /** D-479: stop and start a consented module again (after a circuit trip); consent is re-read. */
+  async restart(packageId: string): Promise<boolean> {
+    const module = this.profile?.modules.find((candidate) => candidate.packageId === packageId);
+    if (!module || this.disposed) return false;
+    this.stop(packageId, "Restarted on this device");
+    const record = await this.consentRecord(packageId);
+    if (this.disposed || !consentCovers(record, module)) return false;
+    this.start(module);
+    this.publish();
+    return true;
   }
 
   private stop(packageId: string, reason: string): void {

@@ -1,5 +1,8 @@
 <script lang="ts">
-  import type { AisRuntimeStatuses } from "../../app/aisRuntime";
+  import type { AisModuleSettingsView, AisModuleShellApi, AisRuntimeStatuses } from "../../app/aisRuntime";
+  import type { AisModuleDiagnostics } from "../../packages/aisHealth";
+  import type { AisSettingValue } from "../../core/automationInterconnect";
+  import AisSettingsForm from "./AisSettingsForm.svelte";
   /**
    * §12 the packages view (AIS v1 lands modules next to the ruleset/content view; D-248/D-249).
    * Lives in the Settings window: "which rules does this world run" is a settings question,
@@ -21,12 +24,46 @@
     rulesBoot = null,
     aisRuntimeStatuses = {},
     onOpenAisPanel = null,
+    aisModules = null,
   }: {
     packages: HostPackages;
     rulesBoot?: HostRulesBoot | null;
     aisRuntimeStatuses?: AisRuntimeStatuses;
     onOpenAisPanel?: ((packageId: string) => void) | null;
+    /** D-476/D-479: settings form + health block of running modules (null before the world boots). */
+    aisModules?: AisModuleShellApi | null;
   } = $props();
+
+  // D-476: settings views load lazily when the GM expands a module's settings block.
+  let aisSettingsViews = $state<Record<string, AisModuleSettingsView>>({});
+  // D-479: health snapshots refresh when the block is expanded or after an action.
+  let aisHealthViews = $state<Record<string, AisModuleDiagnostics | null>>({});
+  let aisHealthNotice = $state<Record<string, string>>({});
+
+  async function loadAisSettings(id: string): Promise<void> {
+    if (!aisModules) return;
+    const view = await aisModules.settings(id);
+    if (view) aisSettingsViews = { ...aisSettingsViews, [id]: view };
+  }
+
+  async function writeAisSetting(id: string, key: string, value: AisSettingValue): Promise<void> {
+    if (!aisModules) throw new Error("The world has not booted yet.");
+    await aisModules.setSetting(id, key, value);
+    await loadAisSettings(id);
+  }
+
+  function refreshAisHealth(id: string): void {
+    aisHealthViews = { ...aisHealthViews, [id]: aisModules?.diagnostics(id) ?? null };
+  }
+
+  async function restartAisModule(id: string): Promise<void> {
+    if (!aisModules) return;
+    const restarted = await aisModules.restart(id);
+    aisHealthNotice = { ...aisHealthNotice, [id]: restarted ? "Restarted from the approved boot definition." : "Not restartable here (not booted, or an adapter/appearance module)." };
+    refreshAisHealth(id);
+  }
+
+  const traceTime = (at: number): string => new Date(at).toLocaleTimeString();
 
   let pkgList = $state<PackageSummary[]>([]);
   let aisState = $state<HostAutomationState | null>(null);
@@ -430,6 +467,52 @@
             {/if}
           </p>
         {/if}
+        {#if p.settings.length > 0}
+          <details class="ais-settings" data-ais-settings={p.id} ontoggle={(event) => { if (event.currentTarget.open) void loadAisSettings(p.id); }}>
+            <summary>Settings ({p.settings.length}) · world values replicate to players, device values stay here</summary>
+            {#if !aisModules}
+              <p class="hint">Settings become editable once the world has booted.</p>
+            {:else if aisSettingsViews[p.id]}
+              <AisSettingsForm packageId={p.id} declarations={aisSettingsViews[p.id]?.declarations ?? []} values={aisSettingsViews[p.id]?.values ?? {}}
+                disabled={pkgBusy} onChange={(key, value) => writeAisSetting(p.id, key, value)} />
+            {:else}
+              <p class="hint">Loading…</p>
+            {/if}
+          </details>
+        {/if}
+        {#if p.requires.length > 0}
+          <p class="hint" data-ais-requires>Requires sibling modules: {p.requires.map((entry) => `${entry.id}${entry.version ? ` ${entry.version}` : ""}${entry.optional ? " (optional)" : ""}`).join(", ")} — enable them first; this module may invoke their commands through the module bus.</p>
+        {/if}
+        {#if p.provides.length > 0}
+          <p class="hint" data-ais-provides>Provides: {p.provides.map((slot) => `${slot.id} (${slot.mode}, contract v${slot.contract})`).join(", ")}.</p>
+        {/if}
+        {#if aisModules && aisRuntimeStatuses[p.id]}
+          <details class="ais-health" data-ais-health={p.id} ontoggle={(event) => { if (event.currentTarget.open) refreshAisHealth(p.id); }}>
+            <summary>Health · {aisRuntimeStatuses[p.id]?.state}{#if aisRuntimeStatuses[p.id]?.error} — {aisRuntimeStatuses[p.id]?.error}{/if}</summary>
+            {#if aisHealthViews[p.id]}
+              {@const health = aisHealthViews[p.id]}
+              <p class="hint" data-ais-health-counters>
+                Requests {health?.counters.requests ?? 0} (failed {health?.counters.failures ?? 0}, rejected {health?.counters.rejected ?? 0}) ·
+                commands {health?.counters.commands ?? 0} (failed {health?.counters.commandFailures ?? 0}) · events {health?.counters.events ?? 0}
+                {#if health?.circuitOpenedAt} · circuit opened at {traceTime(health.circuitOpenedAt)}{/if}
+              </p>
+              {#if (health?.trace.length ?? 0) > 0}
+                <ul class="ais-trace">
+                  {#each (health?.trace ?? []).slice(-10).reverse() as entry, index (index)}
+                    <li class:error={!entry.ok}>{traceTime(entry.at)} · {entry.kind} {entry.name}{#if entry.ms !== undefined} · {entry.ms} ms{/if}{#if entry.error} · {entry.error}{/if}</li>
+                  {/each}
+                </ul>
+              {:else}
+                <p class="hint">No traffic recorded yet.</p>
+              {/if}
+            {:else}
+              <p class="hint">No health data: the module has not started on this device.</p>
+            {/if}
+            <button type="button" data-ais-refresh-health disabled={pkgBusy} onclick={() => refreshAisHealth(p.id)}>Refresh</button>
+            <button type="button" data-ais-restart disabled={pkgBusy || p.runtimeProvider} onclick={() => void restartAisModule(p.id)}>Restart module</button>
+            {#if aisHealthNotice[p.id]}<p class="hint" data-ais-health-notice>{aisHealthNotice[p.id]}</p>{/if}
+          </details>
+        {/if}
         {#if p.commands.length > 0}
           <p class="hint" data-ais-commands>Macro-callable commands: {p.commands.map((command) => `${command.id} (contract v${command.contract})`).join(", ")}. Calls require the separate reviewed script-macro grant.</p>
         {/if}
@@ -608,6 +691,10 @@
     align-items: center;
     gap: 4px;
   }
+  .ais-settings, .ais-health { font-size: 13px; }
+  .ais-settings summary, .ais-health summary { cursor: pointer; }
+  .ais-trace { margin: 4px 0; padding-left: 18px; font-size: 12px; max-height: 160px; overflow: auto; }
+  .ais-trace li.error { color: var(--danger, #c0392b); }
   .ais-source-preview {
     width: 100%;
     min-width: 0;

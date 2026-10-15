@@ -10,15 +10,18 @@ import {
   AIS_API_VERSION,
   AIS_CAPABILITIES,
   AIS_CONTRIBUTION_MODES,
+  AIS_MAX_SETTINGS,
   type AisCapability,
   type AisContributionDeclaration,
   type AisInterconnectManifest,
   type AisModuleCommandDeclaration,
   type AisModuleSharing,
   type AisPanelDeclaration,
+  type AisSettingDeclaration,
   type AisTokenActionDeclaration,
   type AisPackageRequirement,
 } from "./automationInterconnect";
+import { aisSettingDeclarationError, normalizeAisSettingDeclaration } from "./aisSettings";
 import type { Result } from "./result";
 import { err, okVal } from "./result";
 
@@ -107,7 +110,7 @@ const hasControlChars = (text: string): boolean => Array.from(text).some((ch) =>
 
 function validateInterconnect(value: unknown, id: string): Result<AisInterconnectManifest> {
   if (!isRecord(value)) return err(`package ${id}: interconnect must be an object`);
-  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities", "runtime", "runtimeProvider", "sharing", "tokenActions", "panel"]);
+  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities", "runtime", "runtimeProvider", "sharing", "tokenActions", "panel", "settings"]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));
   if (unknown) return err(`package ${id}: interconnect has unsupported field ${unknown}`);
   if (value.api !== AIS_API_VERSION)
@@ -294,6 +297,22 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
       return err(`package ${id}: interconnect.panel requires the ui.panel capability`);
   }
 
+  // D-476: schema-declared settings (world scope replicated + GM-owned, device scope local).
+  const settings: AisSettingDeclaration[] = [];
+  if (value.settings !== undefined) {
+    if (!Array.isArray(value.settings) || value.settings.length > AIS_MAX_SETTINGS)
+      return err(`package ${id}: interconnect.settings must be an array of at most ${AIS_MAX_SETTINGS} entries`);
+    const seen = new Set<string>();
+    for (const [index, raw] of value.settings.entries()) {
+      const error = aisSettingDeclarationError(raw, index);
+      if (error) return err(`package ${id}: ${error}`);
+      const declaration = normalizeAisSettingDeclaration(raw as Record<string, unknown>);
+      if (seen.has(declaration.key)) return err(`package ${id}: interconnect.settings repeats key ${declaration.key}`);
+      seen.add(declaration.key);
+      settings.push(declaration);
+    }
+  }
+
   if (runtime?.resources?.length && !capabilities.includes("package.resources.read"))
     return err(`package ${id}: declared runtime resources require package.resources.read`);
   if ((runtimeProvider || runtime) && !capabilities.includes("runtime.execute"))
@@ -316,6 +335,7 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
     ...(sharing ? { sharing } : {}),
     ...(tokenActions.length ? { tokenActions } : {}),
     ...(panel ? { panel } : {}),
+    ...(settings.length ? { settings } : {}),
   });
 }
 

@@ -8,8 +8,11 @@ import {
   type AisCapability,
   type AisModuleCommandDeclaration,
   type AisPackageCandidate,
+  type AisContributionDeclaration,
+  type AisPackageRequirement,
   type AisPanelDeclaration,
   type AisResolution,
+  type AisSettingDeclaration,
   type AisTokenActionDeclaration,
 } from "../core/automationInterconnect";
 import { aisOwnSource, aisRuntimePackage, aisRuntimeResources } from "../packages/aisRuntimePackage";
@@ -150,6 +153,17 @@ export interface PackageSummary {
   /** Manifest-declared callable entry points; these are not arbitrary string dispatch. */
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
+  /** D-468: delivered to players once approved (GM opt-out per module); false for non-modules. */
+  sharedWithPlayers: boolean;
+  /** D-469: the manifest forbids player execution (`sharing: "host-only"`). */
+  hostOnly: boolean;
+  /** D-470: declared sandboxed panel. */
+  panel?: AisPanelDeclaration;
+  /** D-476: schema-declared settings the packages view renders as a form. */
+  settings: AisSettingDeclaration[];
+  /** D-478: sibling modules this one depends on / contribution slots it fills (from the manifest). */
+  requires: AisPackageRequirement[];
+  provides: AisContributionDeclaration[];
   /** Exact-hash local code approval (separate from the world-shared enabled profile). */
   approved: boolean;
   /** §12 module asks for in-page execution (GM must grant). */
@@ -184,6 +198,12 @@ export interface HostAutomationModuleBoot {
   tokenActions?: AisTokenActionDeclaration[];
   /** D-470: the module draws a panel in its own sandboxed document; the shell chromes it. */
   panel?: AisPanelDeclaration;
+  /** D-476: schema-declared settings (world scope replicated, device scope local). */
+  settings?: AisSettingDeclaration[];
+  /** D-478: declared dependencies — the only modules this one may invoke through the kernel. */
+  requires?: AisPackageRequirement[];
+  /** D-478: contribution slots, shown to sibling modules through `modules.list`. */
+  provides?: AisContributionDeclaration[];
   capabilities: AisCapability[];
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
@@ -216,6 +236,11 @@ export interface HostAutomationModuleSummary {
   hostOnly: boolean;
   /** D-470: declared sandboxed panel (title only matters to the review UI). */
   panel?: AisPanelDeclaration;
+  /** D-476: schema-declared settings. */
+  settings: AisSettingDeclaration[];
+  /** D-478: manifest dependencies / contribution slots (the review UI lists them). */
+  requires: AisPackageRequirement[];
+  provides: AisContributionDeclaration[];
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
 }
@@ -416,6 +441,9 @@ function resolveAutomationState(
     const sharedWithPlayers = !hostOnly && world?.automationSharing?.[rec.id] !== false;
     const tokenActions = rec.manifest.interconnect.tokenActions ?? [];
     const panel = rec.manifest.interconnect.panel ? { ...rec.manifest.interconnect.panel } : undefined;
+    const settings = (rec.manifest.interconnect.settings ?? []).map((declaration) => structuredClone(declaration));
+    const requires = (rec.manifest.interconnect.requires ?? []).map((requirement) => ({ ...requirement }));
+    const provides = (rec.manifest.interconnect.provides ?? []).map((slot) => ({ ...slot }));
     let runtime: ReturnType<typeof aisRuntimePackage> = null;
     let runtimeError: string | undefined;
     try { runtime = aisRuntimePackage(rec, records); }
@@ -441,6 +469,9 @@ function resolveAutomationState(
       sharedWithPlayers,
       hostOnly,
       ...(panel ? { panel } : {}),
+      settings,
+      requires,
+      provides,
       commands,
       emittedEvents,
     });
@@ -457,6 +488,9 @@ function resolveAutomationState(
       ...(hostOnly ? { hostOnly: true } : {}),
       ...(tokenActions.length > 0 ? { tokenActions: tokenActions.map((action) => ({ ...action })) } : {}),
       ...(panel ? { panel: { ...panel } } : {}),
+      ...(settings.length > 0 ? { settings: settings.map((declaration) => structuredClone(declaration)) } : {}),
+      ...(requires.length > 0 ? { requires } : {}),
+      ...(provides.length > 0 ? { provides } : {}),
       source: runtime?.source ?? aisOwnSource(rec),
       resources: aisRuntimeResources(rec),
       ...(rec.manifest.interconnect.provides?.some((slot) => slot.id === "ui.theme" && slot.mode === "exclusive" && slot.contract === 1)
@@ -1092,6 +1126,12 @@ async function bootHostAppLocked(
       ...(module?.runtimeError ? { runtimeError: module.runtimeError } : {}),
       commands: module?.commands ?? [],
       emittedEvents: module?.emittedEvents ?? [],
+      sharedWithPlayers: module?.sharedWithPlayers ?? false,
+      hostOnly: module?.hostOnly ?? false,
+      ...(module?.panel ? { panel: module.panel } : {}),
+      settings: module?.settings ?? [],
+      requires: module?.requires ?? [],
+      provides: module?.provides ?? [],
       approved: module?.approved ?? false,
       trustRequested: rec.manifest.module?.trusted === true,
       trusted: trustedIds.includes(rec.id),

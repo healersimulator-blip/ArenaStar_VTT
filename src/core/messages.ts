@@ -1110,6 +1110,12 @@ export interface AisSharedModule {
   tokenActions?: import("./automationInterconnect").AisTokenActionDeclaration[];
   /** D-470: the module's sandboxed panel declaration (the player shell chromes it). */
   panel?: import("./automationInterconnect").AisPanelDeclaration;
+  /** D-476: schema-declared settings; the player shell renders the device-scope ones. */
+  settings?: import("./automationInterconnect").AisSettingDeclaration[];
+  /** D-478: declared dependencies (the only modules this one may invoke on the player's device). */
+  requires?: import("./automationInterconnect").AisPackageRequirement[];
+  /** D-478: contribution slots, listed to sibling modules. */
+  provides?: import("./automationInterconnect").AisContributionDeclaration[];
 }
 
 /**

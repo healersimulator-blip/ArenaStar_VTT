@@ -24,14 +24,21 @@ import type { AisModuleIframeOptions } from "../../src/packages/aisModuleIframe"
 import type { AisPanelHost, AisPanelSpec } from "../../src/packages/aisPanel";
 import { FakeCodec } from "./fakes";
 
+/** Every frame the mocked iframe class created (D-476+ tests drive their real handlers directly). */
+const created = vi.hoisted(() => ({ frames: [] as Array<{
+  options: AisModuleIframeOptions;
+  emit: ReturnType<typeof vi.fn>;
+  invokeCommand: ReturnType<typeof vi.fn>;
+}> }));
 vi.mock("../../src/packages/aisModuleIframe", async (load) => {
   const original = await load<typeof import("../../src/packages/aisModuleIframe")>();
   return { ...original, AisModuleIframe: class {
     status = { state: "ready" };
     invokeCommand = vi.fn(async () => null);
+    emit = vi.fn();
+    diagnostics = vi.fn(() => ({ counters: { requests: 0, failures: 0, rejected: 0, commands: 0, commandFailures: 0, events: 0 }, trace: [], circuitOpenedAt: null }));
     dispose = vi.fn(() => this.options.onStatus?.({ state: "stopped", error: "test stop" }));
-    constructor(readonly options: AisModuleIframeOptions) {}
-    emit() {}
+    constructor(readonly options: AisModuleIframeOptions) { created.frames.push(this as never); }
   } };
 });
 
@@ -149,6 +156,95 @@ describe("AisRuntime → ais.profile", () => {
       await settle();
       expect(rex.profiles.at(-1)?.modules).toEqual([]);
       expect(rex.client.aisProfile?.modules).toEqual([]);
+    } finally { runtime.dispose(); await app.close(); }
+  });
+
+  test("D-476/D-477/D-478/D-479: settings, compendium, module bus and diagnostics through a booted host", async () => {
+    let app = await freshApp();
+    const settings = [
+      { key: "radius", scope: "world", type: "number", label: "Radius", default: 20, min: 0, max: 60, step: 5 },
+      { key: "sound", scope: "device", type: "boolean", label: "Sound", default: true },
+    ];
+    expect((await app.packages.importZip(moduleZip("torch", ["action.observe", "module.settings.write", "modules.invoke", "compendium.read"],
+      { settings, requires: [{ id: "lamp" }] }))).ok).toBe(true);
+    expect((await app.packages.importZip(moduleZip("lamp", ["action.observe"]))).ok).toBe(true);
+    expect((await app.packages.importZip(zipOf({
+      "manifest.json": JSON.stringify({ id: "beasts", name: "Beasts", version: "1.0.0", type: "data",
+        packs: [{ name: "Beasts", type: "actors", file: "packs/beasts.json" }] }),
+      "packs/beasts.json": JSON.stringify({ name: "Beasts", type: "actors", entries: [
+        { id: "wolf", name: "Wolf", keywords: ["animal"], data: { type: "actor", name: "Wolf", system: { cr: 1 } } },
+        { id: "worg", name: "Worg", data: { type: "actor", name: "Worg", system: { cr: 2 } } },
+      ] }),
+    }))).ok).toBe(true);
+    await approve(app, "lamp", ["action.observe"]); // a required module must be enabled first
+    await approve(app, "torch", ["action.observe", "module.settings.write", "modules.invoke", "compendium.read"]);
+    app = await reboot(app);
+    created.frames.length = 0; // earlier tests in this file created frames of the same package ids
+    const runtime = runtimeFor(app);
+    try {
+      await settle();
+      // The packages view reads these off PackageSummary (previously only on the automation summary).
+      expect((await app.packages.list()).find((entry) => entry.id === "torch")).toMatchObject({
+        sharedWithPlayers: true, hostOnly: false, settings: [{ key: "radius", scope: "world" }, { key: "sound", scope: "device" }],
+      });
+      expect(app.automationBoot.modules.find((m) => m.packageId === "torch")).toMatchObject({ settings, requires: [{ id: "lamp" }] });
+      const torch = created.frames.find((frame) => frame.options.packageId === "torch");
+      const lamp = created.frames.find((frame) => frame.options.packageId === "lamp");
+      if (!torch || !lamp) throw new Error("frames not created");
+
+      // Defaults, then the GM's form writes world scope (a real commit) and device scope (local).
+      expect((await runtime.moduleSettings("torch"))?.values).toEqual({ radius: 20, sound: true });
+      expect(await runtime.moduleSettings("lamp")).toBeNull();
+      await runtime.setModuleSetting("torch", "radius", 30);
+      await settle();
+      expect(app.store.get("settings", "ais-settings:torch")).toMatchObject({ ownership: { default: 1 }, flags: { ais: { values: { radius: 30 } } } });
+      expect(torch.emit).toHaveBeenCalledWith("module.settings.changed", { scope: "world", key: "radius", value: 30 });
+      expect(lamp.emit).not.toHaveBeenCalledWith("module.settings.changed", expect.anything());
+      await runtime.setModuleSetting("torch", "sound", false);
+      expect(torch.emit).toHaveBeenCalledWith("module.settings.changed", { scope: "device", key: "sound", value: false });
+      expect((await runtime.moduleSettings("torch"))?.values).toEqual({ radius: 30, sound: false });
+      await expect(runtime.setModuleSetting("torch", "radius", 7)).rejects.toThrow("steps of 5");
+
+      // The module's own RPC path lands the same commit, with the live consent check in front of it.
+      const handlers = torch.options.handlers;
+      await expect(handlers["settings.set"]({ key: "radius", value: 45 })).resolves.toEqual({ key: "radius", scope: "world", value: 45 });
+      await settle();
+      expect(torch.emit).toHaveBeenCalledWith("module.settings.changed", { scope: "world", key: "radius", value: 45 });
+      await expect(handlers["settings.get"]({ key: "radius" })).resolves.toEqual({ key: "radius", scope: "world", value: 45 });
+
+      // Players receive the declarations with the shared module and the replicated document itself.
+      const rex = await joinPlayer(app, "rex");
+      expect(rex.profiles.at(-1)?.modules.find((m) => m.packageId === "torch")).toMatchObject({
+        settings, requires: [{ id: "lamp" }], capabilities: ["action.observe", "module.settings.write", "modules.invoke"],
+      });
+      expect(rex.client.store.get("settings", "ais-settings:torch")).toMatchObject({ flags: { ais: { values: { radius: 45 } } } });
+
+      // Compendium: the imported data package's pack, read-only, through the module's handlers.
+      await expect(handlers["compendium.list"]({})).resolves.toEqual({ packs: [
+        { id: "beasts/packs/beasts.json", name: "Beasts", type: "actors", packageId: "beasts", entries: 2 },
+      ] });
+      await expect(handlers["compendium.search"]({ query: "wor" })).resolves.toMatchObject({ hits: [{ entryId: "worg", name: "Worg" }] });
+      await expect(handlers["compendium.get"]({ packId: "beasts/packs/beasts.json", entryId: "wolf" })).resolves.toMatchObject({
+        id: "wolf", keywords: ["animal"], data: { type: "actor", name: "Wolf", system: { cr: 1 } },
+      });
+      await expect(lamp.options.handlers["compendium.list"]({})).rejects.toThrow("compendium.read is not currently approved for lamp");
+
+      // Module bus: torch declared lamp → it may invoke lamp's command with GM authority.
+      lamp.invokeCommand.mockResolvedValue("lamp says hi");
+      await expect(handlers["modules.list"]({})).resolves.toEqual({ modules: [
+        { packageId: "lamp", name: "lamp name", version: "1.0.0", running: true, commands: [{ id: "poke", contract: 1 }], provides: [], emits: [] },
+      ] });
+      await expect(handlers["modules.invoke"]({ moduleId: "lamp", commandId: "poke", input: { x: 1 } })).resolves.toEqual({ result: "lamp says hi" });
+      expect(lamp.invokeCommand).toHaveBeenCalledWith("poke", { x: 1 }, expect.objectContaining({ runAs: "gm", requestId: "ais-module:torch:1" }));
+      await expect(lamp.options.handlers["modules.invoke"]({ moduleId: "torch", commandId: "poke" })).rejects.toThrow("modules.invoke is not currently approved for lamp");
+
+      // Diagnostics come from the frame; restart re-creates it from the frozen boot definition.
+      expect(runtime.diagnostics("torch")).toMatchObject({ counters: { requests: 0 }, circuitOpenedAt: null });
+      expect(runtime.diagnostics("nobody")).toBeNull();
+      expect(runtime.restart("torch")).toBe(true);
+      expect(runtime.restart("nobody")).toBe(false);
+      expect(created.frames.filter((frame) => frame.options.packageId === "torch")).toHaveLength(2);
+      expect((await runtime.moduleSettings("torch"))?.values).toEqual({ radius: 45, sound: false });
     } finally { runtime.dispose(); await app.close(); }
   });
 

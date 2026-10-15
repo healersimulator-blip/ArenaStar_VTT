@@ -24,6 +24,8 @@ export const AIS_EVENTS = [
   "ui.token.action",
   /** Namespaced events emitted by an approved AIS module; visible only to action observers. */
   "module.event",
+  /** D-476: one of this module's own declared settings changed (world scope via a commit, device scope locally). */
+  "module.settings.changed",
 ] as const;
 export type AisEventName = (typeof AIS_EVENTS)[number];
 
@@ -66,6 +68,12 @@ export interface AisEventPayloads {
     eventId: string;
     /** Bounded JSON payload chosen by the source module. */
     payload: import("./documents").Json;
+  };
+  "module.settings.changed": {
+    scope: AisSettingScope;
+    key: string;
+    /** The effective value after the change (already coerced to the declaration). */
+    value: AisSettingValue;
   };
 }
 
@@ -131,6 +139,12 @@ export const AIS_CAPABILITIES = [
   "ui.theme",
   // D-470: a host-chromed window around the module's own sandboxed document (AIS.ui.panel).
   "ui.panel",
+  // D-476: write the module's own declared settings (world scope needs GM authority at the host).
+  "module.settings.write",
+  // D-477: read-only access to the world's imported compendium packs (index, search, entry payloads).
+  "compendium.read",
+  // D-478: call a declared command of another running module through the kernel (AIS.modules.invoke).
+  "modules.invoke",
 ] as const;
 export type AisCapability = (typeof AIS_CAPABILITIES)[number];
 
@@ -207,7 +221,40 @@ export interface AisInterconnectManifest {
    * the `ui.panel` capability. The guest opens/closes it with `AIS.ui.panel.open()/close()`.
    */
   panel?: AisPanelDeclaration;
+  /**
+   * D-476: schema-declared module settings. `world` scope lives in a replicated `settings`
+   * document the GM owns (players read it, module writes need `module.settings.write` and GM
+   * authority); `device` scope is stored per device/world in IndexedDB. Both shells render the
+   * schema as a form; the module reads values with `AIS.settings.*` and observes
+   * `module.settings.changed`.
+   */
+  settings?: AisSettingDeclaration[];
 }
+
+export type AisSettingScope = "world" | "device";
+export type AisSettingType = "boolean" | "number" | "string" | "choice";
+export type AisSettingValue = boolean | number | string;
+export interface AisSettingChoice { value: string; label: string }
+export interface AisSettingDeclaration {
+  /** Package-local key, `^[a-z][a-zA-Z0-9_]{0,47}$`. */
+  key: string;
+  scope: AisSettingScope;
+  type: AisSettingType;
+  label: string;
+  hint?: string;
+  default: AisSettingValue;
+  /** Numbers: inclusive bounds and an optional step (integers when step is an integer). */
+  min?: number;
+  max?: number;
+  step?: number;
+  /** Strings: maximum length (≤ 512, default 256). */
+  maxLength?: number;
+  /** Choices: 2–32 entries; the value must be one of them. */
+  choices?: AisSettingChoice[];
+}
+export const AIS_MAX_SETTINGS = 32;
+export const AIS_MAX_SETTING_CHOICES = 32;
+export const AIS_MAX_SETTING_STRING = 512;
 
 export interface AisPanelDeclaration {
   title: string;

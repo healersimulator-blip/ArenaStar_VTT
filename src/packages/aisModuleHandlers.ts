@@ -8,9 +8,22 @@ import type {
   SceneDocument,
   TokenDocument,
 } from "../core/documents";
-import type { AisCapability, AisEventName, AisTokenLightSnapshot } from "../core/automationInterconnect";
+import type {
+  AisCapability,
+  AisContributionDeclaration,
+  AisEventName,
+  AisModuleCommandDeclaration,
+  AisPackageRequirement,
+  AisSettingDeclaration,
+  AisSettingValue,
+  AisTokenLightSnapshot,
+} from "../core/automationInterconnect";
 import type { AisModuleRequestContext } from "./aisModuleIframe";
 import type { Op } from "../core/ops";
+import type { CompendiumPack } from "../core/compendium";
+import { searchCompendia } from "../core/compendium";
+import { aisDeviceSettingsScope, aisWorldSettingOps, aisWorldSettingValues, coerceAisSettingValue } from "../core/aisSettings";
+import type { SettingsDocument } from "../core/documents";
 import { parseLightAnimation } from "../core/lightAnimation";
 import { getAllSettings, getSetting, putSetting } from "../storage/idb";
 import type { AisModuleHandlers } from "./aisModuleIframe";
@@ -28,7 +41,12 @@ const EVENT_NAMES = new Set<AisEventName>([
   "turn.report.committed",
   "ui.token.action",
   "module.event",
+  "module.settings.changed",
 ]);
+/** D-477: one compendium entry payload must fit the RPC frame with room for the envelope. */
+const MAX_COMPENDIUM_ENTRY_BYTES = 48 * 1024;
+const MAX_COMPENDIUM_HITS = 100;
+const COMPENDIUM_PACK_ID_RE = /^[a-z0-9][a-z0-9-]{1,63}\/[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
 export interface AisModuleSelectOption {
   value: string;
@@ -42,6 +60,40 @@ export interface AisModuleSelectRequest {
   options: AisModuleSelectOption[];
 }
 
+/** D-476: the settings service of one module (declarations come from the approved manifest). */
+export interface AisModuleSettingsContext {
+  declarations: readonly AisSettingDeclaration[];
+  /** Display name used when the module's world-settings document is first created. */
+  packageName: string;
+  /** Live replicated document (`ais-settings:<packageId>`), read on every call. */
+  worldDoc: () => SettingsDocument | undefined;
+  /** GM authority on this device; players get a clear refusal before the host would refuse anyway. */
+  canWriteWorld: () => boolean;
+  /** Raised after a device-scope write so the runtime can deliver `module.settings.changed`. */
+  onDeviceChange?: (key: string, value: AisSettingValue) => void;
+}
+
+/** D-477: read-only compendium access (host device only; packs are not replicated to players). */
+export type AisCompendiumSource = () => Promise<ReadonlyArray<{ packageId: string; packFile: string; pack: CompendiumPack }>>;
+
+/** D-478: what one module may learn about, and ask of, the other modules on this device. */
+export interface AisModuleDirectoryEntry {
+  packageId: string;
+  name: string;
+  version: string;
+  running: boolean;
+  commands: readonly AisModuleCommandDeclaration[];
+  provides: readonly AisContributionDeclaration[];
+  emits: readonly string[];
+}
+export interface AisModuleBusContext {
+  /** The caller's own `interconnect.requires` — a target must be declared there. */
+  requires: readonly AisPackageRequirement[];
+  list: () => AisModuleDirectoryEntry[];
+  /** Route to the target frame's declared command with this device's authority (gm or player). */
+  invoke: (targetId: string, commandId: string, input: Json, lifetime: AisModuleRequestContext | undefined) => Promise<Json>;
+}
+
 export interface AisModuleHandlerContext {
   worldId: string;
   packageId: string;
@@ -49,6 +101,12 @@ export interface AisModuleHandlerContext {
   emittedEvents: readonly string[];
   db: IDBPDatabase;
   user: () => { id: string; name: string };
+  /** D-476: absent when the manifest declares no settings (the RPCs then answer with an empty list). */
+  settings?: AisModuleSettingsContext;
+  /** D-477: absent on devices without compendia (players), where the RPCs explain so. */
+  compendia?: AisCompendiumSource;
+  /** D-478: module directory + kernel-routed invocation. */
+  modules?: AisModuleBusContext;
   /** Private host-side scene view; each read API returns only an explicit projection. */
   activeScene: () => SceneDocument | null;
   /** Host-side actor lookup; module APIs expose only bounded inventory fields. */
@@ -238,6 +296,47 @@ function lightSpec(args: Record<string, unknown>): {
   const animation = parseLightAnimation(raw.animation);
   if (!animation.ok) throw new Error(animation.error);
   return { radius, bright, color: raw.color.toLowerCase(), alpha, angle, animation: animation.value };
+}
+
+function settingDeclaration(ctx: AisModuleHandlerContext, args: Record<string, unknown>, allowed: readonly string[]): AisSettingDeclaration {
+  if (Object.keys(args).some((key) => !allowed.includes(key)))
+    throw new Error(`settings call accepts only ${allowed.join(", ")}`);
+  if (typeof args.key !== "string" || args.key.length > 48) throw new Error("setting key must be a string of at most 48 characters");
+  const declaration = ctx.settings?.declarations.find((candidate) => candidate.key === args.key);
+  if (!declaration) throw new Error(`This module declares no setting ${args.key}`);
+  return declaration;
+}
+
+/** World values from the replicated document, device values from this device's IndexedDB rows. */
+async function effectiveSettingValues(
+  ctx: AisModuleHandlerContext,
+  declarations: readonly AisSettingDeclaration[],
+): Promise<Record<string, AisSettingValue>> {
+  const out = aisWorldSettingValues(ctx.settings?.worldDoc(), declarations);
+  const device = declarations.filter((declaration) => declaration.scope === "device");
+  if (device.length > 0) {
+    const scope = aisDeviceSettingsScope(ctx.worldId, ctx.packageId);
+    const rows = await getAllSettings(ctx.db, scope);
+    for (const declaration of device) {
+      const row = rows.find((candidate) => candidate.key === declaration.key);
+      const coerced = row ? coerceAisSettingValue(declaration, row.value) : null;
+      out[declaration.key] = coerced?.ok ? coerced.value : declaration.default;
+    }
+  }
+  return out;
+}
+
+type AisCompendiumEntry = Awaited<ReturnType<AisCompendiumSource>>[number];
+function compendiumPackId(entry: AisCompendiumEntry): string {
+  return `${entry.packageId}/${entry.packFile}`;
+}
+function compendiumPackIdArg(value: unknown): string {
+  if (typeof value !== "string" || !COMPENDIUM_PACK_ID_RE.test(value)) throw new Error("compendium packId must be <packageId>/<pack file>");
+  return value;
+}
+async function compendiumPacks(ctx: AisModuleHandlerContext): Promise<ReadonlyArray<AisCompendiumEntry>> {
+  if (!ctx.compendia) throw new Error("Compendia are read on the GM device only; this device has none");
+  return ctx.compendia();
 }
 
 /** Capability-checked AIS APIs shared by all approved module iframes. */
@@ -514,6 +613,140 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       if (!ctx.panel) throw new Error("This module declares no interconnect.panel");
       ctx.panel.close();
       return { open: false };
+    },
+    // ── D-476: module settings ─────────────────────────────────────────────────────────────
+    "settings.list": async (args, commandContext) => {
+      assertCommandActive(commandContext);
+      if (Object.keys(args).length) throw new Error("settings.list takes no arguments");
+      const declarations = ctx.settings?.declarations ?? [];
+      const values = await effectiveSettingValues(ctx, declarations);
+      return {
+        settings: declarations.map((declaration) => ({
+          key: declaration.key, scope: declaration.scope, type: declaration.type, label: declaration.label,
+          ...(declaration.hint === undefined ? {} : { hint: declaration.hint }),
+          default: declaration.default,
+          ...(declaration.choices ? { choices: declaration.choices.map((choice) => ({ ...choice })) } : {}),
+          value: values[declaration.key] ?? declaration.default,
+        })),
+      };
+    },
+    "settings.get": async (args, commandContext) => {
+      assertCommandActive(commandContext);
+      const declaration = settingDeclaration(ctx, args, ["key"]);
+      const values = await effectiveSettingValues(ctx, [declaration]);
+      return { key: declaration.key, scope: declaration.scope, value: values[declaration.key] ?? declaration.default };
+    },
+    "settings.set": (args, commandContext) => mutate(async () => {
+      await ctx.assertCapability("module.settings.write");
+      assertCommandActive(commandContext);
+      const declaration = settingDeclaration(ctx, args, ["key", "value"]);
+      const coerced = coerceAisSettingValue(declaration, args.value);
+      if (!coerced.ok) throw new Error(coerced.error);
+      const settings = ctx.settings;
+      if (!settings) throw new Error("This module declares no interconnect.settings");
+      if (declaration.scope === "world") {
+        if (!settings.canWriteWorld())
+          throw new Error("World-scope settings are changed with GM authority; this device runs the module as a player");
+        const ops = aisWorldSettingOps(settings.worldDoc(), ctx.packageId, settings.packageName, declaration.key, coerced.value);
+        await ctx.assertCapability("module.settings.write");
+        assertCommandActive(commandContext);
+        if (ops.length > 0) await ctx.submit(ops);
+      } else {
+        await putSetting(ctx.db, { scope: aisDeviceSettingsScope(ctx.worldId, ctx.packageId), key: declaration.key, value: coerced.value });
+        settings.onDeviceChange?.(declaration.key, coerced.value);
+      }
+      return { key: declaration.key, scope: declaration.scope, value: coerced.value };
+    }),
+    // ── D-477: compendium read ────────────────────────────────────────────────────────────
+    "compendium.list": async (args, commandContext) => {
+      await ctx.assertCapability("compendium.read");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).length) throw new Error("compendium.list takes no arguments");
+      const packs = await compendiumPacks(ctx);
+      return {
+        packs: packs.map((entry) => ({
+          id: compendiumPackId(entry), name: entry.pack.name, type: entry.pack.type,
+          packageId: entry.packageId, entries: entry.pack.entries.length,
+        })),
+      };
+    },
+    "compendium.search": async (args, commandContext) => {
+      await ctx.assertCapability("compendium.read");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).some((key) => !["query", "packId", "limit"].includes(key)))
+        throw new Error("compendium.search accepts query, packId and limit");
+      if (typeof args.query !== "string" || args.query.trim().length === 0 || args.query.length > 120)
+        throw new Error("compendium.search query must be 1–120 characters");
+      const limit = args.limit === undefined ? 25 : args.limit;
+      if (!Number.isInteger(limit) || Number(limit) < 1 || Number(limit) > MAX_COMPENDIUM_HITS)
+        throw new Error(`compendium.search limit must be an integer 1–${MAX_COMPENDIUM_HITS}`);
+      const packs = await compendiumPacks(ctx);
+      const selected = args.packId === undefined ? packs : packs.filter((entry) => compendiumPackId(entry) === compendiumPackIdArg(args.packId));
+      if (args.packId !== undefined && selected.length === 0) throw new Error("Unknown compendium pack");
+      const hits = searchCompendia(selected.map((entry) => entry.pack), args.query, Number(limit));
+      return {
+        hits: hits.map((hit) => {
+          const owner = selected.find((entry) => entry.pack === hit.pack);
+          return {
+            packId: owner ? compendiumPackId(owner) : "", entryId: hit.entry.id, name: hit.entry.name,
+            type: hit.entry.data.type, score: hit.score,
+          };
+        }),
+      };
+    },
+    "compendium.get": async (args, commandContext) => {
+      await ctx.assertCapability("compendium.read");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).some((key) => !["packId", "entryId"].includes(key)))
+        throw new Error("compendium.get accepts packId and entryId");
+      const packId = compendiumPackIdArg(args.packId);
+      const entryId = safeId(args.entryId, "compendium entry id");
+      const pack = (await compendiumPacks(ctx)).find((entry) => compendiumPackId(entry) === packId);
+      if (!pack) throw new Error("Unknown compendium pack");
+      const entry = pack.pack.entries.find((row) => row.id === entryId);
+      if (!entry) throw new Error("Unknown compendium entry");
+      const payload = {
+        packId, id: entry.id, name: entry.name,
+        ...(entry.img === undefined ? {} : { img: entry.img }),
+        ...(entry.keywords === undefined ? {} : { keywords: [...entry.keywords] }),
+        type: entry.data.type, data: entry.data as unknown as Json,
+      };
+      const size = byteLength(payload);
+      if (size === null || size > MAX_COMPENDIUM_ENTRY_BYTES)
+        throw new Error(`Compendium entry ${entryId} exceeds the ${MAX_COMPENDIUM_ENTRY_BYTES}-byte RPC budget`);
+      return payload;
+    },
+    // ── D-478: module-to-module bus ───────────────────────────────────────────────────────
+    "modules.list": async (args, commandContext) => {
+      assertCommandActive(commandContext);
+      if (Object.keys(args).length) throw new Error("modules.list takes no arguments");
+      const entries = ctx.modules?.list() ?? [];
+      return {
+        modules: entries.filter((entry) => entry.packageId !== ctx.packageId).map((entry) => ({
+          packageId: entry.packageId, name: entry.name, version: entry.version, running: entry.running,
+          commands: entry.commands.map((command) => ({ ...command })),
+          provides: entry.provides.map((slot) => ({ ...slot })),
+          emits: [...entry.emits],
+        })),
+      };
+    },
+    "modules.invoke": async (args, commandContext) => {
+      await ctx.assertCapability("modules.invoke");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).some((key) => !["moduleId", "commandId", "input"].includes(key)))
+        throw new Error("modules.invoke accepts moduleId, commandId and input");
+      const moduleId = safeId(args.moduleId, "modules.invoke moduleId");
+      const commandId = safeId(args.commandId, "modules.invoke commandId");
+      if (moduleId === ctx.packageId) throw new Error("A module cannot invoke itself through the kernel");
+      const bus = ctx.modules;
+      if (!bus) throw new Error("The module bus is unavailable on this device");
+      if (!bus.requires.some((requirement) => requirement.id === moduleId))
+        throw new Error(`Declare ${moduleId} in interconnect.requires before invoking it`);
+      const input = args.input === undefined ? null : args.input;
+      if (!boundedJson(input)) throw new Error("modules.invoke input must be bounded JSON");
+      const result = await bus.invoke(moduleId, commandId, input, commandContext);
+      assertCommandActive(commandContext);
+      return { result };
     },
     "ui.select": async (args, commandContext) => {
       await ctx.assertCapability("ui.interaction");

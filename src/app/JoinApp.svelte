@@ -65,8 +65,11 @@
     PlayerAisRuntime,
     describeAisCapability,
     type PlayerAisPendingConsent,
+    type PlayerAisSettingsView,
     type PlayerAisStatuses,
   } from "./playerAisRuntime";
+  import AisSettingsForm from "../ui/packages/AisSettingsForm.svelte";
+  import type { AisSettingValue } from "../core/automationInterconnect";
   import { aisPanelLayer } from "../packages/aisPanel";
   import { PlayerRulesPackage, type PlayerRulesStatus } from "./playerRulesPackage";
   import { isFirstPartyArtifact } from "./firstPartyPackages";
@@ -830,6 +833,29 @@
     } catch (error) {
       aisCommandResult = { ...aisCommandResult, [packageId]: error instanceof Error ? error.message : String(error) };
     } finally { aisCommandBusy = null; }
+  }
+  /** D-476: a shared module's settings on this device (world values read-only, device values editable). */
+  let aisSettingsViews = $state<Record<string, PlayerAisSettingsView>>({});
+  function aisSettingsCount(packageId: string): number {
+    return playerAis?.currentProfile?.modules.find((module) => module.packageId === packageId)?.settings?.length ?? 0;
+  }
+  async function loadAisSettings(packageId: string): Promise<void> {
+    const view = await playerAis?.moduleSettings(packageId);
+    if (view) aisSettingsViews = { ...aisSettingsViews, [packageId]: view };
+  }
+  async function writeAisDeviceSetting(packageId: string, key: string, value: AisSettingValue): Promise<void> {
+    if (!playerAis) throw new Error("Not connected.");
+    await playerAis.setDeviceSetting(packageId, key, value);
+    await loadAisSettings(packageId);
+  }
+  /** D-479: after a circuit trip or a module failure, start the module again without re-consenting. */
+  async function restartAisModule(packageId: string): Promise<void> {
+    if (!playerAis || aisDeciding) return;
+    aisDeciding = true;
+    try {
+      const restarted = await playerAis.restart(packageId);
+      if (!restarted) showMoveNotice("The module could not be restarted on this device; use “Ask again”.", "warn");
+    } finally { aisDeciding = false; }
   }
   /** T01 for players: right-click on a token opens the reduced menu (sheet + shared light actions). */
   let tokenMenu = $state<{ x: number; y: number; tokenId: string } | null>(null);
@@ -2378,6 +2404,22 @@
                       <button type="button" data-player-ais-panel-open={row.packageId} disabled={aisStatuses[row.packageId]?.state !== "ready"}
                         onclick={() => { playerAis?.openPanel(row.packageId); }}>Open “{row.panelTitle}”</button>
                     {/if}
+                    {#if !row.pending && aisStatuses[row.packageId]?.state === "failed"}
+                      <button type="button" data-player-ais-restart disabled={aisDeciding} onclick={() => void restartAisModule(row.packageId)}>Restart</button>
+                    {/if}
+                    {#if aisSettingsCount(row.packageId) > 0}
+                      <details class="ais-module-settings" data-player-ais-settings={row.packageId}
+                        ontoggle={(event) => { if (event.currentTarget.open) void loadAisSettings(row.packageId); }}>
+                        <summary>Settings ({aisSettingsCount(row.packageId)}) · world values are the GM's, device values are yours</summary>
+                        {#if aisSettingsViews[row.packageId]}
+                          <AisSettingsForm packageId={row.packageId} declarations={aisSettingsViews[row.packageId]?.declarations ?? []}
+                            values={aisSettingsViews[row.packageId]?.values ?? {}} editableScopes={["device"]}
+                            onChange={(key, value) => writeAisDeviceSetting(row.packageId, key, value)} />
+                        {:else}
+                          <p class="hint">Loading…</p>
+                        {/if}
+                      </details>
+                    {/if}
                     {#if aisCommandsOf(row.packageId).length > 0}
                       <div class="ais-module-command" data-player-ais-command={row.packageId}>
                         <label>Command
@@ -2778,6 +2820,8 @@
   .ais-module-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
   .ais-module-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
   .ais-module-command { flex-basis: 100%; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 0.9em; }
+  .ais-module-settings { flex-basis: 100%; font-size: 0.9em; }
+  .ais-module-settings summary { cursor: pointer; }
   .hex-menu {
     position: absolute;
     z-index: 14;

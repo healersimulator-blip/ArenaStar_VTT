@@ -6,6 +6,7 @@ import {
   type AisModuleCommandDeclaration,
 } from "../core/automationInterconnect";
 import type { Json } from "../core/documents";
+import { createAisHealthMonitor, type AisModuleDiagnostics, type AisTraceEntry } from "./aisHealth";
 import { aisModuleRuntimeSource } from "./aisModuleRuntimeSource";
 
 export const AIS_RPC_TAG = 1 as const;
@@ -37,10 +38,23 @@ export const AIS_MODULE_METHODS = [
   "fx.list",
   "fx.stop",
   "package.resource.read",
+  "settings.list",
+  "settings.get",
+  "settings.set",
+  "compendium.list",
+  "compendium.search",
+  "compendium.get",
+  "modules.list",
+  "modules.invoke",
 ] as const;
 export type AisModuleMethod = (typeof AIS_MODULE_METHODS)[number];
 
-const REQUIRED_CAPABILITY: Record<AisModuleMethod, AisCapability> = {
+/**
+ * Capability gate per method. `null` = no capability: the method only returns what the module
+ * already knows from its own approved manifest (its declared settings, the public contract of
+ * sibling modules) and performs no write.
+ */
+export const AIS_METHOD_CAPABILITY: Record<AisModuleMethod, AisCapability | null> = {
   "events.subscribe": "action.observe",
   "events.emit": "event.emit",
   "scene.read.visible": "scene.read.visible",
@@ -59,6 +73,14 @@ const REQUIRED_CAPABILITY: Record<AisModuleMethod, AisCapability> = {
   "fx.list": "fx.play",
   "fx.stop": "fx.play",
   "package.resource.read": "package.resources.read",
+  "settings.list": null,
+  "settings.get": null,
+  "settings.set": "module.settings.write",
+  "compendium.list": "compendium.read",
+  "compendium.search": "compendium.read",
+  "compendium.get": "compendium.read",
+  "modules.list": null,
+  "modules.invoke": "modules.invoke",
 };
 
 export interface AisModuleRequest {
@@ -140,6 +162,8 @@ export type AisModuleHandler = (
 ) => unknown | Promise<unknown>;
 export type AisModuleHandlers = Record<AisModuleMethod, AisModuleHandler>;
 
+export type { AisModuleDiagnostics, AisTraceEntry } from "./aisHealth";
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -203,6 +227,7 @@ export function createAisModuleDispatcher(
   grantedCapabilities: ReadonlySet<AisCapability>,
   onSubscribe: (event: AisEventName) => void,
   lifetime?: AisModuleRequestContext,
+  onTrace?: (entry: AisTraceEntry) => void,
 ): {
   onFrame(
     data: unknown,
@@ -224,13 +249,16 @@ export function createAisModuleDispatcher(
 
       const now = Date.now();
       while (requestTimes.length > 0 && now - (requestTimes[0] ?? now) >= 1000) requestTimes.shift();
-      const respondError = (error: string): void => post({
-        vttAisRpc: AIS_RPC_TAG,
-        kind: "response",
-        id: request.id,
-        ok: false,
-        error,
-      });
+      const respondError = (error: string): void => {
+        onTrace?.({ at: now, kind: "rejected", name: request.method, ok: false, error });
+        post({
+          vttAisRpc: AIS_RPC_TAG,
+          kind: "response",
+          id: request.id,
+          ok: false,
+          error,
+        });
+      };
       if (requestTimes.length >= MAX_REQUESTS_PER_SECOND) {
         respondError("AIS RPC rate limit exceeded");
         return;
@@ -249,8 +277,8 @@ export function createAisModuleDispatcher(
           return;
         }
       }
-      const required = REQUIRED_CAPABILITY[request.method];
-      if (!grantedCapabilities.has(required)) {
+      const required = AIS_METHOD_CAPABILITY[request.method];
+      if (required !== null && !grantedCapabilities.has(required)) {
         respondError(`Capability not granted: ${required}`);
         return;
       }
@@ -263,6 +291,7 @@ export function createAisModuleDispatcher(
         }
       }
       activeRequests++;
+      const startedAt = Date.now();
       void (async () => {
         let response: AisModuleResponse;
         try {
@@ -286,6 +315,8 @@ export function createAisModuleDispatcher(
         } finally {
           activeRequests--;
         }
+        onTrace?.({ at: startedAt, kind: "rpc", name: request.method, ok: response.ok, ms: Date.now() - startedAt,
+          ...(response.ok ? {} : { error: response.error }) });
         if (lifetime?.isActive() !== false) post(response);
       })();
     },
@@ -351,6 +382,10 @@ export class AisModuleIframe {
   private nextCommandId = 1;
   private disposed = false;
   private statusValue: AisModuleRuntimeStatus = { state: "starting" };
+  /** D-479: bounded trace + counters + circuit breaker (see aisHealth.ts). */
+  private readonly health = createAisHealthMonitor({
+    onTrip: (reason) => queueMicrotask(() => this.stop(reason, true)),
+  });
 
   constructor(options: AisModuleIframeOptions) {
     this.packageId = options.packageId;
@@ -369,7 +404,8 @@ export class AisModuleIframe {
         this.subscriptions.add(event);
         options.onSubscribe?.(event);
       }
-    }, lifetime);
+    }, lifetime, (entry) => this.record(entry));
+    this.record({ at: Date.now(), kind: "lifecycle", name: "start", ok: true });
     const doc = globalThis.document;
     const frame = doc.createElement("iframe");
     frame.setAttribute("sandbox", "allow-scripts");
@@ -388,6 +424,11 @@ export class AisModuleIframe {
 
   get status(): AisModuleRuntimeStatus { return this.statusValue; }
   whenReady(): Promise<void> { return this.ready; }
+
+  /** D-479: bounded health view for the packages UI and tests (copies, never live arrays). */
+  diagnostics(): AisModuleDiagnostics { return this.health.diagnostics(); }
+
+  private record(entry: AisTraceEntry): void { this.health.record(entry); }
 
   /**
    * D-470: show or hide the module's own document. The element never moves in the DOM (re-parenting
@@ -442,6 +483,7 @@ export class AisModuleIframe {
       if (!this.entryReady || !this.documentVerified) return;
       globalThis.clearTimeout(this.startupTimer);
       this.statusValue = { state: "ready" };
+      this.record({ at: Date.now(), kind: "lifecycle", name: "ready", ok: true });
       this.resolveReady();
       this.options.onStatus?.(this.statusValue);
     } else if (data.kind === "command-result") {
@@ -507,17 +549,26 @@ export class AisModuleIframe {
         requestId: options.requestId, runAs: options.runAs, deadlineAt, isActive,
         assertActive: () => { if (!isActive()) throw new Error("AIS macro command was cancelled, expired or exceeded its budget"); },
       };
-      return await new Promise<Json>((resolve, reject) => {
-        const timer = globalThis.setTimeout(() => {
-          this.activeCommands.delete(id);
-          reject(new Error("AIS module command timed out"));
-          if (this.options.stopOnCommandTimeout) this.stop("Guest command timed out; reload to restart", true);
-        }, MAX_COMMAND_MS);
-        this.activeCommands.set(id, { context, resolve, reject, timer });
-        this.post({ vttAisRpc: AIS_RPC_TAG, kind: "command", id, commandId, input,
-          context: { sceneId: options.sceneId, callerId: options.callerId,
-            requestId: options.requestId, runAs: options.runAs, deadlineAt } });
-      });
+      const startedAt = Date.now();
+      try {
+        const result = await new Promise<Json>((resolve, reject) => {
+          const timer = globalThis.setTimeout(() => {
+            this.activeCommands.delete(id);
+            reject(new Error("AIS module command timed out"));
+            if (this.options.stopOnCommandTimeout) this.stop("Guest command timed out; reload to restart", true);
+          }, MAX_COMMAND_MS);
+          this.activeCommands.set(id, { context, resolve, reject, timer });
+          this.post({ vttAisRpc: AIS_RPC_TAG, kind: "command", id, commandId, input,
+            context: { sceneId: options.sceneId, callerId: options.callerId,
+              requestId: options.requestId, runAs: options.runAs, deadlineAt } });
+        });
+        this.record({ at: startedAt, kind: "command", name: commandId, ok: true, ms: Date.now() - startedAt });
+        return result;
+      } catch (error) {
+        this.record({ at: startedAt, kind: "command", name: commandId, ok: false, ms: Date.now() - startedAt,
+          error: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+        throw error;
+      }
     } finally { this.commandPending = false; }
   }
 
@@ -526,8 +577,10 @@ export class AisModuleIframe {
     void (async () => {
       await this.options.assertModuleActive?.();
       if (this.options.isCapabilityCurrentlyGranted && !(await this.options.isCapabilityCurrentlyGranted("action.observe"))) return;
-      if (!this.disposed && this.subscriptions.has(event))
+      if (!this.disposed && this.subscriptions.has(event)) {
+        this.record({ at: Date.now(), kind: "event", name: event, ok: true });
         this.post({ vttAisRpc: AIS_RPC_TAG, kind: "event", event, payload });
+      }
     })().catch(() => {});
   }
 
@@ -535,6 +588,7 @@ export class AisModuleIframe {
     if (this.disposed) return;
     this.disposed = true;
     this.statusValue = { state: failed ? "failed" : "stopped", error: reason };
+    this.record({ at: Date.now(), kind: "lifecycle", name: failed ? "failed" : "stopped", ok: !failed, error: reason.slice(0, 200) });
     globalThis.clearTimeout(this.startupTimer);
     this.rejectReady(new Error(`AIS module ${this.packageId}: ${reason}`));
     globalThis.removeEventListener("message", this.onConnect);
