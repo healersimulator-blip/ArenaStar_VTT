@@ -1,4 +1,4 @@
-# AIS Foundry v13 adapter (0.4.0)
+# AIS Foundry v13 adapter (0.5.0)
 
 ArenaStar-authored code, loaded inside the separately approved guest's opaque AIS iframe.
 The adapter is a runtime provider, not an in-page module and not Foundry core (which is
@@ -95,15 +95,49 @@ shape, the DOM markers and class names modules select on, the key names) — nev
   `MEASURED_TEMPLATE_TYPES`, wall/playlist/table enumerations.
 - `foundry.info.templates = { compiled, core: [paths used from the library], missing: [core paths asked for that the library lacks] }`.
 
-## Layout (`runtimeProvider.scripts`, D-483/D-484)
+## World documents (`runtime/documents.js`, D-485)
 
-The manifest declares `runtimeProvider.scripts = ["runtime/hbs.js", "runtime/jq.js", "runtime/core.js", "runtime/fields.js", "runtime/ui.js"]`
+`game.actors`, `game.items`, `game.journal`, `game.tables`, `game.macros`, `game.folders`,
+`game.playlists`, `game.combats`, `game.users`, `game.messages` and `game.user` are real
+documents hydrated from the kernel's generic document service (`AIS.documents.*`, capabilities
+`documents.read`/`documents.write`) before `init`, and kept current by `documents.changed`.
+`Actor`, `Item`, `JournalEntry`, `JournalEntryPage`, `RollTable`, `Macro`, `Folder`, `Playlist`,
+`Combat`, `Combatant`, `User`, `ChatMessage`, `ActiveEffect` are our own `Document`
+implementation: `create/createDocuments/updateDocuments/deleteDocuments`, `update/delete`,
+`getFlag/setFlag/unsetFlag`, `createEmbeddedDocuments/updateEmbeddedDocuments/
+deleteEmbeddedDocuments`, `getEmbeddedCollection`, `toObject/clone`, `uuid`/`fromUuid`/
+`fromUuidSync`, `isOwner/testUserPermission`, `prepareData` hooks, `Actor#itemTypes`,
+`User#isGM/role/character`. Writes are one atomic host transaction **with the device user's
+authority** (the host validates, as for the shell's own UI); `pre*` hooks may cancel; post hooks
+(`createActor`, `updateItem`, …) fire from replication only, once, with Foundry's
+`(doc, changes, options, userId)` arity — also for edits made in ArenaStar's own UI. Foundry's
+subtype (`type: "npc"`) is kept in `flags["ais-foundry"].type`; the store's `type` stays the kind
+marker. `ChatMessage.create({ content })` posts text through `chat.post`. `foundry.info.documents`
+reports `{ userId, collections, hydrateMs, writes, rejectedWrites, events, hookErrors }`.
+
+RPC economy: the replica applies **updates and embedded deletions from the inline diff** the
+change feed carries (kernel FlatDiff semantics — dotted set, `-=path` delete, numeric array
+index), so an awaited `doc.update()` costs one RPC (`documents.mutate`) plus the event; only
+creates, truncated feeds and a diff the local copy cannot apply re-read the root with
+`documents.get`. Measured in the e2e sandbox (headless Chromium, software rendering): 119–132 ms
+per awaited `actor.update` — 3–8 ms of it inside the host handler, the rest is the ≈90 ms cost
+of every macrotask hop on that render-bound main thread (the shell's own `submitAndWait` is 2 ms;
+an idle `MessageChannel` ping is 89 ms there). Before the fix it was 408 ms: the kernel re-read
+the world record from IndexedDB on every RPC (207 ms per read in that sandbox) and the replica
+re-fetched every changed root.
+Scenes/placeables still use the projected scene view (`Scene.<id>.Token.<id>`), `Compendium.*`
+uuids and `game.packs` wait for the packs slice — see `AIS_FOUNDRY_ARCHITECTURE.md` §5.
+
+## Layout (`runtimeProvider.scripts`, D-483/D-484/D-485)
+
+The manifest declares `runtimeProvider.scripts = ["runtime/hbs.js", "runtime/jq.js", "runtime/core.js", "runtime/fields.js", "runtime/documents.js", "runtime/ui.js"]`
 — classic scripts the kernel evaluates in order inside the module frame before `runtime/adapter.js`
 (`entry`). Each publishes one factory (`__aisFoundryHbs`, `__aisFoundryJq`, `__aisFoundryCore`,
-`__aisFoundryFields`, `__aisFoundryUi`) that the adapter wires with its own `AIS`, `Hooks`,
+`__aisFoundryFields`, `__aisFoundryDocuments`, `__aisFoundryUi`) that the adapter wires with its own `AIS`, `Hooks`,
 `game.i18n` and resource reader. No vendored Handlebars or jQuery and no Foundry files: every layer
 is a re-implementation of the surface Foundry modules use. The layers are unit-tested without a
-browser (`tests/packages/aisFoundryHbs.test.ts`, `tests/packages/aisFoundryCore.test.ts`) and in
+browser (`tests/packages/aisFoundryHbs.test.ts`, `tests/packages/aisFoundryCore.test.ts`,
+`tests/packages/aisFoundryDocuments.test.ts`) and in
 Chromium (`e2e/ais_foundry_ui_runtime.spec.ts`, `e2e/ais_foundry_module.spec.ts`).
 
 ## Profile `foundry-v13-scene-tags-fx` (0.1.0 behaviour, unchanged)

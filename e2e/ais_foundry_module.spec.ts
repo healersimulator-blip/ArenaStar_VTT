@@ -193,13 +193,19 @@ function foundryCoreApiModuleZip(): Buffer {
       `  try { await renderTemplate("templates/sidebar/apps/compendium.html", {}); state.missing = "rendered"; } catch (error) { state.missing = error.message; }`,
       `  ui.notifications.info(game.i18n.localize("FSD.Ready"));`,
       `  game.modules.get(MODULE_ID).api = { state: () => state, radius: () => game.settings.get(MODULE_ID, "radius"),`,
-      `    setRadius: (value) => game.settings.set(MODULE_ID, "radius", value), documents: probeDocuments, docEvents: () => state.docEvents,`,
+      `    setRadius: (value) => game.settings.set(MODULE_ID, "radius", value), documents: probeDocuments, docEvents: () => state.docEvents, bench: benchDocuments,`,
       `    actorView: (id) => { const actor = game.actors.get(id); return actor ? { name: actor.name, hp: actor.system.hp?.value ?? null, flags: actor.flags[MODULE_ID] ?? null, items: actor.items.map((item) => item.name) } : null; } };`,
       `});`,
       // D-485 probes: plain Foundry document code — classes, embedded collections, flags, uuids and the create*/update*/delete* hooks.
       `state.docEvents = [];`,
       `for (const hook of ["createActor", "updateActor", "deleteActor", "createItem", "updateItem", "deleteItem", "createJournalEntry"])`,
       `  Hooks.on(hook, (doc, changes, options, userId) => state.docEvents.push({ hook, name: doc.name, uuid: doc.uuid, changes: hook.startsWith("update") ? changes : null, userId: hook.startsWith("delete") ? options : userId }));`,
+      // Measured, not asserted: what a module experiences per awaited write (mutate → commit → change event → replica refresh).
+      `async function benchDocuments(id, n) {`,
+      `  const actor = game.actors.get(id); const started = performance.now();`,
+      `  for (let i = 0; i < n; i += 1) await actor.update({ "system.hp.value": 10 + i });`,
+      `  return { n, msPerWrite: Math.round((performance.now() - started) / n), hp: actor.system.hp.value };`,
+      `}`,
       `async function probeDocuments() {`,
       `  const before = { actors: game.actors.size, users: game.users.size, isGM: game.user.isGM, userId: game.user.id, userName: game.user.name, userDoc: game.user instanceof User };`,
       `  const actor = await Actor.create({ name: "FSD Guard", type: "npc", system: { hp: { value: 5, max: 5 } }, flags: { [MODULE_ID]: { origin: "probe" } },`,
@@ -510,6 +516,8 @@ test("D-485: world documents — a Foundry module creates/updates Actors, embedd
   const info = await result(page, "fsd-demo", "foundry.info");
   expect(info.documents).toMatchObject({ userName: expect.any(String), events: expect.any(Number), writes: 0, rejectedWrites: 0, hookErrors: [] });
   expect(typeof info.documents.hydrateMs).toBe("number");
+  test.info().annotations.push({ type: "documents.hydrate", description: `${info.documents.documents} documents in ${info.documents.hydrateMs} ms (${JSON.stringify(info.documents.collections)})` });
+  console.log(`D-485 hydrate: ${info.documents.documents} documents in ${info.documents.hydrateMs} ms`, JSON.stringify(info.documents.collections));
   expect(info.documents.collections.users).toBeGreaterThanOrEqual(1);
   const hydratedActors: number = info.documents.collections.actors;
 
@@ -566,4 +574,19 @@ test("D-485: world documents — a Foundry module creates/updates Actors, embedd
   const finalInfo = await result(page, "fsd-demo", "foundry.info");
   expect(finalInfo.documents).toMatchObject({ writes: 6, rejectedWrites: 0, hookErrors: [] });
   expect(finalInfo.unsupportedCalls).toEqual([]);
+
+  // Measured write latency in the quiet state (recorded in the report, not asserted against a threshold).
+  const bench = await result(page, "fsd-demo", "foundry.api", { path: "bench", args: [probe.actorId, 10] });
+  expect(bench).toMatchObject({ n: 10, hp: 19 });
+  test.info().annotations.push({ type: "documents.write", description: `${bench.msPerWrite} ms per awaited actor.update (10 sequential)` });
+  console.log(`D-485 write latency: ${bench.msPerWrite} ms per awaited actor.update (10 sequential)`);
+  // Host-side handler time per RPC (the Health trace) separates kernel cost from channel/frame cost.
+  await page.locator("#gm-settings").click();
+  const health = page.locator('[data-ais-health="fsd-demo"]');
+  await health.locator("summary").click();
+  await expect(health.locator(".ais-trace li").first()).toBeVisible();
+  const trace = await health.locator(".ais-trace li").allInnerTexts();
+  test.info().annotations.push({ type: "documents.trace", description: trace.join(" | ") });
+  console.log(`D-485 host trace (newest first): ${trace.join(" | ")}`);
+  await page.locator('[data-window="settings"] [data-window-close]').click();
 });

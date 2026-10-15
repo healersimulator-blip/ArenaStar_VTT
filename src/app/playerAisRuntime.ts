@@ -313,21 +313,34 @@ export class PlayerAisRuntime {
     this.options.onPending(this.pendingConsent);
   }
 
+  /**
+   * Consent records are re-checked on every module RPC; this runtime is the only writer of its
+   * scope, so after the first read they are served from memory (an IndexedDB read per request
+   * measured ~200 ms in the e2e sandbox). `writeConsent`/`forget` refresh the entry they write.
+   */
+  private readonly consentCache = new Map<string, PlayerAisConsentRecord | null>();
+
   private async consentRecord(packageId: string): Promise<PlayerAisConsentRecord | null> {
+    const cached = this.consentCache.get(packageId);
+    if (cached !== undefined) return cached;
     const row = await getSetting(this.options.db, playerAisConsentScope(this.options.worldId), packageId);
     const value = row?.value as Partial<PlayerAisConsentRecord> | undefined;
-    if (!value || typeof value.hash !== "string" || (value.decision !== "allow" && value.decision !== "deny")) return null;
-    return {
-      hash: value.hash,
-      decision: value.decision,
-      at: typeof value.at === "number" ? value.at : 0,
-      ...(typeof value.digest === "string" ? { digest: value.digest } : {}),
-      ...(Array.isArray(value.capabilities) ? { capabilities: value.capabilities.filter((c): c is AisCapability => typeof c === "string") } : {}),
-    };
+    const record: PlayerAisConsentRecord | null =
+      !value || typeof value.hash !== "string" || (value.decision !== "allow" && value.decision !== "deny") ? null : {
+        hash: value.hash,
+        decision: value.decision,
+        at: typeof value.at === "number" ? value.at : 0,
+        ...(typeof value.digest === "string" ? { digest: value.digest } : {}),
+        ...(Array.isArray(value.capabilities) ? { capabilities: value.capabilities.filter((c): c is AisCapability => typeof c === "string") } : {}),
+      };
+    // A write that raced this read wins: it already placed the newer entry.
+    if (!this.consentCache.has(packageId)) this.consentCache.set(packageId, record);
+    return this.consentCache.get(packageId) ?? record;
   }
 
   private async writeConsent(packageId: string, record: PlayerAisConsentRecord): Promise<void> {
     await putSetting(this.options.db, { scope: playerAisConsentScope(this.options.worldId), key: packageId, value: { ...record } });
+    this.consentCache.set(packageId, { ...record, ...(record.capabilities ? { capabilities: [...record.capabilities] } : {}) });
   }
 
   /** The player's "Allow" for a pending module: persisted for this exact hash and code, then started. */
@@ -359,6 +372,7 @@ export class PlayerAisRuntime {
   /** Forget a decision (Settings): a later profile asks again. */
   async forget(packageId: string): Promise<void> {
     await putSetting(this.options.db, { scope: playerAisConsentScope(this.options.worldId), key: packageId, value: null });
+    this.consentCache.set(packageId, null);
     this.stop(packageId, "Consent withdrawn on this device");
     if (this.profile) this.applyProfile(this.profile);
   }

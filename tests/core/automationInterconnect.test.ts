@@ -46,8 +46,11 @@ describe("AIS v1 package profile resolution", () => {
     expect(AIS_EVENTS).toContain("ui.panel.closed");
     expect(aisEventSubscriptionCapability("module.settings.changed")).toBeNull();
     expect(aisEventSubscriptionCapability("ui.panel.closed")).toBe("ui.panel");
+    // D-485: document change notifications carry ids and diffs; the read grant that exposes them owns the event.
+    expect(aisEventSubscriptionCapability("documents.changed")).toBe("documents.read");
     for (const event of AIS_EVENTS)
-      if (event !== "module.settings.changed" && event !== "ui.panel.closed") expect(aisEventSubscriptionCapability(event)).toBe("action.observe");
+      if (event !== "module.settings.changed" && event !== "ui.panel.closed" && event !== "documents.changed")
+        expect(aisEventSubscriptionCapability(event)).toBe("action.observe");
   });
 
   test("publishes a typed token-light source-change hook and identifies only committed light writes", () => {

@@ -94,6 +94,9 @@ intersection with the player-runnable set) must have granted.
 | `AIS.settings.register(declaration)` | `module.settings.write` | D-482; same schema as `interconnect.settings[]`, declared from code (per boot; 64 on top of the 32 manifest entries); identical re-registration → `{ registered: false }`, a different shape for a known key is refused; `hidden: true` keeps a setting out of the forms (JSON text up to 16 384 chars fits a `string`) |
 | `AIS.compendium.list()` / `.search(query, { packId?, limit? })` / `.get(packId, entryId)` | `compendium.read` | D-477; GM device only; pack ids are `<packageId>/<packFile>`; entries are copies ≤ 48 KiB |
 | `AIS.modules.list()` / `.invoke(moduleId, commandId, input)` | invoke: `modules.invoke` | D-478; target must be in your `requires`; depth ≤ 8; runs with the device's authority |
+| `AIS.documents.context()` / `.list(collection, offset?, limit?)` / `.get({ collection, id, parent? })` | `documents.read` | D-485; this device user's own view of `actors, items, journals, rollTables, macros, folders, playlists, combats, users, messages`; pages ≤ 500 rows / ≈256 KiB; one document ≤ 1 MiB |
+| `AIS.documents.mutate(ops)` | `documents.write` | D-485; `[{ kind: "create", collection, data, parent? } \| { kind: "update", collection, id, diff, parent? } \| { kind: "delete", collection, id, parent? }]`, ≤ 32 ops, one atomic host transaction **with this device user's authority** (a player cannot create actors; a GM device can). `_id`/`type` are kernel-owned; defaults (`ownership` = creator owns, `items: []`, …) are filled for you, recursively for inline embedded rows |
+| `AIS.events.on("documents.changed", cb)` | `documents.read` | D-485; `{ seq, by, changes: [{ kind, collection, id, parent?, diff? }] }` per committed transaction on the exposed collections (diffs ≤ 16 KiB inline; re-`get` the root otherwise) |
 
 Errors are ordinary rejections with a sentence you can show (`"compendium.read is not shared"`,
 `"Declare lamp in interconnect.requires"`, `"pf1e-torch declares no setting radius"`, `"between
@@ -156,8 +159,9 @@ panel button, command runner, device settings, **Restart** when failed.
 - One classic script per module: no ES-module graph, no `import` of sibling files (R-09). Bundle
   before packaging.
 - No binary resources in packages and no file storage (R-07).
-- No document creation beyond the typed intents listed above (R-02): a module cannot create
-  actors or items; it can ask the GM through `ui.select`/chat and let the shell's own tools act.
+- Documents (R-02) are open since D-485 for the world collections listed in §3; scenes and
+  placeables still go through the typed scene intents (tags, token light) until the next slice.
+  Authority is the device user's: a player frame cannot create actors, exactly as its own UI cannot.
 - No raw sockets; players and host are coordinated by replication and ownership, not by messages
   you send (R-06 — by design).
 - No system namespace or `CONFIG` (R-08 — by design).

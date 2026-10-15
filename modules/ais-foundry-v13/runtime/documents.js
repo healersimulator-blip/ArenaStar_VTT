@@ -449,7 +449,11 @@
           if (existing) fire(`delete${klass.documentName}`, existing, {}, by);
           continue;
         }
-        const fresh = await AIS.documents.get({ collection: root.collection, id: root.id });
+        // Updates and embedded deletions apply to the replica from the inline diffs (one awaited write
+        // then costs one RPC, not two); creates, truncated feeds and anything the diff cannot express
+        // re-read the root.
+        const fresh = (existing && !payload.truncated ? localSource(existing, root.changes) : null)
+          ?? await AIS.documents.get({ collection: root.collection, id: root.id });
         if (!fresh) { if (existing) { collection.delete(root.id); fire(`delete${klass.documentName}`, existing, {}, by); } continue; }
         let doc = existing;
         if (!doc) {
@@ -479,6 +483,55 @@
       }
       if (typeof payload.seq === "number" && payload.seq > appliedSeq) appliedSeq = payload.seq;
       for (const waiter of [...waiters]) if (waiter.seq <= appliedSeq) { waiters.delete(waiter); waiter.resolve(); }
+    };
+    /** Kernel FlatDiff semantics (`src/core/diff.ts`): dotted set, `-=path: null` delete, numeric array index; missing intermediates are errors. */
+    const applyKernelDiff = (target, diff) => {
+      for (const [key, value] of Object.entries(diff)) {
+        const isDelete = key.startsWith("-=");
+        const segments = (isDelete ? key.slice(2) : key).split(".");
+        let cursor = target;
+        for (let depth = 0; depth < segments.length - 1; depth += 1) {
+          const next = Array.isArray(cursor) ? cursor[Number(segments[depth])] : cursor[segments[depth]];
+          if (next === null || typeof next !== "object") throw new Error(`diff path ${key} is missing an intermediate`);
+          cursor = next;
+        }
+        const last = segments[segments.length - 1];
+        if (Array.isArray(cursor)) {
+          const index = Number(last);
+          if (isDelete || !Number.isInteger(index) || index < 0 || index >= cursor.length) throw new Error(`diff path ${key} cannot address the array`);
+          cursor[index] = value;
+        } else if (isDelete) Reflect.deleteProperty(cursor, last);
+        else cursor[last] = value;
+      }
+    };
+    /** The root's next source from inline changes, or null when a change needs the kernel copy. */
+    const localSource = (existing, changes) => {
+      const source = clone(existing._source);
+      try {
+        for (const { change, chain } of changes) {
+          if (change.kind === "create") return null;
+          // Walk the cloned source and the instance tree in parallel (the instances carry the metadata).
+          let sourceCursor = source; let instanceCursor = existing;
+          for (const level of chain.slice(1)) {
+            const key = Object.values(instanceCursor.constructor.metadata.embedded).find((candidate) => candidate === level.collection);
+            const rows = key ? sourceCursor[key] : null;
+            if (!Array.isArray(rows)) return null;
+            if (change.kind === "delete" && level === chain[chain.length - 1]) {
+              if (!rows.some((row) => row?._id === level.id)) return null;
+              sourceCursor[key] = rows.filter((row) => row?._id !== level.id);
+              sourceCursor = null;
+              break;
+            }
+            sourceCursor = rows.find((row) => row?._id === level.id) ?? null;
+            instanceCursor = instanceCursor[key]?.get(level.id) ?? null;
+            if (!sourceCursor || !instanceCursor) return null;
+          }
+          if (change.kind === "delete") { if (sourceCursor !== null) return null; continue; }
+          if (!change.diff || typeof change.diff !== "object") return null;
+          applyKernelDiff(sourceCursor, change.diff);
+        }
+      } catch { return null; }
+      return source;
     };
     const walk = (doc, chain) => {
       let cursor = doc;

@@ -44,7 +44,7 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 | `test:e2e:hexcrawl` | 8 | 16 | 15 min | 8.2 min | **16 passed** |
 | `test:e2e:images` | 10 | 31 | 15 min | 4.9 min | **30 passed / 1 skipped** |
 | `test:e2e:net` | 4 | 5 | 15 min | 0.5 min | **4 passed** (+ `players_roster`, D-465) |
-| `test:e2e:ais` | 4 | 18 | 15 min | 5.8 min + 2.4 min (`ais_foundry` rerun after rebuilding `dist/worlds`) | **18 passed** (D-480, 2026-10-15) |
+| `test:e2e:ais` | 6 | 27 | 25 min (raised from 15 in D-485) | 14.8 min (D-486 post-fix; 15.9 min D-485; 10.1 min for 26 tests on the D-484 host) | **27 passed** (D-486 re-run, 2026-10-15) |
 | `test:e2e:ui-adapters` | 2 | 5 | 15 min | 1.6 min | **5 passed** |
 | `test:e2e:pf1e-combat` | 16 | 70 | 20 min | 12.7 min | 64 passed / **6 pre-existing failures** |
 | `test:e2e:pf1e-sheets` | 14 | 28 | 20 min | 4.3 min | 23 passed / **5 pre-existing failures** |
@@ -263,3 +263,30 @@ used from the library and what it asked for that the library lacks. Test 2's exp
 fifth (hidden) setting. **Executed 2026-10-15: `ais_foundry_ui_runtime.spec.ts` 4/4 in 2.4 s;
 `ais_foundry_module.spec.ts` 4/4 in 2.6 min (new test 36.5 s alone).** Eight layer defects were
 fixed before the passing runs (see D-484). **`test:e2e:ais` (now 26 tests): 26/26 in 10.1 min.**
+
+## World documents through the generic document service (D-485, 2026-10-15)
+
+`ais_foundry_module.spec.ts` grows a fifth test. The fixture module gains plain Foundry document
+code and `createActor`/`createItem`/`updateItem`/`updateActor`/`createJournalEntry` hook
+recorders; the test boots it, reads `foundry.info.documents` (hydration before `init`, the device
+user as a `User` document), runs the module's `Actor.create` (inline `items`) →
+`createEmbeddedDocuments("Item")` → `item.update` → `setFlag` → `actor.update` →
+`JournalEntry.create` (inline page) sequence through `foundry.api`, then checks the **shell's own
+store** (kind markers, `flags["ais-foundry"].type`, owner level, completed embedded rows, page
+text) and the module's hook log (order, once each, Foundry `(doc, changes, options, userId)`
+arity). Finally the shell edits the actor with `submitAndWait` and the module's held instance
+reflects it with an `updateActor` hook. **Executed 2026-10-15: new test 54.8 s alone;
+`ais_foundry_module.spec.ts` + `ais_foundry_ui_runtime.spec.ts` 9/9 in 4.8 min.** The full
+`test:e2e:ais` batch is now 27 tests; the first run in this (slower) sandbox hit the script's
+15-minute `--global-timeout` with 26 passed and `ais_player.spec.ts` not started (it passes alone in
+43.6 s); the rerun passed **27/27 in 15.9 min**, so the script's cap is now `--global-timeout=1500000`
+(25 min) — raise it again rather than trimming tests if hosts get slower.
+
+**D-486 addendum.** The D-485 test is also the project's latency probe: it logs `D-485 hydrate: …
+ms` / `D-485 write latency: … ms` and, via the GM settings Health panel, the module's host trace
+(`D-485 host trace (newest first): …`, annotation `documents.trace` with the host handler `ms`).
+After the D-486 fix (in-memory consent/capability snapshots, inline-diff replica) the full batch
+run logs 123 ms per awaited `actor.update` (was 408) and 516 ms hydrate (was 833–1,095) on this
+sandbox, of which 3 ms is the host handler (`documents.mutate` in the trace) — the rest is the
+sandbox's ≈90 ms macrotask hop (render-bound main thread), not the AIS path. Batch **27/27 in
+14.8 min** after the fix.

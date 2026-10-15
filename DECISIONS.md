@@ -15198,3 +15198,184 @@ Icons are text glyphs for the common `fa-*` names (`ui.js`), not a FontAwesome-c
 collections, `validateJoint` chains) stays out until R-02 CRUD exists. Everything else from D-483's
 limits list still holds (host-only, panel-confined windows, no ProseMirror/`enrichHTML`/FilePicker/
 ContextMenu/DragDrop, R-02/R-06/R-07, pf1-dependent modules = Target B).
+
+## D-485 — Target A step 4: the whole-system architecture is written down, and its first consequence ships — a generic AIS document service with the adapter's own Foundry `Document` emulation (adapter 0.5.0) (2026-10-15)
+
+**Why.** The owner asked to "continue but think about overall project architecture" before more
+slices were added. Reconnaissance of the layers showed that the open Foundry concerns (R-02
+documents, player-side modules, R-06 sockets, R-10 packs, R-07 files) all hinge on one question —
+*how does a sandboxed module reach the world?* — and that the world already answers it: ArenaStar's
+documents are Foundry-shaped (`_id/type/name/ownership/flags/system`, embedded `items/effects/
+pages/combatants`), every mutation is an `Op[]` validated host-side (rate limit → permissions →
+schema-lite → invariants) and projected per user, and each device holds a replica of what its user
+may see. So the architecture needs **no new authority model**: a module runs with the device user's
+authority, narrowed by capabilities, never widened; the host decides every write exactly as for the
+shell's own UI. That principle, the layer map (world ↔ generic kernel ↔ in-sandbox adapter ↔
+unmodified module), where each Foundry concern lives, and the ordered remaining slices are now the
+design of record in [`AIS_FOUNDRY_ARCHITECTURE.md`](AIS_FOUNDRY_ARCHITECTURE.md). This entry
+records the first slice built inside that design.
+
+**Decision.**
+
+- **Kernel (generic, Foundry-agnostic) — `src/core/aisDocuments.ts` (386 lines) + handlers.**
+  Capabilities `documents.read` / `documents.write` (23 total); RPCs `documents.context`
+  (user id, collection sizes/writability/embedded names, limits), `documents.list` (paged, ≤500
+  rows and ≈256 KiB per page, stable `next` offset), `documents.get` (ref chain, ≤1 MiB),
+  `documents.mutate` (≤32 ops, ≤512 KiB, **one atomic host transaction via `ctx.submit`** with the
+  device user's authority; 31 RPC methods total); event `documents.changed { seq, by, changes:
+  [{ kind, collection, id, parent?, diff? }], truncated }` (10 events) derived from every committed
+  envelope for exposed roots, inline diffs ≤16 KiB, subscription gated by `documents.read`.
+  Exposed collections: `actors, items, journals, rollTables, macros, folders, playlists, combats`
+  (writable) and `users, messages` (read-only); `settings, automations, actionReceipts,
+  fxInstances, compendia, prefabs, scenes` are not addressable (scenes keep their dedicated
+  services until the next slice). Embedded chains validate against the parent kind
+  (`actors→items→effects`, `journals→pages`, `combats→combatants`, depth ≤ 2). The kernel owns
+  `_id` and the kind marker `type` (not updatable through a diff; prototype-polluting path
+  segments refused), and fills what the store requires so no module has to know it: `ownership`
+  (creator = owner, Foundry semantics; embedded rows `{default: 0}`), `flags`, `system`, per-kind
+  defaults (`items: []`, `effects: []`, `pages: []`, `formula: "1d20"`, `kind: "chat"`,
+  `targetType: "actors"`, `round/turn`, combatant fields) — **recursively for inline embedded
+  arrays** (`Actor.create({ items: [...] })` yields store-shaped items with ids). Both device
+  runtimes supply the same `documents` context from their own store (GM: full world; player: the
+  host's projection) and emit the change event from their `ops` bus. `AIS.documents.*` is in the
+  runtime source for every AIS module, not just the adapter; `AIS_MODULE_GUIDE.md` §3 documents it.
+- **Adapter 0.5.0 — `runtime/documents.js` (514 lines, `__aisFoundryDocuments`), wired by
+  `adapter.js`.** Our own `Document` implementation (no Foundry code): `Actor`, `Item`,
+  `JournalEntry`, `JournalEntryPage`, `RollTable`, `Macro`, `Folder`, `Playlist`, `Combat`,
+  `Combatant`, `User`, `ChatMessage`, `ActiveEffect` with `create/createDocuments/updateDocuments/
+  deleteDocuments`, `update/delete`, `getFlag/setFlag/unsetFlag`, `createEmbeddedDocuments/
+  updateEmbeddedDocuments/deleteEmbeddedDocuments`, `getEmbeddedCollection/Document`,
+  `toObject/toJSON/clone`, `uuid`, `isOwner/permission/testUserPermission/canUserModify`,
+  `prepareData/BaseData/EmbeddedDocuments/DerivedData`, `Actor#itemTypes/getRollData`,
+  `Item#actor`, `User#isGM/isSelf/isTrusted/role/character/hasRole`, `Folder#contents/children`,
+  `Combat#started/combatant`; `WorldCollection` (`get/getName(strict)/contents/filter/find/
+  search/folders/documentClass`) and `EmbeddedCollection`. **Replica with stable instances:**
+  hydrated before `init` through `documents.context` + paged `documents.list` in parallel with the
+  module's own files, refreshed *in place* by `documents.changed` (a reference a module holds keeps
+  reflecting the world), `game.user` = the device's `User` document, `game.users/actors/items/
+  journal/tables/macros/folders/playlists/combats/messages` live, `game.combat` the started one.
+  **Writes:** `pre<Create|Update|Delete><Doc>(doc, data|changes, options, userId)` run locally and
+  may cancel (`false`); Foundry's `{ "a.-=b": null }` becomes the kernel's `"-=a.b"`; nested update
+  objects flatten to dotted paths; one `documents.mutate` per call; the promise resolves after the
+  replica applied the commit (seq-gated, 1.5 s fallback) so `await Actor.create()` returns the
+  collection's instance. **Post hooks fire from the change feed only** — `createActor`,
+  `updateItem`, `deleteJournalEntry`, … with `(doc, changes, options, userId)` — so edits made in
+  ArenaStar's own UI and the module's own take one path and fire once; embedded deletes keep the
+  pre-image for the hook. Foundry's subtype ↔ ArenaStar's kind marker: `type: "npc"` is stored in
+  `flags["ais-foundry"].type`; a document that never had one derives it deterministically (Actor:
+  `character` when a non-GM user owns it, else `npc`; Macro from `kind`; Folder from `targetType`;
+  JournalEntryPage from `src`; else `base`). Foundry page data `{ text: { content }, src }` maps to
+  the store's `text` string. `fromUuid/fromUuidSync` resolve `Actor.<id>`, `Actor.<id>.Item.<id>`,
+  `JournalEntry.<id>.JournalEntryPage.<id>`, … (scene uuids still go to the projected scene view).
+  `ChatMessage.create({ content })` posts text through `chat.post` (host-stamped author; HTML
+  flattened); `getSpeaker` exists. The synthesised Foundry manifest grants `documents.read`,
+  `documents.write`, `chat.post`. `foundry.info.documents = { userId, userName, collections,
+  hydrateMs, documents, events, writes, rejectedWrites, hookErrors }`. A module whose grant lacks
+  the capability degrades to empty collections with a warning, not a crash.
+
+**Evidence (2026-10-15, Chromium through the real import path).**
+- `e2e/ais_foundry_module.spec.ts` test 5 (new; **54.8 s** alone, file **5/5**): the unmodified
+  `fsd-demo` module (Foundry-only code) boots with `foundry.info.documents.hydrateMs` a number,
+  `writes: 0`; `game.user instanceof User`, `isGM`, its id equal to the shell's `client.user.id`.
+  Its `probeDocuments()` then runs `Actor.create({ name, type: "npc", system, flags, items: [Shield]
+  })` → `createEmbeddedDocuments("Item", [Torch])` → `torch.update({ "system.lit": true })` →
+  `setFlag` → `actor.update({ name, "system.hp.value": 4 })` → `JournalEntry.create({ pages: [{
+  type: "text", text: { content } }] })`: the returned instance has `uuid Actor.<id>`, `type
+  "npc"`, `hp 4`, `isOwner`, flags `{ origin, count: 1 }`, `itemTypes ["equipment","weapon"]`,
+  `fromUuidSync(torch.uuid) === torch`, `await fromUuid(actor.uuid) === actor`,
+  `game.actors.getName(...) === actor`, `game.actors.size` +1. The shell's own store holds
+  `{ type: "actor", flags: { "fsd-demo": {...}, "ais-foundry": { type: "npc" } }, system: { hp: {
+  value: 4, max: 5 } }, items: [{ type: "item", name: "Shield", effects: [] }, { type: "item", name:
+  "Torch", system: { lit: true } }] }` with an owner level 3, and the journal `{ type: "journal",
+  pages: [{ type: "page", text: "<p>Hold the gate</p>", src: null }] }`. Hook log, in order and once
+  each: `createActor:FSD Guard, createItem:Torch, updateItem:Torch, updateActor:FSD Guard,
+  updateActor:FSD Guard II, createJournalEntry:FSD Notes`, with `changes` `{ system: { lit: true }
+  }`, `{ flags: { "fsd-demo": { count: 1 } } }`, `{ name, system: { hp: { value: 4 } } }` and the
+  shell user id. Then the **shell** edits the actor (`submitAndWait` hp → 9): the module's instance
+  reads 9 and `updateActor` fires with `{ system: { hp: { value: 9 } } }`. Final
+  `foundry.info.documents = { writes: 6, rejectedWrites: 0, hookErrors: [] }`, `unsupportedCalls: []`.
+- `tests/packages/aisFoundryDocuments.test.ts` (new, 8 tests): the adapter layer against a kernel
+  double that runs the **real** normalisation/paging/change derivation — hydration, subtype
+  derivation (`character` vs `npc` from the users collection), create/flags/unsetFlag diffs,
+  pre-hook cancellation, read-only rejection (`Document write rejected: … read-only`), embedded
+  CRUD with stable identity, shell-originated updates/deletes, inline Foundry pages, macro/folder
+  `type` translation, player-device creator ownership.
+- `tests/core/aisDocuments.test.ts` (new, 9 tests): exposed set, ref chains, diff-path rules,
+  defaults/kind markers/creator ownership, inline embedded completion (recursive ids), op-index
+  error messages, 32-op cap, change derivation (root filtering, inline-diff cap), paging by count
+  and bytes.
+- Gates: vitest **447 files (445 passed, 2 skipped) / 5,916 passed / 12 skipped** (+17 tests),
+  `tsc --noEmit` 0, `eslint .` 0, `test:e2e:ais` (now 27 tests) **27/27 in 15.9 min** on this
+  sandbox (the first attempt hit the old 15-minute global cap with 26 passed and one not started;
+  every spec passes alone — the cap is now 25 min in `package.json`), module spec + UI layer spec
+  **9/9 in 4.8 min**. Sizes: adapter zip **89,934 B**
+  (+11,147 B over 0.4.0: `documents.js`), `dist/index.html` **5,961,700 B** (+11,308 B: the kernel
+  service, handlers and runtime-source API — the only part that belongs in the shell).
+
+**Defects the tests found and fixed (in the layer, not the expectations).** (1) `_reset` cleared
+the instance's own keys *before* capturing its embedded collections, so every update replaced
+embedded instances and a module's `item` reference went stale → capture first, refresh in place.
+(2) Kernel rows constructed through the Foundry-data path turned the store's kind marker
+(`"item"`) into a subtype flag → `fromSource` rows bypass `toSource`. (3) Own-property assignment
+would have shadowed the prototype accessors (`type`, `folder`, `role`, …) and thrown in strict mode
+for getter-only ones → keys defined on the prototype chain read `_source` instead. (4) Inline
+embedded rows of a create had no `_id`/`type` in the store → the kernel completes them recursively.
+
+**Honest limits.** Scenes and placeables are not yet addressable through `documents.*` (tags and
+token light keep their dedicated services; `TokenDocument.update` beyond tags, prototype tokens
+and `Scene.update` are the next slice). `Compendium.*` uuids and `game.packs` wait for the packs
+slice; `Roll` is still a stub and `ChatMessage.create` posts text, not cards; no `DocumentSheet`
+rendering for these documents yet (`doc.sheet` is `null`); `Folder` membership is the `folder`
+field modules write, which ArenaStar's own sidebar does not yet read; `Actor.TYPES` is a fixed
+list, not a system's. Player-side execution of Foundry-profile modules stays `host-only` until the
+sharing flip described in `AIS_FOUNDRY_ARCHITECTURE.md` §5 (the kernel side — device-user authority
+on both runtimes — is in place). The shell grew by 11 KB for the kernel service; everything
+Foundry-specific stays in the package.
+
+## D-486 — RPC latency: in-memory consent/capability snapshots + inline-diff replica (2026-10-15)
+
+**Context.** The D-485 e2e measured an awaited `actor.update` at **408 ms** and a one-document
+hydrate at 833–1,095 ms (11 RPCs) in the headless-Chromium sandbox. The shell's own
+`submitAndWait` create/update is 10–11 ms / 2 ms, so the cost was inside the AIS path.
+
+**Root cause (measured, not guessed).** A raw IndexedDB `worlds`-row `get` costs **≈207 ms per
+transaction** in this sandbox (462 B row). Host `assertCapability` performed a `getWorld` IDB read
+on **every** RPC (`documents.mutate` ×2 per write, `documents.get` ×1), and the player runtime did
+a `getSetting` IDB read per RPC — ≈400 ms of pure storage on a single write. Separately the
+adapter's replica re-fetched the whole root with `documents.get` after every change event.
+
+**Fix.**
+- Host capability/consent checks read `HostPersister.world` — the authoritative in-memory record
+  the store already maintains. Every live write goes through `patchWorld`/`writeDocuments`, and
+  rebuild/clear resets the record, so consent revocation and world-settings changes take effect
+  immediately; nothing on an RPC path touches IDB.
+- Player runtime caches consent per package (`consentCache`; `writeConsent` refreshes,
+  `forget`/`assertModuleActive` clear) — same immediate-revocation property.
+- The adapter replica applies **inline FlatDiffs** from `documents.changed` to its local copy
+  (`applyKernelDiff`/`localSource`; kernel diff semantics: dotted set, `-=path` delete, numeric
+  array index). A root re-read (`documents.get`) happens only for creates, truncated feeds and a
+  diff the local copy cannot apply. Unit test ("replica economy") asserts zero `documents.get`
+  on updates and exactly one on create.
+
+**Measured after the fix** (same e2e, D-485 test now logs hydrate/write latency and the module's
+Health trace): awaited `actor.update` **119–132 ms** (−70 %); hydrate **652–752 ms** (1 doc,
+11 RPCs); host handler time inside `documents.mutate` **3–8 ms** (Health trace `documents.trace`).
+Adapter zip 91,515 B (+1,581 B over 0.5.0's 89,934 B).
+
+**Residual latency is not AIS.** A *pure idle* macrotask hop in this sandbox costs ≈90–105 ms
+(`idleMessageMs` 88.6 / `idleTimeoutMs` 105.3 on a temp bench; update+yield ≈200 ms): the shell's
+Pixi canvas is ticker-driven and continuously renders on software GL, so every postMessage hop
+queues behind ~90 ms frames. Shell commit itself is 2 ms; a write needs ≥2 hops. On GPU hardware
+a hop is ≈1 ms and these numbers collapse. A **render-on-demand canvas** is the right shell
+architecture follow-up (continuous re-render only while the scene is dirty), tracked as a shell
+backlog item — out of scope for the AIS slice and not chased further here.
+
+**Rule of record** (now in `AIS_FOUNDRY_ARCHITECTURE.md` §4/§6): no storage read on an RPC path;
+one RPC per awaited write; replicas consume inline diffs and re-read only on create/truncated/
+unapplicable diffs; every latency claim is measured in the browser (Health trace + e2e timings),
+never assumed.
+
+**Evidence.** `tests/packages/aisFoundryDocuments.test.ts` 9/9 (new replica-economy test);
+`tsc --noEmit` 0; `eslint .` 0; vitest 5,917 passed / 12 skipped (447 files); D-485 e2e passes in
+57 s with the new measurements; `test:e2e:ais` **27/27 in 14.8 min** after the fix, logging
+hydrate 516 ms / write 123 ms / handler 3 ms (details in `E2E_BATCHES.md`).

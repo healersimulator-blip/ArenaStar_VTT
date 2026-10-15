@@ -131,15 +131,19 @@ and a small Sequence-style interface to our existing native FX engine. `test:fx:
 general Foundry compatibility. The [broader adapter proposal](FOUNDRY_AIS_ADAPTER_PROPOSAL.md)
 records the remaining workflow, UI, system and multiplayer work.
 
-**Unmodified Foundry modules (Target A, D-482…D-484):** a Foundry-format `module.json`
-distribution imports untouched; the `ais-foundry-v13` adapter (0.4.0,
+**Unmodified Foundry modules (Target A, D-482…D-485):** a Foundry-format `module.json`
+distribution imports untouched; the `ais-foundry-v13` adapter (0.5.0,
 [`modules/ais-foundry-v13/README.md`](modules/ais-foundry-v13/README.md)) maps Foundry core APIs —
-settings, i18n, hooks, documents, the Application/ApplicationV2 UI inside the module's sandboxed
-panel — onto AIS services and emulates the resources Foundry's host provides and modules never
-ship: ArenaStar's own core template library (`templates/generic/tab-navigation.hbs`,
-`templates/hud/dialog.html`, …), core language keys, base CSS, `foundry.data.fields`/`DataModel`.
-Never Foundry's code or files. GM-device only in this phase; modules that depend on the `pf1`
-system are a later target.
+settings, i18n, hooks, the Application/ApplicationV2 UI inside the module's sandboxed panel, and
+(D-485) the world documents (`game.actors`/`items`/`journal`/`tables`/`macros`/`folders`/
+`playlists`/`combats`/`users`, `Actor.create`, embedded Items/Pages/Effects, flags, `fromUuid`,
+`createActor`/`updateItem` hooks fed by replication) — onto AIS services and emulates the
+resources Foundry's host provides and modules never ship: ArenaStar's own core template library,
+core language keys, base CSS, `foundry.data.fields`/`DataModel`. Never Foundry's code or files.
+The layering (world ↔ generic AIS kernel ↔ adapter ↔ module), the authority model and the
+remaining slices (scenes, player side, sockets, packs, files) are in
+[`AIS_FOUNDRY_ARCHITECTURE.md`](AIS_FOUNDRY_ARCHITECTURE.md). GM-device only in this phase;
+modules that depend on the `pf1` system are a later target.
 
 ### Foundry UI appearances — ready-to-open laboratory
 

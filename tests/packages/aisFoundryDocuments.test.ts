@@ -88,6 +88,7 @@ function makeKernel(world: World, userId: string) {
     }
   };
   const emit = (payload: unknown): void => { for (const listener of listeners) listener(payload); };
+  const reads: unknown[] = [];
   const AIS = {
     documents: {
       context: async () => ({ userId, userName: userId, limits: { ...AIS_DOCUMENTS_LIMITS },
@@ -95,6 +96,7 @@ function makeKernel(world: World, userId: string) {
           embedded: Object.keys(AIS_DOCUMENT_COLLECTIONS[collection].embedded), size: world[collection].length })) }),
       list: async (collection: AisDocumentCollection, offset?: number, limit?: number) => pageAisDocuments(collection, world[collection] as unknown as BaseDocument[], offset, limit, byteLength),
       get: async (ref: { collection: string; id: string; parent?: unknown }) => {
+        reads.push(ref);
         const chain: Array<{ collection: string; id: string }> = []; let cursor: unknown = ref;
         while (isPlain(cursor)) { chain.unshift({ collection: String(cursor.collection), id: String(cursor.id) }); cursor = cursor.parent; }
         let row: Row | undefined = world[chain[0]?.collection as AisDocumentCollection]?.find((entry) => entry._id === chain[0]?.id);
@@ -114,7 +116,7 @@ function makeKernel(world: World, userId: string) {
     events: { on: (event: string, callback: (payload: unknown) => void) => { if (event === "documents.changed") listeners.push(callback); return () => undefined; } },
     chat: { post: async () => ({ ok: true }) },
   };
-  return { AIS, apply, emitExternal: (ops: Op[]) => { apply(ops); seq += 1; emit(aisDocumentChanges(seq, "u-other", ops, byteLength)); } };
+  return { AIS, apply, reads, emitExternal: (ops: Op[]) => { apply(ops); seq += 1; emit(aisDocumentChanges(seq, "u-other", ops, byteLength)); } };
 }
 
 function makeHooks() {
@@ -248,6 +250,41 @@ describe("ais-foundry-v13 documents layer", () => {
     expect(t.layer.collections.actors?.has("a-pc")).toBe(false);
     expect(t.calls.find((call) => call.name === "deleteActor")?.args[0]).toBe(actor);
     await actor.delete().catch(() => undefined);
+  });
+
+  test("replica economy: updates and embedded deletes apply from the inline diff without documents.get; creates re-read the root", async () => {
+    const actor = t.layer.collections.actors?.get("a-pc") as unknown as DocLike;
+    t.kernel.reads.length = 0;
+    // Root update + nested path + key deletion: applied locally with kernel FlatDiff semantics
+    // (intermediates must exist, exactly as the store requires of the op itself).
+    t.kernel.emitExternal([{ kind: "update", ref: { coll: "actors", id: "a-pc" }, diff: { system: { hp: { value: 5 } }, "flags.other": { seen: true } } }]);
+    await flush();
+    t.kernel.emitExternal([{ kind: "update", ref: { coll: "actors", id: "a-pc" }, diff: { "system.hp.value": 3, "-=flags.other": null, name: "Renamed" } }]);
+    await flush();
+    expect(actor.system).toEqual({ hp: { value: 3 } });
+    expect(actor.name).toBe("Renamed");
+    expect(actor.flags).not.toHaveProperty("other");
+    expect(t.kernel.reads).toEqual([]);
+    // Embedded create needs the kernel copy (the feed carries no row data); the instance stays stable.
+    const [sword] = await (actor as unknown as { createEmbeddedDocuments: (name: string, rows: unknown[]) => Promise<DocLike[]> }).createEmbeddedDocuments("Item", [{ name: "Sword", type: "weapon", system: { dmg: 4 } }]);
+    expect(t.kernel.reads).toHaveLength(1);
+    expect(t.layer.collections.actors?.get("a-pc")).toBe(actor);
+    // Embedded update + embedded delete from another device: no re-read, hooks still fire with the pre-image.
+    t.kernel.reads.length = 0;
+    t.kernel.emitExternal([{ kind: "update", ref: { coll: "items", id: sword.id, parent: { coll: "actors", id: "a-pc" } }, diff: { "system.dmg": 6 } }]);
+    await flush();
+    expect((actor as unknown as { items: { get: (id: string) => DocLike } }).items.get(sword.id)).toBe(sword);
+    expect(sword.system).toEqual({ dmg: 6 });
+    t.kernel.emitExternal([{ kind: "delete", ref: { coll: "items", id: sword.id, parent: { coll: "actors", id: "a-pc" } } }]);
+    await flush();
+    expect((actor as unknown as { items: { has: (id: string) => boolean } }).items.has(sword.id)).toBe(false);
+    expect(t.calls.filter((call) => call.name === "deleteItem").at(-1)?.args[0]).toBe(sword);
+    expect(t.kernel.reads).toEqual([]);
+    // A diff the replica cannot apply (missing intermediate) falls back to the kernel copy instead of guessing.
+    t.kernel.emitExternal([{ kind: "update", ref: { coll: "actors", id: "a-pc" }, diff: { "system.ac.base": 10 } }]);
+    await flush();
+    expect(t.kernel.reads).toHaveLength(1);
+    expect(actor.system).toEqual({ hp: { value: 3 }, ac: { base: 10 } });
   });
 
   test("JournalEntry.create with inline Foundry pages lands as store-shaped pages", async () => {

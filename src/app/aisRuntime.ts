@@ -205,10 +205,12 @@ export class AisRuntime {
       const pruneFx = (): void => {
         for (const [id, run] of fxRuns) if (run.endsAtHostTime <= Date.now()) fxRuns.delete(id);
       };
+      // Per-RPC consent re-check against the persister's in-memory world record (the copy every
+      // consent write goes through) — not an IndexedDB read per request (D-485 follow-up: that
+      // read alone cost ~200 ms × 3 per awaited document write in the e2e sandbox).
       const assertCapability = async (capability?: AisCapability): Promise<void> => {
         if (this.disposed) throw new Error("AIS world runtime was stopped");
-        assertAisModuleConsent(await getWorld(app.db, app.worldId), module, capability);
-        if (this.disposed) throw new Error("AIS world runtime was stopped");
+        assertAisModuleConsent(app.persister.world, module, capability);
       };
       // D-470: a declared panel gets its hidden host-chromed window first, so the iframe is created
       // inside it and never re-parented (re-parenting reloads an iframe = module navigation).
