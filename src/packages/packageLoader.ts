@@ -436,8 +436,8 @@ function convertLevelDbPacks(
   files: Record<string, string>,
   binaries: Map<string, Uint8Array>,
 ): Record<string, string> {
-  // Find module.json
-  const moduleJsonPath = Object.keys(files).find((p) => p === "module.json" || p.endsWith("/module.json"));
+  // Find module.json or system.json
+  const moduleJsonPath = Object.keys(files).find((p) => p === "module.json" || p.endsWith("/module.json") || p === "system.json" || p.endsWith("/system.json"));
   if (!moduleJsonPath) return files;
   let manifest: { packs?: Array<{ name: string; path: string; type: string }> } | null = null;
   try { manifest = JSON.parse(files[moduleJsonPath] ?? ""); } catch { return files; }

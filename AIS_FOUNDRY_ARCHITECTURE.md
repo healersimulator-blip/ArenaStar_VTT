@@ -9,10 +9,9 @@ slices were added. Companion documents: [`DECISIONS.md`](DECISIONS.md) (D-468…
 
 ## 1. Goal and the two rules everything follows
 
-**Goal (Target A).** A Foundry VTT module written against Foundry's *core* API — its `module.json`
+**Goal (Target A).** A Foundry VTT module **or system** written against Foundry's *core* API — its `module.json`/`system.json`
 distribution untouched — imports into an ArenaStar world and runs: settings, i18n, hooks, windows,
-documents, chat, sockets, files, packs. Modules that depend on the `pf1` *system* (its data models,
-sheets and rules) are Target B and build on the same layers later.
+documents, chat, sockets, files, packs. The **pf1 system** (`foundryvtt-pathfinder1`, `system.json` id `pf1`) is the **main target** for current AIS testing — it is the base package that `pf-content`, `pf1e-archetypes`, `statblock-library` and SBC depend on. Systems run through the same `ais-foundry-v13` provider as modules (Target A), with a system provider layer for `CONFIG.Actor.dataModels`/`CONFIG.Item.dataModels`/`pf1` namespace.
 
 **Rule 1 — emulate the contract, never copy the implementation.** ArenaStar provides its own
 implementation of what Foundry's *host* provides to a module (APIs, core templates, language keys,
@@ -125,7 +124,7 @@ classic scripts, styles and language files load in Foundry's order, and its hook
 | Files (`FilePicker`, `game.audio`, R-07) | asset library | — | stubs | needs an asset-library RPC (list/pick/resolve by hash) — never raw URLs |
 | Packs (`game.packs`, R-10) | compendium docs | compendium RPCs | `game.packs` empty | map `CompendiumCollection` onto `compendium.*`; LevelDB packs need an importer |
 | Canvas / PIXI | — | — | — | out of scope by design: the parent renderer is ArenaStar's; placeable *documents* are the compatibility surface |
-| Systems (`pf1`) | — | — | system provider layer (TypeDataModels, sheets, `CONFIG.Actor.dataModels`) | Target B |
+| Systems (`pf1`) | — | — | system provider layer (TypeDataModels, sheets, `CONFIG.Actor.dataModels`, `pf1` registry) | **Target A — main target** (pf1 system is the base for pf-content/archetypes/statblock) |
 
 ## 4. The document bridge (D-485/D-486) — design details that matter
 
@@ -236,8 +235,7 @@ What remains is the standing rule above: no message may carry an unbounded paylo
    every change (D-487 deflates them, but the bytes still travel). Content-addressed sources —
    the profile carries hashes, devices fetch through the §7 asset pipeline and cache — turns
    every later profile into a kilobyte. Natural home: with the files/asset-library slice.
-9. **Target B.** A *system provider* layer: `pf1`'s `TypeDataModel`s, sheets and `CONFIG` hooks
-   over the same documents — the owner decides when.
+9. **Target A — System provider layer (main target).** `pf1`'s `TypeDataModel`s, sheets, `CONFIG.Actor.dataModels`/`CONFIG.Item.dataModels`, `CONFIG.PF1`, `pf1` registry (`pf1.utils.createTag`, `pf1.registry`, `pf1.config`), `pf1` hooks (`pf1PreAttackRoll`, `pf1RegisterSources`). This is the base package for all PF1e content modules and is the **primary target** for AIS testing. Runs through same adapter as modules, with `game.system.id = "pf1"` shim.
 
 ## 6. Guardrails that every slice must keep
 

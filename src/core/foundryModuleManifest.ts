@@ -26,7 +26,7 @@ import { err, okVal } from "./result";
 import { isSafePackagePath, validatePackageManifest, type PackageManifest } from "./packageManifest";
 import { AIS_API_VERSION } from "./automationInterconnect";
 
-/** The runtime provider every synthesized Foundry module binds to, exact version. */
+/** The runtime provider every synthesized Foundry module/system binds to, exact version. */
 export const FOUNDRY_ADAPTER = Object.freeze({ id: "ais-foundry-v13", version: "0.6.0", profile: "foundry-module" });
 /** Path under which the synthesized ArenaStar manifest is written into the imported files. */
 export const FOUNDRY_SYNTHESIZED_MANIFEST = "manifest.json";
@@ -34,6 +34,7 @@ export const FOUNDRY_SYNTHESIZED_MANIFEST = "manifest.json";
 export const FOUNDRY_ENTRY_STUB_PATH = "ais-foundry/entry.js";
 export const FOUNDRY_LOADER_STUB_PATH = "ais-foundry/loader.js";
 export const FOUNDRY_MANIFEST_PATH = "module.json";
+export const FOUNDRY_SYSTEM_MANIFEST_PATH = "system.json";
 export const FOUNDRY_MAX_TEXT_FILES = 50000;
 
 export interface FoundryLanguage { lang: string; name: string; path: string }
@@ -177,11 +178,13 @@ export function parseFoundryModuleManifest(raw: unknown): Result<FoundryModuleMa
   });
 }
 
-/** The ArenaStar manifest (raw JSON shape) the kernel sees for an imported Foundry module. */
-export function synthesizeFoundryPackageManifest(foundry: FoundryModuleManifest, resources: readonly string[]): Record<string, unknown> {
+/** The ArenaStar manifest (raw JSON shape) the kernel sees for an imported Foundry module/system. */
+export function synthesizeFoundryPackageManifest(foundry: FoundryModuleManifest, resources: readonly string[], configPath: string = FOUNDRY_MANIFEST_PATH): Record<string, unknown> {
+  const isSystem = configPath === FOUNDRY_SYSTEM_MANIFEST_PATH || configPath.endsWith("/system.json");
+  const kind = isSystem ? "system" : "module";
   const systems = foundry.systems.length ? ` Declares Foundry system(s): ${foundry.systems.join(", ")}.` : "";
   const description =
-    `Foundry VTT module "${foundry.title}" ${foundry.version} (id ${foundry.id}), imported unmodified; ` +
+    `Foundry VTT ${kind} "${foundry.title}" ${foundry.version} (id ${foundry.id}), imported unmodified; ` +
     `runs through the ${FOUNDRY_ADAPTER.id} "${FOUNDRY_ADAPTER.profile}" profile.${systems}` +
     (foundry.description ? ` ${foundry.description.replace(/<[^>]*>/g, "").trim()}` : "");
   return {
@@ -198,7 +201,7 @@ export function synthesizeFoundryPackageManifest(foundry: FoundryModuleManifest,
         provider: FOUNDRY_ADAPTER.id,
         profile: FOUNDRY_ADAPTER.profile,
         scripts: [FOUNDRY_LOADER_STUB_PATH],
-        configuration: FOUNDRY_MANIFEST_PATH,
+        configuration: configPath,
         resources: [...resources],
       },
       // `foundry.info`: loader diagnostics; `foundry.api`: call the module's own globals/API from a reviewed
@@ -246,51 +249,65 @@ export interface SynthesizedFoundryPackage {
 }
 
 /**
- * Turn the text files of a Foundry module distribution (already rooted: `module.json` at the
+ * Turn the text files of a Foundry module/system distribution (already rooted: `module.json` or `system.json` at the
  * top) into a loadable ArenaStar package. `binaryPaths` are the entries the zip reader could
  * not decode; they are not an error (icons, fonts, LevelDB packs) but entry files among them are.
  */
 export function synthesizeFoundryModulePackage(
   files: Record<string, string>, binaryPaths: readonly string[] = [],
 ): Result<SynthesizedFoundryPackage> {
-  const text = files[FOUNDRY_MANIFEST_PATH];
-  if (text === undefined) return err("package: module.json not found at the package root");
+  const configPath = files[FOUNDRY_MANIFEST_PATH] !== undefined ? FOUNDRY_MANIFEST_PATH
+    : files[FOUNDRY_SYSTEM_MANIFEST_PATH] !== undefined ? FOUNDRY_SYSTEM_MANIFEST_PATH
+    : null;
+  if (configPath === null) return err("package: module.json or system.json not found at the package root");
+  const text = files[configPath];
+  if (text === undefined) return err(`package: ${configPath} not found at the package root`);
   let raw: unknown;
   try { raw = JSON.parse(text); } catch (error) {
-    return err(`package: module.json is not valid JSON — ${error instanceof Error ? error.message : String(error)}`);
+    return err(`package: ${configPath} is not valid JSON — ${error instanceof Error ? error.message : String(error)}`);
   }
   const parsed = parseFoundryModuleManifest(raw);
   if (!parsed.ok) return err(`package: ${parsed.error}`);
   const foundry = parsed.value;
   if (!foundry.esmodules.length && !foundry.scripts.length && !foundry.packs.length && !foundry.styles.length && !foundry.languages.length)
-    return err(`package ${foundry.id}: module.json lists no esmodules or scripts — nothing to run`);
+    return err(`package ${foundry.id}: ${configPath} lists no esmodules or scripts — nothing to run`);
   for (const entry of [...foundry.esmodules, ...foundry.scripts]) {
     if (files[entry] !== undefined) continue;
     return err(binaryPaths.includes(entry)
       ? `package ${foundry.id}: ${entry} is not UTF-8 text`
-      : `package ${foundry.id}: ${entry} is listed in module.json but missing from the archive`);
+      : `package ${foundry.id}: ${entry} is listed in ${configPath} but missing from the archive`);
   }
   const reserved = new Set([FOUNDRY_SYNTHESIZED_MANIFEST, FOUNDRY_ENTRY_STUB_PATH, FOUNDRY_LOADER_STUB_PATH]);
   const resources = Object.keys(files).filter((path) => !reserved.has(path) && isSafePackagePath(path)).sort();
   if (resources.length > FOUNDRY_MAX_TEXT_FILES)
     return err(`package ${foundry.id}: ${resources.length} text files; ArenaStar serves at most ${FOUNDRY_MAX_TEXT_FILES} per module`);
-  const manifestRaw = synthesizeFoundryPackageManifest(foundry, resources);
+  const manifestRaw = synthesizeFoundryPackageManifest(foundry, resources, configPath);
   const manifest = validatePackageManifest(manifestRaw);
   if (!manifest.ok) return manifest;
-  const header = `// Foundry VTT module ${foundry.id} ${foundry.version}: imported unmodified (D-482).\n`;
+  const isSystem = configPath === FOUNDRY_SYSTEM_MANIFEST_PATH;
+  const kind = isSystem ? "system" : "module";
+  const header = `// Foundry VTT ${kind} ${foundry.id} ${foundry.version}: imported unmodified (D-482).\n`;
   const out: Record<string, string> = {};
   for (const path of resources) out[path] = files[path] as string;
   out[FOUNDRY_SYNTHESIZED_MANIFEST] = `${JSON.stringify(manifestRaw, null, 2)}\n`;
-  out[FOUNDRY_ENTRY_STUB_PATH] = `${header}// Entry stub: the ${FOUNDRY_ADAPTER.id} adapter loads module.json's esmodules/scripts itself.\n`;
+  out[FOUNDRY_ENTRY_STUB_PATH] = `${header}// Entry stub: the ${FOUNDRY_ADAPTER.id} adapter loads ${configPath}'s esmodules/scripts itself.\n`;
   out[FOUNDRY_LOADER_STUB_PATH] = `${header}// Runtime stub: see runtimeContext.distribution for the rewritten ESM graph.\n`;
   return okVal({ manifest: manifest.value, files: out, foundry });
 }
 
-/** `module.json` at the zip root or inside exactly one top-level folder (the shape packages use). */
+/** `module.json` or `system.json` at the zip root or inside exactly one top-level folder (the shape packages use). */
 export function resolveFoundryManifestPath(paths: readonly string[]): string | null {
   if (paths.includes(FOUNDRY_MANIFEST_PATH)) return FOUNDRY_MANIFEST_PATH;
-  const roots = new Set(paths.filter((p) => p.endsWith(`/${FOUNDRY_MANIFEST_PATH}`)).map((p) => p.split("/")[0] ?? ""));
-  if (roots.size !== 1) return null;
-  const root = [...roots][0] ?? "";
-  return root === "" ? null : `${root}/${FOUNDRY_MANIFEST_PATH}`;
+  if (paths.includes(FOUNDRY_SYSTEM_MANIFEST_PATH)) return FOUNDRY_SYSTEM_MANIFEST_PATH;
+  const moduleRoots = new Set(paths.filter((p) => p.endsWith(`/${FOUNDRY_MANIFEST_PATH}`)).map((p) => p.split("/")[0] ?? ""));
+  if (moduleRoots.size === 1) {
+    const root = [...moduleRoots][0] ?? "";
+    if (root !== "") return `${root}/${FOUNDRY_MANIFEST_PATH}`;
+  }
+  const systemRoots = new Set(paths.filter((p) => p.endsWith(`/${FOUNDRY_SYSTEM_MANIFEST_PATH}`)).map((p) => p.split("/")[0] ?? ""));
+  if (systemRoots.size === 1) {
+    const root = [...systemRoots][0] ?? "";
+    if (root !== "") return `${root}/${FOUNDRY_SYSTEM_MANIFEST_PATH}`;
+  }
+  return null;
 }

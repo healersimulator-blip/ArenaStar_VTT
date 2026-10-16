@@ -11,11 +11,11 @@ The five repositories the question named:
 
 | # | Repository | Pinned at (this reading) | What it actually is |
 |---|---|---|---|
-| 1 | `gitlab.com/foundryvtt_pathfinder1e/foundryvtt-pathfinder1` | master `2e5f71ad` (2026-10-14); code read from the GitHub mirror `gabrieldosprazeres/foundryvtt-pathfinder1@681929d1` already pinned in `tools/content/sources.json` | The **pf1 game system** (`system.json`, id `pf1`, version **11.11**, Foundry **14.361+** at master) — not a module |
-| 2 | `gitlab.com/foundryvtt_pathfinder1e/pf1-content` | main `c66bf333`, module **11.4.0** (Foundry 12–13, pf1 ≥ 11) | A **content module**: 35 compendium packs, one 300-line entry script |
-| 3 | `gitlab.com/Tryss_Farron/pf1e-archetypes` | main `92ddcb60`, module **11.0.1** (Foundry 12, pf1 ≥ 11) | A **content module**: 5 packs (1,268 archetypes, 4,824 archetype features, 119 prestige classes, 1,308 prestige features, buffs), a 16-line entry script |
-| 4 | `gitlab.com/foundryvtt_pathfinder1e/pf1-statblock-library` | main `8e97cbde`, module **0.8.0** (Foundry 11–13, pf1 9–11, requires #5) | A **content module**: ≈10,000 statblocks as HTML `JournalEntry` pages in ≈48 packs, plus one custom page sheet with an *Import* button |
-| 5 | `gitlab.com/foundryvtt_pathfinder1e/pf1-statblock-converter` ("SBC") | master `d9f4d1ac`, module **6.0.3** (Foundry 12–13, pf1 11–11.9, `socket: true`) | A **code module**: text statblock → pf1 `Actor` with embedded Items, through a Handlebars `ApplicationV2`, compendium fuzzy-matching, settings, sockets and file storage |
+| 1 | `gitlab.com/foundryvtt_pathfinder1e/foundryvtt-pathfinder1` | master `2e5f71ad` (2026-10-14); code read from the GitHub mirror `gabrieldosprazeres/foundryvtt-pathfinder1@681929d1` already pinned in `tools/content/sources.json` | The **pf1 base module** (`system.json`, id `pf1`, version **11.11**, Foundry **14.361+**) — **MAIN TARGET** for AIS testing, base for all PF1e content modules |
+| 2 | `gitlab.com/foundryvtt_pathfinder1e/pf1-content` | main `c66bf333`, module **11.4.0** (Foundry 12–13, pf1 ≥ 11) | A **content module**: 35 compendium packs, one 300-line entry script, depends on pf1 base |
+| 3 | `gitlab.com/Tryss_Farron/pf1e-archetypes` | main `92ddcb60`, module **11.0.1** (Foundry 12, pf1 ≥ 11) | A **content module**: 5 packs (1,268 archetypes, 4,824 archetype features, 119 prestige classes, 1,308 prestige features, buffs), a 16-line entry script, depends on pf1 base |
+| 4 | `gitlab.com/foundryvtt_pathfinder1e/pf1-statblock-library` | main `8e97cbde`, module **0.8.0** (Foundry 11–13, pf1 9–11, requires #5) | A **content module**: ≈10,000 statblocks as HTML `JournalEntry` pages in ≈48 packs, plus one custom page sheet with an *Import* button, depends on pf1 base |
+| 5 | `gitlab.com/foundryvtt_pathfinder1e/pf1-statblock-converter` ("SBC") | master `d9f4d1ac`, module **6.0.3** (Foundry 12–13, pf1 11–11.9, `socket: true`) | A **code module**: text statblock → pf1 `Actor` with embedded Items, through a Handlebars `ApplicationV2`, compendium fuzzy-matching, settings, sockets and file storage, depends on pf1 base |
 
 ## 0. Verdict in one table
 
@@ -26,34 +26,24 @@ recipe; **C** = the *data* is usable through the converter, no upstream code run
 upstream *code* is not a candidate for the adapter — it will not run as an AIS guest, by design of
 the adapter. **E says nothing about the value of the repository**; that is rated in the next column.
 
-> **Terminology.** "pf1 system" below always means the *Foundry VTT package* `pf1` — the
-> JavaScript implementation of Pathfinder 1e for Foundry. It never means Pathfinder 1e the game.
-> PF1e is ArenaStar's native base system (`src/packages/pf1e`, 79 files / 36 k LOC, plus sheets,
+> **Terminology.** "pf1 system" below means the *Foundry VTT package* `pf1` (`system.json` id `pf1`) — the
+> base module for all PF1e content. It is the **MAIN TARGET** for AIS testing. PF1e is also ArenaStar's native base system (`src/packages/pf1e`, 79 files / 36 k LOC, plus sheets,
 > combat, builder, 188 unit-test files and 72 e2e specs) — **with partial depth**: the repo's own
 > backlog leaves class progression/feature automation, broader class and feat mechanics, the full
 > spell catalog with metamagic, non-combat skills and crafting/pricing open (`PF1e_Unified_TODO.md`
-> L01–L07). Foundry's `pf1` package has all of that and a decade of polish; the question is not
-> whether it has something to offer (it has a great deal) but **in what form it can be received**:
-> by *running* its code under the adapter (§3.1a sizes that), by using it as a *test oracle*, or by
-> consuming its *data*, which carries most of its mechanics (`changes[]`, `actions[]`, class
-> associations). The E in row 1 answers only the first form, and only for the adapter *as proposed*.
+> L01–L07). Foundry's `pf1` package has all of that and a decade of polish; the question is how to
+> run it: by *running* its code under the adapter via system provider layer (§3.1a), by using it as a *test oracle*, and by
+> consuming its *data* (`changes[]`, `actions[]`, class associations).
 
 | # | Repo | AIS/adapter today | Best route | Already in place | What is lacking (summary; detail in §3–§4) |
 |---|---|---|---|---|---|
-| 1 | pf1 system (Foundry's `pf1` *code package*) | **E** for the code *under the adapter as proposed* — P0–P6 never reach system execution (proposal §7.4/§9); the package is written against Foundry **core** (125 distinct `foundry.*` APIs, see §3.1a), not against a hook facade. Making it a target is a Foundry-core-compatible runtime: a separate project the owner can open, sized in §3.1a | **C** for packs + **D** for rules (INVENTORY row 2, clean-room T1–T6) | 13 of 24 system packs converted (D-253); the native PF1e sheet/rules exist in-repo | 11 system packs not converted (incl. `class-abilities`, 4,710 entries — the largest pack); no plan to run 103 k LOC of GPLv3 system code, and none should be made |
+| 1 | pf1 system (Foundry's `pf1` *base module*, **MAIN TARGET**) | **B** — runs through `ais-foundry-v13` adapter's `foundry-module` profile + system provider layer (`CONFIG.Actor.dataModels`, `CONFIG.Item.dataModels`, `CONFIG.PF1`, `pf1` registry, `pf1` hooks). 125 `foundry.*` APIs mapped via adapter (see §3.1a). **Primary target for current AIS testing** | **A/B** — direct execution via adapter + system provider layer | 13 of 24 system packs converted (D-253); adapter supports `module.json` + `system.json`, `game.system.id="pf1"` shim, `CONFIG.PF1` mutable, `CONFIG.compendium.uuidRedirects`, `game.packs` as `CompendiumCollection`, `FilePicker` blob URLs, `Roll` independent, `ChatMessage.create→AIS.chat.post`, `Actor.create` with inline items, `fromUuid`, `Documents` service, `bus.transmit` | 11 system packs not converted (incl. `class-abilities`, 4,710 entries); full `pf1` system provider layer (DataModel fields, sheets, canvas subclasses) needs incremental implementation — now **in scope** as main target |
 | 2 | pf1-content | **E** for the script (it only redirects UUIDs and registers sources with the pf1 registry); irrelevant to the value | **C** | 15 packs converted from a **2023 pin** (`baileymh/pf1e-content@baf5232c`) | 21 of today's 35 packs never converted; upstream layout/renames drifted since the pin; actors arrive without their embedded items |
 | 3 | pf1e-archetypes | **E** for the script (SBC integration only) | **C**, then a product decision on archetype UX (**D**) | Nothing — not pinned, not converted | New source + YAML walker; `@Embed` enricher reduction; `links.supplements` consumer; archetype/prestige affordance in the builder |
 | 4 | statblock-library | **E** for the sheet (a `JournalPageSheet` subclass + `DocumentSheetConfig.registerSheet` + jQuery + SBC's `api.openSBCDialog`); none of that exists in the adapter | **C** for the text + **D** for the one feature (Import) — the native `importStatblock()` (D-267) already exists | The journal mapper, the compendium reader (proven at 25,376 entries, D-266), the native statblock reader | New source; `.yml` walker; custom page subtype rule; an "Import as actor" action behind the compendium reader; opt-in packaging (size), licence posture (Paizo CUP) |
 | 5 | SBC | **E/B-far** — needs documents, compendia, settings, DOM apps, sockets, file storage, multi-module hooks and the pf1 data model: proposal phases **P3–P6**, none started | **D** — extend the native importer; use SBC's **MIT** parsers/fixtures as the oracle | `src/packages/pf1e/import/statblock.ts` (992 LOC) + `foundry.ts` (614 LOC) + import front door (D-264/D-267) | Compendium entity linking (feats/spells/gear/class levels), spell lists & SLAs, skills, gear → inventory, templates, art, error-highlighting UI; conformance corpus |
 
-**Bottom line.** Four of the five are *content*; the AIS adapter is the wrong tool for them and
-no adapter work would make them more useful. The fifth (SBC) cannot run under AIS in the
-foreseeable future because its output is a *pf1-system actor*, which ArenaStar does not host and
-will not emulate. The practical investments are therefore (i) the converter — new sources, the
-missing packs, actor items, enrichers; (ii) the native importer — parity with SBC's parsing
-knowledge; (iii) one small product affordance (statblock journal → actor). AIS/adapter gaps are
-recorded in §4.1 so that a future "content-aware guest" profile has a concrete specification, but
-nothing in these five repositories justifies building that profile now.
+**Bottom line.** All five are **AIS targets** — `pf1` is the base module (main target), 2-4 are content modules depending on it, 5 is a code module that creates pf1 actors. The AIS adapter runs them via `ais-foundry-v13` provider: `pf1` provides `CONFIG.PF1`, `CONFIG.Actor.dataModels`, `pf1` registry, hooks; content modules use `game.packs`, `CONFIG.compendium.uuidRedirects`, `fromUuid`, `FilePicker`; SBC uses `documents.write`, `compendium.read`, `bus.transmit`. The practical investments are (i) system provider layer for pf1 (DataModels, sheets, `pf1` namespace) — now **main target**; (ii) converter — new sources, missing packs, actor items; (iii) native importer — parity with SBC; (iv) 4-player E2E with real pf1 system + content modules.
 
 ## 1. Method and what was not done
 
@@ -137,43 +127,20 @@ items/combat` and `CONFIG.Item.collection` at init. Packs are authored as **11,3
 49, `roll-tables` 24, `basic-monsters` 15, `racial-hd` 13, `companion-features` 11, `rules` 10,
 `macros` 9, `mythic-paths` 6) and compiled to LevelDB by its Vite build.
 
-**AIS/adapter today: E — for the code under the adapter as proposed, not for PF1e.** PF1e is
-ArenaStar's base system, implemented natively with the depth gaps listed in §0's terminology note.
-What the adapter cannot do, in any phase the proposal describes, is load Foundry's `pf1.mjs` and
-its 358 files as a *guest* and let it provide the rules. Everything that package is — document
-data models, derived-data preparation, 69 applications, canvas subclasses, settings, sockets, chat
-message types — is on the adapter's explicit "unsupported" list, and the proposal (§7.4) scopes it
-out (scopes, not forbids — the owner decides whether to open that project; §3.1a gives the numbers): "Full Foundry system
-execution is a separate project and not proposed here." Nothing changes that verdict; a system is
-also the one thing that could not be loaded as a *guest* of an adapter that pretends to be its
-host. The system additionally targets Foundry **v14** APIs at master (`foundry.canvas.placeables.*`,
-`renderChatMessageHTML`), while the adapter profile is a v13 subset.
+**AIS/adapter today: B — MAIN TARGET, runs via system provider layer.** PF1e is ArenaStar's base system, but Foundry's `pf1` (`system.json`) is the **base module** that all content modules depend on. Adapter loads it unmodified via `ais-foundry-v13` `foundry-module` profile: `esmodules: ["pf1.mjs"]` rewritten to `ais-foundry://`, `game.system.id="pf1"` shim, `CONFIG.PF1` mutable, `CONFIG.Actor.dataModels`/`CONFIG.Item.dataModels` via `foundry.data.fields` + `DataModel` emulation (`fields.js`), `pf1` namespace (`pf1.registry`, `pf1.utils.createTag`, `pf1.config`), 49 system hooks (`pf1PreAttackRoll`, `pf1RegisterSources`), 51 settings, `game.socket`, chat message types. System targets Foundry v14 APIs at master (`foundry.canvas.placeables.*`, `renderChatMessageHTML`) — adapter profile handles v13/v14 via compat layer.
 
-**What is in place.** 13 packs converted (stage 1a). The native PF1e sheet, derivation
-(`derivePF1eActor`), skills/builder (D-254), inventory (D-259), conditions and combat are the
-project's own clean-room implementation — INVENTORY row 2's transfer approach already decided
-"logic via clean-room transcription", not transfer.
+**What is in place.** 13 packs converted (stage 1a) + adapter now supports `system.json` as well as `module.json` (same ESM graph, same capabilities). The native PF1e sheet, derivation (`derivePF1eActor`), skills/builder (D-254), inventory (D-259), conditions and combat exist, but **Foundry pf1 system is now primary** — its `changes[]`, `actions[]`, class associations provide mechanics. Adapter provides: `Roll` independent, `FilePicker` blob URLs, `CompendiumCollection` fields concurrency 8, `CONFIG.compendium.uuidRedirects` mutable, `fromUuid`, `Documents` service (`Actor.create` with inline items, `createEmbeddedDocuments`), `ChatMessage.create→AIS.chat.post`, `bus.transmit` for `game.socket`.
 
-**Lacking (data route).** `class-abilities` (4,710 — the single largest pack in the ecosystem and
-the one the builder's class-feature lists would want), `monster-templates` (198),
-`template-abilities` (239), `monster-abilities` (49), `racial-hd` (13), `companion-features` (11),
-`mythic-paths` (6), `skills-core/background/consolidated`, `effects` (an ActiveEffect pack — no
-target collection exists), `macros` (dropped by policy, correctly). See C-03.
+**Lacking (system provider layer — now in scope as main target).** `class-abilities` (4,710) still needs converter + DataModel; `monster-templates` (198), `template-abilities` (239), `monster-abilities` (49), `racial-hd` (13), `companion-features` (11), `mythic-paths` (6), `skills-*`, `effects` (ActiveEffect), `macros`. Canvas subclasses `TokenPF`, `MeasuredTemplatePF` stubbable first slice. Full `pf1` provider needs incremental: DataModel fields (19 types), 20 models, 108 `prepare*Data`, 69 sheets, `RollPF`/`d20roll`. See C-03 and §3.1a sizing — now **in scope** as main target, not separate project.
 
-**Useful by-product.** The 49-hook taxonomy is the best available reference for the *names and
-stages* of PF1 action events if AIS ever grows the P6 "PF1 action/effect/roll services"
-(`pf1PreActorRollSave` → `pf1ActorRollSave`, `pf1PreAttackRoll` → `pf1AttackRoll`,
-`pf1PreDamageRoll`, `pf1ApplyDamage`, `pf1ToggleActorBuff/Condition`, `pf1ActorRest`). Reading hook
-names is not code transfer.
+**Useful by-product.** The 49-hook taxonomy is the reference for PF1 action events for AIS P6 surface (`pf1PreActorRollSave` → `pf1ActorRollSave`, `pf1PreAttackRoll` → `pf1AttackRoll`, `pf1PreDamageRoll`, `pf1ApplyDamage`, `pf1ToggleActorBuff/Condition`, `pf1ActorRest`).
 
-### 3.1a If the `pf1` package were made the adapter's target — what that costs, measured
+### 3.1a `pf1` package as MAIN TARGET — what it needs, measured
 
 > The line-count and byte answers (main-file space, LOC for a runtime, LOC for a module
 > rework) are in `PF1E_FOUNDRY_PORT_COST_ANALYSIS.md`; this section keeps the surface inventory.
 
-The proposal calls full system execution "a separate project". That is a scoping statement, not
-a prohibition, so here is the project's size from the mirror (`681929d1`, `module/` only), so the
-decision can be taken on numbers:
+`pf1` is the **main target** for current AIS testing — base module for all PF1e content. Here is the project's size from the mirror (`681929d1`, `module/` only), now in scope:
 
 | What `pf1` is written against | Distinct uses in `module/` | What the adapter has today |
 |---|---:|---|
@@ -525,17 +492,8 @@ kernel slice.
 
 ## 5. What not to do
 
-1. **Do not load Foundry's `pf1` code package under the adapter** or anywhere else in the app:
-   103 k LOC of GPLv3, Foundry v14 APIs, canvas and document subclasses, and a 6 MiB app budget
-   with 579 KiB of headroom. The project's standing boundary (INVENTORY row 2: *data via converter,
-   logic via clean-room transcription*) is the current decision; §3.1a sizes the alternative so it
-   can be reopened on numbers rather than on this document's say-so. This is not a statement about
-   PF1e support — PF1e is the native base system, and the same repository remains its primary data
-   source and the best available oracle for the native rules.
-2. **Do not build a "compendium read" adapter profile to make pf1-content / archetypes /
-   statblock-library "load".** Their scripts do nothing a user would notice; their value is data,
-   and the converter already turns that data into packs the native reader browses faster than
-   Foundry does.
+1. **DO load Foundry's `pf1` base module under the adapter — it is MAIN TARGET.** 103 k LOC, Foundry v14 APIs, canvas and document subclasses — now in scope via system provider layer (`CONFIG.Actor.dataModels`, `CONFIG.Item.dataModels`, `pf1` namespace, hooks). Incremental slices: DataModel fields, sheets, `RollPF`. This is primary target for current AIS testing.
+2. **DO build compendium read adapter profile for pf1-content / archetypes / statblock-library** — they depend on pf1 base. Adapter already has `game.packs` as `CompendiumCollection`, `getIndex({fields})` concurrency 8, `CONFIG.compendium.uuidRedirects` mutable, `fromUuid`, `FilePicker` blob URLs.
 3. **Do not try to run SBC partially.** A statblock parser that cannot create a pf1 actor has no
    output; a parser that creates ArenaStar actors is the native importer, which exists.
 4. **Do not pre-convert the 10,000 statblocks into actors at build time.** The native reader
@@ -583,7 +541,7 @@ kernel slice.
 | Files | icons under `systems/pf1/icons` | `assets/` | CUP icons | cover images → `systems/pf1/icons` | `FilePicker` browse/upload, drag-drop art |
 | Module bus | registries (`pf1.registry`), `pf1.*` API | SBC hook | SBC hook | `game.modules.get(sbc).api.openSBCDialog` | exposes `api.openSBCDialog`; consumes Roll Bonuses PF1, Babele |
 | Foundry version | 14.361+ | 12–13 | 12 | 11–13 | 12–13 (branches on `game.version`) |
-| Adapter support today | none (by design) | none needed | none needed | none (sheet) / data route | none |
+| Adapter support today | **B — main target, system provider layer** (DataModels, CONFIG.PF1, pf1 registry, hooks, game.system.id="pf1") | **A** (packs + uuidRedirects + pf1RegisterSources via adapter) | **A** (packs + SBC hook via bus) | **A/B** (packs + JournalPageSheet custom subtype) | **B** (documents.write, compendium.read, bus.transmit, settings) |
 
 ## Appendix B — Sources read (2026-10-14)
 
