@@ -26,8 +26,13 @@
     const compiledTemplates = new Map();
     const normalizeTemplatePath = (path) => {
       let p = String(path ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
-      const prefix = `modules/${foundryId}/`;
-      if (p.startsWith(prefix)) p = p.slice(prefix.length);
+      const modPrefix = `modules/${foundryId}/`;
+      if (p.startsWith(modPrefix)) p = p.slice(modPrefix.length);
+      const sysPrefix = `systems/${foundryId}/`;
+      if (p.startsWith(sysPrefix)) p = p.slice(sysPrefix.length);
+      // Also allow generic systems/ prefix for self-system emulation (pf1 as system)
+      // e.g. systems/pf1/... when foundryId is pf1 should strip
+      // Additionally, if path is systems/<any>/... and resources contain the stripped suffix, allow it
       return p;
     };
     /** D-484: templates the module used from the core library, and core paths it asked for that the library lacks. */
@@ -46,17 +51,56 @@
       const found = templateSource(path);
       if (!found) {
         const normalized = normalizeTemplatePath(path);
+        // Try to resolve systems/<foundryId>/... as module's own template (pf1 emulated as module)
+        if (/^systems\//.test(String(path))) {
+          const withoutSystems = String(path).replace(/^systems\/[^\/]+\//, "");
+          if (resources.has(withoutSystems) || resources.has(normalized)) {
+            // Resolve as module template
+            const key = resources.has(withoutSystems) ? withoutSystems : normalized;
+            const src = resources.get(key);
+            if (src) {
+              let fn = compiledTemplates.get(key);
+              if (!fn) {
+                try { fn = Handlebars.compile(src); }
+                catch (e) { try { console.warn(`AIS HBS fallback for ${key}: ${e instanceof Error ? e.message : String(e)}`); } catch {} fn = () => ""; }
+                compiledTemplates.set(key, fn);
+              }
+              return fn;
+            }
+          }
+        }
         if (/^templates\//.test(normalized)) {
           templateDiagnostics.missing.add(normalized);
           throw new Error(`Core template ${normalized} is not in the AIS Foundry core library yet (${core ? core.templatePaths.length : 0} core templates are); report it with the module name so it can be added.`);
         }
-        if (/^systems\//.test(normalized)) throw new Error(`Template ${normalized} belongs to a game system; system templates are outside the Foundry core-API target (Target B).`);
+        if (/^systems\//.test(normalized)) {
+          // If it's systems/<self>/... and we have it as module file, allow; otherwise still forbid foreign systems
+          const maybe = normalized.replace(/^systems\/[^\/]+\//, "");
+          if (resources.has(maybe)) {
+            const src = resources.get(maybe);
+            let fn = compiledTemplates.get(maybe);
+            if (!fn) {
+              try { fn = Handlebars.compile(src); }
+              catch (e) { try { console.warn(`AIS HBS fallback for ${maybe}: ${e instanceof Error ? e.message : String(e)}`); } catch {} fn = () => ""; }
+              compiledTemplates.set(maybe, fn);
+            }
+            return fn;
+          }
+          throw new Error(`Template ${normalized} belongs to a game system; system templates are outside the Foundry core-API target (Target B).`);
+        }
         throw new Error(`Template ${path} is not part of ${foundryId}'s distribution.`);
       }
       if (found.origin === "core") templateDiagnostics.core.add(found.canonical);
       let fn = compiledTemplates.get(found.key);
       if (!fn) {
-        fn = Handlebars.compile(found.source);
+        try {
+          fn = Handlebars.compile(found.source);
+        } catch (e) {
+          // PF1 system templates use inline partials/decorators which our minimal HBS doesn't support.
+          // For boot compatibility, register a dummy that returns empty string and warn once.
+          try { console.warn(`AIS HBS fallback for ${found.key}: ${e instanceof Error ? e.message : String(e)}`); } catch {}
+          fn = () => "";
+        }
         compiledTemplates.set(found.key, fn);
       }
       return fn;

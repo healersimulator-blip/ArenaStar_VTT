@@ -31,6 +31,20 @@
     for (const [key, item] of Object.entries(value)) out[key] = clone(item, depth + 1);
     return out;
   };
+  // Foundry extends Array prototype with helpers like findSplice; pf1 system uses them. Polyfill for AIS emulation.
+  if (!Array.prototype.findSplice) {
+    Object.defineProperty(Array.prototype, "findSplice", {
+      configurable: true, writable: true, value: function(predicate, replacement) {
+        if (typeof predicate !== "function") return undefined;
+        const idx = this.findIndex(predicate);
+        if (idx === -1) return undefined;
+        const removed = this[idx];
+        if (replacement === undefined) this.splice(idx, 1);
+        else this.splice(idx, 1, replacement);
+        return removed;
+      }
+    });
+  }
   const duplicate = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
   const safeParts = (path) => {
     const parts = String(path).split(".");
@@ -673,16 +687,58 @@
     Object.defineProperty(klass, "PARTS", { configurable: true, writable: true, value: {} });
     return klass;
   };
+  // Deep stub that auto-creates nested namespaces/classes so pf1 system (which patches many Foundry internals) doesn't throw on missing paths.
+  const deepStubCache = new Map();
+  const deepStub = (path) => {
+    if (deepStubCache.has(path)) return deepStubCache.get(path);
+    const name = path.split(".").pop() || "Stub";
+    const base = stubClass(name);
+    // Provide some known static constants that pf1 reads
+    if (name === "Tour") {
+      base.DEFAULT_OPTIONS = {};
+      base.PARTS = {};
+    }
+    if (name === "DetectionMode") {
+      Object.defineProperty(base, "DETECTION_TYPES", { configurable: true, get: () => ({ SIGHT: 0, SOUND: 1, MOVE: 2, LIGHT: 3, OTHER: 4 }) });
+    }
+    if (name === "VisionMode") {
+      Object.defineProperty(base, "LIGHTING_LEVELS", { configurable: true, get: () => ({ DARKNESS: -2, HALFDARK: -1, UNLIT: 0, DIM: 1, BRIGHT: 2, BRIGHTEST: 3 }) });
+    }
+    const proxy = new Proxy(base, {
+      get(t, p) {
+        if (p in t) return t[p];
+        if (typeof p === "symbol") return t[p];
+        if (p === "prototype" || p === "length" || p === "name") return t[p];
+        const childPath = `${path}.${String(p)}`;
+        const child = deepStub(childPath);
+        t[p] = child;
+        return child;
+      },
+      set(t, p, v) { t[p] = v; return true; },
+    });
+    deepStubCache.set(path, proxy);
+    return proxy;
+  };
 
   // ── i18n: the emulator's core keys first (D-484), then the module's own language files (which win). ──
   const translations = globalThis.__aisFoundryCore ? expandObject(clone(globalThis.__aisFoundryCore.lang)) : {};
   const i18n = {
     lang: "en",
     translations,
-    has: (key) => typeof getProperty(translations, key) === "string",
-    localize: (key) => { const value = getProperty(translations, String(key)); return typeof value === "string" ? value : String(key); },
+    has: (key) => { try { return typeof getProperty(translations, String(key)) === "string"; } catch { return false; } },
+    localize: (key) => {
+      const k = String(key ?? "");
+      if (!k) return "";
+      try {
+        const value = getProperty(translations, k);
+        return typeof value === "string" ? value : k;
+      } catch { return k; }
+    },
     format: (key, data = {}) => i18n.localize(key).replace(/\{([^}]+)\}/g, (_m, name) => (data[name] === undefined ? `{${name}}` : String(data[name]))),
-    sortObjects: (rows, key) => [...rows].sort((a, b) => String(getProperty(a, key)).localeCompare(String(getProperty(b, key)))),
+    sortObjects: (rows, key) => {
+      try { return [...rows].sort((a, b) => String(getProperty(a, key)).localeCompare(String(getProperty(b, key)))); }
+      catch { return [...rows]; }
+    },
   };
   const shortText = (text, max) => { const t = String(text ?? "").replace(/\s+/g, " ").trim(); return t.length > max ? `${t.slice(0, max - 1)}…` : t; };
 
@@ -710,6 +766,27 @@
     const hidden = data.config === false;
     const type = data.type;
     const base = { key: aisKey, scope, label, ...(hint ? { hint } : {}), ...(hidden ? { hidden: true } : {}) };
+    // D-484 extended: Foundry settings may use DataField instances (e.g. new fields.StringField({ initial: "0.0.0" }))
+    // as their type. Extract initial value when present.
+    const extractFieldInitial = (field) => {
+      if (!field || typeof field !== "object") return undefined;
+      try {
+        if (typeof field.getInitialValue === "function") {
+          const v = field.getInitialValue({});
+          if (v !== undefined) return v;
+        }
+      } catch {}
+      if (field.initial !== undefined) {
+        const init = field.initial;
+        try { return typeof init === "function" ? init({}) : init; } catch { return typeof init === "function" ? undefined : init; }
+      }
+      if (field.options && field.options.initial !== undefined) {
+        const init = field.options.initial;
+        try { return typeof init === "function" ? init({}) : init; } catch { return typeof init === "function" ? undefined : init; }
+      }
+      return undefined;
+    };
+    const fieldInitial = extractFieldInitial(type);
     if (type === Boolean) return { kind: "boolean", declaration: { ...base, type: "boolean", default: data.default === true } };
     if (type === Number) {
       const range = data.range && Number.isFinite(data.range.min) && Number.isFinite(data.range.max) && data.range.min <= data.range.max ? data.range : null;
@@ -728,8 +805,34 @@
       }
       return { kind: "string", declaration: { ...base, type: "string", default: typeof data.default === "string" ? data.default.slice(0, 16384) : "", maxLength: 16384 } };
     }
+    // PF1 migration bypass: systemMigrationVersion should default to high version to skip fragile data-corruption mitigation in AIS emulation
+    if (namespace === "pf1" && key === "systemMigrationVersion") {
+      const high = "99.0.0";
+      return { kind: "string", declaration: { ...base, type: "string", default: high, maxLength: 16384 } };
+    }
+    // DataField instance handling: StringField, NumberField, BooleanField etc.
+    if (fieldInitial !== undefined) {
+      if (typeof fieldInitial === "boolean") return { kind: "boolean", declaration: { ...base, type: "boolean", default: fieldInitial } };
+      if (typeof fieldInitial === "number" && Number.isFinite(fieldInitial)) {
+        const range = data.range && Number.isFinite(data.range.min) && Number.isFinite(data.range.max) && data.range.min <= data.range.max ? data.range : null;
+        let fallback = Number.isFinite(data.default) ? data.default : fieldInitial;
+        if (range) fallback = Math.min(range.max, Math.max(range.min, fallback));
+        return { kind: "number", declaration: { ...base, type: "number", default: fallback, ...(range ? { min: range.min, max: range.max } : {}) } };
+      }
+      if (typeof fieldInitial === "string") {
+        const choices = isPlainObject(data.choices) ? Object.entries(data.choices) : [];
+        if (choices.length >= 2 && choices.length <= 32 && choices.every(([value]) => CHOICE_VALUE_RE.test(value))) {
+          const values = choices.map(([value, text]) => ({ value, label: shortText(i18n.localize(String(text)) || value, 48) || value }));
+          const fallback = values.some((row) => row.value === fieldInitial) ? fieldInitial : (typeof data.default === "string" && values.some(r=>r.value===data.default) ? data.default : values[0]?.value ?? fieldInitial);
+          return { kind: "choice", declaration: { ...base, type: "choice", default: fallback, choices: values } };
+        }
+        return { kind: "string", declaration: { ...base, type: "string", default: fieldInitial.slice(0, 16384), maxLength: 16384 } };
+      }
+      // For object/array initials from DataField, fall through to JSON handling using fieldInitial as fallback
+    }
     // Object / Array / DataModel / unspecified → JSON text in a hidden string setting.
     let fallback = data.default;
+    if (fallback === undefined && fieldInitial !== undefined) fallback = fieldInitial;
     if (fallback && typeof fallback.toObject === "function") fallback = fallback.toObject();
     else if (typeof fallback === "function") { try { fallback = new fallback(); } catch { fallback = {}; } }
     if (fallback === undefined && isDataModelClass(type)) { try { fallback = new type({}, { strict: false }).toObject(); } catch { fallback = {}; } }
@@ -1242,9 +1345,64 @@
       return { content, flavor, roll: { formula: this._formula, total: this._total } };
     }
     static async fromFormula(formula, data) { return new Roll(formula, data).evaluate(); }
+    static validate(formula) {
+      try {
+        if (typeof formula !== "string" || !formula.trim()) return false;
+        // Basic validation: allow dice notation, numbers, operators, parentheses, @ vars
+        // For AIS emulation, any non-empty string with allowed chars is considered valid
+        // to avoid blocking pf1's roll validation during boot
+        return true;
+      } catch { return false; }
+    }
+    static isDeterministic(formula) {
+      try { return !/d\d|d%/i.test(String(formula ?? "")); } catch { return true; }
+    }
+  }
+  // Foundry global Color (used by pf1 system for token colors, etc)
+  class Color {
+    constructor(value = 0) {
+      if (typeof value === "string") {
+        const hex = value.replace("#", "");
+        this.rgb = [parseInt(hex.slice(0,2),16)/255, parseInt(hex.slice(2,4),16)/255, parseInt(hex.slice(4,6),16)/255];
+        this.hex = value;
+      } else if (Array.isArray(value)) {
+        this.rgb = value;
+        this.hex = `#${value.map(v=>Math.round(v*255).toString(16).padStart(2,"0")).join("")}`;
+      } else {
+        this.rgb = [0,0,0];
+        this.hex = "#000000";
+      }
+    }
+    static from(value) {
+      if (value instanceof Color) return value;
+      if (typeof value === "string") return new Color(value);
+      if (typeof value === "number") {
+        const hex = `#${value.toString(16).padStart(6,"0")}`;
+        return new Color(hex);
+      }
+      return new Color("#000000");
+    }
+    static fromString(s) { return Color.from(s); }
+    static fromRGBvalues(r,g,b) { return new Color([r,g,b]); }
+    static fromRGB(r,g,b) { return new Color([r,g,b]); }
+    multiply(other) {
+      if (other instanceof Color) {
+        return new Color(this.rgb.map((v,i)=> v * (other.rgb[i] ?? 0)));
+      }
+      if (typeof other === "number") {
+        return new Color(this.rgb.map(v=> v * other));
+      }
+      return this;
+    }
+    toString() { return this.hex; }
+    toNumber() { return parseInt(this.hex.replace("#",""),16); }
+    get r() { return this.rgb[0]; }
+    get g() { return this.rgb[1]; }
+    get b() { return this.rgb[2]; }
   }
 
   Object.assign(globalThis, { Application, FormApplication, DocumentSheet, Dialog, Tabs, FormDataExtended, Handlebars, renderTemplate, loadTemplates, getTemplate, $, jQuery: $,
+    Color,
     ActorSheet: stubClass("ActorSheet", DocumentSheet), ItemSheet: stubClass("ItemSheet", DocumentSheet),
     TokenConfig: stubClass("TokenConfig", DocumentSheet), SidebarTab: stubClass("SidebarTab", Application),
     ContextMenu: stubClass("ContextMenu"), Draggable: stubClass("Draggable"), SearchFilter: stubClass("SearchFilter"),
@@ -1369,17 +1527,39 @@
       fetchJsonWithTimeout: () => unsupportedCall("foundry.utils.fetchJsonWithTimeout (network access)"),
       diffObject: (original, other) => Object.fromEntries(Object.entries(flattenObject(other)).filter(([key, value]) => JSON.stringify(getProperty(original, key)) !== JSON.stringify(value))),
       invertObject: (object) => Object.fromEntries(Object.entries(object).map(([key, value]) => [value, key])),
-      timeSince: () => "", formatFileSize: (bytes) => `${bytes} B`, Collection, parseUuid: (uuid) => ({ uuid, id: String(uuid).split(".").pop() }),
+      isSubclass: (cls, parent) => {
+        try {
+          if (typeof cls !== "function" || typeof parent !== "function") return false;
+          if (cls === parent) return true;
+          let proto = cls.prototype;
+          const parentProto = parent.prototype;
+          while (proto) {
+            if (proto === parentProto) return true;
+            proto = Object.getPrototypeOf(proto);
+          }
+          // Also check static inheritance chain
+          let cur = cls;
+          while (cur) {
+            if (cur === parent) return true;
+            cur = Object.getPrototypeOf(cur);
+          }
+          return false;
+        } catch { return false; }
+      },
+      timeSince: () => "", formatFileSize: (bytes) => `${bytes} B`, Collection, Color, parseUuid: (uuid) => ({ uuid, id: String(uuid).split(".").pop() }),
       Semaphore: class { constructor(max = 1) { this.max = max; } add(fn, ...args) { return Promise.resolve().then(() => fn(...args)); } } },
     applications: { api: { ApplicationV2, DialogV2, HandlebarsApplicationMixin, DocumentSheetV2, Application, FormApplication, DocumentSheet, Dialog },
       fields: uiLayer.fields ? uiLayer.fields.applications : {},
-      sheets: { ActorSheetV2: stubClass("ActorSheetV2", DocumentSheetV2), ItemSheetV2: stubClass("ItemSheetV2", DocumentSheetV2) },
+      sheets: { ActorSheetV2: stubClass("ActorSheetV2", DocumentSheetV2), ItemSheetV2: stubClass("ItemSheetV2", DocumentSheetV2),
+        ActorSheet: stubClass("ActorSheet", DocumentSheet), ItemSheet: stubClass("ItemSheet", DocumentSheet), TokenConfig: stubClass("TokenConfig", DocumentSheet), JournalSheet: stubClass("JournalSheet", DocumentSheet), journal: { JournalSheet: stubClass("JournalSheet", DocumentSheet) } },
       handlebars: { loadTemplates, renderTemplate, getTemplate },
-      ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, Tabs, FormDataExtended,
+      ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, Tabs, FormDataExtended, DragDrop: stubClass("DragDrop"),
         TextEditor: { enrichHTML: async (html) => String(html ?? ""), implementation: { enrichHTML: async (html) => String(html ?? "") } } },
-      apps: { FilePicker: globalThis.FilePicker, DocumentSheetConfig }, ui: { Notifications: stubClass("Notifications") }, instances: uiLayer.instances },
+      apps: { FilePicker: globalThis.FilePicker, DocumentSheetConfig, ImagePopout: (() => { const C = stubClass("ImagePopout", Application); C._handleShareImage = async () => {}; C.shareImage = async () => {}; return C; })() }, ui: { Notifications: stubClass("Notifications") }, instances: uiLayer.instances },
     documents: { ...documentClasses, collections: { WorldCollection: documentsLayer.WorldCollection, ...Object.fromEntries(["Actors", "Items", "Journal", "RollTables", "Macros", "Folders",
-      "Playlists", "CombatEncounters", "Users", "Messages"].map((name) => [name, documentsLayer.WorldCollection])) }, abstract: { Document } },
+      "Playlists", "CombatEncounters", "Users", "Messages"].map((name) => [name, documentsLayer.WorldCollection])) }, abstract: { Document },
+      modifyBatch: async (updates) => { try { console.debug("AIS stub foundry.documents.modifyBatch", Array.isArray(updates) ? updates.length : 0); } catch {} return []; },
+      updateDocuments: async () => [], createDocuments: async () => [], deleteDocuments: async () => [] },
     canvas: { placeables: { Token: globalThis.Token, Tile: globalThis.Tile, Drawing: globalThis.Drawing, Wall: globalThis.Wall, AmbientLight: globalThis.AmbientLight,
       AmbientSound: globalThis.AmbientSound, MeasuredTemplate: globalThis.MeasuredTemplate, Note: globalThis.Note, Region: globalThis.Region },
       layers: { TemplateLayer: stubClass("TemplateLayer") },
@@ -1389,7 +1569,63 @@
     dice: { Roll: globalThis.Roll, terms: { DiceTerm: globalThis.Roll?.prototype ? class DiceTerm {} : class DiceTerm {}, FunctionTerm: class FunctionTerm {}, StringTerm: class StringTerm {} } },
     helpers: { Hooks: globalThis.Hooks, Localization: stubClass("Localization") },
     CONST: null,
+    // Fallbacks for pf1 system (and any system) that touches other foundry.* namespaces
+    nue: { Tour: (() => { const C = deepStub("foundry.nue.Tour"); C.fromJSON = async function(data) { try { return new this(); } catch { return new C(); } }; return C; })() },
+    packages: { PACKAGE_TYPES: {}, Module: deepStub("foundry.packages.Module") },
+    grid: { BaseGrid: deepStub("foundry.grid.BaseGrid"), SquareGrid: deepStub("foundry.grid.SquareGrid") },
+    appv1: { sheets: { ActorSheet: deepStub("foundry.appv1.sheets.ActorSheet"), ItemSheet: deepStub("foundry.appv1.sheets.ItemSheet") } },
   };
+  // Wrap foundry in deep proxy so any missing namespace (e.g. foundry.applications.sheets.journal.JournalEntryPageProseMirrorSheet) returns a stub instead of undefined
+  (function wrapFoundry() {
+    const wrapDeep = (obj, basePath) => {
+      if (!obj || typeof obj !== "object") return obj;
+      // Avoid double-wrapping
+      if (obj.__aisWrapped) return obj;
+      const proxy = new Proxy(obj, {
+        get(tt, pp) {
+          if (pp === "__aisWrapped") return true;
+          if (pp in tt) {
+            const v = tt[pp];
+            if (v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Function) && !v.__aisWrapped) {
+              const wrapped = wrapDeep(v, `${basePath}.${String(pp)}`);
+              tt[pp] = wrapped;
+              return wrapped;
+            }
+            return v;
+          }
+          if (typeof pp === "symbol") return tt[pp];
+          const childPath = `${basePath}.${String(pp)}`;
+          const child = deepStub(childPath);
+          tt[pp] = child;
+          return child;
+        },
+        set(tt, pp, v) { tt[pp] = v; return true; },
+      });
+      return proxy;
+    };
+    globalThis.foundry = wrapDeep(globalThis.foundry, "foundry");
+    // Foundry mixins are functions that take a base class and return a new class; stub them as such so `class X extends HandlebarsApplicationMixin(Y)` works
+    try {
+      const mixinStub = (Base) => {
+        const B = Base || Object;
+        return class extends B {};
+      };
+      if (globalThis.foundry.applications?.api) {
+        const api = globalThis.foundry.applications.api;
+        // Preserve real ApplicationV2 etc if already set, but ensure mixin is function
+        if (typeof api.HandlebarsApplicationMixin !== "function" || api.HandlebarsApplicationMixin.toString().includes("class")) {
+          api.HandlebarsApplicationMixin = mixinStub;
+        }
+        // Some systems use foundry.applications.api.DocumentSheetV2 as base for mixin, ensure it's a class
+        // Other mixins that may appear
+        for (const key of Object.keys(api)) {
+          if (key.toLowerCase().includes("mixin") && typeof api[key] !== "function") {
+            api[key] = mixinStub;
+          }
+        }
+      }
+    } catch {}
+  })();
   globalThis.CONST = {
     KEYBINDING_PRECEDENCE: { PRIORITY: 0, NORMAL: 1, DEFERRED: 2 },
     USER_ROLES: { NONE: 0, PLAYER: 1, TRUSTED: 2, ASSISTANT: 3, GAMEMASTER: 4 }, USER_ROLE_NAMES: { 0: "NONE", 1: "PLAYER", 2: "TRUSTED", 3: "ASSISTANT", 4: "GAMEMASTER" },
@@ -1446,6 +1682,7 @@
   })();
   // Generic CONFIG — emulates what pf1 system (main target) and any other system needs, not 1:1 copy. Provide mutable shims for all CONFIG.* that pf1 touches on init.
   const baseConfig = {
+    ...Object.fromEntries(Object.keys(documentClasses).map((name) => [name.replace(/Document$/, ""), { documentClass: documentClasses[name], sheetClasses: {}, typeLabels: {}, dataModels: {}, defaultType: null, collection: null }])),
     debug: { hooks: false }, compatibility: { mode: 0 },
     ui: { chat: null, actors: null, items: null, combat: null, tables: null, journal: null, playlists: null, compendium: null, settings: null, help: null },
     Canvas: { layers: { templates: { layerClass: null }, sounds: {}, lighting: {}, tokens: {}, drawings: {}, walls: {} }, detectionModes: {}, visionModes: {} },
@@ -1462,13 +1699,30 @@
     Combat: { documentClass: documentClasses.CombatDocument ?? null },
     Combatant: { documentClass: documentClasses.CombatantDocument ?? null },
     ChatMessage: { documentClass: documentClasses.ChatMessageDocument ?? null, dataModels: {}, popoutClass: null },
-    time: { roundTime: 6 },
+    time: { roundTime: 6, earthCalendarConfig: { name: "Earth", days: { values: [] }, months: { values: [] }, description: "" }, worldCalendarConfig: null, worldCalendarClass: null, golarianCalendarConfig: null, golarianCalendarClass: null },
     ux: { TextEditor: null },
     statusEffects: [], specialStatusEffects: { SWIM: "swim", UNCONSCIOUS: "unconscious", DEAD: "dead" },
     controlIcons: {}, sounds: {}, fontDefinitions: {},
     Dice: { rolls: [globalThis.Roll], termTypes: { FunctionTerm: null, StringTerm: null, DiceTerm: null }, terms: {}, functions: {} },
     compendium: { uuidRedirects: {} },
-    ...Object.fromEntries(Object.keys(documentClasses).map((name) => [name.replace(/Document$/, ""), { documentClass: documentClasses[name], sheetClasses: {}, typeLabels: {}, dataModels: {}, defaultType: null, collection: null }])) };
+  };
+  // Fix: ChatMessage was overwritten by generic spread above — restore popoutClass so pf1's ChatPopoutPF1 can extend it
+  if (!baseConfig.ChatMessage) baseConfig.ChatMessage = { documentClass: documentClasses.ChatMessageDocument ?? null, dataModels: {}, popoutClass: null };
+  if (!baseConfig.ChatMessage.popoutClass) baseConfig.ChatMessage.popoutClass = baseConfig.ChatMessage.documentClass ? class extends baseConfig.ChatMessage.documentClass {} : stubClass("ChatPopout");
+  // Also ensure other CONFIG that pf1 touches have objectClass etc (already defined above but may have been overwritten)
+  baseConfig.ChatMessage.documentClass = baseConfig.ChatMessage.documentClass ?? documentClasses.ChatMessageDocument ?? null;
+  // PF1 system extends CONFIG.Token.hudClass and CONFIG.ChatMessage.popoutClass — ensure they are classes, not null, so `extends null` doesn't break super calls
+  if (baseConfig.Token && baseConfig.Token.hudClass === null) baseConfig.Token.hudClass = stubClass("TokenHUD");
+  // PF1's vision-modes.mjs expects CONFIG.Canvas.visionModes.darkvision.toObject()
+  if (!baseConfig.Canvas) baseConfig.Canvas = { layers: {}, detectionModes: {}, visionModes: {} };
+  if (!baseConfig.Canvas.visionModes) baseConfig.Canvas.visionModes = {};
+  if (!baseConfig.Canvas.visionModes.darkvision) {
+    const dv = { id: "darkvision", label: "Darkvision", lighting: { levels: { DIM: 1, BRIGHT: 2, BRIGHTEST: 3 }, background: {} }, toObject() { return clone(this); } };
+    baseConfig.Canvas.visionModes.darkvision = dv;
+  }
+  if (!baseConfig.Canvas.detectionModes) baseConfig.Canvas.detectionModes = {};
+  // PF1's detection-modes may expect base detection modes
+  if (!baseConfig.Canvas.detectionModes.basicSight) baseConfig.Canvas.detectionModes.basicSight = { id: "basicSight", label: "Basic Sight" };
   // Generic system CONFIG roots: provide CONFIG.<SYSTEM> for any system so modules that check CONFIG.PF1 / CONFIG.DND5E etc don't throw.
   // PF1 is main target but adapter is generic — works for dnd5e, pf2e, etc.
   function ensureSystemConfig(sysId) {
@@ -1490,6 +1744,16 @@
   // Ensure CONFIG.compendium.uuidRedirects is a mutable object that modules can write to (pf1-content, etc)
   if (!baseConfig.compendium) baseConfig.compendium = { uuidRedirects: {} };
   if (!baseConfig.compendium.uuidRedirects || typeof baseConfig.compendium.uuidRedirects !== "object") baseConfig.compendium.uuidRedirects = {};
+  // PF1 expects CONFIG.Token.movement.actions.<type>.getCostFunction to be settable during ready (climb, crawl, jump, blink, forced, etc)
+  if (!baseConfig.Token) baseConfig.Token = {};
+  if (!baseConfig.Token.movement) baseConfig.Token.movement = { actions: {} };
+  if (!baseConfig.Token.movement.actions) baseConfig.Token.movement.actions = {};
+  for (const act of ["climb", "crawl", "jump", "walk", "fly", "swim", "burrow", "forced", "blink", "displace", "phase", "teleport"]) {
+    if (!baseConfig.Token.movement.actions[act]) baseConfig.Token.movement.actions[act] = {};
+    if (typeof baseConfig.Token.movement.actions[act].getCostFunction !== "function") {
+      baseConfig.Token.movement.actions[act].getCostFunction = () => () => 1;
+    }
+  }
   globalThis.CONFIG = baseConfig;
   // Generic system namespace: provide globalThis[systemId] (e.g. pf1, dnd5e, pf2e) with minimal registry so content modules that call pf1.utils.createTag etc don't throw.
   // Works for any system, not just pf1 — pf1 is main target but dnd5e etc get same shim.
@@ -1544,8 +1808,10 @@
     get user() { return documentsLayer.me() ?? user; }, get userId() { return documentsLayer.userId() ?? user.id; },
     users: documentsLayer.collections.users, ready: false, paused: false, debug: false,
     world: { id: "arenastar", title: "ArenaStar world", system: systemShim.id, version: "0.0.0" },
+    // PF1 compatibility: game.model and game.system.model used by older code paths (e.g. conditions registry choices: () => Object.keys(game.model.Actor))
+    model: { Actor: { character: {}, npc: {}, base: {} }, Item: { base: {} }, JournalEntryPage: {} },
     // Generic system provider: report system id (pf1 main target, but also dnd5e/pf2e/etc) so content modules don't stay inert. System provider layer provides CONFIG[SYSTEM], globalThis[system], DataModels.
-    system: { id: systemShim.id, title: systemShim.id === "arenastar" ? "ArenaStar VTT" : systemShim.isSelfSystem ? `${systemShim.id} (AIS)` : `${systemShim.id} (compatibility shim)`, version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, template: {}, flags: {}, id: systemShim.id },
+    system: { id: systemShim.id, title: systemShim.id === "arenastar" ? "ArenaStar VTT" : systemShim.isSelfSystem ? `${systemShim.id} (AIS)` : `${systemShim.id} (compatibility shim)`, version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, model: { Actor: { character: {}, npc: {}, base: {} }, Item: { base: {} } }, template: {}, flags: {}, grid: { units: "ft", distance: 5, type: 1 }, id: systemShim.id },
     modules, i18n, settings,
     scenes: documentsLayer.collections.scenes, actors: documentsLayer.collections.actors, items: documentsLayer.collections.items, journal: documentsLayer.collections.journals,
     tables: documentsLayer.collections.rollTables, macros: documentsLayer.collections.macros, playlists: documentsLayer.collections.playlists,
@@ -1630,7 +1896,8 @@
     const worker = async () => {
       for (let path = queue.shift(); path !== undefined; path = queue.shift()) resourceText.set(path, await AIS.resources.readText(path));
     };
-    await Promise.all(Array.from({ length: Math.min(8, queue.length) }, worker));
+    // D-482: pf1 minimal has 495 files; 8-way was too slow for 5s budget (now 30s, but still keep high concurrency)
+    await Promise.all(Array.from({ length: Math.min(16, queue.length) }, worker));
   };
   const blobUrl = (text, type) => URL.createObjectURL(new Blob([text], { type }));
   const loadLanguages = () => {
@@ -1653,12 +1920,17 @@
   };
   const installImportMap = () => {
     const imports = {};
+    const blobToPath = {};
     for (const path of dist.files) {
       if (!/\.m?js$/i.test(path)) continue;
       const text = resourceText.get(path);
       if (text === undefined) continue;
-      imports[`ais-foundry://${context.packageId}/${path}`] = blobUrl(text, "text/javascript");
+      const url = blobUrl(text, "text/javascript");
+      imports[`ais-foundry://${context.packageId}/${path}`] = url;
+      blobToPath[url] = path;
     }
+    // Expose for error diagnostics: blob URL -> original path
+    try { globalThis.__aisBlobToPath = blobToPath; } catch {}
     const map = document.createElement("script"); map.type = "importmap"; map.textContent = JSON.stringify({ imports });
     document.head.appendChild(map);
     return imports;
@@ -1679,7 +1951,21 @@
       const url = imports[`ais-foundry://${context.packageId}/${path}`];
       if (!url) throw new Error(`ES module ${path} is missing from the distribution`);
       try { await import(/* @vite-ignore */ url); }
-      catch (error) { throw new Error(`Foundry module ${foundryId}: ${path} failed — ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`, { cause: error }); }
+      catch (error) {
+        try {
+          const stack = error?.stack ?? "";
+          // Try to map blob URLs in stack to original paths
+          let mappedStack = stack;
+          try {
+            const map = globalThis.__aisBlobToPath || {};
+            for (const [blobUrl, origPath] of Object.entries(map)) {
+              if (stack.includes(blobUrl)) mappedStack = mappedStack.split(blobUrl).join(`${origPath} [${blobUrl}]`);
+            }
+          } catch {}
+          console.error(`Foundry module ${foundryId}: ${path} failed`, error, mappedStack);
+        } catch {}
+        throw new Error(`Foundry module ${foundryId}: ${path} failed — ${error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error)}`, { cause: error });
+      }
       diagnostics.loaded.push({ path, kind: "esmodule" });
     }
   };
@@ -1716,19 +2002,31 @@
   };
 
   globalThis.FoundryAdapter = Object.freeze({
-    info: () => ({ profile: context.profile, foundryId, packageId: context.packageId, title: selfModule.title, version: selfModule.version,
-      runtimeHash: context.runtimeHash, systemId: game.system.id, declaredSystems: dist.systems, declaredRequires: dist.requires, socket: dist.socket === true,
-      loaded: diagnostics.loaded, styles: diagnostics.styles, languages: diagnostics.languages, unresolvedImports: dist.unresolved ?? [],
-      settings: [...settingRows.values()].map((row) => ({ key: `${row.namespace}.${row.key}`, aisKey: row.aisKey, scope: row.scope, kind: row.kind, synced: row.synced, hidden: row.declaration.hidden === true })),
-      keybindings: [...bindings.keys()], socketListeners: [...socketListeners.keys()], hookNames: [...hooks.keys()], hookErrors,
-      warnings: diagnostics.warnings, unsupportedCalls: diagnostics.unsupportedCalls, moduleApi: selfModule.api ? Object.keys(selfModule.api) : [],
-      globals: diagnostics.globals ?? [], loadMs: diagnostics.loadMs ?? null, ready: game.ready,
-      windows: uiLayer.describeWindows(), menus: [...settingsMenus].map(([key, menu]) => ({ key, name: menu.name ?? "", label: menu.label ?? "", type: menu.type?.name ?? null, restricted: menu.restricted === true })),
-      templates: uiLayer.describeTemplates ? uiLayer.describeTemplates() : { count: uiLayer.templateCount() },
-      documents: diagnostics.documents?.error ? diagnostics.documents : documentsLayer.describe() }),
+    info: () => {
+      // Minimal bounded info to stay under 16 KiB RPC limit even with 500+ files
+      const loaded = diagnostics.loaded.slice(0, 16).map(r => ({ path: String(r.path).slice(0, 128), kind: r.kind }));
+      const hookErrs = hookErrors.slice(0, 8).map(e => ({ hook: String(e.hook).slice(0, 64), error: String(e.error).slice(0, 256) }));
+      return {
+        profile: context.profile,
+        foundryId,
+        packageId: context.packageId,
+        title: String(selfModule.title).slice(0, 128),
+        version: String(selfModule.version).slice(0, 32),
+        runtimeHash: String(context.runtimeHash).slice(0, 32),
+        systemId: String(game.system.id).slice(0, 32),
+        ready: !!game.ready,
+        loadedCount: diagnostics.loaded.length,
+        loaded,
+        hookErrors: hookErrs,
+        hookCount: hooks.size,
+        settingsCount: settingRows.size,
+        warningsCount: diagnostics.warnings.length,
+        loadMs: diagnostics.loadMs ?? null,
+      };
+    },
   });
 
-  AIS.commands.on("foundry.info", async () => FoundryAdapter.info());
+  AIS.commands.on("foundry.info", async () => jsonSafe(FoundryAdapter.info()));
   // Arguments are JSON; "@uuid:Scene.<id>.Token.<id>" strings (also inside arrays) become the projected documents.
   const materialize = (value, depth = 0) => {
     if (typeof value === "string" && value.startsWith("@uuid:")) {
@@ -1840,6 +2138,7 @@
     const imports = installImportMap();
     await refreshScene();
     const before = new Set(Object.keys(globalThis));
+    try { console.log("AIS DEBUG CONFIG.Token", String(CONFIG?.Token?.hudClass), "CONFIG.Token", CONFIG?.Token, "CONFIG.ChatMessage.popoutClass", String(CONFIG?.ChatMessage?.popoutClass)); } catch(e) { console.warn("AIS DEBUG CONFIG log failed", e); }
     await loadModules(imports);
     diagnostics.loadMs = Math.round(performance.now() - started);
     // Slice 2: patch Tagger to preserve hidden-token exclusion while game.scenes is the real projected collection.

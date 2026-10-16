@@ -49,12 +49,27 @@ function resolveManifestPath(paths: string[]): Result<string> {
 }
 
 /** D-482: strip the single nested root (if any) off every path. */
+function outerRootOf(paths: readonly string[]): string {
+  if (!paths.length) return "";
+  const firstSegments = paths.map((p) => (p.includes("/") ? p.split("/")[0] ?? "" : ""));
+  const first = firstSegments[0] ?? "";
+  if (!first) return "";
+  if (firstSegments.every((seg) => seg === first)) return `${first}/`;
+  return "";
+}
 function rootedFiles(rawFiles: Record<string, string>, markerPath: string): Record<string, string> {
-  const root = markerPath.includes("/") ? `${markerPath.split("/")[0] ?? ""}/` : "";
-  const files: Record<string, string> = {};
-  for (const [path, text] of Object.entries(rawFiles))
-    if (root === "" || path.startsWith(root)) files[path.slice(root.length)] = text;
-  return files;
+  const allPaths = Object.keys(rawFiles);
+  // If all files share a single top-level folder (GitHub zip), strip it; otherwise keep as-is.
+  // This handles both `foundryvtt-.../public/system.json` and `public/system.json` + `pf1.js` at root.
+  const outer = outerRootOf(allPaths);
+  if (outer && markerPath.startsWith(outer)) {
+    const files: Record<string, string> = {};
+    for (const [path, text] of Object.entries(rawFiles))
+      if (path.startsWith(outer)) files[path.slice(outer.length)] = text;
+    return files;
+  }
+  // No outer root, or marker is already at package root (e.g. public/system.json) — keep all files
+  return { ...rawFiles };
 }
 
 /**
@@ -68,8 +83,8 @@ export function buildPackageFromFiles(rawFiles: Record<string, string>, binaryPa
   if (!manifestPath.ok) {
     const foundryPath = resolveFoundryManifestPath([...paths, ...binaryPaths]);
     if (foundryPath === null) return manifestPath;
-    const root = foundryPath.includes("/") ? `${foundryPath.split("/")[0] ?? ""}/` : "";
-    const binaries = binaryPaths.filter((path) => path.startsWith(root)).map((path) => path.slice(root.length));
+    const outer = outerRootOf([...paths, ...binaryPaths]);
+    const binaries = outer ? binaryPaths.filter((path) => path.startsWith(outer)).map((path) => path.slice(outer.length)) : [...binaryPaths];
     const synthesized = synthesizeFoundryModulePackage(rootedFiles(rawFiles, foundryPath), binaries);
     if (!synthesized.ok) return synthesized;
     const built = buildPackageFromFiles(synthesized.value.files);

@@ -22,7 +22,20 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   function fail(error) {
     if (failed) return;
     failed = true;
-    post({ vttAisRpc: 1, kind: "error", error: String(error && error.message || error).slice(0, 500) });
+    var rawMsg = error && error.stack ? String(error.stack) : String(error && error.message || error);
+    var msg = rawMsg;
+    try {
+      var map = globalThis.__aisBlobToPath;
+      if (map && typeof map === "object") {
+        for (var blobUrl in map) {
+          if (msg.indexOf(blobUrl) !== -1) {
+            msg = msg.split(blobUrl).join(map[blobUrl] + " [" + blobUrl + "]");
+          }
+        }
+      }
+    } catch {}
+    try { console.error("AIS module failed", msg, error); } catch {}
+    post({ vttAisRpc: 1, kind: "error", error: String(msg).slice(0, 4000) });
   }
   window.addEventListener("error", function (event) { fail(event.error || event.message); });
   window.addEventListener("unhandledrejection", function (event) { fail(event.reason); });
@@ -30,7 +43,7 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   function rpc(method, args, commandId) {
     return new Promise(function (resolve, reject) {
       if (failed) { reject(new Error("AIS module has stopped")); return; }
-      if (pending.size >= 32) { reject(new Error("AIS RPC concurrency limit exceeded")); return; }
+      if (pending.size >= 128) { reject(new Error("AIS RPC concurrency limit exceeded")); return; }
       var id = nextId++;
       var frame = { vttAisRpc: 1, kind: "request", id: id, method: method,
         args: args === undefined ? {} : args,

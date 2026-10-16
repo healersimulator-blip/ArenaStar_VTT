@@ -437,7 +437,9 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       const text = ctx.resources[args.path] ?? "";
       const offset = Number(args.offset);
       if (offset > text.length) throw new Error("Invalid resource offset");
-      const next = offset + 8192;
+      // D-482: pf1 system has 495 files; larger chunks reduce RPCs (was 8192, too chatty for 5s boot)
+      // 32k keeps response safely under 64KiB even with JSON envelope and UTF-8 expansion
+      const next = offset + 32000;
       return { text: text.slice(offset, next), next: next < text.length ? next : null };
     },
     "scene.tags.snapshot": async (_args, lifetime) => {
@@ -717,13 +719,11 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       if (Object.keys(args).length) throw new Error("settings.list takes no arguments");
       const declarations = ctx.settings?.declarations ?? [];
       const values = await effectiveSettingValues(ctx, declarations);
+      // Return only key+value to stay under 64 KiB even with 100+ settings (pf1 has many large defaults).
+      // The adapter only needs key/value for sync; label/hint/default are not needed at runtime.
       return {
         settings: declarations.map((declaration) => ({
-          key: declaration.key, scope: declaration.scope, type: declaration.type, label: declaration.label,
-          ...(declaration.hint === undefined ? {} : { hint: declaration.hint }),
-          default: declaration.default,
-          ...(declaration.choices ? { choices: declaration.choices.map((choice) => ({ ...choice })) } : {}),
-          ...(declaration.hidden ? { hidden: true } : {}),
+          key: declaration.key,
           value: values[declaration.key] ?? declaration.default,
         })),
       };
