@@ -40,7 +40,7 @@ export interface FoundryDistribution {
   scripts: string[];
   styles: string[];
   languages: Array<{ lang: string; name: string; path: string }>;
-  packs: Array<{ name: string; label: string; type: string }>;
+  packs: Array<{ name: string; label: string; type: string; path: string }>;
   systems: string[];
   requires: string[];
   socket: boolean;
@@ -140,7 +140,7 @@ export function prepareFoundryDistribution(
     scripts: foundry.scripts.filter(has),
     styles: foundry.styles.filter(has),
     languages: foundry.languages.filter((language) => has(language.path)),
-    packs: foundry.packs.map((pack) => ({ name: pack.name, label: pack.label, type: pack.type })),
+    packs: foundry.packs.map((pack) => ({ name: pack.name, label: pack.label, type: pack.type, path: pack.path })),
     systems: foundry.systems,
     requires: foundry.requires,
     socket: foundry.socket,
