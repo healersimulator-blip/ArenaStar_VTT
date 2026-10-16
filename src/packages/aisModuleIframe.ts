@@ -1,11 +1,13 @@
 import {
   AIS_EVENTS,
+  aisEventSubscriptionCapability,
   type AisCapability,
   type AisEventName,
   type AisEventPayloads,
   type AisModuleCommandDeclaration,
 } from "../core/automationInterconnect";
 import type { Json } from "../core/documents";
+import { createAisHealthMonitor, type AisModuleDiagnostics, type AisTraceEntry } from "./aisHealth";
 import { aisModuleRuntimeSource } from "./aisModuleRuntimeSource";
 
 export const AIS_RPC_TAG = 1 as const;
@@ -21,6 +23,7 @@ const COMMAND_NAME_RE = /^[a-z0-9][a-z0-9._:-]{1,127}$/;
 export const AIS_MODULE_METHODS = [
   "events.subscribe",
   "events.emit",
+  "bus.emit",
   "scene.read.visible",
   "actor.inventory.read",
   "scene.token.light.apply",
@@ -29,18 +32,39 @@ export const AIS_MODULE_METHODS = [
   "chat.post",
   "ui.notify",
   "ui.select",
+  "ui.panel.open",
+  "ui.panel.close",
   "scene.tags.snapshot",
   "scene.tags.update",
   "fx.play",
   "fx.list",
   "fx.stop",
   "package.resource.read",
+  "settings.list",
+  "settings.get",
+  "settings.set",
+  "settings.register",
+  "compendium.list",
+  "compendium.search",
+  "compendium.get",
+  "modules.list",
+  "modules.invoke",
+  "documents.context",
+  "documents.list",
+  "documents.get",
+  "documents.mutate",
 ] as const;
 export type AisModuleMethod = (typeof AIS_MODULE_METHODS)[number];
 
-const REQUIRED_CAPABILITY: Record<AisModuleMethod, AisCapability> = {
+/**
+ * Capability gate per method. `null` = no capability: the method only returns what the module
+ * already knows from its own approved manifest (its declared settings, the public contract of
+ * sibling modules) and performs no write.
+ */
+export const AIS_METHOD_CAPABILITY: Record<AisModuleMethod, AisCapability | null> = {
   "events.subscribe": "action.observe",
   "events.emit": "event.emit",
+  "bus.emit": "bus.transmit",
   "scene.read.visible": "scene.read.visible",
   "actor.inventory.read": "actor.inventory.read",
   "scene.token.light.apply": "scene.token.light.manage",
@@ -49,12 +73,27 @@ const REQUIRED_CAPABILITY: Record<AisModuleMethod, AisCapability> = {
   "chat.post": "chat.post",
   "ui.notify": "ui.notify",
   "ui.select": "ui.interaction",
+  "ui.panel.open": "ui.panel",
+  "ui.panel.close": "ui.panel",
   "scene.tags.snapshot": "scene.tags.read",
   "scene.tags.update": "scene.tags.write",
   "fx.play": "fx.play",
   "fx.list": "fx.play",
   "fx.stop": "fx.play",
   "package.resource.read": "package.resources.read",
+  "settings.list": null,
+  "settings.get": null,
+  "settings.set": "module.settings.write",
+  "settings.register": "module.settings.write",
+  "compendium.list": "compendium.read",
+  "compendium.search": "compendium.read",
+  "compendium.get": "compendium.read",
+  "modules.list": null,
+  "modules.invoke": "modules.invoke",
+  "documents.context": "documents.read",
+  "documents.list": "documents.read",
+  "documents.get": "documents.read",
+  "documents.mutate": "documents.write",
 };
 
 export interface AisModuleRequest {
@@ -93,7 +132,7 @@ export interface AisModuleCommandFrame {
     sceneId: string;
     callerId: string;
     requestId: string;
-    runAs: "gm";
+    runAs: "gm" | "player";
     deadlineAt: number;
   };
 }
@@ -111,7 +150,7 @@ export interface AisModuleCallContext extends AisModuleRequestContext {
   sceneId: string;
   callerId: string;
   requestId: string;
-  runAs: "gm";
+  runAs: "gm" | "player";
   deadlineAt: number;
   isActive(): boolean;
   assertActive(): void;
@@ -121,8 +160,12 @@ export interface AisModuleInvocationOptions {
   sceneId: string;
   callerId: string;
   requestId: string;
-  /** AIS commands execute only under an explicitly GM-reviewed script-macro elevation. */
-  runAs: "gm";
+  /**
+   * At the host, AIS commands execute only under an explicitly GM-reviewed script-macro elevation
+   * (`"gm"`). D-469: a frame created with `playerCommands: true` — the player-side runtime — accepts
+   * `"player"`: the command runs with that player's own authority (host-side ownership validation).
+   */
+  runAs: "gm" | "player";
   isActive: () => boolean;
 }
 
@@ -131,6 +174,8 @@ export type AisModuleHandler = (
   context?: AisModuleRequestContext,
 ) => unknown | Promise<unknown>;
 export type AisModuleHandlers = Record<AisModuleMethod, AisModuleHandler>;
+
+export type { AisModuleDiagnostics, AisTraceEntry } from "./aisHealth";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -195,6 +240,7 @@ export function createAisModuleDispatcher(
   grantedCapabilities: ReadonlySet<AisCapability>,
   onSubscribe: (event: AisEventName) => void,
   lifetime?: AisModuleRequestContext,
+  onTrace?: (entry: AisTraceEntry) => void,
 ): {
   onFrame(
     data: unknown,
@@ -216,13 +262,16 @@ export function createAisModuleDispatcher(
 
       const now = Date.now();
       while (requestTimes.length > 0 && now - (requestTimes[0] ?? now) >= 1000) requestTimes.shift();
-      const respondError = (error: string): void => post({
-        vttAisRpc: AIS_RPC_TAG,
-        kind: "response",
-        id: request.id,
-        ok: false,
-        error,
-      });
+      const respondError = (error: string): void => {
+        onTrace?.({ at: now, kind: "rejected", name: request.method, ok: false, error });
+        post({
+          vttAisRpc: AIS_RPC_TAG,
+          kind: "response",
+          id: request.id,
+          ok: false,
+          error,
+        });
+      };
       if (requestTimes.length >= MAX_REQUESTS_PER_SECOND) {
         respondError("AIS RPC rate limit exceeded");
         return;
@@ -241,13 +290,15 @@ export function createAisModuleDispatcher(
           return;
         }
       }
-      const required = REQUIRED_CAPABILITY[request.method];
-      if (!grantedCapabilities.has(required)) {
+      const args = asRecord(request.args) ?? {};
+      // D-476/D-483: a module's own settings and panel are not host state — those events need no observe grant.
+      const required = request.method === "events.subscribe" && isAisEventName(args.event)
+        ? aisEventSubscriptionCapability(args.event) : AIS_METHOD_CAPABILITY[request.method];
+      if (required !== null && !grantedCapabilities.has(required)) {
         respondError(`Capability not granted: ${required}`);
         return;
       }
 
-      const args = asRecord(request.args) ?? {};
       if (request.method === "events.subscribe") {
         if (!isAisEventName(args.event)) {
           respondError("Unknown AIS event");
@@ -255,6 +306,7 @@ export function createAisModuleDispatcher(
         }
       }
       activeRequests++;
+      const startedAt = Date.now();
       void (async () => {
         let response: AisModuleResponse;
         try {
@@ -278,6 +330,8 @@ export function createAisModuleDispatcher(
         } finally {
           activeRequests--;
         }
+        onTrace?.({ at: startedAt, kind: "rpc", name: request.method, ok: response.ok, ms: Date.now() - startedAt,
+          ...(response.ok ? {} : { error: response.error }) });
         if (lifetime?.isActive() !== false) post(response);
       })();
     },
@@ -287,6 +341,8 @@ export function createAisModuleDispatcher(
 export interface AisModuleRuntimeStatus {
   state: "starting" | "ready" | "failed" | "stopped" | "available" | "blocked";
   error?: string;
+  /** D-482: how many settings the module declared at runtime (`settings.register`) in this boot. */
+  settings?: number;
 }
 
 export interface AisModuleIframeOptions {
@@ -305,6 +361,8 @@ export interface AisModuleIframeOptions {
   onStatus?: (status: AisModuleRuntimeStatus) => void;
   onSubscribe?: (event: AisEventName) => void;
   hostElement?: HTMLElement;
+  /** D-469: this frame belongs to a player's runtime; commands run as `"player"`, never `"gm"`. */
+  playerCommands?: boolean;
 }
 
 interface ActiveModuleCommand {
@@ -341,6 +399,10 @@ export class AisModuleIframe {
   private nextCommandId = 1;
   private disposed = false;
   private statusValue: AisModuleRuntimeStatus = { state: "starting" };
+  /** D-479: bounded trace + counters + circuit breaker (see aisHealth.ts). */
+  private readonly health = createAisHealthMonitor({
+    onTrip: (reason) => queueMicrotask(() => this.stop(reason, true)),
+  });
 
   constructor(options: AisModuleIframeOptions) {
     this.packageId = options.packageId;
@@ -359,14 +421,18 @@ export class AisModuleIframe {
         this.subscriptions.add(event);
         options.onSubscribe?.(event);
       }
-    }, lifetime);
+    }, lifetime, (entry) => this.record(entry));
+    this.record({ at: Date.now(), kind: "lifecycle", name: "start", ok: true });
     const doc = globalThis.document;
     const frame = doc.createElement("iframe");
     frame.setAttribute("sandbox", "allow-scripts");
     frame.setAttribute("aria-hidden", "true");
     frame.setAttribute("title", `AIS module:${options.packageId}`);
     frame.style.display = "none";
-    const csp = "default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'";
+    // D-482: `blob:` lets the Foundry adapter evaluate a module's ES-module graph (one blob per
+    // file + an import map) inside this frame; blob URLs are only reachable by the frame that
+    // created them, so this widens nothing beyond the inline code the frame already runs.
+    const csp = "default-src 'none'; script-src 'unsafe-inline' blob:; connect-src 'none'; img-src 'none'; media-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'";
     frame.srcdoc = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><body><script>${escapeScript(aisModuleRuntimeSource(this.bootId, options.runtimeContext))}</script><script>${escapeScript(options.source)}</script><script>globalThis.AIS.__ready()</script></body>`;
     this.frame = frame;
     this.startupTimer = globalThis.setTimeout(() => this.stop("Module did not become ready", true), MAX_STARTUP_MS);
@@ -378,6 +444,23 @@ export class AisModuleIframe {
 
   get status(): AisModuleRuntimeStatus { return this.statusValue; }
   whenReady(): Promise<void> { return this.ready; }
+
+  /** D-479: bounded health view for the packages UI and tests (copies, never live arrays). */
+  diagnostics(): AisModuleDiagnostics { return this.health.diagnostics(); }
+
+  private record(entry: AisTraceEntry): void { this.health.record(entry); }
+
+  /**
+   * D-470: show or hide the module's own document. The element never moves in the DOM (re-parenting
+   * an iframe reloads it, which this class treats as a navigation and stops the module); the shell
+   * creates it inside the panel body via `hostElement` and toggles visibility here.
+   */
+  setVisible(visible: boolean): void {
+    if (this.disposed && visible) return;
+    this.frame.style.display = visible ? "block" : "none";
+    if (visible) this.frame.removeAttribute("aria-hidden");
+    else this.frame.setAttribute("aria-hidden", "true");
+  }
 
   private readonly onLoad = (): void => {
     if (this.loaded) this.stop("Module iframe navigated; reload the world to restart it", true);
@@ -420,6 +503,7 @@ export class AisModuleIframe {
       if (!this.entryReady || !this.documentVerified) return;
       globalThis.clearTimeout(this.startupTimer);
       this.statusValue = { state: "ready" };
+      this.record({ at: Date.now(), kind: "lifecycle", name: "ready", ok: true });
       this.resolveReady();
       this.options.onStatus?.(this.statusValue);
     } else if (data.kind === "command-result") {
@@ -459,7 +543,10 @@ export class AisModuleIframe {
     if (this.disposed) throw new Error(`AIS module ${this.packageId} is not running`);
     if (!this.commandIds.has(commandId)) throw new Error(`AIS module ${this.packageId} does not declare command ${commandId}`);
     if (!COMMAND_NAME_RE.test(commandId)) throw new Error("Invalid AIS command ID");
-    if (options.runAs !== "gm") throw new Error("AIS module commands require explicitly reviewed GM authority");
+    if (this.options.playerCommands ? options.runAs !== "player" : options.runAs !== "gm")
+      throw new Error(this.options.playerCommands
+        ? "AIS module commands at a player run only with that player's own authority"
+        : "AIS module commands require explicitly reviewed GM authority");
     if (!boundedJson(input) || (jsonByteLength(input) ?? Infinity) > MAX_COMMAND_BYTES)
       throw new Error("AIS command input exceeds 16 KiB or is not bounded JSON");
     if (this.commandPending) throw new Error(`AIS module ${this.packageId} already has a command running`);
@@ -482,17 +569,26 @@ export class AisModuleIframe {
         requestId: options.requestId, runAs: options.runAs, deadlineAt, isActive,
         assertActive: () => { if (!isActive()) throw new Error("AIS macro command was cancelled, expired or exceeded its budget"); },
       };
-      return await new Promise<Json>((resolve, reject) => {
-        const timer = globalThis.setTimeout(() => {
-          this.activeCommands.delete(id);
-          reject(new Error("AIS module command timed out"));
-          if (this.options.stopOnCommandTimeout) this.stop("Guest command timed out; reload to restart", true);
-        }, MAX_COMMAND_MS);
-        this.activeCommands.set(id, { context, resolve, reject, timer });
-        this.post({ vttAisRpc: AIS_RPC_TAG, kind: "command", id, commandId, input,
-          context: { sceneId: options.sceneId, callerId: options.callerId,
-            requestId: options.requestId, runAs: options.runAs, deadlineAt } });
-      });
+      const startedAt = Date.now();
+      try {
+        const result = await new Promise<Json>((resolve, reject) => {
+          const timer = globalThis.setTimeout(() => {
+            this.activeCommands.delete(id);
+            reject(new Error("AIS module command timed out"));
+            if (this.options.stopOnCommandTimeout) this.stop("Guest command timed out; reload to restart", true);
+          }, MAX_COMMAND_MS);
+          this.activeCommands.set(id, { context, resolve, reject, timer });
+          this.post({ vttAisRpc: AIS_RPC_TAG, kind: "command", id, commandId, input,
+            context: { sceneId: options.sceneId, callerId: options.callerId,
+              requestId: options.requestId, runAs: options.runAs, deadlineAt } });
+        });
+        this.record({ at: startedAt, kind: "command", name: commandId, ok: true, ms: Date.now() - startedAt });
+        return result;
+      } catch (error) {
+        this.record({ at: startedAt, kind: "command", name: commandId, ok: false, ms: Date.now() - startedAt,
+          error: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+        throw error;
+      }
     } finally { this.commandPending = false; }
   }
 
@@ -500,9 +596,15 @@ export class AisModuleIframe {
     if (this.disposed || !this.subscriptions.has(event)) return;
     void (async () => {
       await this.options.assertModuleActive?.();
-      if (this.options.isCapabilityCurrentlyGranted && !(await this.options.isCapabilityCurrentlyGranted("action.observe"))) return;
-      if (!this.disposed && this.subscriptions.has(event))
+      // D-476/D-483: the subscription capability is re-checked on delivery as well, so revocation
+      // takes effect without a reload (the first browser run of the settings form caught the gap).
+      const required = aisEventSubscriptionCapability(event);
+      if (required && this.options.isCapabilityCurrentlyGranted &&
+        !(await this.options.isCapabilityCurrentlyGranted(required))) return;
+      if (!this.disposed && this.subscriptions.has(event)) {
+        this.record({ at: Date.now(), kind: "event", name: event, ok: true });
         this.post({ vttAisRpc: AIS_RPC_TAG, kind: "event", event, payload });
+      }
     })().catch(() => {});
   }
 
@@ -510,6 +612,7 @@ export class AisModuleIframe {
     if (this.disposed) return;
     this.disposed = true;
     this.statusValue = { state: failed ? "failed" : "stopped", error: reason };
+    this.record({ at: Date.now(), kind: "lifecycle", name: failed ? "failed" : "stopped", ok: !failed, error: reason.slice(0, 200) });
     globalThis.clearTimeout(this.startupTimer);
     this.rejectReady(new Error(`AIS module ${this.packageId}: ${reason}`));
     globalThis.removeEventListener("message", this.onConnect);

@@ -8,7 +8,13 @@ import {
   type AisCapability,
   type AisModuleCommandDeclaration,
   type AisPackageCandidate,
+  type AisContributionDeclaration,
+  type AisPackageRequirement,
+  type AisPanelDeclaration,
   type AisResolution,
+  type AisSettingDeclaration,
+  type AisTokenActionDeclaration,
+  cloneAisSettingDeclaration,
 } from "../core/automationInterconnect";
 import { aisOwnSource, aisRuntimePackage, aisRuntimeResources } from "../packages/aisRuntimePackage";
 import { packageContentHash } from "../packages/packageHash";
@@ -38,7 +44,7 @@ import type {
 } from "../core/documents";
 import type { WorldId } from "../core/ids";
 import { HostSync, gmSessionUser, type HostEvents } from "../host/sync";
-import { AssetServer, wireManifestToStore } from "../host/assets";
+import { AssetServer, sha256Hex, wireManifestToStore } from "../host/assets";
 import { ImportPipeline } from "../host/import";
 import { HostPersister } from "../storage/persistence";
 import { listWorlds, openVttDb, type IDBPDatabase } from "../storage/idb";
@@ -58,6 +64,14 @@ import {
   WorkerSimRunner,
   type SimRunner,
 } from "../workers/simWorkerClient";
+import { importRulesModule } from "../sim/rulesLoader";
+import type { RulesModule } from "../core/rules";
+import type { WelcomeRulesArtifact } from "../core/messages";
+import { BUILTIN_SYSTEM_ID, BUILTIN_SYSTEM_VERSION } from "./builtinSystem";
+import { createWorldFromRecipe } from "./worldRecipe";
+import { loadFirstPartyRecipePackages, type FirstPartyPackage } from "./firstPartyPackages";
+import { importUiModule, type PackageUiModule } from "../packages/uiModuleLoader";
+export { BUILTIN_SYSTEM_ID, BUILTIN_SYSTEM_VERSION } from "./builtinSystem";
 import { MASS_BATTLE_SCHEMA_COLUMNS } from "../packages";
 import { readZipPackage } from "../packages/packageLoader";
 import { type CompendiumPack } from "../core/compendium";
@@ -92,14 +106,6 @@ import { verifyHello } from "../net/identity";
 
 export const GM_USER_ID = "gm";
 export const DEFAULT_SCENE_ID = "scene-1";
-/**
- * The built-in strategic ruleset (`src/packages/massBattleBasic.ts`) — what a world runs when
- * no §12 system package is active. `WorldsRecord.system` is either this id or the active
- * package's id, so the record (and the join welcome that echoes it) always names the ruleset
- * the sim actually boots with.
- */
-export const BUILTIN_SYSTEM_ID = "mass-battle-basic";
-export const BUILTIN_SYSTEM_VERSION = "1.0.0";
 
 export interface HostAppOptions {
   /** Injected DB handle (tests); default opens "vtt". */
@@ -118,6 +124,15 @@ export interface HostAppOptions {
    */
   simRunner?: SimRunner;
   now?: () => number;
+  /**
+   * D-473: when no world exists and one has to be created, create it on the first-party PF1e
+   * ruleset (with its content companion) instead of the built-in rules — the `?e2e=1&rules=pf1e`
+   * host route. Ignored when this build carries no first-party package (built-in, as before) and
+   * when a world already exists (nothing is created then).
+   */
+  firstPartyRules?: boolean;
+  /** Test seam: the first-party list to use instead of the build's embedded one. */
+  firstPartyPackages?: readonly FirstPartyPackage[];
 }
 
 export interface PackageSummary {
@@ -139,6 +154,17 @@ export interface PackageSummary {
   /** Manifest-declared callable entry points; these are not arbitrary string dispatch. */
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
+  /** D-468: delivered to players once approved (GM opt-out per module); false for non-modules. */
+  sharedWithPlayers: boolean;
+  /** D-469: the manifest forbids player execution (`sharing: "host-only"`). */
+  hostOnly: boolean;
+  /** D-470: declared sandboxed panel. */
+  panel?: AisPanelDeclaration;
+  /** D-476: schema-declared settings the packages view renders as a form. */
+  settings: AisSettingDeclaration[];
+  /** D-478: sibling modules this one depends on / contribution slots it fills (from the manifest). */
+  requires: AisPackageRequirement[];
+  provides: AisContributionDeclaration[];
   /** Exact-hash local code approval (separate from the world-shared enabled profile). */
   approved: boolean;
   /** §12 module asks for in-page execution (GM must grant). */
@@ -163,6 +189,22 @@ export interface HostAutomationModuleBoot {
   runtimeContext?: import("../core/documents").Json;
   runtimeDependencies?: Array<{ packageId: string; version: string; hash: string; capabilities: AisCapability[] }>;
   blockedReason?: string;
+  /** D-468: package display name, carried to players with the shared module. */
+  name: string;
+  /** D-468: false when the GM keeps this approved module on the host device only. */
+  sharedWithPlayers: boolean;
+  /** D-469: the manifest says `sharing: "host-only"` — never offered to players, whatever the GM ticks. */
+  hostOnly?: boolean;
+  /** D-469: manifest-declared token-menu entries (emitted back as `ui.token.action`). */
+  tokenActions?: AisTokenActionDeclaration[];
+  /** D-470: the module draws a panel in its own sandboxed document; the shell chromes it. */
+  panel?: AisPanelDeclaration;
+  /** D-476: schema-declared settings (world scope replicated, device scope local). */
+  settings?: AisSettingDeclaration[];
+  /** D-478: declared dependencies — the only modules this one may invoke through the kernel. */
+  requires?: AisPackageRequirement[];
+  /** D-478: contribution slots, shown to sibling modules through `modules.list`. */
+  provides?: AisContributionDeclaration[];
   capabilities: AisCapability[];
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
@@ -189,6 +231,17 @@ export interface HostAutomationModuleSummary {
   runtimeProviderId?: string;
   runtimeHash?: string;
   runtimeError?: string;
+  /** D-468: delivered to players once approved (default true; GM opt-out per module). */
+  sharedWithPlayers: boolean;
+  /** D-469: the manifest forbids player execution (`sharing: "host-only"`). */
+  hostOnly: boolean;
+  /** D-470: declared sandboxed panel (title only matters to the review UI). */
+  panel?: AisPanelDeclaration;
+  /** D-476: schema-declared settings. */
+  settings: AisSettingDeclaration[];
+  /** D-478: manifest dependencies / contribution slots (the review UI lists them). */
+  requires: AisPackageRequirement[];
+  provides: AisContributionDeclaration[];
   commands: AisModuleCommandDeclaration[];
   emittedEvents: string[];
 }
@@ -222,6 +275,19 @@ export interface HostRulesBoot {
   version: string;
   /** Why a package was refused at boot (validation/import error). */
   error: string | null;
+  /**
+   * D-471: whether the host page also holds the package's RulesModule (the same `rules.js` the
+   * worker validated) for its own dispatch — order validation in the army window, hero stats on
+   * resolve. `"builtin"` = mass-battle-basic (no package); a string = the in-page import failed
+   * and those features fall back to the built-in rules while the worker still runs the package.
+   */
+  inPage: "package" | "builtin" | { error: string };
+  /**
+   * D-475: the package's `ui.js` (window components) imported in-page — `"package"` when it
+   * loaded, `"none"` when the package declares no UI (or runs built-in), an error when the
+   * declared entry did not evaluate or failed the shape gate (the rules still run).
+   */
+  ui: "package" | "none" | { error: string };
 }
 
 export interface HostPackages {
@@ -269,6 +335,8 @@ export interface HostPackages {
   grantAutomationCapabilities(id: string, capabilities: AisCapability[], reviewedHash?: string, reviewedRuntimeHash?: string): Promise<{ ok: true } | { ok: false; error: string }>;
   /** Clear this package's local code/capability approval. */
   revokeAutomationApproval(id: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  /** D-468: keep an approved module on this device only (false) or deliver it to players (true, default). */
+  setAutomationSharing(id: string, shared: boolean): Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 export interface HostApp {
@@ -287,6 +355,13 @@ export interface HostApp {
   readonly pipeline: ImportPipeline;
   /** §12 what the sim booted with this world load. */
   readonly rulesBoot: HostRulesBoot;
+  /**
+   * D-471: the active system's RulesModule as loaded in the host page (null = built-in rules).
+   * This is the dispatch instance host code consumes instead of importing system symbols.
+   */
+  readonly rulesModule: RulesModule | null;
+  /** D-475: the active package's window components, or null (built-in rules / no UI / failed). */
+  readonly uiModule: PackageUiModule | null;
   /** §12 active package module entry for the sandboxed iframe (null = none). */
   readonly moduleBoot: HostModuleBoot | null;
   /** AIS independent multi-module runtime plan (local grants never enter its profile). */
@@ -363,6 +438,13 @@ function resolveAutomationState(
     const lock = profile.modules.find((entry) => entry.id === rec.id);
     const enabled = lock?.version === rec.version && lock.hash === hash;
     const savedGrant = world?.automationGrants?.[rec.id];
+    const hostOnly = rec.manifest.interconnect.sharing === "host-only";
+    const sharedWithPlayers = !hostOnly && world?.automationSharing?.[rec.id] !== false;
+    const tokenActions = rec.manifest.interconnect.tokenActions ?? [];
+    const panel = rec.manifest.interconnect.panel ? { ...rec.manifest.interconnect.panel } : undefined;
+    const settings = (rec.manifest.interconnect.settings ?? []).map((declaration) => cloneAisSettingDeclaration(declaration));
+    const requires = (rec.manifest.interconnect.requires ?? []).map((requirement) => ({ ...requirement }));
+    const provides = (rec.manifest.interconnect.provides ?? []).map((slot) => ({ ...slot }));
     let runtime: ReturnType<typeof aisRuntimePackage> = null;
     let runtimeError: string | undefined;
     try { runtime = aisRuntimePackage(rec, records); }
@@ -385,6 +467,12 @@ function resolveAutomationState(
       ...(rec.manifest.interconnect.runtime ? { runtimeProviderId: rec.manifest.interconnect.runtime.provider } : {}),
       ...(runtime ? { runtimeHash: runtime.hash } : {}),
       ...(runtimeError ? { runtimeError } : {}),
+      sharedWithPlayers,
+      hostOnly,
+      ...(panel ? { panel } : {}),
+      settings,
+      requires,
+      provides,
       commands,
       emittedEvents,
     });
@@ -394,8 +482,16 @@ function resolveAutomationState(
     if (!resolved) continue;
     bootModules.push({
       packageId: rec.id,
+      name: rec.name,
       version: rec.version,
       hash,
+      sharedWithPlayers,
+      ...(hostOnly ? { hostOnly: true } : {}),
+      ...(tokenActions.length > 0 ? { tokenActions: tokenActions.map((action) => ({ ...action })) } : {}),
+      ...(panel ? { panel: { ...panel } } : {}),
+      ...(settings.length > 0 ? { settings: settings.map((declaration) => cloneAisSettingDeclaration(declaration)) } : {}),
+      ...(requires.length > 0 ? { requires } : {}),
+      ...(provides.length > 0 ? { provides } : {}),
       source: runtime?.source ?? aisOwnSource(rec),
       resources: aisRuntimeResources(rec),
       ...(rec.manifest.interconnect.provides?.some((slot) => slot.id === "ui.theme" && slot.mode === "exclusive" && slot.contract === 1)
@@ -405,7 +501,8 @@ function resolveAutomationState(
         runtimeHash: runtime.hash,
         runtimeContext: { profile: rec.manifest.interconnect.runtime?.profile ?? "",
           configuration: runtime.configuration, packageId: rec.id,
-          providerId: runtime.provider.id, sourceHash: hash, runtimeHash: runtime.hash },
+          providerId: runtime.provider.id, sourceHash: hash, runtimeHash: runtime.hash,
+          ...(runtime.distribution ? { distribution: runtime.distribution as unknown as import("../core/documents").Json } : {}) },
         runtimeDependencies: [{ packageId: runtime.provider.id, version: runtime.provider.version,
           hash: packageContentHash(runtime.provider.files),
           capabilities: world?.automationGrants?.[runtime.provider.id]?.capabilities ?? [] }],
@@ -554,15 +651,35 @@ async function bootHostAppLocked(
       };
     } else {
       const worldId = `w-${globalThis.crypto.randomUUID().slice(0, 8)}`;
-      meta = {
-        worldId,
-        name: "World One",
-        system: BUILTIN_SYSTEM_ID,
-        systemVersion: BUILTIN_SYSTEM_VERSION,
-      };
-      lock.release = await acquireWorldLock(meta.worldId);
-      persister = await HostPersister.createWorld(db, meta, { now });
-      worldRec = await getWorld(db, worldId);
+      lock.release = await acquireWorldLock(worldId);
+      const firstParty = options.firstPartyRules
+        ? await loadFirstPartyRecipePackages(...(options.firstPartyPackages ? [options.firstPartyPackages] : []))
+        : null;
+      if (firstParty) {
+        // D-473: the recipe writes the package rows and the `activeRulesPackage` pin before the
+        // first boot, exactly as the New-world wizard does — no activate-then-reload step.
+        await createWorldFromRecipe(
+          { name: "World One", ruleset: { kind: "package", pkg: firstParty.ruleset }, content: firstParty.content },
+          { db, now, worldId },
+        );
+        persister = await HostPersister.open(db, worldId, { now });
+        worldRec = await getWorld(db, worldId);
+        meta = {
+          worldId,
+          name: "World One",
+          system: worldRec?.system ?? firstParty.ruleset.manifest.id,
+          systemVersion: worldRec?.version ?? firstParty.ruleset.manifest.version,
+        };
+      } else {
+        meta = {
+          worldId,
+          name: "World One",
+          system: BUILTIN_SYSTEM_ID,
+          systemVersion: BUILTIN_SYSTEM_VERSION,
+        };
+        persister = await HostPersister.createWorld(db, meta, { now });
+        worldRec = await getWorld(db, worldId);
+      }
     }
   }
 
@@ -819,9 +936,15 @@ async function bootHostAppLocked(
     packageId: null,
     version: "1.0.0",
     error: null,
+    inPage: "builtin",
+    ui: "none",
   };
+  let rulesModule: RulesModule | null = null;
+  let uiModule: PackageUiModule | null = null;
   let simSys: SysSchema = MASS_BATTLE_SCHEMA_COLUMNS;
   let rulesSource: string | undefined;
+  let rulesArtifact: WelcomeRulesArtifact | undefined;
+  let uiArtifact: WelcomeRulesArtifact | undefined;
   if (pkg && pkgSource !== undefined) {
     // §12 gate: the package is imported (blob URL) + validated INSIDE the
     // worker sandbox before any campaign may start; failure degrades cleanly
@@ -829,20 +952,57 @@ async function bootHostAppLocked(
     try {
       if (!runner.loadRules) throw new Error("runner cannot load packages");
       const info = await runner.loadRules(pkgSource, 5_000);
+      // D-471: the host page keeps its own copy of the validated package for dispatch (order
+      // validation, hero stats). Same source, same shape gate; the InlineSimRunner fallback has
+      // always imported it in-page, so this adds no new execution tier.
+      const inPage = await importRulesModule(pkgSource);
+      if (inPage.ok) rulesModule = inPage.value.module;
+      // D-475: the package's window components load in the page the same way; a UI that does
+      // not evaluate is the package's error to show, never a reason to drop its rules.
+      let uiBoot: HostRulesBoot["ui"] = "none";
+      const uiEntry = pkg.manifest.ui?.entry;
+      const uiSource = uiEntry === undefined ? undefined : pkg.files[uiEntry];
+      if (uiEntry !== undefined) {
+        if (uiSource === undefined) uiBoot = { error: `ui entry ${uiEntry} is missing from the package` };
+        else {
+          const imported = await importUiModule(uiSource);
+          if (imported.ok) {
+            uiModule = imported.value;
+            uiBoot = "package";
+          } else uiBoot = { error: imported.error };
+        }
+      }
       rulesBoot = {
         source: "package",
         packageId: pkg.id,
         version: info.version,
         error: null,
+        inPage: inPage.ok ? "package" : { error: inPage.error },
+        ui: uiBoot,
       };
       simSys = pkg.manifest.rules?.modelColumns ?? MASS_BATTLE_SCHEMA_COLUMNS;
       rulesSource = pkgSource;
+      // D-472: the same bytes travel to players as a content-addressed artifact on the assets
+      // channel, so a player shell can run the world's rules in-page after its own consent.
+      const artifactBytes = new TextEncoder().encode(pkgSource);
+      const artifactHash = await sha256Hex(artifactBytes);
+      host.publishArtifact(artifactHash, artifactBytes);
+      rulesArtifact = { hash: artifactHash, size: artifactBytes.byteLength, name: pkg.manifest.name };
+      // D-475: the UI the GM page could evaluate is published beside it, under the same consent.
+      if (uiBoot === "package" && uiSource !== undefined) {
+        const uiBytes = new TextEncoder().encode(uiSource);
+        const uiHash = await sha256Hex(uiBytes);
+        host.publishArtifact(uiHash, uiBytes);
+        uiArtifact = { hash: uiHash, size: uiBytes.byteLength, name: pkg.manifest.name };
+      }
     } catch (e) {
       rulesBoot = {
         source: "builtin",
         packageId: pkg.id,
         version: pkg.manifest.version,
         error: e instanceof Error ? e.message : String(e),
+        inPage: "builtin",
+        ui: "none",
       };
     }
   } else if (worldRec?.activeRulesPackage) {
@@ -851,6 +1011,8 @@ async function bootHostAppLocked(
       packageId: worldRec.activeRulesPackage,
       version: "1.0.0",
       error: "active package record missing or not a system package",
+      inPage: "builtin",
+      ui: "none",
     };
   }
   const moduleSource =
@@ -880,6 +1042,8 @@ async function bootHostAppLocked(
     schema: simSys,
     packageId: rulesBoot.packageId,
     version: rulesBoot.version,
+    ...(rulesArtifact ? { artifact: rulesArtifact } : {}),
+    ...(uiArtifact ? { ui: uiArtifact } : {}),
   });
   const bridge = new SimBridge(DEFAULT_SCENE_ID, {
     db,
@@ -897,6 +1061,7 @@ async function bootHostAppLocked(
     sceneId: DEFAULT_SCENE_ID,
     sys: simSys,
     seed: campaignSeed || 1,
+    ...(rulesModule?.leaderStats ? { leaderStats: rulesModule.leaderStats } : {}),
   });
 
   const pair = createTransportPair();
@@ -963,6 +1128,12 @@ async function bootHostAppLocked(
       ...(module?.runtimeError ? { runtimeError: module.runtimeError } : {}),
       commands: module?.commands ?? [],
       emittedEvents: module?.emittedEvents ?? [],
+      sharedWithPlayers: module?.sharedWithPlayers ?? false,
+      hostOnly: module?.hostOnly ?? false,
+      ...(module?.panel ? { panel: module.panel } : {}),
+      settings: module?.settings ?? [],
+      requires: module?.requires ?? [],
+      provides: module?.provides ?? [],
       approved: module?.approved ?? false,
       trustRequested: rec.manifest.module?.trusted === true,
       trusted: trustedIds.includes(rec.id),
@@ -1304,6 +1475,17 @@ async function bootHostAppLocked(
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
     },
+    async setAutomationSharing(id, shared) {
+      try {
+        const world = await getWorld(db, meta.worldId);
+        const next = Object.fromEntries(Object.entries(world?.automationSharing ?? {}).filter(([key]) => key !== id));
+        if (!shared) next[id] = false;
+        await persister.patchWorld({ automationSharing: Object.keys(next).length ? next : undefined });
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    },
     async compendia() {
       const out: Array<{
         packageId: string;
@@ -1370,6 +1552,7 @@ async function bootHostAppLocked(
     selectAutomationProvider: (slotId, providerRef) => mutatePackage(() => packageImpl.selectAutomationProvider(slotId, providerRef)),
     grantAutomationCapabilities: (id, capabilities, reviewedHash, reviewedRuntimeHash) => mutatePackage(() => packageImpl.grantAutomationCapabilities(id, capabilities, reviewedHash, reviewedRuntimeHash)),
     revokeAutomationApproval: (id) => mutatePackage(() => packageImpl.revokeAutomationApproval(id)),
+    setAutomationSharing: (id, shared) => mutatePackage(() => packageImpl.setAutomationSharing(id, shared)),
   };
   const cloudBackups = new CloudBackupController({
     worldId: meta.worldId,
@@ -1407,6 +1590,8 @@ async function bootHostAppLocked(
 
   return {
     rulesBoot,
+    rulesModule,
+    uiModule,
     moduleBoot,
     automationBoot,
     migrationBoot,

@@ -1120,6 +1120,10 @@ export interface PlayerSurface {
   /** Last presentation cue/rejection observed by this replica; useful for browser-sync diagnosis. */
   lastFxCue(): { runId: string; macroId: string; sceneId: string } | null;
   lastRejected(): { txId: string; reason: string; detail: string } | null;
+  /** D-481: the replicated world values of one AIS module's settings document (null = defaults). */
+  aisWorldSettings(packageId: string): Record<string, unknown> | null;
+  /** D-487: chat message texts this replica holds (cross-device bus assertions read them). */
+  aisChatTexts(): string[];
   /** D-271: the cell keys this replica holds. A closed cell is never sent, so this is the
    *  reveal set and nothing else — the browser half of the projection rule. */
   hexCellKeys(): string[];
@@ -1523,6 +1527,12 @@ export interface GmFogSurface {
    * must never change (it reads that player's map; every write stays the player's own).
    */
   fogStoredBytesFor(spec: { sceneId: string; userId: string }): Promise<number>;
+  /**
+   * D-488: seed a stored explored map of at least `bytes` for one user (a real, incompressible
+   * PNG). Lets an acceptance test put a payload **over the 256 KiB per-message cap** on the
+   * `fog.state` path without painting a giant map by hand.
+   */
+  fogSeedBig(spec: { sceneId: string; userId: string; bytes: number }): Promise<number>;
 }
 
 export interface RulesPackageSmokeResult {
@@ -1553,7 +1563,18 @@ export interface VttE2eSurface {
   modelsSmoke(): Promise<ModelsSmokeResult>;
   rulesPackageSmoke(): Promise<RulesPackageSmokeResult>;
   armiesSmoke(): Promise<ArmiesSmokeResult>;
-  heroOrdersSmoke(): Promise<HeroOrdersSmokeResult>;
+  /**
+   * D-471: the PF1e rules are no longer bundled; the spec hands over the built package's
+   * `rules.js` text (`systems/pf1e-mass-battles/rules.js`) and the hook imports it exactly like
+   * the host does — the harness exercises the real artifact, not an in-bundle twin.
+   */
+  heroOrdersSmoke(input: { rulesSource: string }): Promise<HeroOrdersSmokeResult>;
+  /**
+   * D-475: the package's `ui.js` (`systems/pf1e-mass-battles/ui.js`) is imported in the real
+   * bundle — against the Svelte runtime `main.ts` exposed — and its `battleAnalysis` component
+   * is mounted the way `ArmyWindow` mounts it, then read back from the DOM.
+   */
+  packageUiSmoke(input: { uiSource: string }): Promise<PackageUiSmokeResult>;
   visionSmoke(): Promise<VisionSmokeResult>;
   gridsSmoke(): Promise<GridsSmokeResult>;
   paritySmoke(): Promise<ParitySmokeResult>;
@@ -1599,6 +1620,8 @@ export interface PlayerCanvasSurface {
     sceneId: string | null;
     enabled: boolean;
     restored: boolean;
+    /** D-488: bytes of the stored map this replica restored (0 = nothing stored). */
+    restoredBytes: number;
     reveals: number;
     saves: number;
     explored: number;
@@ -1842,6 +1865,13 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
     },
     lastFxCue: () => lastFxCue,
     lastRejected: () => lastRejected,
+    aisWorldSettings: (packageId) => {
+      const doc = client()?.store.get("settings", `ais-settings:${packageId}`);
+      const values = (doc?.flags as { ais?: { values?: Record<string, unknown> } } | undefined)?.ais?.values;
+      return values && typeof values === "object" ? { ...values } : null;
+    },
+    aisChatTexts: () =>
+      (client()?.store.getAll("messages") ?? []).map((message) => String((message as { content?: unknown }).content ?? "")),
     hexCellKeys: () => {
       const scenes = client()?.store.getAll("scenes") ?? [];
       const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;
@@ -4539,7 +4569,62 @@ function orderLandedCheck(pending: number): boolean {
  * `ArmyWindow` component over a real `ClientSync` replica, so what is asserted is the op that
  * lands on the unit document — not a re-implementation of the component's logic.
  */
-async function runHeroOrdersSmoke(): Promise<HeroOrdersSmokeResult> {
+export interface PackageUiSmokeResult {
+  ok: boolean;
+  /** `main.ts` published the runtime before anything could import a package UI. */
+  runtimeExposed: boolean;
+  /** The slots the loaded module filled (the shape gate keeps only known ones). */
+  slots: string[];
+  /** The mounted component's heading, read back from the DOM. */
+  heading: string;
+  /** The summary cards it rendered for the synthetic report. */
+  cards: number;
+  /** The component's own styles reached the document (injected on mount, not shipped by the shell). */
+  styled: boolean;
+  error?: string;
+}
+
+async function runPackageUiSmoke(input: { uiSource: string }): Promise<PackageUiSmokeResult> {
+  const fail = (error: string): PackageUiSmokeResult => ({
+    ok: false, runtimeExposed: false, slots: [], heading: "", cards: 0, styled: false, error,
+  });
+  try {
+    if (typeof input?.uiSource !== "string" || input.uiSource.length === 0)
+      throw new Error("packageUiSmoke needs the built package's ui.js text (run `pnpm build:systems`)");
+    const [{ svelteRuntimeExposed }, { importUiModule }, { mount, unmount, flushSync }] = await Promise.all([
+      import("./svelteRuntime"),
+      import("../packages/uiModuleLoader"),
+      import("svelte"),
+    ]);
+    const runtimeExposed = svelteRuntimeExposed();
+    const loaded = await importUiModule(input.uiSource);
+    if (!loaded.ok) return { ...fail(`ui.js did not import in-page: ${loaded.error}`), runtimeExposed };
+    const slots = Object.keys(loaded.value.components);
+    const BattleAnalysis = loaded.value.components.battleAnalysis;
+    if (!BattleAnalysis) return { ...fail("battleAnalysis slot not filled"), runtimeExposed, slots };
+    const zero = {
+      unitId: "all", totalAttacks: 12, hits: 7, misses: 5, hitPercentage: 58, critThreats: 1, critsConfirmed: 1,
+      misfiresCount: 0, rawDamageDealt: 40, drAbsorbed: 5, drBypassed: 2, srBlocked: 0, netDamageDealt: 35,
+      damageHealed: 0, killsCount: 2, deathsCount: 1, savesPassed: 3, savesFailed: 1, aooExecuted: 0, aooHits: 0,
+      cmbSuccesses: 0, concentrationPassed: 0, concentrationFailed: 0,
+    };
+    const report = { totals: zero, units: { "u-a": { ...zero, unitId: "u-a" } } };
+    const target = globalThis.document.createElement("div");
+    globalThis.document.body.appendChild(target);
+    const instance = mount(BattleAnalysis, { target, props: { report } });
+    flushSync();
+    const heading = target.querySelector(".pf1e-analysis h3")?.textContent?.trim() ?? "";
+    const cards = target.querySelectorAll(".pf1e-analysis .summary-cards .card").length;
+    const styled = [...globalThis.document.querySelectorAll("style")].some((style) => (style.textContent ?? "").includes("pf1e-analysis"));
+    unmount(instance);
+    target.remove();
+    return { ok: heading.length > 0 && cards > 0, runtimeExposed, slots, heading, cards, styled };
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : String(e));
+  }
+}
+
+async function runHeroOrdersSmoke(input: { rulesSource: string }): Promise<HeroOrdersSmokeResult> {
   const fail = (error: string): HeroOrdersSmokeResult => ({
     ok: false,
     heroControls: false,
@@ -4569,7 +4654,7 @@ async function runHeroOrdersSmoke(): Promise<HeroOrdersSmokeResult> {
       { createTransportPair, flushMicrotasks },
       { mount, unmount },
       { default: ArmyWindow },
-      { createMassBattlePf1e },
+      { importRulesModule },
       { createMassBattleBasic },
     ] = await Promise.all([
       import("../core/store"),
@@ -4581,7 +4666,7 @@ async function runHeroOrdersSmoke(): Promise<HeroOrdersSmokeResult> {
       import("../net/memory"),
       import("svelte"),
       import("../ui/armies/ArmyWindow.svelte"),
-      import("../packages/massBattlePf1e"),
+      import("../sim/rulesLoader"),
       import("../packages/massBattleBasic"),
     ]);
     const store = new DocumentStore({
@@ -4692,7 +4777,11 @@ async function runHeroOrdersSmoke(): Promise<HeroOrdersSmokeResult> {
         await new Promise((r) => setTimeout(r, 0));
     };
 
-    const rules = createMassBattlePf1e();
+    if (typeof input?.rulesSource !== "string" || input.rulesSource.length === 0)
+      throw new Error("heroOrdersSmoke needs the built package's rules.js text (run `pnpm build:systems`)");
+    const imported = await importRulesModule(input.rulesSource);
+    if (!imported.ok) throw new Error(`PF1e rules package did not import in-page: ${imported.error}`);
+    const rules = imported.value;
     const host0 = globalThis.document.createElement("div");
     globalThis.document.body.appendChild(host0);
     const win = mount(ArmyWindow, {
@@ -6099,7 +6188,8 @@ export async function installE2eHook(app?: HostApp | null): Promise<void> {
     modelsSmoke: () => runModelsSmoke(),
     rulesPackageSmoke: () => runRulesPackageSmoke(),
     armiesSmoke: () => runArmiesSmoke(),
-    heroOrdersSmoke: () => runHeroOrdersSmoke(),
+    heroOrdersSmoke: (input) => runHeroOrdersSmoke(input),
+    packageUiSmoke: (input) => runPackageUiSmoke(input),
     visionSmoke: () => runVisionSmoke(),
     gridsSmoke: () => runGridsSmoke(),
     paritySmoke: () => runParitySmoke(),

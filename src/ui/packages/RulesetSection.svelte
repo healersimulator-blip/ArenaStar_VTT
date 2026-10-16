@@ -1,5 +1,8 @@
 <script lang="ts">
-  import type { AisRuntimeStatuses } from "../../app/aisRuntime";
+  import type { AisModuleSettingsView, AisModuleShellApi, AisRuntimeStatuses } from "../../app/aisRuntime";
+  import type { AisModuleDiagnostics } from "../../packages/aisHealth";
+  import type { AisSettingValue } from "../../core/automationInterconnect";
+  import AisSettingsForm from "./AisSettingsForm.svelte";
   /**
    * §12 the packages view (AIS v1 lands modules next to the ruleset/content view; D-248/D-249).
    * Lives in the Settings window: "which rules does this world run" is a settings question,
@@ -14,16 +17,69 @@
   import type { HostAutomationState, HostPackages, HostRulesBoot, PackageSummary } from "../../app/hostBoot";
   import type { AisCapability } from "../../core/automationInterconnect";
   import { classifyZip, packageKindLabel } from "../../host/zipKind";
+  import { firstPartyPackageBytes, firstPartyPackages } from "../../app/firstPartyPackages";
 
   let {
     packages,
     rulesBoot = null,
     aisRuntimeStatuses = {},
+    onOpenAisPanel = null,
+    aisModules = null,
   }: {
     packages: HostPackages;
     rulesBoot?: HostRulesBoot | null;
     aisRuntimeStatuses?: AisRuntimeStatuses;
+    onOpenAisPanel?: ((packageId: string) => void) | null;
+    /** D-476/D-479: settings form + health block of running modules (null before the world boots). */
+    aisModules?: AisModuleShellApi | null;
   } = $props();
+
+  // D-476: settings views load lazily when the GM expands a module's settings block.
+  let aisSettingsViews = $state<Record<string, AisModuleSettingsView | null>>({});
+  // A failed load is shown in place (never a "Loading…" that stays forever).
+  let aisSettingsErrors = $state<Record<string, string>>({});
+  // D-479: health snapshots refresh when the block is expanded or after an action.
+  let aisHealthViews = $state<Record<string, AisModuleDiagnostics | null>>({});
+  let aisHealthNotice = $state<Record<string, string>>({});
+
+  async function loadAisSettings(id: string): Promise<void> {
+    if (!aisModules) return;
+    try {
+      const view = await aisModules.settings(id);
+      aisSettingsViews = { ...aisSettingsViews, [id]: view };
+      aisSettingsErrors = Object.fromEntries(Object.entries(aisSettingsErrors).filter(([key]) => key !== id));
+    } catch (error) {
+      aisSettingsErrors = { ...aisSettingsErrors, [id]: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  // D-482: a module that registers settings at runtime (the Foundry adapter) grows its form after
+  // boot; a view that is already loaded is refreshed when the runtime reports a new count.
+  $effect(() => {
+    for (const [id, status] of Object.entries(aisRuntimeStatuses)) {
+      void status.settings;
+      if (Object.hasOwn(aisSettingsViews, id)) void loadAisSettings(id);
+    }
+  });
+
+  async function writeAisSetting(id: string, key: string, value: AisSettingValue): Promise<void> {
+    if (!aisModules) throw new Error("The world has not booted yet.");
+    await aisModules.setSetting(id, key, value);
+    await loadAisSettings(id);
+  }
+
+  function refreshAisHealth(id: string): void {
+    aisHealthViews = { ...aisHealthViews, [id]: aisModules?.diagnostics(id) ?? null };
+  }
+
+  async function restartAisModule(id: string): Promise<void> {
+    if (!aisModules) return;
+    const restarted = await aisModules.restart(id);
+    aisHealthNotice = { ...aisHealthNotice, [id]: restarted ? "Restarted from the approved boot definition." : "Not restartable here (not booted, or an adapter/appearance module)." };
+    refreshAisHealth(id);
+  }
+
+  const traceTime = (at: number): string => new Date(at).toLocaleTimeString();
 
   let pkgList = $state<PackageSummary[]>([]);
   let aisState = $state<HostAutomationState | null>(null);
@@ -93,6 +149,27 @@
     } finally {
       // let the same file be picked again after a fix
       if (pkgFileInput) pkgFileInput.value = "";
+      pkgBusy = false;
+    }
+  }
+
+  /**
+   * D-473: the packages this build ships (PF1e Mass Battles + Pathfinder 1e Core) can be added to
+   * an existing world without a file — the same `importZip` path, the same activate-then-reload
+   * step afterwards. Hidden once every first-party package is present.
+   */
+  const firstPartyMissing = $derived(firstPartyPackages().filter((entry) => !pkgList.some((p) => p.id === entry.id)));
+  async function installFirstParty(): Promise<void> {
+    pkgBusy = true;
+    pkgError = "";
+    try {
+      for (const entry of firstPartyMissing) {
+        const res = await packages.importZip(firstPartyPackageBytes(entry));
+        if (!res.ok) { pkgError = `${entry.name}: ${res.error}`; break; }
+        if (res.summary.type === "module" || res.summary.type === "system") aisPendingReload = true;
+      }
+      refresh();
+    } finally {
       pkgBusy = false;
     }
   }
@@ -224,6 +301,19 @@
     }
   }
 
+  /** D-468: sharing takes effect live (the host republishes `ais.profile`); no reload involved. */
+  async function setAisSharing(id: string, shared: boolean): Promise<void> {
+    pkgBusy = true;
+    pkgError = "";
+    try {
+      const result = await packages.setAutomationSharing(id, shared);
+      if (!result.ok) pkgError = result.error;
+      refresh();
+    } finally {
+      pkgBusy = false;
+    }
+  }
+
   const reloadWorld = (): void => {
     if (typeof location !== "undefined") location.reload();
   };
@@ -306,6 +396,13 @@
       rules: {rulesBoot.error}
     </p>
   {/if}
+  {#if rulesBoot && typeof rulesBoot.ui === "object"}
+    <!-- D-475: a package UI that did not evaluate is shown, not swallowed; the rules still run. -->
+    <p class="error" data-pkg-ui-error>
+      {rulesBoot.packageId ?? "The pinned ruleset"} ships window components that did not load —
+      its windows fall back to the shell's own views: {rulesBoot.ui.error}
+    </p>
+  {/if}
   {#each pkgList as p (p.id)}
     <div class="row" data-pkg-row data-pkg-id={p.id} data-pkg-type={p.type}>
       <span
@@ -377,6 +474,65 @@
         {#if p.runtimeProvider}<p class="hint" data-ais-runtime-provider>Runtime adapter: no standalone execution. Each guest requires separate approval; effective capabilities are the intersection of both grants.</p>{/if}
         {#if p.runtimeProviderId}<p class="hint" data-ais-runtime-binding>Experimental adapter-backed guest · {p.runtimeProviderId}. Review and enable the adapter first. Composition: {p.runtimeHash?.slice(0, 16) ?? "unresolved"}.</p>{/if}
         {#if p.runtimeError}<p class="error">{p.runtimeError}</p>{/if}
+        {#if p.panel}
+          <p class="hint" data-ais-panel-declared>
+            Panel: “{p.panel.title}” ({p.panel.width}×{p.panel.height}) drawn inside the module's own sandbox; the shell adds the window chrome.
+            {#if onOpenAisPanel}
+              <button type="button" data-ais-panel-open={p.id} disabled={aisRuntimeStatuses[p.id]?.state !== "ready"}
+                onclick={() => onOpenAisPanel?.(p.id)}>Open panel</button>
+            {/if}
+          </p>
+        {/if}
+        {#if p.settings.length + (aisRuntimeStatuses[p.id]?.settings ?? 0) > 0}
+          <details class="ais-settings" data-ais-settings={p.id} ontoggle={(event) => { if (event.currentTarget.open) void loadAisSettings(p.id); }}>
+            <summary>Settings ({p.settings.length + (aisRuntimeStatuses[p.id]?.settings ?? 0)}) · world values replicate to players, device values stay here</summary>
+            {#if !aisModules}
+              <p class="hint">Settings become editable once the world has booted.</p>
+            {:else if aisSettingsErrors[p.id]}
+              <p class="error" data-ais-settings-error={p.id}>{aisSettingsErrors[p.id]}</p>
+            {:else if aisSettingsViews[p.id]}
+              <AisSettingsForm packageId={p.id} declarations={aisSettingsViews[p.id]?.declarations ?? []} values={aisSettingsViews[p.id]?.values ?? {}}
+                disabled={pkgBusy} onChange={(key, value) => writeAisSetting(p.id, key, value)} />
+            {:else if aisSettingsViews[p.id] === null}
+              <p class="hint" data-ais-settings-error={p.id}>This module did not boot on this device, so its settings cannot be edited here (enable and approve it, then reload).</p>
+            {:else}
+              <p class="hint">Loading…</p>
+            {/if}
+          </details>
+        {/if}
+        {#if p.requires.length > 0}
+          <p class="hint" data-ais-requires>Requires sibling modules: {p.requires.map((entry) => `${entry.id}${entry.version ? ` ${entry.version}` : ""}${entry.optional ? " (optional)" : ""}`).join(", ")} — enable them first; this module may invoke their commands through the module bus.</p>
+        {/if}
+        {#if p.provides.length > 0}
+          <p class="hint" data-ais-provides>Provides: {p.provides.map((slot) => `${slot.id} (${slot.mode}, contract v${slot.contract})`).join(", ")}.</p>
+        {/if}
+        {#if aisModules && aisRuntimeStatuses[p.id]}
+          <details class="ais-health" data-ais-health={p.id} ontoggle={(event) => { if (event.currentTarget.open) refreshAisHealth(p.id); }}>
+            <summary>Health · {aisRuntimeStatuses[p.id]?.state}{#if aisRuntimeStatuses[p.id]?.error} — {aisRuntimeStatuses[p.id]?.error}{/if}</summary>
+            {#if aisHealthViews[p.id]}
+              {@const health = aisHealthViews[p.id]}
+              <p class="hint" data-ais-health-counters>
+                Requests {health?.counters.requests ?? 0} (failed {health?.counters.failures ?? 0}, rejected {health?.counters.rejected ?? 0}) ·
+                commands {health?.counters.commands ?? 0} (failed {health?.counters.commandFailures ?? 0}) · events {health?.counters.events ?? 0}
+                {#if health?.circuitOpenedAt} · circuit opened at {traceTime(health.circuitOpenedAt)}{/if}
+              </p>
+              {#if (health?.trace.length ?? 0) > 0}
+                <ul class="ais-trace">
+                  {#each (health?.trace ?? []).slice(-10).reverse() as entry, index (index)}
+                    <li class:error={!entry.ok}>{traceTime(entry.at)} · {entry.kind} {entry.name}{#if entry.ms !== undefined} · {entry.ms} ms{/if}{#if entry.error} · {entry.error}{/if}</li>
+                  {/each}
+                </ul>
+              {:else}
+                <p class="hint">No traffic recorded yet.</p>
+              {/if}
+            {:else}
+              <p class="hint">No health data: the module has not started on this device.</p>
+            {/if}
+            <button type="button" data-ais-refresh-health disabled={pkgBusy} onclick={() => refreshAisHealth(p.id)}>Refresh</button>
+            <button type="button" data-ais-restart disabled={pkgBusy || p.runtimeProvider} onclick={() => void restartAisModule(p.id)}>Restart module</button>
+            {#if aisHealthNotice[p.id]}<p class="hint" data-ais-health-notice>{aisHealthNotice[p.id]}</p>{/if}
+          </details>
+        {/if}
         {#if p.commands.length > 0}
           <p class="hint" data-ais-commands>Macro-callable commands: {p.commands.map((command) => `${command.id} (contract v${command.contract})`).join(", ")}. Calls require the separate reviewed script-macro grant.</p>
         {/if}
@@ -414,6 +570,15 @@
           <p class="hint">This module requests no host capabilities; approval still allows its sandboxed code to run.</p>
         {/if}
         {#if p.approved}
+          <label class="ais-share-players">
+            <input type="checkbox" data-ais-share-players checked={p.sharedWithPlayers} disabled={pkgBusy || p.hostOnly}
+              onchange={(event) => void setAisSharing(p.id, event.currentTarget.checked)} />
+            {#if p.hostOnly}
+              Host-only by the module's own declaration (<code>sharing: "host-only"</code>) — never run on player devices
+            {:else}
+              Players run this module too (they are asked for their own consent; their changes are limited to what they own)
+            {/if}
+          </label>
           <span data-ais-approved>Approved: {p.grantedCapabilities.length ? p.grantedCapabilities.join(", ") : "no capabilities"}</span>
           <button type="button" data-ais-revoke disabled={pkgBusy} onclick={() => revokeAisApproval(p.id)}>Revoke local approval</button>
           <button type="button" data-ais-update-grant disabled={pkgBusy} onclick={() => void approveAisModule(p.id, capabilitiesFor(p.id, p), p.hash, p.runtimeHash)}>Update capabilities</button>
@@ -447,6 +612,12 @@
       {#each aisState.resolution.issues as issue (`${issue.kind}:${issue.packageId ?? ""}:${issue.slotId ?? ""}:${issue.message}`)}
         <p class={issue.blocking ? "error" : "warn"} data-ais-issue>{issue.message}</p>
       {/each}
+    </div>
+  {/if}
+  {#if firstPartyMissing.length > 0}
+    <div class="row" data-pkg-first-party>
+      <span>Built into this release: {firstPartyMissing.map((entry) => `${entry.name} v${entry.version}`).join(", ")}</span>
+      <button type="button" data-pkg-install-first-party disabled={pkgBusy} onclick={() => void installFirstParty()}>Add to this world</button>
     </div>
   {/if}
   <div class="row">
@@ -534,11 +705,16 @@
     border: 1px solid #34465d;
     border-radius: 5px;
   }
+  .module-review .ais-share-players { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
   .module-review fieldset label {
     display: inline-flex;
     align-items: center;
     gap: 4px;
   }
+  .ais-settings, .ais-health { font-size: 13px; }
+  .ais-settings summary, .ais-health summary { cursor: pointer; }
+  .ais-trace { margin: 4px 0; padding-left: 18px; font-size: 12px; max-height: 160px; overflow: auto; }
+  .ais-trace li.error { color: var(--danger, #c0392b); }
   .ais-source-preview {
     width: 100%;
     min-width: 0;

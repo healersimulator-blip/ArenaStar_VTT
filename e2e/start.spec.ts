@@ -63,8 +63,11 @@ test.describe("start screen (D-249)", () => {
     const wizard = page.locator("[data-wizard]");
     await expect(wizard).toBeVisible();
     await expect(wizard).toContainText("Scenes start tactical");
-    await expect(wizard.locator("#wizard-ruleset-builtin")).toBeChecked();
+    // D-473: the shipped PF1e ruleset is the default; built-in is one click away.
+    await expect(wizard.locator("#wizard-ruleset-firstparty")).toBeChecked();
+    await expect(wizard.locator("[data-wizard-firstparty]")).toHaveAttribute("data-wizard-firstparty", "pf1e-mass-battles");
     await expect(wizard.locator("#wizard-ruleset-package")).toBeDisabled(); // nothing loaded yet
+    await wizard.locator("#wizard-ruleset-builtin").check();
     await wizard.locator("#wizard-name").fill("  Wizard World ");
     await wizard.locator("#wizard-create").click();
 
@@ -96,6 +99,30 @@ test.describe("start screen (D-249)", () => {
     await expect(wizard.locator("#wizard-create")).toBeDisabled();
     await wizard.locator("#wizard-cancel").click();
     await expect(rows).toHaveCount(1);
+  });
+
+  test("D-473: the wizard default creates a world on the shipped PF1e ruleset with its content pack, no file involved", async ({
+    page,
+  }) => {
+    await page.goto(entry);
+    await page.click("#new-world");
+    const wizard = page.locator("[data-wizard]");
+    await expect(wizard.locator("#wizard-ruleset-firstparty")).toBeChecked();
+    await expect(wizard).toContainText("built into this release");
+    await wizard.locator("#wizard-name").fill("Default World");
+    await wizard.locator("#wizard-create").click();
+
+    await expectHosting(page, "Default World");
+    await expect(page.locator("#status [data-rules-status]")).toHaveText("strategic rules: pf1e-mass-battles v1.0.0");
+    await expect(page.locator("[data-rules-boot-error]")).toHaveCount(0);
+
+    // Settings → Packages lists both first-party packages: the ruleset active, the companion beside it.
+    await page.click("#gm-settings");
+    const settings = page.locator('[data-window="settings"]');
+    await expect(settings.locator('[data-pkg-row][data-pkg-id="pf1e-mass-battles"] [data-pkg-active]')).toBeVisible();
+    await expect(settings.locator('[data-pkg-row][data-pkg-id="pf1e-core"]')).toBeVisible();
+    // nothing left to add from the build itself
+    await expect(settings.locator("[data-pkg-install-first-party]")).toHaveCount(0);
   });
 
   test("wizard with a ruleset file + content pack: dependency hint, misfiled zips sorted, world boots on the package", async ({

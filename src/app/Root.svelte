@@ -16,10 +16,13 @@
 
   let {
     autoHost = false,
+    autoHostFirstParty = false,
     onApp = null,
   }: {
     /** Boot the most recent (or a fresh default) world immediately — the e2e host route (D-045). */
     autoHost?: boolean;
+    /** D-473: a fresh default world is created on the first-party PF1e ruleset (`?e2e=1&rules=pf1e`). */
+    autoHostFirstParty?: boolean;
     /** Called with each booted HostApp (and null after it closes) — attaches the e2e surface. */
     onApp?: ((app: HostApp | null) => void | Promise<void>) | null;
   } = $props();
@@ -40,7 +43,9 @@
     mode = "hosting";
     bootError = null;
     try {
-      const booted = await bootHostApp(worldId ? { worldId: worldId as HostApp["worldId"] } : {});
+      const booted = await bootHostApp(
+        worldId ? { worldId: worldId as HostApp["worldId"] } : (autoHostFirstParty ? { firstPartyRules: true } : {}),
+      );
       app = booted;
       await onApp?.(booted);
     } catch (err) {

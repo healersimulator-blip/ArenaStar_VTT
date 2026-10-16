@@ -28,7 +28,22 @@ const entryPath = new URL(
 );
 const entrySource = readFileSync(entryPath, "utf8");
 
-function fixture(items: InventoryItem[]) {
+const SETTING_SCOPES: Record<string, "world" | "device"> = {
+  ignoreInventory: "world",
+  consumeConsumables: "world",
+  fallbackLight: "world",
+  defaultSourceId: "world",
+  quietNotices: "device",
+};
+const SETTING_DEFAULTS: Record<string, unknown> = {
+  ignoreInventory: false,
+  consumeConsumables: true,
+  fallbackLight: "20-40",
+  defaultSourceId: "torch",
+  quietNotices: false,
+};
+
+function fixture(items: InventoryItem[], options: { device?: "gm" | "player" } = {}) {
   const inventory = { items: structuredClone(items) };
   const token: Token = {
     id: "token-1",
@@ -47,8 +62,12 @@ function fixture(items: InventoryItem[]) {
   const selections: Array<{ title: string; options: UiOption[] }> = [];
   const applications: Array<Record<string, unknown>> = [];
   const notifications: Array<{ message: string; level: string }> = [];
-  const storage = new Map<string, unknown>();
+  // D-481: the torch reads its policy from manifest-declared settings (world = GM-authored and
+  // replicated; device = this browser). A player device is refused world writes by the kernel.
+  const settings = new Map<string, unknown>();
+  const settingWrites: Array<{ key: string; value: unknown }> = [];
   let nextSelection: string | null = null;
+  let inventoryError: string | null = null;
   let inventoryReads = 0;
   let actionListener: ((request: Request) => unknown) | null = null;
   const eventListeners = new Map<string, Set<(payload: unknown) => unknown>>();
@@ -84,6 +103,7 @@ function fixture(items: InventoryItem[]) {
     actor: {
       readInventory: async () => {
         inventoryReads += 1;
+        if (inventoryError) throw new Error(inventoryError);
         return inventory;
       },
     },
@@ -112,10 +132,21 @@ function fixture(items: InventoryItem[]) {
         return { ok: true };
       },
     },
-    storage: {
-      get: async (key: string) => storage.get(key) ?? null,
+    settings: {
+      list: async () => ({
+        settings: Object.keys(SETTING_SCOPES).map((key) => ({
+          key,
+          scope: SETTING_SCOPES[key],
+          value: settings.has(key) ? settings.get(key) : SETTING_DEFAULTS[key],
+        })),
+      }),
+      get: async (key: string) => (settings.has(key) ? settings.get(key) : SETTING_DEFAULTS[key]),
       set: async (key: string, value: unknown) => {
-        storage.set(key, structuredClone(value));
+        if (!(key in SETTING_SCOPES)) throw new Error(`setting ${key} is not declared`);
+        if (SETTING_SCOPES[key] === "world" && options.device === "player")
+          throw new Error("World-scope settings are changed with GM authority; this device is a player.");
+        settings.set(key, structuredClone(value));
+        settingWrites.push({ key, value: structuredClone(value) });
         return { ok: true };
       },
     },
@@ -168,7 +199,11 @@ function fixture(items: InventoryItem[]) {
     setSelection(value: string | null) {
       nextSelection = value;
     },
-    storage,
+    failInventory(message: string | null) {
+      inventoryError = message;
+    },
+    settings,
+    settingWrites,
     token,
   };
 }
@@ -275,10 +310,7 @@ describe("independent PF1e Torch AIS module", () => {
 
     f.setSelection("fallback:30:60");
     await f.dispatch("settings");
-    expect(f.storage.get("preferences")).toMatchObject({
-      fallbackBrightFt: 30,
-      fallbackDimFt: 60,
-    });
+    expect(f.settingWrites).toEqual([{ key: "fallbackLight", value: "30-60" }]);
 
     await f.dispatch("off");
     await f.dispatch("toggle");
@@ -336,6 +368,7 @@ describe("independent PF1e Torch AIS module", () => {
     const f = fixture([{ id: "item-candle", name: "Candle", quantity: 1 }]);
     f.setSelection("consume:off");
     await f.dispatch("settings");
+    expect(f.settingWrites).toEqual([{ key: "consumeConsumables", value: false }]);
     await f.dispatch("toggle");
     expect(f.applications.at(-1)).toMatchObject({
       sourceId: "candle",
@@ -344,5 +377,47 @@ describe("independent PF1e Torch AIS module", () => {
     });
     expect(f.applications.at(-1)).not.toHaveProperty("consumeItemId");
     expect(f.inventory.items[0]?.quantity).toBe(1);
+  });
+
+  // D-481: the policy is the GM's world setting; a player's copy of the module follows it as soon
+  // as the replicated value changes and cannot overwrite it.
+  test("follows the GM's replicated world policy on a player device and refuses to overwrite it", async () => {
+    const f = fixture([{ id: "item-torch", name: "Torch", quantity: 2 }], { device: "player" });
+    await f.dispatch("toggle");
+    expect(f.inventory.items[0]?.quantity).toBe(1);
+
+    f.settings.set("consumeConsumables", false); // the GM's change arrives through replication
+    await f.dispatch("off");
+    await f.dispatch("toggle");
+    expect(f.applications.at(-1)).toMatchObject({ sourceId: "torch", active: true });
+    expect(f.applications.at(-1)).not.toHaveProperty("consumeItemId");
+    expect(f.inventory.items[0]?.quantity).toBe(1);
+
+    f.setSelection("consume:on");
+    await f.dispatch("settings");
+    expect(f.settingWrites).toEqual([]);
+    expect(f.notifications.at(-1)).toMatchObject({ level: "warn" });
+    expect(f.notifications.at(-1)?.message).toMatch(/only the GM can change them/);
+    expect(f.notifications.at(-1)?.message).toMatch(/consumables are not consumed/);
+  });
+
+  test("the device-scope quietNotices setting mutes informational notices but not warnings", async () => {
+    const f = fixture([], { device: "player" });
+    f.setSelection("quiet:on");
+    await f.dispatch("settings");
+    expect(f.settingWrites).toEqual([{ key: "quietNotices", value: true }]);
+    expect(f.notifications.at(-1)).toMatchObject({ message: "Torch settings saved.", level: "info" });
+
+    const before = f.notifications.length;
+    f.setSelection("fallback");
+    await f.dispatch("select");
+    await f.dispatch("toggle");
+    expect(f.applications.at(-1)).toMatchObject({ sourceId: "personal-light", active: true });
+    expect(f.notifications.length).toBe(before);
+
+    await f.dispatch("off");
+    f.failInventory("sheet locked");
+    await f.dispatch("toggle");
+    expect(f.notifications.at(-1)).toMatchObject({ message: "Inventory could not be read: sheet locked", level: "warn" });
   });
 });

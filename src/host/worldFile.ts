@@ -1444,6 +1444,10 @@ export async function importWorldZip(
   if (trustedPackages.length > 0) world.trustedPackages = trustedPackages;
   world.automationProfile = automationProfile;
   if (Object.keys(automationGrants).length > 0) world.automationGrants = automationGrants;
+  // D-468: player-sharing opt-outs are a device preference like grants — kept across re-imports,
+  // never read from the archive.
+  if (existing?.automationSharing && Object.keys(existing.automationSharing).length > 0)
+    world.automationSharing = structuredClone(existing.automationSharing);
   void tx.objectStore(STORES.worlds).put(world);
   await tx.done;
 

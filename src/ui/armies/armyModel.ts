@@ -30,37 +30,25 @@ import type {
 import type { WallDocument } from "../../core/documents";
 import { worldSettingsFrom } from "../../core/worldSettings";
 import type { RulesModule } from "../../core/rules";
-import type { HostPackages } from "../../app/hostBoot";
 import { createMassBattleBasic } from "../../packages/massBattleBasic";
-import { createMassBattlePf1e } from "../../packages/massBattlePf1e";
 
 // ─── M14 (D-224) — production navigation for the army windows ────────────────
 
 /**
  * The Army Management Window validates orders and forecasts through a
- * client-side RulesModule (§10/§12 — the same convention e2eHook used, but
- * resolved from the campaign's ACTIVE system package, not hardcoded): a PF1e
- * campaign's orders validate against the PF1e module, the built-in campaign
- * against mass-battle-basic. Modules are bundled code; package content zips
- * never execute in-page (§12), so resolving by package id is the honest seam.
- * Memoized for the window's lifetime (package activation is a world-level
- * event; a re-opened window re-resolves because the module cache is keyed per
- * packages handle, see below).
+ * client-side RulesModule (§10/§12). D-471: the module is the host page's copy
+ * of the campaign's ACTIVE system package (`HostApp.rulesModule`, imported from
+ * the same `rules.js` the sim worker validated) — the shell no longer bundles
+ * or names any system; a world without an in-page package module (built-in
+ * campaign, player shell, in-page import failure) validates against
+ * mass-battle-basic, exactly as before for non-PF1e campaigns.
  */
-let armyWindowRulesCache: { packages: HostPackages | null; rules: Promise<RulesModule> } | null = null;
+let basicRules: RulesModule | null = null;
 
-export function armyWindowRules(packages: HostPackages | null): Promise<RulesModule> {
-  if (armyWindowRulesCache !== null && armyWindowRulesCache.packages === packages)
-    return armyWindowRulesCache.rules;
-  const rules = (async (): Promise<RulesModule> => {
-    if (packages === null) return createMassBattleBasic();
-    const list = await packages.list();
-    const active = list.find((p) => p.type === "system" && p.active);
-    if (active?.id === "pf1e-mass-battles") return createMassBattlePf1e();
-    return createMassBattleBasic();
-  })();
-  armyWindowRulesCache = { packages, rules };
-  return rules;
+export function armyWindowRules(rulesModule: RulesModule | null | undefined): RulesModule {
+  if (rulesModule) return rulesModule;
+  basicRules ??= createMassBattleBasic();
+  return basicRules;
 }
 
 // ─── Armies tab cards ─────────────────────────────────────────────────────────

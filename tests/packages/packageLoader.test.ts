@@ -91,6 +91,94 @@ describe("validatePackageManifest (§12)", () => {
     } }).ok).toBe(false);
   });
 
+  test("D-469: sharing and tokenActions are validated and normalized", () => {
+    const base = {
+      id: "typed-module", name: "Typed Module", version: "1.0.0", type: "module",
+      interconnect: { api: "arena.ais/1", entry: "module.js", capabilities: ["action.observe", "ui.interaction"] },
+    };
+    const ok = validatePackageManifest({ ...base, interconnect: {
+      ...base.interconnect, sharing: "host-only", tokenActions: [{ id: "mount", label: "  Mount up  " }, { id: "dismount", label: "Dismount" }],
+    } });
+    expect(ok).toMatchObject({ ok: true, value: { interconnect: {
+      sharing: "host-only", tokenActions: [{ id: "mount", label: "Mount up" }, { id: "dismount", label: "Dismount" }],
+    } } });
+    // Absent by default — a module that says nothing is shareable and adds no menu entries.
+    const plain = validatePackageManifest(base);
+    expect(plain.ok && plain.value.type === "module" ? plain.value.interconnect?.sharing : "set").toBeUndefined();
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, sharing: "everyone" } }))
+      .toMatchObject({ ok: false, error: 'package typed-module: interconnect.sharing must be "players" or "host-only"' });
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, tokenActions: [{ id: "a", label: "A", icon: "x" }] } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, tokenActions: [{ id: "mount", label: "" }] } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, tokenActions: [{ id: "mount", label: "M" }, { id: "mount", label: "N" }] } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: {
+      ...base.interconnect, capabilities: ["action.observe"], tokenActions: [{ id: "mount", label: "Mount" }],
+    } })).toMatchObject({ ok: false, error: "package typed-module: interconnect.tokenActions requires the ui.interaction capability" });
+  });
+
+  test("D-470: interconnect.panel is bounded, defaulted and tied to the ui.panel capability", () => {
+    const base = {
+      id: "typed-module", name: "Typed Module", version: "1.0.0", type: "module",
+      interconnect: { api: "arena.ais/1", entry: "module.js", capabilities: ["ui.panel"] },
+    };
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: " Loot " } } }))
+      .toMatchObject({ ok: true, value: { interconnect: { panel: { title: "Loot", width: 360, height: 420 } } } });
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: "Loot", width: 480, height: 160 } } }))
+      .toMatchObject({ ok: true, value: { interconnect: { panel: { title: "Loot", width: 480, height: 160 } } } });
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: "Loot", width: 100 } } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: "Loot", height: 720.5 } } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: "", width: 300 } } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, panel: { title: "Loot", icon: "x" } } }).ok).toBe(false);
+    expect(validatePackageManifest({ ...base, interconnect: { ...base.interconnect, capabilities: ["ui.notify"], panel: { title: "Loot" } } }))
+      .toMatchObject({ ok: false, error: "package typed-module: interconnect.panel requires the ui.panel capability" });
+  });
+
+  test("D-476: interconnect.settings is a bounded, typed schema with validated defaults", () => {
+    const base = {
+      id: "typed-module", name: "Typed Module", version: "1.0.0", type: "module",
+      interconnect: { api: "arena.ais/1", entry: "module.js", capabilities: ["module.settings.write"] },
+    };
+    const withSettings = (settings: unknown) => validatePackageManifest({ ...base, interconnect: { ...base.interconnect, settings } });
+    expect(withSettings([
+      { key: "radius", scope: "world", type: "number", label: " Radius ", hint: "In feet", default: 20, min: 0, max: 60, step: 5 },
+      { key: "sound", scope: "device", type: "boolean", label: "Sound", default: true },
+      { key: "mode", scope: "world", type: "choice", label: "Mode", default: "soft", choices: [{ value: "soft", label: " Soft " }, { value: "hard", label: "Hard" }] },
+      { key: "note", scope: "device", type: "string", label: "Note", default: "", maxLength: 40 },
+    ])).toMatchObject({ ok: true, value: { interconnect: { settings: [
+      { key: "radius", scope: "world", type: "number", label: "Radius", hint: "In feet", default: 20, min: 0, max: 60, step: 5 },
+      { key: "sound", scope: "device", type: "boolean", label: "Sound", default: true },
+      { key: "mode", scope: "world", type: "choice", label: "Mode", default: "soft", choices: [{ value: "soft", label: "Soft" }, { value: "hard", label: "Hard" }] },
+      { key: "note", scope: "device", type: "string", label: "Note", default: "", maxLength: 40 },
+    ] } } });
+    // A manifest without settings keeps the field absent.
+    const plain = validatePackageManifest(base);
+    expect(plain.ok && !Object.hasOwn(plain.value.interconnect ?? {}, "settings")).toBe(true);
+    const bad: Array<[unknown, string]> = [
+      [[{ key: "Radius", scope: "world", type: "number", label: "R", default: 1 }], "key matching"],
+      [[{ key: "r", scope: "global", type: "number", label: "R", default: 1 }], "scope must be"],
+      [[{ key: "r", scope: "world", type: "colour", label: "R", default: 1 }], "type must be"],
+      [[{ key: "r", scope: "world", type: "number", label: "", default: 1 }], "label of 1–48"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: "1" }], "default: setting r must be a finite number"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: 99, max: 10 }], "default: setting r must be between"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: 1, min: 5, max: 2 }], "min must not exceed max"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: 1, step: 0 }], "step must be positive"],
+      [[{ key: "r", scope: "world", type: "boolean", label: "R", default: true, min: 1 }], "min only applies to number"],
+      [[{ key: "r", scope: "world", type: "string", label: "R", default: "x", maxLength: 20000 }], "maxLength must be an integer 1–16384"],
+      [[{ key: "r", scope: "world", type: "choice", label: "R", default: "a" }], "choice settings need choices"],
+      [[{ key: "r", scope: "world", type: "choice", label: "R", default: "a", choices: [{ value: "a", label: "A" }] }], "needs 2–32 choices"],
+      [[{ key: "r", scope: "world", type: "choice", label: "R", default: "c", choices: [{ value: "a", label: "A" }, { value: "b", label: "B" }] }], "declared choices"],
+      [[{ key: "r", scope: "world", type: "choice", label: "R", default: "a", choices: [{ value: "a", label: "A" }, { value: "a", label: "B" }] }], "repeats choice a"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: 1, icon: "x" }], "unsupported field icon"],
+      [[{ key: "r", scope: "world", type: "number", label: "R", default: 1 }, { key: "r", scope: "device", type: "boolean", label: "S", default: false }], "repeats key r"],
+      [Array.from({ length: 33 }, (_, i) => ({ key: `k${i}`, scope: "device", type: "boolean", label: "K", default: false })), "at most 32 entries"],
+      [{ key: "r" }, "must be an array"],
+    ];
+    for (const [settings, message] of bad) {
+      const result = withSettings(settings);
+      expect(result.ok, JSON.stringify(settings)).toBe(false);
+      if (!result.ok) expect(result.error).toContain(message);
+    }
+  });
+
   test("rejects bad ids, names, versions, types", () => {
     expect(validatePackageManifest(systemManifest({ id: "Bad_ID" })).ok).toBe(false);
     expect(validatePackageManifest(systemManifest({ id: "x" })).ok).toBe(false); // too short
@@ -133,6 +221,19 @@ describe("validatePackageManifest (§12)", () => {
     expect(dataModule.ok).toBe(false);
     if (dataModule.ok) return;
     expect(dataModule.error).toContain("module block");
+  });
+
+  test("D-475: system packages may declare a ui entry (window components); data may not", () => {
+    const withUi = validatePackageManifest(systemManifest({ ui: { entry: "ui.js" } }));
+    expect(withUi.ok ? null : withUi.error).toBeNull();
+    if (withUi.ok) expect(withUi.value.ui?.entry).toBe("ui.js");
+    expect(validatePackageManifest(systemManifest({ ui: { entry: "../ui.js" } })).ok).toBe(false);
+    expect(validatePackageManifest(systemManifest({ ui: { entry: "" } })).ok).toBe(false);
+    expect(validatePackageManifest(systemManifest({ ui: "ui.js" })).ok).toBe(false);
+    const dataUi = validatePackageManifest(systemManifest({ type: "data", rules: undefined, ui: { entry: "ui.js" } }));
+    expect(dataUi.ok).toBe(false);
+    if (dataUi.ok) return;
+    expect(dataUi.error).toContain("ui block");
   });
 
   test("module.trusted is a validated boolean request flag", () => {
@@ -278,6 +379,28 @@ describe("readZipPackage / buildPackageFromFiles (§12)", () => {
       }),
     );
     expect(good.ok).toBe(true);
+  });
+
+  test("D-475: a declared ui entry must ship in the zip and be non-empty", async () => {
+    const missing = await readZipPackage(
+      zipOf({ "manifest.json": JSON.stringify(systemManifest({ ui: { entry: "ui.js" } })), "rules.js": RULES_JS }),
+    );
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error).toContain("ui entry ui.js is missing");
+    const empty = await readZipPackage(
+      zipOf({ "manifest.json": JSON.stringify(systemManifest({ ui: { entry: "ui.js" } })), "rules.js": RULES_JS, "ui.js": "   " }),
+    );
+    expect(empty.ok).toBe(false);
+    if (!empty.ok) expect(empty.error).toContain("ui entry is empty");
+    const good = await readZipPackage(
+      zipOf({
+        "manifest.json": JSON.stringify(systemManifest({ ui: { entry: "ui.js" } })),
+        "rules.js": RULES_JS,
+        "ui.js": "export default { api: 'arena.ui/1', components: {} };",
+      }),
+    );
+    expect(good.ok ? null : good.error).toBeNull();
+    if (good.ok) expect(good.value.manifest.ui?.entry).toBe("ui.js");
   });
 
   test("folder import path shares validation", () => {

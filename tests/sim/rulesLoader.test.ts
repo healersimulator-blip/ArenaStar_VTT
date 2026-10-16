@@ -98,6 +98,23 @@ describe("validateRulesModule (§12 contract)", () => {
     expect(nullNs.error).toContain("namespace");
   });
 
+  test("D-474: the characterImport seam is optional, but whole when present", async () => {
+    const base = `schema: { version: "1", modelColumns: {}, unitTypes: {}, orderTypes: [], subPhases: [] }, validateOrder(){}, resolveTurn(){}, detection(){}`;
+    const whole = await importRulesModule(
+      `export default { ${base}, characterImport: { pasteExample: "x", fileAccept: ".json", fileFormats: "f", pasteFormats: "p", read(){ return { ok: false, error: "no" }; } } };`,
+    );
+    expect(whole.ok).toBe(true);
+    if (!whole.ok) return;
+    expect(typeof whole.value.module.characterImport?.read).toBe("function");
+    const half = (await importRulesModule(
+      `export default { ${base}, characterImport: { read(){} } };`,
+    )) as { ok: boolean; error?: string };
+    expect(half.ok).toBe(false);
+    expect(half.error).toContain("characterImport");
+    const notObject = (await importRulesModule(`export default { ${base}, characterImport: true };`)) as { ok: boolean; error?: string };
+    expect(notObject.ok).toBe(false);
+  });
+
   test("syntax errors surface as Err, never a throw", async () => {
     const res = await importRulesModule("export default {{{{");
     expect(res.ok).toBe(false);

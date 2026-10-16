@@ -2,7 +2,7 @@ import { aisTagProposal, parseAisTagUpdate } from "../core/aisScene";
 import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE, STAIR_OFFER_TTL_MS, levelCreationOps, stairChoiceOps, stairChoicesHere, stairMovementPlan, type StairPrompt } from "../core/levelPlay";
 import { isScopedCollection } from "../core/levelMembership";
 import { levelFocusView, LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
-import type { LevelFocusMsg, StairChooseMsg, StairOfferMsg, StairRequestMsg } from "../core/messages";
+import type { AisBusMsg, AisProfileMsg, LevelFocusMsg, StairChooseMsg, StairOfferMsg, StairRequestMsg } from "../core/messages";
 import { fogVersionKey, fogLevelIdError, fogEpochError, LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "../core/levelFog";
 import { SaveWork } from "../storage/saveCoordinator";
 import { snapshotMoveEntry } from "../core/moveDestination";
@@ -271,7 +271,7 @@ import { segmentsCross } from "../canvas/vision/polygon";
 import { MAX_FOG_PNG_BYTES } from "../core/fogExploration";
 import type { AssetServer } from "./assets";
 import type { ImportPipeline } from "./import";
-import { AssetTransfer } from "../net/transfer";
+import { AssetTransfer, type AssetTransferOptions } from "../net/transfer";
 import type { EventBus, PermissionUser } from "../core";
 import type { Transport } from "../core/net";
 import { frameMessage, deframeMessage, channelFor } from "../net/frame";
@@ -347,12 +347,8 @@ export interface HostSyncOptions {
   assets?: AssetServer;
   /** Host-side image validation/derivation/storage used only after the upload gate succeeds. */
   pipeline?: Pick<ImportPipeline, "importImage">;
-  /** Transfer overrides (tests): chunk size, bandwidth cap, clock. */
-  assetTransfer?: {
-    chunkSize?: number;
-    bytesPerSecond?: number;
-    now?: () => number;
-  };
+  /** Transfer overrides (tests): chunk size, bandwidth cap, clock, pacing sleep. */
+  assetTransfer?: AssetTransferOptions;
   /**
    * D-250: where explored-fog maps live between sessions (hostBoot wires the IDB `fog`
    * store). Absent → fog.put is kept in memory only and fog.get answers from that.
@@ -856,12 +852,23 @@ export class HostSync {
   ) => Promise<boolean>;
   private readonly manifestSource: NonNullable<HostSyncOptions["manifest"]>;
   private readonly assets: AssetServer | null;
-  private readonly transfer: AssetTransfer | null;
+  private transfer: AssetTransfer | null;
+  private readonly transferOptions: NonNullable<HostSyncOptions["assetTransfer"]>;
+  /**
+   * D-472: content-addressed blobs the host publishes outside the asset manifest — today the
+   * active rules package's `rules.js`. Any approved session may fetch them on the `assets`
+   * channel; they are code the GM activated for the whole table, not scene media with an ACL.
+   */
+  private readonly artifacts = new Map<AssetId, Uint8Array>();
   private readonly pipeline: HostSyncOptions["pipeline"];
   private readonly rng: RngFn;
   private readonly now: () => number;
   private readonly scriptRunner: ScriptRunner;
   private aisMacroModuleInvoker: AisMacroModuleInvoker | null = null;
+  /** D-468: builds the shared AIS module set (`ais.profile`) for players; null = no runtime wired. */
+  private aisProfileProvider: (() => Omit<AisProfileMsg, "kind" | "seq" | "worldId">) | null = null;
+  /** D-487: delivers a relayed bus frame to the host device's own frames of that package. */
+  private aisBusRelay: ((msg: AisBusMsg) => void) | null = null;
   private readonly resolveSummonSource: HostSyncOptions["resolveSummonSource"];
   private readonly summonRequests = new Map<string, number>();
   private summonTimer: ReturnType<typeof setTimeout> | null = null;
@@ -894,6 +901,48 @@ export class HostSync {
   }
 
   /**
+   * D-472: publish a content-addressed blob (the active rules package's `rules.js`) that any
+   * approved session may fetch with `asset.get` on the `assets` channel. The transfer machinery
+   * is the §7 one (32 KB chunks, resume, per-peer pacing), so a 330 KB package needs no new
+   * framing on any transport. `hash` must be sha256(bytes) — the client verifies it before the
+   * code runs; a mismatch here would only make every fetch fail verification.
+   */
+  publishArtifact(hash: AssetId, bytes: Uint8Array): void {
+    this.artifacts.set(hash, bytes);
+    this.transfer ??= this.createTransfer();
+  }
+
+  /** Published artifact hashes (introspection / tests). */
+  publishedArtifacts(): AssetId[] {
+    return [...this.artifacts.keys()];
+  }
+
+  private createTransfer(): AssetTransfer {
+    return new AssetTransfer(
+      async (hash, offset, length, peerId) => {
+        const user = peerId ? this.sessions.get(peerId)?.user : null;
+        if (!user) return undefined; // indistinguishable from an unknown hash
+        const artifact = this.artifacts.get(hash);
+        if (artifact) {
+          // D-472: approved session is the whole gate — the GM activated this code for the table.
+          return { bytes: artifact.subarray(offset, offset + length), total: artifact.length };
+        }
+        // Re-check on EACH chunk, not only when queued: permissions and
+        // documents can change during a long premium-media transfer.
+        if (!canFetchAsset(this.store.world, this.manifestSource(), user, hash)) return undefined;
+        return this.assets?.read(hash, offset, length);
+      },
+      {
+        send: (peerId, chunk) => {
+          const session = this.sessions.get(peerId);
+          if (session?.user) this.send(session, chunk);
+        },
+      },
+      this.transferOptions,
+    );
+  }
+
+  /**
    * §5A/N01: set the active strategic battle (scene + package schema) that
    * every welcome announces, so joiners adopt it before their first sim frame
    * instead of guessing columns/scene. A *changed* announcement is re-sent to
@@ -909,6 +958,8 @@ export class HostSync {
         this.simInfo.sceneId === info.sceneId &&
         this.simInfo.packageId === info.packageId &&
         this.simInfo.version === info.version &&
+        this.simInfo.artifact?.hash === info.artifact?.hash &&
+        this.simInfo.ui?.hash === info.ui?.hash &&
         sameSchema(this.simInfo.schema, info.schema));
     if (same) return;
     this.simInfo = info;
@@ -1033,26 +1084,8 @@ export class HostSync {
     this.manifestSource =
       options.manifest ?? (() => this.store.world.assetManifest);
     this.assets = options.assets ?? null;
-    this.transfer = this.assets
-      ? new AssetTransfer(
-          async (hash, offset, length, peerId) => {
-            const user = peerId ? this.sessions.get(peerId)?.user : null;
-            // Re-check on EACH chunk, not only when queued: permissions and
-            // documents can change during a long premium-media transfer.
-            if (!user || !canFetchAsset(this.store.world, this.manifestSource(), user, hash)) {
-              return undefined; // indistinguishable from an unknown hash
-            }
-            return options.assets?.read(hash, offset, length);
-          },
-          {
-            send: (peerId, chunk) => {
-              const session = this.sessions.get(peerId);
-              if (session?.user) this.send(session, chunk);
-            },
-          },
-          options.assetTransfer ?? {},
-        )
-      : null;
+    this.transferOptions = options.assetTransfer ?? {};
+    this.transfer = this.assets ? this.createTransfer() : null;
     this.pipeline = options.pipeline;
     this.fogStore = options.fogStore ?? null;
     this.rng = options.rng ?? cryptoRng;
@@ -1065,6 +1098,69 @@ export class HostSync {
   /** The browser host wires this bridge to its already-approved AIS module iframes. */
   setAisMacroModuleInvoker(invoker: AisMacroModuleInvoker | null): void {
     this.aisMacroModuleInvoker = invoker;
+  }
+
+  /**
+   * D-468: the browser host registers the builder of the player-facing module set. Every
+   * welcomed session hears the current profile right after its snapshot/catch-up; the host
+   * republishes to all sessions on every change (`publishAisProfile`). The GM's own in-process
+   * client receives it too and simply ignores it.
+   */
+  setAisProfileProvider(provider: (() => Omit<AisProfileMsg, "kind" | "seq" | "worldId">) | null): void {
+    this.aisProfileProvider = provider;
+    this.publishAisProfile();
+  }
+
+  /** D-487: the browser host registers the local-delivery bridge for relayed bus frames. */
+  setAisBusRelay(relay: ((msg: AisBusMsg) => void) | null): void {
+    this.aisBusRelay = relay;
+  }
+
+  /**
+   * D-487: host-device emit. Relays to every authenticated session only when the package is in
+   * the current player-shared set (host-only packages never leave this device); the emitting
+   * frame already heard its own echo from the runtime.
+   */
+  publishAisBus(msg: Omit<AisBusMsg, "kind" | "worldId" | "by"> & { by: { id: string; name: string } }): void {
+    if (!this.currentAisProfile()?.modules.some((module) => module.packageId === msg.packageId)) return;
+    const frame: AisBusMsg = { kind: "ais.bus", worldId: this.store.meta.worldId, ...msg };
+    for (const session of this.sessions.values()) if (session.user) this.send(session, frame);
+  }
+
+  /**
+   * D-487: a player device's bus frame. Validated and re-stamped here, delivered to the host
+   * device's own frames of that package and relayed to every *other* session (the sender already
+   * echoed locally). Only packages in the current player-shared set may cross devices.
+   */
+  private handleAisBus(session: Session, msg: AisBusMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (!session.ephemeralBucket.tryRemove()) return; // fire-and-forget: drop on rate limit
+    if (typeof msg.packageId !== "string" || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(msg.packageId) ||
+        typeof msg.channel !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(msg.channel) ||
+        !boundedJson(msg.data, 16 * 1024) ||
+        (msg.worldId !== undefined && msg.worldId !== this.store.meta.worldId)) return;
+    if (!this.currentAisProfile()?.modules.some((module) => module.packageId === msg.packageId)) return;
+    const frame: AisBusMsg = {
+      kind: "ais.bus", worldId: this.store.meta.worldId, packageId: msg.packageId,
+      channel: msg.channel, data: msg.data, by: { id: caller.id, name: caller.name },
+    };
+    this.aisBusRelay?.(frame);
+    for (const other of this.sessions.values())
+      if (other.user && other.peerId !== session.peerId) this.send(other, frame);
+  }
+
+  /** Re-send the current shared module set to every authenticated session. */
+  publishAisProfile(): void {
+    const msg = this.currentAisProfile();
+    if (!msg) return;
+    for (const session of this.sessions.values()) if (session.user) this.send(session, msg);
+  }
+
+  private currentAisProfile(): AisProfileMsg | null {
+    const body = this.aisProfileProvider?.();
+    if (!body) return null;
+    return { kind: "ais.profile", worldId: this.store.meta.worldId, seq: this.store.seq, ...body };
   }
 
   // ─── Sessions ───────────────────────────────────────────────────────────────
@@ -1252,6 +1348,9 @@ export class HostSync {
         return;
       case "fx.stopMatching":
         this.handleFxStopMatching(session, msg);
+        return;
+      case "ais.bus":
+        this.handleAisBus(session, msg);
         return;
       case "automation.request":
         this.handleAutomationRequest(session, msg);
@@ -1728,6 +1827,9 @@ export class HostSync {
       ...(this.simInfo !== null ? { sim: this.simInfo } : {}),
     });
     this.catchUpSeq(session, hello);
+    // D-468: the shared AIS module set follows the documents it will read.
+    const aisProfile = this.currentAisProfile();
+    if (aisProfile) this.send(session, aisProfile);
     // A viewer loading the active scene it does not already hold hears `sceneLoad` — the
     // per-player half of MATT's scene trigger (its wiki: "triggers for each player loading
     // in"). Fired after the snapshot so the graph's own commits arrive as later ops; a scene
@@ -9218,7 +9320,8 @@ export class HostSync {
     if (!session.user) return; // requires an approved session (§16)
     if (!session.assetBucket.tryRemove()) return; // §16: silently dropped
     if (!this.transfer) return; // no asset server wired (unit: assets)
-    if (!canFetchAsset(this.store.world, this.manifestSource(), session.user, msg.assetId)) {
+    if (!this.artifacts.has(msg.assetId) &&
+        !canFetchAsset(this.store.world, this.manifestSource(), session.user, msg.assetId)) {
       // Same miss sentinel as an unknown asset: a guessed hash gives no
       // existence oracle, and the fetcher's promise can terminate.
       this.send(session, { kind: "asset.chunk", assetId: msg.assetId,

@@ -15,6 +15,7 @@
  *   reconnects the same user and the same grant instead of accumulating rows.
  */
 import type { ClientSync } from "../client/sync";
+import type { RulesModule } from "../core/rules";
 import type { HostSync } from "../host/sync";
 import type { StoreMeta } from "../core/store";
 import type { Op } from "../core/ops";
@@ -59,6 +60,12 @@ export interface AgentManagerOptions {
   importImage?:
     | ((bytes: Uint8Array, name: string, mime: string) => Promise<{ hash: string }>)
     | undefined;
+  /**
+   * D-474: the world's live rules module (`HostApp.rulesModule`). `actor.from_statblock` reads
+   * through its `characterImport` seam; without one it answers that this world's rules import no
+   * characters.
+   */
+  rules?: (() => RulesModule | null) | undefined;
 }
 
 export interface AgentManager {
@@ -204,6 +211,7 @@ export function createAgentManager(options: AgentManagerOptions): AgentManager {
               agentId: id,
               ...(options.compendia ? { compendia: options.compendia } : {}),
               ...(options.importImage ? { importImage: options.importImage } : {}),
+              ...(options.rules ? { rules: options.rules } : {}),
             }),
           );
         } else {
@@ -246,6 +254,7 @@ export function createAgentManager(options: AgentManagerOptions): AgentManager {
           agentId: id,
           ...(options.compendia ? { compendia: options.compendia } : {}),
           ...(options.importImage ? { importImage: options.importImage } : {}),
+          ...(options.rules ? { rules: options.rules } : {}),
         }),
       );
       return true;

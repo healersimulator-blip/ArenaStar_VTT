@@ -88,6 +88,10 @@ export const MsgKind = {
   "stair.offer": 0x5b,
   "stair.choose": 0x5c,
   "stair.request": 0x5d,
+  // D-468: host → player AIS module delivery (approved, shared module set).
+  "ais.profile": 0x5e,
+  // D-487: a package's cross-device channel frame (both directions; host stamps the sender).
+  "ais.bus": 0x5f,
   // D-394 — permitted personal macro authoring in the GM world (not execution).
   "macros.save": 0x51,
   // SQ-02 — private acknowledgement naming the exact host-approved run a requester may cancel.
@@ -865,6 +869,30 @@ export interface WelcomeSimInfo {
   packageId: string | null;
   /** Active rules version (package version, or the built-in's). */
   version: string;
+  /**
+   * D-472: the active package's `rules.js` as a content-addressed blob any approved session may
+   * fetch on the `assets` channel (`asset.get` with this hash, served from the host's published
+   * artifacts rather than the asset manifest). A player shell that loads it runs the world's
+   * own rules in-page (order validation, schema) — after this device's consent (not sandboxed).
+   * Absent for the built-in rules or when the host did not publish the artifact.
+   */
+  artifact?: WelcomeRulesArtifact;
+  /**
+   * D-475: the active package's `ui.js` — the window components it contributes — as a second
+   * published artifact under the same consent (or first-party trust) as `artifact`. Absent when
+   * the package ships no UI or the host did not publish it.
+   */
+  ui?: WelcomeRulesArtifact;
+}
+
+/** D-472: how a player fetches and verifies the active rules package. */
+export interface WelcomeRulesArtifact {
+  /** sha256 (hex) of the UTF-8 `rules.js` bytes; doubles as the asset id to request. */
+  hash: AssetId;
+  /** Byte length, so the shell can size the fetch and the consent prompt. */
+  size: number;
+  /** The package's display name (manifest `name`). */
+  name: string;
 }
 
 /** §6.4: after approval the client is welcomed, then receives the snapshot. */
@@ -1063,7 +1091,78 @@ export interface StairChooseMsg { kind: "stair.choose"; offerId: string; levelId
 /** G-08: client → host "take the stairs" for a token already standing in a stairwell. */
 export interface StairRequestMsg { kind: "stair.request"; sceneId: string; tokenId: string }
 
+/**
+ * D-468: one GM-approved AIS module as delivered to a player shell. The hash is the module's
+ * identity (player consent is keyed on it); `capabilities` are the host-granted capabilities
+ * restricted to the player-runnable subset — the host still authorizes every resulting op.
+ */
+export interface AisSharedModule {
+  packageId: string;
+  name: string;
+  version: string;
+  hash: string;
+  /**
+   * The module's executable source (runtime-provider composition included). On the wire either
+   * this or `payloadZ` is present: heavy modules travel deflated because one WebRTC user message
+   * caps at 256 KiB and a Foundry adapter composition measures ≈312 KiB raw (D-487).
+   */
+  source?: string;
+  resources?: Record<string, string>;
+  runtimeHash?: string;
+  runtimeContext?: Json;
+  /** D-487: deflateRaw(JSON of {source, resources?, runtimeContext?}); see `expandAisSharedModule`. */
+  payloadZ?: Uint8Array;
+  commands: import("./automationInterconnect").AisModuleCommandDeclaration[];
+  capabilities: import("./automationInterconnect").AisCapability[];
+  emittedEvents: string[];
+  /** D-469: manifest token-menu entries, shown at the player for tokens they control. */
+  tokenActions?: import("./automationInterconnect").AisTokenActionDeclaration[];
+  /** D-470: the module's sandboxed panel declaration (the player shell chromes it). */
+  panel?: import("./automationInterconnect").AisPanelDeclaration;
+  /** D-476: schema-declared settings; the player shell renders the device-scope ones. */
+  settings?: import("./automationInterconnect").AisSettingDeclaration[];
+  /** D-478: declared dependencies (the only modules this one may invoke on the player's device). */
+  requires?: import("./automationInterconnect").AisPackageRequirement[];
+  /** D-478: contribution slots, listed to sibling modules. */
+  provides?: import("./automationInterconnect").AisContributionDeclaration[];
+}
+
+/**
+ * D-468: the host's current shared AIS module set for one world. Sent after the welcome
+ * snapshot and again whenever the GM's approvals, grants or provider selections change; a
+ * module missing from a later profile must stop at the player. `providers` are the GM's
+ * exclusive-slot selections (`slotId → "packageId/contributionId"`).
+ */
+export interface AisProfileMsg {
+  kind: "ais.profile";
+  worldId: WorldId;
+  seq: number;
+  providers: Record<string, string>;
+  modules: AisSharedModule[];
+}
+
+/**
+ * D-487: one bounded frame of a package's cross-device channel (the kernel's socket: `AIS.bus`,
+ * `game.socket` for Foundry-profile modules). Host→client frames carry the relay; client→host
+ * frames are re-stamped with the sending session's user before any relay (`by` is never taken
+ * from the wire). Only the same package's frames on other devices receive it — no fan-out to
+ * other packages.
+ */
+export interface AisBusMsg {
+  kind: "ais.bus";
+  worldId: WorldId;
+  packageId: string;
+  /** 1–128 characters of [A-Za-z0-9._:-] — the package's own channel name. */
+  channel: string;
+  /** Bounded JSON ≤ 16 KiB. */
+  data: Json;
+  /** Sender identity, host-stamped on every relay. */
+  by: { id: string; name: string };
+}
+
 export type WireMessage =
+  | AisProfileMsg
+  | AisBusMsg
   | LevelFocusMsg
   | LevelFocusStateMsg
   | StairOfferMsg

@@ -17,6 +17,11 @@
     type WorldRecipe,
   } from "../../app/worldRecipe";
   import { openVttDb } from "../../storage/idb";
+  import {
+    firstPartySystemPackage,
+    loadFirstPartyRecipePackages,
+    type FirstPartyRecipePackages,
+  } from "../../app/firstPartyPackages";
 
   let {
     initialPackage = null,
@@ -30,7 +35,14 @@
   } = $props();
 
   let name = $state("New world");
-  let rulesetChoice = $state<"builtin" | "package">("builtin");
+  /**
+   * D-473: the ruleset ArenaStar ships in this build (PF1e Mass Battles + its content companion)
+   * is the default — the owner's call that a new world is a PF1e world unless the GM says
+   * otherwise. A build without the embed set has no such option and starts on the built-in rules.
+   */
+  const firstParty = firstPartySystemPackage();
+  let firstPartyPackages = $state.raw<FirstPartyRecipePackages | null>(null);
+  let rulesetChoice = $state<"firstparty" | "builtin" | "package">(firstParty ? "firstparty" : "builtin");
   // $state.raw: loaded packages go straight into IndexedDB (structured clone), which refuses
   // Svelte's deep-reactive proxies — and nothing mutates them in place anyway.
   let ruleset = $state.raw<RecipePackage | null>(null);
@@ -45,8 +57,18 @@
     ruleset:
       rulesetChoice === "package" && ruleset
         ? { kind: "package", pkg: ruleset }
-        : { kind: "builtin" },
-    content,
+        : rulesetChoice === "firstparty" && firstPartyPackages
+          ? { kind: "package", pkg: firstPartyPackages.ruleset }
+          : { kind: "builtin" },
+    // The first-party ruleset brings its declared companions; a pack the GM added under the
+    // same id wins (it is theirs), the rest are appended.
+    content:
+      rulesetChoice === "firstparty" && firstPartyPackages
+        ? [
+            ...content,
+            ...firstPartyPackages.content.filter((pkg) => !content.some((own) => own.manifest.id === pkg.manifest.id)),
+          ]
+        : content,
   });
   const check = $derived(checkRecipe(recipe));
   const rulesetInfo = $derived(ruleset ? describeRecipePackage(ruleset) : null);
@@ -122,6 +144,14 @@
   }
 
   $effect(() => {
+    if (!firstParty) return;
+    void loadFirstPartyRecipePackages().then(
+      (loaded) => { firstPartyPackages = loaded; },
+      (err: unknown) => { error = err instanceof Error ? err.message : String(err); rulesetChoice = "builtin"; },
+    );
+  });
+
+  $effect(() => {
     if (!initialPackage) return;
     const bytes = initialPackage;
     void loadRecipePackage(bytes).then((loaded) => {
@@ -156,6 +186,24 @@
       (heroes only); switch any scene under Settings → Scale. The ruleset can be changed
       until the first strategic turn is resolved.
     </p>
+    {#if firstParty}
+      <label class="choice">
+        <input
+          id="wizard-ruleset-firstparty"
+          type="radio"
+          name="ruleset"
+          value="firstparty"
+          bind:group={rulesetChoice}
+          disabled={!firstPartyPackages}
+        />
+        <span>
+          <b data-wizard-firstparty={firstParty.id}>{firstParty.name} v{firstParty.version}</b>
+          <small>built into this release{firstPartyPackages && firstPartyPackages.content.length > 0
+            ? ` · brings ${firstPartyPackages.content.map((pkg) => pkg.manifest.name).join(", ")}`
+            : ""}</small>
+        </span>
+      </label>
+    {/if}
     <label class="choice">
       <input
         id="wizard-ruleset-builtin"

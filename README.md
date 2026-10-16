@@ -10,7 +10,7 @@ the architecture spec in `uploads/VTT_Task.txt` (§0–§19) — see `PLAN.md`.
 ```sh
 pnpm install
 pnpm dev          # vite dev server
-pnpm build        # → dist/index.html (single file, ≤ 6 MB raw budget)
+pnpm build        # → dist/index.html (single file, ≤ 6 MB raw budget; runs build:systems first and embeds the first-party packages, D-473)
 pnpm test         # vitest unit tests
 pnpn typecheck    # tsc --noEmit
 pnpm lint         # eslint
@@ -40,6 +40,11 @@ Requires Node 20+ and pnpm 10.
 open `dist/index.html`, **Open file (.zip)** → `dist/worlds/pf1e-mass-battles-starter-1.0.0.zip`
 → **Open as new world**. The world boots with the PF1e strategic ruleset active and the PF1e
 Core compendia installed; nothing to activate, nothing to reload.
+
+**Or in one:** `pnpm build`, open `dist/index.html`, **New world** → Create. The build carries its
+own packages (D-473): the wizard's default ruleset is the shipped PF1e Mass Battles Engine with
+Pathfinder 1e Core beside it, no zip involved; "built-in" and "load a package" stay one click away,
+and Settings → Packages can add the shipped packages to an existing world the same way.
 
 ### Content: two ways in
 
@@ -102,12 +107,43 @@ without a reload; starting newly approved code still requires one. The acceptanc
 this lifecycle and the shipped Torch path over both `file://` and HTTPS. See D-461 and
 [E2E_BATCHES.md](E2E_BATCHES.md) for the verified scope; this is not yet the full AIS target design.
 
+**Players run shared modules too (D-468).** An approved module is shared with the table by default
+("Players run this module too" in its review). Each player is asked once per device and exact code
+hash; after allowing, the same sandboxed module runs on their machine against their own replica,
+and everything it writes is the player's own intent — the host's ownership rules decide, so a
+player lights the torch on *their* token from the token's right-click menu and is refused on anyone
+else's. Un-sharing or revoking stops the player's copy without a reload. The programme that
+continues this (player commands, shared sheets, native PF1e into the world file) is
+[AIS_PLAYER_RUNTIME_PLAN.md](AIS_PLAYER_RUNTIME_PLAN.md).
+
+**For module authors (D-476…D-479).** [AIS_MODULE_GUIDE.md](AIS_MODULE_GUIDE.md) is the one-page
+contract: manifest, lifecycle on GM and player devices, the `AIS.*` API with its capabilities and
+bounds. Modules declare **settings** in the manifest (world scope replicates to players as a
+document the GM edits; device scope stays local; both shells render the form), read the world's
+**compendium** packs on the GM device, call declared commands of modules they **require** through
+the module bus, and every running module has a **Health** block (counters, trace, breaker) with
+**Restart** in Settings → Packages and in the player's *Shared modules* card.
+
 **Runnable feasibility demo:** [Foundry through AIS](AIS_FOUNDRY_FEASIBILITY.md) loads original,
 byte-pinned Tagger 1.5.4 code through a separately packaged adapter, with host-validated tag writes
 and a small Sequence-style interface to our existing native FX engine. `test:fx:prepare` also builds
 `dist/worlds/ais-foundry-feasibility-0.1.0.zip`. The demo is GM-local and deliberately limited—not
 general Foundry compatibility. The [broader adapter proposal](FOUNDRY_AIS_ADAPTER_PROPOSAL.md)
 records the remaining workflow, UI, system and multiplayer work.
+
+**Unmodified Foundry modules (Target A, D-482…D-485):** a Foundry-format `module.json`
+distribution imports untouched; the `ais-foundry-v13` adapter (0.5.0,
+[`modules/ais-foundry-v13/README.md`](modules/ais-foundry-v13/README.md)) maps Foundry core APIs —
+settings, i18n, hooks, the Application/ApplicationV2 UI inside the module's sandboxed panel, and
+(D-485) the world documents (`game.actors`/`items`/`journal`/`tables`/`macros`/`folders`/
+`playlists`/`combats`/`users`, `Actor.create`, embedded Items/Pages/Effects, flags, `fromUuid`,
+`createActor`/`updateItem` hooks fed by replication) — onto AIS services and emulates the
+resources Foundry's host provides and modules never ship: ArenaStar's own core template library,
+core language keys, base CSS, `foundry.data.fields`/`DataModel`. Never Foundry's code or files.
+The layering (world ↔ generic AIS kernel ↔ adapter ↔ module), the authority model and the
+remaining slices (scenes, player side, sockets, packs, files) are in
+[`AIS_FOUNDRY_ARCHITECTURE.md`](AIS_FOUNDRY_ARCHITECTURE.md). GM-device only in this phase;
+modules that depend on the `pf1` system are a later target.
 
 ### Foundry UI appearances — ready-to-open laboratory
 
@@ -169,7 +205,9 @@ A GM handles **one file per campaign**: the world file. Everything else travels 
   (e.g. `systems/pf1e-mass-battles`). It drives **strategic** scenes only
   (heroes + units, Settings → Scale); tactical scenes (heroes only) never touch it,
   so one world can mix both kinds. It is chosen in **New world…** and pinned once the
-  first strategic turn is resolved.
+  first strategic turn is resolved. A ruleset may also ship `ui.js` (D-475) — window
+  components compiled against this build's Svelte runtime (the PF1e battle-analysis
+  view today) — which both the GM's and the players' shells load with the rules.
 - **Content pack** — a `manifest.json` with `type: "data"` and packs (e.g.
   `systems/pf1e-core`); its entries appear under Compendia. Chosen in **New world…** or
   added any time under Settings → *Strategic ruleset & content*.
@@ -263,6 +301,28 @@ ships a compressed Chromium plus a tarball of the system libraries it needs; unp
 point `LD_LIBRARY_PATH` at the library directory and pass its `executablePath()` to the
 variable above. That is how the acceptance runs in this repository's own sandbox were made
 (repeatedly, after the CDN turned out to be unreachable).
+
+The one-command form of that recipe is `pnpm e2e:browser`
+(`scripts/e2e/installHeadlessChromium.mjs`): it reads the revision Playwright expects from
+`playwright-core/browsers.json`, fetches the matching `@sparticuz/chromium` release from the npm
+registry, and lays the headless shell, its Amazon Linux libraries, SwiftShader and fonts out in
+`~/.cache/ms-playwright/chromium_headless_shell-<revision>/` with Playwright's own markers — so
+`playwright test --project=chromium` needs no executable-path override. `playwright.config.ts`
+recognises that layout and sets `LD_LIBRARY_PATH`/`FONTCONFIG_PATH` itself (the shipped
+`fonts.conf` points at `/var/task`, which otherwise renders every glyph zero-width). Measured on
+2026-10-15: install 4.5 s, then `pnpm test:fx:prepare && pnpm test:e2e:ais` → 18/18 (D-480).
+
+Environment facts for whoever runs this next (verified 2026-10-15): the agent sandbox is
+**Debian 12 (bookworm), glibc 2.36, kernel 6.1, 2 CPUs**, and only `registry.npmjs.org` /
+`pypi.org` / `github.com` are reachable. **Chromium 153.0.8010.0 runs on it with the bundled NSS
+libraries** — `ldd` on the headless shell shows exactly three libraries missing from the host,
+`libnss3.so`, `libnssutil3.so`, `libnspr4.so` (Debian's `libnss3` is not installed and `apt` has
+no egress); `al2023/lib` supplies them plus `libexpat.so.1`, `libplc4.so`, `libplds4.so`, and
+nothing else is needed (the rest resolves to the host's glibc). The Chromium sandbox starts
+normally — `PLAYWRIGHT_CHROMIUM_NO_SANDBOX` is **not** required here. A sandbox restore drops
+`node_modules`, `~/.cache` (the browser) and `/tmp`, and can rewind the local git HEAD:
+`git fetch && git reset origin/<branch> && corepack pnpm install --frozen-lockfile && pnpm
+e2e:browser` brings everything back in about ten seconds.
 
 **Unpack `swiftshader.tar.br` into the same directory as the `chromium` executable** (so
 `libEGL.so`, `libGLESv2.so`, `libvk_swiftshader.so` and `vk_swiftshader_icd.json` sit beside it).

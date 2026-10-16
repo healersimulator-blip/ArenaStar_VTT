@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { exportAnalyticsToCsv, type PF1eBattleReport } from "../../packages/pf1e/analytics";
+  import { exportAnalyticsToCsv, type PF1eBattleReport } from "../analytics";
 
   let { report }: { report: PF1eBattleReport } = $props();
 

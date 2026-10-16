@@ -340,6 +340,8 @@ describe("world.zip format 2 — the ruleset and content travel with the world (
       packageId: "probe-rules",
       version: "2.0.0",
       error: null,
+      inPage: "package",
+      ui: "none",
     });
     const store = rebooted.gm.client.store;
     const strategic = store.get("scenes", DEFAULT_SCENE_ID) as SceneDocument;

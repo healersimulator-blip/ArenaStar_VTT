@@ -52,6 +52,8 @@ import { secondsPerRoundOf, worldSettingsFrom } from "../../src/core/worldSettin
 import { readRollApplications } from "../../src/packages/pf1e/rollApply";
 import { agentRegistryFrom, agentRecordOf, grantOfRecord } from "../../src/core/agents/grants";
 import { agentWorldView } from "../../src/app/agentBridge";
+import { createMassBattlePf1e } from "../../src/packages/massBattlePf1e";
+import type { RulesModule } from "../../src/core/rules";
 import { callTool } from "../../src/core/agents/tools";
 
 const meta: StoreMeta = { worldId: "w1", name: "World One", system: "pf1e-core", systemVersion: "1.0.0" };
@@ -273,8 +275,10 @@ Skills Ride +6, Stealth +10
 Languages Goblin`;
 
 /** A tool context over the real session: its own replica, the compendia above, and its writer. */
-const ctxOf = (session: AgentSession, grant: AgentGrant): ToolContext => ({
-  view: agentWorldView(session.client, { compendia: async () => [BESTIARY] }),
+/** D-474: the character importers reach the agent through the world's rules module (the PF1e package in-page). */
+const PF1E_RULES = createMassBattlePf1e();
+const ctxOf = (session: AgentSession, grant: AgentGrant, rules: RulesModule | null = PF1E_RULES): ToolContext => ({
+  view: agentWorldView(session.client, { compendia: async () => [BESTIARY], rules: () => rules }),
   grant,
   writer: session.writer,
 });
@@ -751,6 +755,20 @@ describe("the library and the paste buffer, through a real host (§5.4)", () => 
     expect(actor?.ownership[session.user._id]).toBe(3);
     const scene = boot.store.get("scenes", "s1") as unknown as SceneDocument | undefined;
     expect((scene?.tokens ?? []).some((t) => t.actorId === actor?._id)).toBe(true);
+  });
+
+  test("D-474: without a rules module that imports characters, the tool says so and creates nothing", async () => {
+    const boot = await bootWorld();
+    const { session, grant } = await openAgent(boot, "gm", "Scribe");
+    const answered = await callTool(
+      { name: "actor.from_statblock", args: { text: GOBLIN_STATBLOCK } },
+      ctxOf(session, grant, null),
+    );
+    expect(answered.kind).toBe("result");
+    if (answered.kind !== "result") return;
+    expect(answered.result.isError).toBe(true);
+    expect(answered.result.content[0]?.text).toContain("import no characters");
+    expect(boot.store.getAll("actors")).toHaveLength(0);
   });
 
   test("a stat block the importer cannot play is refused, and nothing is created", async () => {

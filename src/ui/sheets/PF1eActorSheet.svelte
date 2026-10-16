@@ -3734,7 +3734,6 @@
 
   {#if compendiumPickerKind}
     <PF1eCompendiumPicker
-      {client}
       kind={compendiumPickerKind}
       onSelect={handleSelectCompendiumEntry}
       onClose={() => (compendiumPickerKind = null)}

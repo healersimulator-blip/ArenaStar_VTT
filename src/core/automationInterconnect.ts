@@ -24,8 +24,31 @@ export const AIS_EVENTS = [
   "ui.token.action",
   /** Namespaced events emitted by an approved AIS module; visible only to action observers. */
   "module.event",
+  /** D-476: one of this module's own declared settings changed (world scope via a commit, device scope locally). */
+  "module.settings.changed",
+  /** D-483: the user closed this module's own panel from the host chrome (the frame is hidden, not stopped). */
+  "ui.panel.closed",
+  /** D-485: a committed transaction touched documents of a collection exposed to modules (per-root entries). */
+  "documents.changed",
+  /** D-487: a frame of this package's cross-device channel (AIS.bus / the kernel's bounded socket). */
+  "bus.message",
 ] as const;
 export type AisEventName = (typeof AIS_EVENTS)[number];
+
+/**
+ * Capability a module needs to subscribe to an event. Host-state events need `action.observe`;
+ * a module's own settings carry no host state (D-476), and its own panel is covered by the
+ * `ui.panel` grant that made the panel exist (D-483).
+ */
+export function aisEventSubscriptionCapability(event: AisEventName): AisCapability | null {
+  if (event === "module.settings.changed") return null;
+  if (event === "ui.panel.closed") return "ui.panel";
+  // D-485: document change notifications carry document ids and diffs — the read grant covers them.
+  if (event === "documents.changed") return "documents.read";
+  // D-487: the channel is the package's own namespace; opting in is the bus grant itself.
+  if (event === "bus.message") return "bus.transmit";
+  return "action.observe";
+}
 
 /** Safe light projection delivered to AIS observers; it contains no token or actor document. */
 export interface AisTokenLightSnapshot {
@@ -66,6 +89,24 @@ export interface AisEventPayloads {
     eventId: string;
     /** Bounded JSON payload chosen by the source module. */
     payload: import("./documents").Json;
+  };
+  "module.settings.changed": {
+    scope: AisSettingScope;
+    key: string;
+    /** The effective value after the change (already coerced to the declaration). */
+    value: AisSettingValue;
+  };
+  "ui.panel.closed": {
+    /** Only the host chrome's Close button raises this; `ui.panel.close` from the module itself does not. */
+    reason: "user";
+  };
+  /** D-485: see `aisDocumentChanges` — one entry per op on an exposed collection, root-filtered. */
+  "documents.changed": import("./aisDocuments").AisDocumentsChangedPayload;
+  /** D-487: one bounded frame of a package's cross-device channel. `by` is host-stamped. */
+  "bus.message": {
+    channel: string;
+    data: import("./documents").Json;
+    by: { id: string; name: string };
   };
 }
 
@@ -129,6 +170,21 @@ export const AIS_CAPABILITIES = [
   "runtime.execute",
   "package.resources.read",
   "ui.theme",
+  // D-470: a host-chromed window around the module's own sandboxed document (AIS.ui.panel).
+  "ui.panel",
+  // D-476: write the module's own declared settings (world scope needs GM authority at the host).
+  "module.settings.write",
+  // D-477: read-only access to the world's imported compendium packs (index, search, entry payloads).
+  "compendium.read",
+  // D-478: call a declared command of another running module through the kernel (AIS.modules.invoke).
+  "modules.invoke",
+  // D-485: read the world documents this device's user can see (actors, items, journals, …) and
+  // observe their changes; write them as ordinary transactions under that user's authority.
+  "documents.read",
+  "documents.write",
+  // D-487: talk to the same package's instances on other devices over the kernel's bounded
+  // channel (AIS.bus; `game.socket` for Foundry-profile modules). Delivery is same-package only.
+  "bus.transmit",
 ] as const;
 export type AisCapability = (typeof AIS_CAPABILITIES)[number];
 
@@ -160,6 +216,8 @@ export interface AisModuleCommandDeclaration {
 export interface AisRuntimeProviderDeclaration {
   contract: 1;
   profiles: string[];
+  /** D-483: provider source files evaluated before `entry`, in order (each a safe package path). */
+  scripts?: string[];
 }
 
 export interface AisRuntimeBinding {
@@ -187,6 +245,103 @@ export interface AisInterconnectManifest {
   /** Package-local names permitted in `AIS.events.emit`; the host adds the source package ID. */
   emits?: string[];
   capabilities?: AisCapability[];
+  /**
+   * D-469: where the module may run. `players` (default) lets the GM share it with player
+   * devices (each player consents; the host still authorizes every write); `host-only` keeps it
+   * on the GM device — the author's choice for modules that write in reaction to observed events.
+   */
+  sharing?: AisModuleSharing;
+  /**
+   * D-469: entries both shells add to a token's context menu while the module runs; choosing
+   * one emits `ui.token.action` with `action: id` to this module (the generic form of the
+   * token-light slot). At a player they appear only for tokens that player controls.
+   */
+  tokenActions?: AisTokenActionDeclaration[];
+  /**
+   * D-470: the module draws its own UI inside its sandboxed iframe document; the shell shows that
+   * document in a window it chromes itself (title, origin, close). One panel per module; needs
+   * the `ui.panel` capability. The guest opens/closes it with `AIS.ui.panel.open()/close()`.
+   */
+  panel?: AisPanelDeclaration;
+  /**
+   * D-476: schema-declared module settings. `world` scope lives in a replicated `settings`
+   * document the GM owns (players read it, module writes need `module.settings.write` and GM
+   * authority); `device` scope is stored per device/world in IndexedDB. Both shells render the
+   * schema as a form; the module reads values with `AIS.settings.*` and observes
+   * `module.settings.changed`.
+   */
+  settings?: AisSettingDeclaration[];
+}
+
+export type AisSettingScope = "world" | "device";
+export type AisSettingType = "boolean" | "number" | "string" | "choice";
+export type AisSettingValue = boolean | number | string;
+export interface AisSettingChoice { value: string; label: string }
+export interface AisSettingDeclaration {
+  /** Package-local key, `^[a-z][a-zA-Z0-9_]{0,47}$`. */
+  key: string;
+  scope: AisSettingScope;
+  type: AisSettingType;
+  label: string;
+  hint?: string;
+  default: AisSettingValue;
+  /** Numbers: inclusive bounds and an optional step (integers when step is an integer). */
+  min?: number;
+  max?: number;
+  step?: number;
+  /** Strings: maximum length (≤ 16 384, default 256). */
+  maxLength?: number;
+  /** Choices: 2–32 entries; the value must be one of them. */
+  choices?: AisSettingChoice[];
+  /**
+   * D-482: not shown in the shells' forms (still listed by `settings.list`). The Foundry adapter
+   * uses it for `config: false` settings — module-internal state a Foundry module keeps in
+   * `game.settings` — which it stores as JSON text in a `string` setting.
+   */
+  hidden?: boolean;
+}
+export const AIS_MAX_SETTINGS = 32;
+/** D-482: `settings.register` at runtime may add this many declarations on top of the manifest's. */
+export const AIS_MAX_RUNTIME_SETTINGS = 64;
+export const AIS_MAX_SETTING_CHOICES = 32;
+
+/**
+ * A plain copy of one declaration. Shells keep `HostApp`/`PlayerApp` in Svelte `$state`, so a
+ * declaration read through the app is a reactive proxy — `structuredClone` and `postMessage`
+ * refuse proxies ("#<Object> could not be cloned"), which is exactly how the GM's settings form
+ * failed in the browser. Copy field by field instead; the result is always cloneable.
+ */
+export function cloneAisSettingDeclaration(declaration: AisSettingDeclaration): AisSettingDeclaration {
+  return {
+    key: declaration.key,
+    scope: declaration.scope,
+    type: declaration.type,
+    label: declaration.label,
+    ...(declaration.hint !== undefined ? { hint: declaration.hint } : {}),
+    default: declaration.default,
+    ...(declaration.min !== undefined ? { min: declaration.min } : {}),
+    ...(declaration.max !== undefined ? { max: declaration.max } : {}),
+    ...(declaration.step !== undefined ? { step: declaration.step } : {}),
+    ...(declaration.maxLength !== undefined ? { maxLength: declaration.maxLength } : {}),
+    ...(declaration.choices ? { choices: declaration.choices.map((choice) => ({ value: choice.value, label: choice.label })) } : {}),
+    ...(declaration.hidden ? { hidden: true } : {}),
+  };
+}
+export const AIS_MAX_SETTING_STRING = 16_384;
+
+export interface AisPanelDeclaration {
+  title: string;
+  /** CSS pixels, 240–960 (default 360). */
+  width: number;
+  /** CSS pixels, 160–720 (default 420). */
+  height: number;
+}
+
+export type AisModuleSharing = "players" | "host-only";
+
+export interface AisTokenActionDeclaration {
+  id: string;
+  label: string;
 }
 
 export interface AisModuleLock {

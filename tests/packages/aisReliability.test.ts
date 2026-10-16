@@ -37,6 +37,20 @@ describe("AIS RPC admission and lifecycle", () => {
     expect(post).toHaveBeenCalledWith(expect.objectContaining({ ok: false, error: "approval revoked" }));
   });
 
+  test("D-476: hearing one's own settings change needs no observe grant; host events still do", async () => {
+    const calls = handlers();
+    const subscribe = vi.fn();
+    const post = vi.fn();
+    const dispatcher = createAisModuleDispatcher(calls, new Set(), subscribe);
+    dispatcher.onFrame(request(1, "events.subscribe", { event: "module.settings.changed" }), post);
+    dispatcher.onFrame(request(2, "events.subscribe", { event: "world.snapshot" }), post);
+    await tick();
+    expect(subscribe).toHaveBeenCalledTimes(1);
+    expect(subscribe).toHaveBeenCalledWith("module.settings.changed");
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ id: 1, ok: true }));
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ id: 2, ok: false, error: "Capability not granted: action.observe" }));
+  });
+
   test("duplicate and replayed IDs cannot repeat a mutating request", async () => {
     const calls = handlers();
     const dispatcher = createAisModuleDispatcher(calls, new Set(["chat.post"]), vi.fn());
@@ -136,7 +150,7 @@ async function fixture() {
     db, worldId: `ais-test-${crypto.randomUUID()}`, packageId: "probe", emittedEvents: [],
     user: () => ({ id: "gm", name: "GM" }), activeScene: () => scene,
     actorById: (id) => id === actor._id ? actor : undefined, select: async () => null,
-    submit: vi.fn(async () => "tx-accepted"), notify: vi.fn(), emitModuleEvent: vi.fn(),
+    submit: vi.fn(async () => "tx-accepted"), notify: vi.fn(), emitModuleEvent: vi.fn(), busEmit: vi.fn(),
     newId: () => "message-1", assertCapability: async () => {},
   };
   return { db, actor, scene, context };
@@ -182,8 +196,10 @@ describe("AIS authoritative writes", () => {
       ]);
       expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled", "rejected"]);
       expect(quantities).toEqual([1, 0]);
-      expect(diffs[0]).toHaveProperty(["flags.ais.probe"]);
+      // The fixture token has no `flags.ais` yet: the namespace is created whole, never `flags`.
+      expect(diffs[0]).toHaveProperty(["flags.ais", "probe"]);
       expect(diffs[0]).not.toHaveProperty("flags");
+      expect(diffs[0]).not.toHaveProperty(["flags.ais", "other"]);
     } finally { db.close(); }
   });
 
@@ -252,7 +268,7 @@ describe("AIS authoritative writes", () => {
 
 describe("AIS exact boot identity and local consent", () => {
   const module: HostAutomationModuleBoot = {
-    packageId: "probe", version: "1.0.0", hash: "abc", source: "", capabilities: [...AIS_CAPABILITIES], commands: [], emittedEvents: [],
+    packageId: "probe", name: "Probe", version: "1.0.0", hash: "abc", sharedWithPlayers: true, source: "", capabilities: [...AIS_CAPABILITIES], commands: [], emittedEvents: [],
   };
   const world = (): WorldsRecord => ({
     worldId: "world-probe" as WorldsRecord["worldId"], name: "Probe", system: "test", version: "1.0.0",

@@ -21,6 +21,7 @@
  * writes the generated entries there instead of into `systems/` — that is what the tests use, so
  * a test run never mutates the tree.
  */
+import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,14 +38,62 @@ const RULES_SOURCES = {
   "pf1e-mass-battles": "src/packages/pf1e/rulesEntry.ts",
 };
 
+/**
+ * D-475: which source file each package's `ui.entry` is built from — Svelte components bundled
+ * with the Svelte runtime externalised to the shell's copy (see `SVELTE_RUNTIME_GLOBAL`), so a
+ * package component shares reactivity, context and scheduling with the shell that mounts it.
+ */
+const UI_SOURCES = {
+  "pf1e-mass-battles": "src/packages/pf1e/uiEntry.ts",
+};
+
+/** The global the shell publishes its Svelte runtime on (`src/app/svelteRuntime.ts`). */
+export const SVELTE_RUNTIME_GLOBAL = "__ARENASTAR_SVELTE__";
+/** The runtime modules the shell exposes; a component importing anything else fails the build. */
+export const SVELTE_RUNTIME_MODULES = ["svelte", "svelte/internal/client", "svelte/store"];
+
 /** Where the package folders live (each is one importable package). */
 const PACKAGE_ROOT = "systems";
 
 function listPackageDirs(systemsDir) {
   return readdirSync(systemsDir, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
+    .filter((e) => e.isDirectory() && !e.name.startsWith("."))
     .map((e) => e.name)
     .sort();
+}
+
+/**
+ * D-473: the first-party embed set. `vite.config.ts` reads `systems/.first-party/index.json`
+ * and inlines the listed zips (base64) plus each system package's `rules.js` sha256 into the
+ * shell, so a fresh world can activate ArenaStar's own PF1e package without a file on disk and
+ * a player shell recognises the artifact its GM announces as first-party (no consent prompt).
+ * Written next to the sources rather than under `dist/`, which `vite build` empties.
+ */
+export const FIRST_PARTY_DIR = join(repoRoot, PACKAGE_ROOT, ".first-party");
+
+function writeFirstPartyIndex(results, systemsDir) {
+  rmSync(FIRST_PARTY_DIR, { recursive: true, force: true });
+  mkdirSync(FIRST_PARTY_DIR, { recursive: true });
+  const index = [];
+  for (const { id, version, type, zip, manifest } of results) {
+    if (!zip) continue;
+    const file = `${id}-${version}.zip`;
+    cpSync(zip, join(FIRST_PARTY_DIR, file));
+    const entry = manifest.rules?.entry;
+    const rulesSha256 =
+      type === "system" && entry !== undefined
+        ? createHash("sha256").update(readFileSync(join(systemsDir, id, entry))).digest("hex")
+        : null;
+    // D-475: the package's ui.js is a second artifact under the same first-party trust.
+    const uiEntry = manifest.ui?.entry;
+    const uiSha256 =
+      type === "system" && uiEntry !== undefined
+        ? createHash("sha256").update(readFileSync(join(systemsDir, id, uiEntry))).digest("hex")
+        : null;
+    index.push({ id, name: manifest.name, version, type, dependencies: manifest.dependencies ?? [], zip: file, rulesSha256, uiSha256 });
+  }
+  writeFileSync(join(FIRST_PARTY_DIR, "index.json"), `${JSON.stringify(index, null, 2)}\n`);
+  return index;
 }
 
 /** Every file in a package folder, package-relative and deterministically sorted. */
@@ -107,6 +156,75 @@ export function toSingleDefaultExpression(code, fileLabel) {
   }
 
   return `export default (() => {\n${body}\nreturn ${local};\n})();\n`;
+}
+
+/**
+ * D-475: rewrite the bundler's remaining `svelte*` imports into reads from the shell's runtime
+ * global. The side-effect-only `svelte/internal/disclose-version` import is dropped (the shell
+ * already disclosed). Throws on a runtime module the shell does not expose, or on any other
+ * leftover import — the file must be self-contained apart from that global.
+ */
+export function rewriteSvelteRuntimeImports(code, fileLabel) {
+  const guard =
+    `const __arenaSvelte = globalThis[${JSON.stringify(SVELTE_RUNTIME_GLOBAL)}];\n` +
+    `if (!__arenaSvelte) throw new Error("arena.ui/1: the shell has not exposed its Svelte runtime");\n`;
+  let used = false;
+  const out = code.replace(
+    /^\s*import\s+(?:(\*\s+as\s+[A-Za-z0-9_$]+|\{[^}]*\}|[A-Za-z0-9_$]+)\s+from\s+)?["']([^"']+)["']\s*;?\s*$/gm,
+    (whole, clause, spec) => {
+      if (!spec.startsWith("svelte")) return whole;
+      if (clause === undefined) {
+        if (spec === "svelte/internal/disclose-version") return "";
+        throw new Error(`${fileLabel}: side-effect import of ${spec} is not supported`);
+      }
+      if (!SVELTE_RUNTIME_MODULES.includes(spec)) {
+        throw new Error(`${fileLabel}: imports ${spec}, which the shell does not expose (${SVELTE_RUNTIME_MODULES.join(", ")})`);
+      }
+      used = true;
+      const source = `__arenaSvelte[${JSON.stringify(spec)}]`;
+      const star = /^\*\s+as\s+([A-Za-z0-9_$]+)$/.exec(clause.trim());
+      if (star) return `const ${star[1]} = ${source};`;
+      const named = /^\{([^}]*)\}$/.exec(clause.trim());
+      if (named) {
+        const parts = named[1].split(",").map((part) => part.trim()).filter(Boolean)
+          .map((part) => part.replace(/^([A-Za-z0-9_$]+)\s+as\s+([A-Za-z0-9_$]+)$/, "$1: $2"));
+        return `const { ${parts.join(", ")} } = ${source};`;
+      }
+      return `const ${clause.trim()} = ${source}.default;`;
+    },
+  );
+  return used ? guard + out : out;
+}
+
+async function bundleUi(entrySource, outDir) {
+  const { build } = await import("vite");
+  const { svelte } = await import("@sveltejs/vite-plugin-svelte");
+  rmSync(outDir, { recursive: true, force: true });
+  const external = (id) => id === "svelte" || id.startsWith("svelte/");
+  await build({
+    configFile: false,
+    root: repoRoot,
+    logLevel: "warn",
+    // Styles ride inside the component (`append_styles`): the package is one file.
+    plugins: [svelte({ compilerOptions: { css: "injected" }, emitCss: false })],
+    build: {
+      outDir,
+      emptyOutDir: true,
+      minify: false,
+      sourcemap: false,
+      target: "es2022",
+      lib: {
+        entry: resolve(repoRoot, entrySource),
+        formats: ["es"],
+        fileName: () => "ui.js",
+      },
+      rolldownOptions: { external },
+      rollupOptions: { external },
+    },
+  });
+  const produced = join(outDir, "ui.js");
+  if (!statSync(produced).isFile()) throw new Error(`build produced no ui.js in ${outDir}`);
+  return readFileSync(produced, "utf8");
 }
 
 async function bundleRules(entrySource, outDir) {
@@ -202,10 +320,25 @@ export async function buildSystemPackages(opts = {}) {
       console.log(`${id}: using checked-in ${entry}`);
     }
 
+    const uiEntry = manifest.ui?.entry;
+    const uiSource = UI_SOURCES[id];
+    if (uiSource !== undefined) {
+      if (uiEntry === undefined) {
+        throw new Error(`${id}: a ui build source is registered but the manifest declares no ui.entry`);
+      }
+      const raw = await bundleUi(uiSource, join(tmpDir, `${id}-ui`));
+      const final = toSingleDefaultExpression(rewriteSvelteRuntimeImports(raw, `${id}/${uiEntry}`), `${id}/${uiEntry}`);
+      if (!dryRun) writeFileSync(join(dir, uiEntry), final);
+      console.log(`${id}: ${uiEntry} ${(final.length / 1024).toFixed(1)} kB (from ${uiSource})`);
+    } else if (uiEntry !== undefined && !statSync(join(dir, uiEntry), { throwIfNoEntry: false })?.isFile()) {
+      throw new Error(`${id}: manifest declares ui.entry "${uiEntry}" but no build source is registered in UI_SOURCES and the file does not exist`);
+    }
+
     const files = listPackageFiles(dir);
     // Mirror packageLoader's contract checks so a broken package fails the build, not the GM.
     for (const [label, path] of [
       ["rules.entry", entry],
+      ["ui.entry", uiEntry],
       ["module.entry", manifest.module?.entry],
       ...[...(manifest.packs ?? [])].map((pack) => [`pack ${pack.name}`, pack.file]),
     ]) {
@@ -223,9 +356,17 @@ export async function buildSystemPackages(opts = {}) {
         `${id}: ${manifest.version} → ${relative(repoRoot, zip)} (${(readFileSync(zip).length / 1024).toFixed(1)} kB)`,
       );
     }
-    results.push({ id, version: manifest.version, type: manifest.type, files, zip });
+    results.push({ id, version: manifest.version, type: manifest.type, files, zip, manifest });
   }
-  if (!dryRun && !staging) rmSync(tmpDir, { recursive: true, force: true });
+  if (!dryRun && !staging) {
+    rmSync(tmpDir, { recursive: true, force: true });
+    // Only a full in-place build describes the release; a staging/`--only` build must not
+    // leave a partial embed set behind for the shell to inline.
+    if (only === null) {
+      const index = writeFirstPartyIndex(results, systemsDir);
+      console.log(`first-party embed set: ${index.map((e) => `${e.id}@${e.version}`).join(", ")} → ${relative(repoRoot, FIRST_PARTY_DIR)}/`);
+    }
+  }
   return results;
 }
 

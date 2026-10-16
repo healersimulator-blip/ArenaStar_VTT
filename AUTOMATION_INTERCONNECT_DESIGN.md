@@ -37,7 +37,7 @@ The repository has a partial AIS v1 runtime and one app-integrated exclusive tok
 - Typed events are `world.snapshot`, `world.ops.committed`, `scene.token.light.changed`, `turn.phase.changed`, `turn.report.committed`, `ui.token.action`, and `module.event`. `scene.token.light.changed` is an after-commit host hook: it carries only the active scene's visible token ID and bounded light snapshot (including optional animation metadata), never raw ops or hidden-token data. `ui.token.action` is dispatched only to the selected `scene.token.light.action` provider from the native token context menu. A new `world.snapshot` subscriber receives the current sequence even though the GM welcome preceded module boot. Subscriptions are registered only after successful live authorization. A module can emit only names declared in its exact manifest; the host authenticates the source package and broadcasts to subscribers that separately hold `action.observe`.
 - Declared module commands can be registered with `AIS.commands.on` and called by ArenaStar's already-reviewed script macros through `api.ais.invoke(moduleId, commandId, input)`. Macro invocation requires a separate script grant and reviewed GM run-as; the target must be enabled, exact-hash approved and locally capable. Calls accept up to 16 KiB of bounded JSON, use an 8-second execution deadline, reserve the single per-module command slot before awaiting readiness/consent, propagate liveness through host RPCs, and cannot invoke raw module source or Foundry globals. Human selection is refused inside a macro command; it remains available to ordinary live module callbacks. This is a typed bridge into module-owned command handlers, not general `eval` or a Foundry-compatible macro runtime.
 - Light documents now support strict, declarative `torch` and `pulse` animation metadata (bounded rate/intensity and optional phase reversal). The host validates module-authored token-light updates; scene rendering applies modulation to placed, carried, and cross-floor light graphics, pauses it for reduced-motion users, and leaves light-range/vision calculations unchanged. Foundry imports retain only the supported metadata fields; no animation script or arbitrary renderer callback is accepted.
-- The `pf1e-torch` world module demonstrates the end-to-end path: PF1e light catalog, aliases, source choice/cycling, fallback and inventory preferences, optional consumable tracking, directional carried lighting, flame animation metadata, eight typed macro commands, and `torch.changed` / `torch.selected` events. Starter profiles may enable and select it, but no world ZIP approves code or grants capabilities. Its real native menu, host-committed consumption, text selection, persisted preferences and reviewed macro path now pass in Chromium over both file and HTTPS origins. Full Foundry parity remains incomplete and the conditional modding skill is therefore not included.
+- The `pf1e-torch` world module demonstrates the end-to-end path: PF1e light catalog, aliases, source choice/cycling, GM-authored world settings for fallback/inventory/consumption (D-481), optional consumable tracking, directional carried lighting, flame animation metadata, eight typed macro commands, and `torch.changed` / `torch.selected` events. Starter profiles may enable and select it, but no world ZIP approves code or grants capabilities. Its real native menu, host-committed consumption, text selection, replicated settings and reviewed macro path now pass in Chromium over both file and HTTPS origins. Full Foundry parity remains incomplete and the conditional modding skill is therefore not included.
 - RPC requests/results are limited to 64 KiB, 120 requests per second, and 32 concurrent requests per module. Module storage is bounded to 128 KiB per module, 256 keys, and 16 KiB per value. These are not a CPU budget. The iframe/CSP arrangement has not been audited across every target browser and cannot prove that arbitrary approved JavaScript is harmless or stop an infinite loop. Review the exact code and use disposable worlds when testing.
 - D-461 verification: **5,681 unit tests passed / 12 skipped**; typecheck and lint passed; the dedicated `test:e2e:ais` batch passed **12/12** real Chromium tests with no retries in **4.6 minutes**. Coverage includes both-origin approval/RPC/event/storage/revocation and Torch workflows, cross-module events, stale source replacement, runtime/startup failure, navigation (including before first load), command deadlines, grant changes and simultaneous command admission.
 - The current `pnpm size` measurement after `test:fx:prepare` is **5,319,995 raw bytes (5.074 MiB)** and 1,519,421 gzip bytes, below the 6 MiB main-file gate. Module entry sources remain in world package records and are not statically bundled.
@@ -96,6 +96,150 @@ before applying results. Native modal review and Ctrl+Alt+0 recovery stay outsid
 Verification: **5,721 unit tests passed / 12 skipped**, typecheck/lint/build/size passed, UI-adapter
 browser batch **3/3**, existing AIS browser batch **15/15**, adjacent shell/world tests **20/20**.
 The ordinary app is **5,355,180 raw bytes / 1,530,129 gzip bytes** (5.107 MiB raw), under the 6 MiB cap.
+
+### 0.4 Player-side execution of shared modules (D-468)
+
+The GM-only posture of 0.1–0.3 was an implementation stage, not a goal: the owner's rule is that
+the GM can share modules, UI and sheets with players, and the first acceptance case is the shipped
+`pf1e-torch` lighting a torch on a **player's own token from the player's own UI**. Slice P1a of
+[AIS_PLAYER_RUNTIME_PLAN.md](AIS_PLAYER_RUNTIME_PLAN.md) delivers exactly that:
+
+- a new `ais.profile` message (ops channel, after the welcome snapshot and on every change) carries
+  the GM-approved *shared* module set — archive, hash, commands and the host grant minus the
+  GM-device-only capabilities (`fx.play`, `scene.tags.write`, `ui.theme`);
+- each player allows each module per device, world and exact hash; GM approval is necessary and
+  never sufficient; un-sharing, revocation or a hash change stop the module without a reload;
+- the player runtime composes the unchanged sandboxed iframe and kernel RPC handlers over the
+  player's `ClientSync` replica, so every write is the player's own intent and the host's
+  `validateOps` + ownership decide (no authorization code changed);
+- the player shell gains a consent dialog, a choice dialog, notices and a token context menu with
+  the light entries; the GM's module review gains a per-module "Players run this module too" box.
+
+Verification: unit **5,775 passed / 12 skipped**, typecheck/lint/build clean, main file
+**5,723,400 B** (+24,504 B). The browser case `e2e/ais_player.spec.ts` joined `test:e2e:ais`;
+it was first executed on 2026-10-15 (D-480) and passes — a player lights and puts out the torch on
+their own token through the GM-shared module in a real Chromium. Later phases — player quickbar/chat commands, shared
+sheets/panels through a Svelte component-package contract, and moving the native PF1e logic into
+the world file — are planned there.
+
+**P1b (D-469)** added the generic player-side controls without touching any module:
+
+- `interconnect.sharing: "players" | "host-only"` — the author's own declaration; `host-only`
+  modules never enter `ais.profile` and the GM's sharing box is disabled with that reason (the
+  answer to the "every copy observes the same events" constraint of plan §4.7);
+- `interconnect.tokenActions: [{ id, label }]` (≤ 16, needs `ui.interaction`) — token-menu entries
+  in **both** shells, dispatched as the existing `ui.token.action { sceneId, tokenId, action }` to
+  the declaring module; at the player, disabled on tokens the player does not control;
+- `runAs: "player"` — a player's frame (`AisModuleIframe` with `playerCommands: true`) runs declared
+  commands as that player (`PlayerAisRuntime.invokeCommand`), with the host validating every op
+  under the player's ownership; the *Shared modules* card has a command runner for the selected
+  token. Host frames keep refusing anything but the reviewed `"gm"` elevation.
+
+**P2a (D-470)** gave third-party modules a UI surface without ever running their markup in the
+shell page: `interconnect.panel { title, width, height }` + capability `ui.panel`; the module draws
+inside its own sandboxed iframe document (it always had one — the frame was merely hidden) and the
+shell draws the window chrome around it (`src/packages/aisPanel.ts`, used by both shells; the
+iframe is created inside the panel body and never re-parented). `AIS.ui.panel.open()/close()` from
+the module, "Open panel" buttons in Settings → Packages and in the player's *Shared modules* card.
+
+**P3 step 1 (D-471)** started moving native PF1e into the world file: the strategic ruleset is no
+longer compiled into the main file — the host imports the active system package's `rules.js`
+in-page (`HostApp.rulesModule`) and consumes it through `RulesModule` seams (`leaderStats` for the
+hero overlay, order validation in the army window). Measured −50,252 B; main file 5,688,191 B.
+
+**P3 step 2 (D-472)** carried the same package to players: the host publishes `rules.js` under
+its sha256 and serves it through the §7 chunked asset transfer (no new op framing); every welcome
+names it in `sim.artifact`; `PlayerRulesPackage` verifies the digest, asks this device once per
+world/package/hash (the prompt states that a rules package runs unsandboxed), imports in-page and
+hands the module to the player's `WindowHost`. The same publish → announce → fetch → verify →
+consent → import path is what later package tiers (T2/T3, P2b component packages) will reuse.
+
+**P3 step 3 (D-473)** made the package the default rather than an import: the build embeds its own
+packages (`systems/.first-party/` → `__FIRST_PARTY_PACKAGES__`), the New-world wizard creates on
+the first-party ruleset by default (built-in and zip remain choices), `bootHostApp({ firstPartyRules })`
+does the same for the auto-hosted world, and `PlayerRulesPackage` loads an announced artifact whose
+hash is in the build's own list without the consent prompt — the "build-signed first-party hashes"
+the P2b row has been waiting for. Third-party packages and other builds of first-party packages
+still prompt.
+
+**P3 T1 (D-474)** moved the character importers into the package behind `RulesModule.characterImport`:
+the Actors tab in both shells and the agent bridge's `actor.from_statblock` read through the live
+module and offer nothing when it has no seam. Measured: `rules.js` +110,457 B, of which ≈61 KB are
+PF1e helpers the sheets still bundle — the duplication T2 has to remove before the single file
+shrinks again.
+
+**P2b (D-475)** built the component-package mechanism the UI tiers need, ahead of T2 because the
+import survey showed every host-imported tactical module is also a UI import (a logic-only seam
+moves no bytes). A system package may ship `ui.js` next to `rules.js` (`manifest.ui.entry`): Svelte's
+compiled output with the runtime externalised to the shell's copy — `main.ts` publishes
+`globalThis.__ARENASTAR_SVELTE__` (`svelte`, `svelte/internal/client`, `svelte/store`) and the build
+rewrites the package's imports into reads from it — evaluating to `{ api: "arena.ui/1", components }`.
+The host imports it in-page (`HostApp.uiModule`), publishes it as a second sha256 artifact (`sim.ui`)
+and both shells mount its components through slots they know (`battleAnalysis` first, the actor
+sheet next). The player's one consent record covers the rules/ui pair (`uiHash`); first-party trust
+needs both hashes. This is first-party-only by construction — a `ui.js` is bound to the shell's
+Svelte build — and sits beside, not instead of, P2a's sandboxed panels for third-party UI.
+
+### 0.5 Platform readiness slice: settings, compendium reads, module bus, diagnostics (D-476…D-479)
+
+After D-475 the kernel could run, share and show a module, but a module author still had nowhere
+to keep configuration, no way to read the world's content packs, no way to talk to a sibling
+module, and the GM had no view of what a running module was doing. The readiness review
+(`AIS_PF1E_MODULE_READINESS.md` §4.1) lists those as R-03, R-01 and R-05; §14 and §16.11 of this
+document ask for the diagnostics. One slice closed the four, with the same shape every time —
+manifest declaration → host validation → capability → RPC handler shared by both runtimes →
+shell UI → tests:
+
+- **Settings (D-476)** — `interconnect.settings[]` (≤ 32; `key`, `scope: world | device`,
+  `type: boolean | number | string | choice`, `label`, `hint`, `default`, bounds/choices), validated
+  with the manifest. RPC `settings.list / get / set`; writes need `module.settings.write`.
+  D-482 adds `settings.register` (same schema, declared from code, 64 per boot on top of the
+  manifest's 32) and `hidden: true` declarations (replicated, never rendered) so a Foundry
+  module's `game.settings.register` maps 1:1 onto the kernel service.
+- **Foundry distributions (D-482).** An archive with a `module.json` and no `manifest.json`
+  imports unmodified: the loader synthesizes the manifest (provider `ais-foundry-v13`, profile
+  `foundry-module`, every text file a resource), rewrites import specifiers in the resource view
+  to `ais-foundry://<pkg>/<path>` (`src/packages/foundryEsmGraph.ts`), and the adapter runs the
+  module's own ES modules from blob URLs behind one import map, mapping Foundry core APIs
+  (`game.settings`, `game.i18n`, `game.modules`, `ui.notifications`, hooks, projected scene
+  documents, transient FX) onto AIS services. `game.system.id` is `arenastar`, never `pf1`.
+  World values are one replicated `settings` document per module (`ais-settings:<pkg>`,
+  `flags.ais.values`, GM authority only — a player frame's world write is refused before any op is
+  built), device values are per-device IndexedDB rows. Both runtimes raise
+  `module.settings.changed { scope, key, value }`; players hear world changes through the replica.
+  `AisSettingsForm.svelte` renders the declarations in Settings → Packages (GM: both scopes) and in
+  the player's *Shared modules* card (device scope editable, world scope shown).
+- **Foundry application UI (D-483).** Imported Foundry modules are synthesized with `ui.panel` and
+  a 760×560 panel; the adapter's layered runtime (`runtimeProvider.scripts`: `hbs.js`, `jq.js`,
+  `ui.js`, evaluated before the provider's `entry`) implements `Application`/`FormApplication`/
+  `Dialog`/`ApplicationV2`/`HandlebarsApplicationMixin`/`DialogV2`, Handlebars and the jQuery subset
+  inside that frame. The kernel's ninth event, `ui.panel.closed { reason: "user" }`, is raised by
+  the chrome's Close button in both runtimes; subscription and delivery are gated per event
+  (`aisEventSubscriptionCapability`: host events `action.observe`, own settings none, own panel
+  `ui.panel`). The module iframe keeps no `allow-forms`; the layer synthesises `SubmitEvent`s.
+- **Compendium reads (D-477)** — `compendium.list / search / get` over the packs of every imported
+  content package (`<packageId>/<packFile>` ids, bounded hits, 48 KiB entry cap, copies only).
+  Capability `compendium.read` is GM-device-only: players have no replica of the package store, so
+  the kernel refuses at the player rather than pretending.
+- **Module bus (D-478)** — `modules.list` (sibling modules: running state, commands, provides,
+  emits) and `modules.invoke { moduleId, commandId, input }` (capability `modules.invoke`), allowed
+  only toward a module named in the caller's `interconnect.requires`, depth ≤ 8, never toward
+  itself; the target runs the command exactly as a shell invocation would — with the device's
+  authority (`runAs: "gm"` on the host, `"player"` at the player), its own grant, and a
+  `requestId: ais-module:<caller>:<n>` it can log. `requires`/`provides` now ride in
+  `ais.profile` and in the packages view.
+- **Diagnostics (D-479)** — every frame keeps a 64-entry trace ring and counters (`requests`,
+  `failures`, `rejected`, `commands`, `commandFailures`, `events`) in `src/packages/aisHealth.ts`;
+  a breaker trips after 50 failed or rejected requests inside 10 s, stops the frame with the reason
+  in its status, and both shells offer **Restart** (from the frozen boot definition on the host;
+  with the existing consent at the player). The GM's module review shows a *Health* block
+  (counters, circuit state, last traces); `AisRuntime.diagnostics()` /
+  `PlayerAisRuntime.diagnostics()` expose the same data to tests and agents.
+
+What stayed as it was: the authority rule (every write is still an ordinary op the host
+validates), the budgets of §9, and the loader (one IIFE per module — R-09 remains the known
+residual; R-08, the `pf1.*` namespace, is excluded by design). The settings, compendium and bus
+contracts are listed for authors in [AIS_MODULE_GUIDE.md](AIS_MODULE_GUIDE.md).
 
 ## 1. Goals and non-goals
 
@@ -416,6 +560,7 @@ No script-returned `true`, player-supplied roll total, or module-supplied permis
 - Prompts return typed player responses. The host stores a continuation token, validates the response once, then re-reads and revalidates world state before resuming.
 - Module versions, API contract versions, hashes, required features, and selected exclusive providers are part of the world profile. Host/player negotiation happens before features that need local UI or matching logic are used.
 - Mechanics remain host-resolved even when player UI code is missing. A client with no optional UI module sees the core fallback; a missing required rules provider is a compatibility error, never an invisible ruleset change.
+- (D-468) Player-side module code is **the same archive the GM approved**, delivered by the host in `ais.profile` and keyed by hash; it runs under the player's identity against the player's visibility-filtered replica, and its writes are ordinary intents — the host's permission path is the only authority for them, exactly as for a human player's own edits.
 - Module-produced player UI is client-side presentation only. It gets that player's projected data and can request actions through the host; it never gets GM documents or host-only secrets.
 
 ### Budgets and failure containment
@@ -520,7 +665,7 @@ The actual file layout may reuse `world.json`/`packages.json`, but it must be ve
 
 ### Configuration and migrations
 
-Package settings are namespaced by `worldId/packageId/schemaVersion`. Values are JSON, size/depth bounded, validated before persistence, and never share keys with other modules. Upgrade migrations are declarative where possible. Any executable migration runs in the same restricted context, is previewed as a diff, has an explicit backup/rollback plan, and runs only after GM confirmation. Imports never run migrations merely because an archive was opened.
+Package settings are namespaced by `worldId/packageId/schemaVersion`. Values are JSON, size/depth bounded, validated before persistence, and never share keys with other modules. **Implemented (D-476):** the schema is the manifest's `interconnect.settings[]`; world-scope values are a replicated `settings` document per module (`ais-settings:<packageId>`, `flags.ais.values`, exported with the world, written by GM authority only), device-scope values are per-device rows (`ais-settings:<worldId>:<packageId>`, never exported); every value is coerced against its declaration on read and on write, so a stale or hand-edited document degrades to defaults instead of crashing the module. Schema versioning is the `default`/`choices` of the *current* manifest: a key that disappears is ignored, a key that appears reads its default. Upgrade migrations are declarative where possible. Any executable migration runs in the same restricted context, is previewed as a diff, has an explicit backup/rollback plan, and runs only after GM confirmation. Imports never run migrations merely because an archive was opened.
 
 ### Compatibility negotiation
 
@@ -555,6 +700,8 @@ The manager should distinguish:
 - UI renderer unavailable / theme invalid / core fallback active.
 
 Each trace record should include `worldId`, package ID/version/hash, contribution ID, event contract, invocation/action ID, caller audience (or privacy-safe user key), phase, duration, result class, sanitized error, budget, and commit sequence if any. It must not store secret actor data, raw private script inputs, or another player's hidden state in a player-visible log.
+
+**Implemented (D-479):** each frame records a bounded trace (64 entries: RPC name, admission rejections, commands, events, lifecycle; duration; result class; sanitized error — no payloads) and counters, readable as `diagnostics(packageId)` on both runtimes and in the GM's module review (*Health*). A breaker stops a module after 50 failed/rejected requests inside 10 s with the reason in its status line; *Restart* starts it again from the approved boot definition (host) or the existing consent (player) without touching other modules.
 
 A single faulty optional module should be disableable without restarting the whole world. Package registration is staged before activation; if boot fails, core opens in safe mode with the last known-good profile and a clear explanation. Disabling a module cancels pending invocations/prompts and unregisters its callbacks. A trusted in-page legacy script is an exception: the app can stop calling it and remove visible globals, but cannot guarantee undo of arbitrary side effects already executed; mark it accordingly.
 
@@ -616,15 +763,33 @@ The first generally usable AIS release should meet all of these:
 11. Diagnostics identify the module, version/hash, event, failure, fallback, and whether a host commit occurred.
 12. Tests cover package validation, world profile migration, dependency graph, exclusive/additive arbitration, malicious RPC frames, bounds, permission changes, replay/dedup, player visibility, host/peer compatibility, theme fallback, and multi-module browser behavior.
 
+**Status (2026-10-15, after D-479).** 1 ✔ (size gate green; packages embedded as data, not code).
+2 ✔ (`aisRuntimeSharing` boots two modules with a declared dependency beside a content package; the default world runs the first-party system package as well, D-473). 3 ✔ (D-089/D-468
+consent; import never executes). 4 ✔ (profile/lock/hashes round-trip; local approvals do not;
+world-scope module settings are documents and round-trip with the world). 5 ✔ (missing required
+sibling blocks enabling with the reason; provider conflicts visible). 6 ✔ (projection + ownership;
+no raw store). 7 ✔ (every write is an op through `validateOps`). 8 ✔ (reducer order tests). 9 ✔
+(reliability suite + D-479 breaker). 10 ✔ (panels/token actions/theme fallback; player shell runs
+without any module). 11 ✔ (D-479 trace: module, hash in status, RPC/command/event, error class,
+commit via the op log). 12 ✔ — unit coverage for every listed item, and *multi-module browser
+behavior* executed in a real Chromium on 2026-10-15 (D-480): `test:e2e:ais` **18/18**
+(`ais_modules`, `ais_foundry`, `ais_player`, `ais_platform` — the last one boots three packages
+side by side: two modules along a declared `requires` and a content pack), plus `package_ui`,
+`ais_ui`, `packages`, `join`, `pf1e_join`. That first run found three shell/kernel defects the
+unit tests could not see (dead `WindowHost` props, `structuredClone` on Svelte-proxied
+declarations, `module.settings.changed` dropped at delivery without `action.observe`); all fixed
+and unit-covered where a unit test can reach them. Known residuals outside this list: ESM module
+graphs in the loader (R-09) and binary resources (R-07).
+
 ## 17. Open decisions to settle before coding
 
 1. **Package role name:** `module`, `automation`, or a generic module with typed `contributes` fields? Recommendation: use `module` as the package role and classify behavior with `contributes`, so a package can provide automation + UI without duplicate wrappers.
-2. **Client code delivery:** require players to import the world ZIP, or transfer selected UI module blobs from host? Recommendation: first require exact local package/hash for client code and fall back to core UI; add verified bounded package transfer only if user testing shows this is too much friction.
+2. **Client code delivery:** require players to import the world ZIP, or transfer selected UI module blobs from host? Recommendation: first require exact local package/hash for client code and fall back to core UI; add verified bounded package transfer only if user testing shows this is too much friction. **Decided (D-468):** the host transfers the approved archive in `ais.profile`, identified by hash; the player consents per device and hash; no local import is required.
 3. **Custom UI ceiling:** is theme-token + schema-driven UI enough initially, or is a sandboxed custom panel required in v1? Recommendation: ship first two levels first; do isolated custom panels after sandbox/CSP proof.
 4. **Trusted in-page modules:** keep as a long-lived legacy tier, or deprecate after sandboxed capabilities reach parity? Recommendation: retain temporarily but make the warning and non-unloadability explicit; don't extend it with new APIs.
 5. **System-specific event evolution:** can an installed system package declare new events at boot, or must the main app predeclare every event? Recommendation: core owns universal events; a system may declare additional namespaced contracts, validated against a bounded schema subset and pinned with its version.
 6. **Code provenance:** is GM consent enough for local campaign use, or will ArenaStar eventually provide signed/published modules? Recommendation: start offline-first with local consent and hashes; don't imply hashes are signatures.
-7. **What counts as mandatory for a player client:** decide per contribution whether it is host-only, player-UI-optional, or player-UI-required, and encode this in the profile/handshake rather than guessing from `module.entry`.
+7. **What counts as mandatory for a player client:** decide per contribution whether it is host-only, player-UI-optional, or player-UI-required, and encode this in the profile/handshake rather than guessing from `module.entry`. **Decided (D-468):** mechanics stay host-resolved; shared modules at the player are optional UI/intent producers, and a player who declines still plays with the core fallback (the GM device keeps running the module).
 
 ## 18. Recommended prototype vertical slice
 

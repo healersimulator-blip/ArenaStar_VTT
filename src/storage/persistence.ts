@@ -114,6 +114,16 @@ export class HostPersister {
     return this.record.worldId;
   }
 
+  /**
+   * The world record as this persister last wrote it — the authoritative copy while the world is
+   * open (every write goes through `patchWorld`/flush). Hot paths that must re-check per request
+   * (AIS consent on every module RPC) read this instead of opening an IndexedDB transaction each
+   * time: measured 207 ms per `get` of a 462-byte row in the e2e sandbox, against a 2 ms commit.
+   */
+  get world(): Readonly<WorldsRecord> {
+    return this.record;
+  }
+
   get flushedSeq(): number {
     return this.record.flushedSeq;
   }

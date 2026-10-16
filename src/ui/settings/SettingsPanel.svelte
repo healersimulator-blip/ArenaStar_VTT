@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { AisRuntimeStatuses } from "../../app/aisRuntime";
+  import type { AisModuleShellApi, AisRuntimeStatuses } from "../../app/aisRuntime";
   import type { CloudBackupController } from "../../storage/cloud/cloudBackup";
   import SavesPanel from "./SavesPanel.svelte";
   import type { SaveCoordinator } from "../../storage/saveCoordinator";
@@ -91,6 +91,8 @@
     packages = null,
     rulesBoot = null,
     aisRuntimeStatuses = {},
+    onOpenAisPanel = null,
+    aisModules = null,
     agents = null,
     saves = null,
     cloud = null,
@@ -118,6 +120,10 @@
     packages?: HostPackages | null;
     rulesBoot?: HostRulesBoot | null;
     aisRuntimeStatuses?: AisRuntimeStatuses;
+    /** D-470: opens a running module's sandboxed panel (GM shell). */
+    onOpenAisPanel?: ((packageId: string) => void) | null;
+    /** D-476/D-479: module settings form + health block (GM shell, after boot). */
+    aisModules?: AisModuleShellApi | null;
     /**
      * §3.2 the connector's agent desk (GM only; null hides the Agents section). The window holds
      * no transport handles of its own: sessions, grants and bridges are the manager's.
@@ -442,7 +448,7 @@
     <SavesPanel {saves} {cloud} {onBackup} onFolder={onBackupFolder} />
   {/if}
   {#if packages}
-    <RulesetSection {packages} {rulesBoot} {aisRuntimeStatuses} />
+    <RulesetSection {packages} {rulesBoot} {aisRuntimeStatuses} {onOpenAisPanel} {aisModules} />
   {/if}
   {#if agents}
     <AgentsSection

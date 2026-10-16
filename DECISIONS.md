@@ -13908,3 +13908,1605 @@ horizontally inside the panel (`.roster-scroll`), so the compact copy inside Wor
 fits. A third observation is *not* a defect: every window in a headless screenshot sits on a
 large white block — the `.wm-window` box-shadow composited by SwiftShader over the WebGL
 canvas; it vanishes with the shadow off and does not appear on a GPU.
+
+## D-466 — Five PF1e Foundry repositories read against AIS + adapter: the readiness verdict and the gap list (2026-10-14)
+
+**Context.** After the AIS state report, the owner asked for something practical: read the
+documentation and code of the pf1 system (`foundryvtt-pathfinder1`), `pf1-content`,
+`pf1e-archetypes`, `pf1-statblock-library` and `pf1-statblock-converter` (SBC), decide whether
+ArenaStar's AIS and its Foundry adapter are ready to handle them, and if not, write down what is
+lacking. This is a feasibility slice (proposal §10 defines certification; nothing here claims it).
+
+**What was read.** GitLab pages/raw files for all five (READMEs, manifests, entry scripts, one
+source entry per data repo, LICENSE files, SBC's `sbc.mjs`/`sbcInput.js`/`sbcCompendium.js`/
+`sbcParser.js`), plus a sparse checkout of the pinned pf1 system mirror (`681929d1`: `module/`
+358 files / 102,928 LOC, 49 `pf1*` hooks, 51 settings, 69 Applications, 7 document subclasses,
+11,315 pack YAML files). Compared against the AIS kernel/bridge/adapter as on `main` and the data
+route (`tools/content`, `tools/convert`, 28 packs / 25,376 entries). No module was executed; no
+converter run against the new repos (no pins exist yet).
+
+**Decision — the document.** `AIS_PF1E_MODULE_READINESS.md` (new, repo root): a verdict table, a
+per-repo analysis (identity, licence, API footprint, what is in place, what is lacking), a
+consolidated gap list in four classes — AIS/adapter **R-01…R-11** (recorded, *not* recommended for
+action), converter **C-01…C-10**, native/product **N-01…N-05**, legal **L-01…L-04** — a
+what-not-to-do list, a seven-slice sequence, open questions, and an API-footprint appendix.
+
+**Verdicts.** Terminology first: "pf1 system" means Foundry's `pf1` *code package*, never PF1e the
+game — PF1e is ArenaStar's native base system (`src/packages/pf1e`, 79 files / 36 k LOC). Running
+that Foundry code under AIS is out of scope (proposal §7.4: "Full Foundry system execution is a
+separate project"; INVENTORY row 2's rule — data via converter, logic via clean-room transcription —
+stands). The repository keeps the role it already has: primary data source (13 of 24 packs
+converted) and rules-parity reference; its remaining value is 11 unconverted packs,
+`class-abilities` (4,710) first. `pf1-content` and `pf1e-archetypes` are **content**: their scripts are SBC/registry glue
+that the adapter neither supports nor needs; the route is the converter (pf1-content needs a
+re-pin — the 2023 mirror's `src/packs/<pack>/*.json` layout no longer exists upstream, 21 packs
+are unconverted, and actors lose their embedded `items[]`). `pf1-statblock-library` is ≈10,000
+HTML statblock journal pages plus one sheet whose only feature is "send this text to SBC" — the
+native `importStatblock()` (D-267) already does that job, so the gap is a `.yml` walker, a
+journal-subtype rule, an *Import as actor* action behind the compendium reader, opt-in packaging
+(size unmeasured) and a Paizo CUP legal case. **SBC** is the only real code module and cannot run
+under AIS in any foreseeable phase: it needs compendium reads, document CRUD, settings,
+`ApplicationV2` + Handlebars, sockets, file storage, a module-to-module API bus and — decisively —
+the pf1 data model for the actor it produces. Its MIT licence makes its parsing tables and
+fixtures the right **oracle and transcription source** for the native importer's parity work.
+
+**Inventory.** `tools/adopt/INVENTORY.md` rows **16–18** added (archetypes GPLv3 + OGL + CUP
+icons; statblock-library GPLv3 + CUP, OGL notice not located; SBC MIT) — verified facts at the
+commits read, `legalStatus: pending`, per the D-252 posture.
+
+**What was deliberately not done.** No AIS/adapter change — nothing in these five repositories
+justifies a "content-aware guest" profile; R-01…R-11 are its requirement list if one is ever
+wanted, and the next kernel slice remains P3. No `sources.json` pins (GitLab is unreachable from
+this sandbox's build shell; C-10 asks the owner to choose GitLab pins vs. controlled mirrors). No
+converter code. No gates re-run: the change is three Markdown files.
+
+**Correction (same day, after owner review).** Two sentences in the first version of this entry
+and of the document overclaimed: "ArenaStar *is* the PF1e implementation" (true of the architectural
+role — ArenaStar owns the actor model and rules pipeline — false as a statement of depth: L01–L07 in
+`PF1e_Unified_TODO.md` remain open, and the Foundry `pf1` package has far more mechanics than the
+native engine), and "out of scope by design" (the proposal *scopes out* full system execution as a
+separate project; it does not forbid making `pf1` a target — that is the owner's call). The document
+now says so, and gains **§3.1a**, which sizes that project from the mirror (125 distinct `foundry.*`
+APIs, 20 data models / 108 `prepare*Data` sites, 185 Handlebars templates, 50 document-CRUD sites,
+no headless mode upstream — `pf1`'s own tests are Quench batches inside a live Foundry) and lists
+the three forms in which `pf1` can still be the target: **oracle** fixtures exported from a live
+Foundry + `pf1` session (cheap, recommended), **data as the mechanics carrier** (`changes[]` /
+`actions[]` / class associations — `itemChanges.ts` from D-259 already evaluates pf1-shaped
+changes; highest leverage, maps onto L01/L02/L04), and the **runtime** (the separate project).
+
+
+**Second correction (same day).** §3.1a's first draft said `pf1` "does not carry its own
+document, data-model, roll, application or compendium layers". Wrong as worded: Foundry core knows
+nothing of PF1e; `pf1` *is* the PF1e rules engine (schemas, derivation, actions, rolls, sheets,
+packs) and only the *framework* under it is Foundry's. §3.1a now opens with a who-provides-what
+table and splits the would-be runtime into a facade over plumbing ArenaStar already has versus the
+genuinely new framework pieces (`DataModel`, `Document` semantics over a system-owned document
+store, `Roll` classes, `ApplicationV2`/Handlebars, `CONFIG`), and names the acceptance gate such a
+project would have for free: `pf1`'s own Quench batches.
+
+## D-467 — Three cost questions on PF1e ⇄ Foundry, answered with measurements (2026-10-14)
+
+**Context.** After D-466 the owner asked for hard numbers rather than verdicts: (a) how much of the
+6 MiB main file the native PF1e implementation occupies and could give back if moved into the
+world zip; (b) how many lines of change to AIS, its adapter and the core would let them *run* the
+pf1 system, pf-content, pf1e-archetypes, statblock-library and SBC; (c) how extensive a rework of
+the *modules* (reusing their code, not clean-room) would be instead.
+
+**Decision — the document and the instruments.** `PF1E_FOUNDRY_PORT_COST_ANALYSIS.md` (new)
+answers the three questions; `tools/analysis/` (new, lint-clean, not part of any gate) holds the
+instruments so the numbers can be re-run: `vite.attribution.config.ts` (the production build
+without the inliner, with a source map), `bundleAttribution.mjs` (VLQ-decodes the map and charges
+every byte of the 5,236,560 B chunk to its source module; agrees with source-map-explorer to
+0.2 %), `pf1eCoupling.mjs` (host↔PF1e import edges and player-/GM-shell reachability),
+`foundryApiInventory.mjs` (framework-reference families, coupling density and distinct-member
+inventories for any Foundry package checkout).
+
+**Measured.** PF1e-named code is **732,893 B of JS (14.0 % of the chunk) + ≈ 24 KB CSS = 13.3 %
+of `index.html`**; logic 348,022 · UI 310,713 · importers 49,003 · strategic ruleset 25,155.
+**115 of 118 PF1e files (730,408 B) are reachable from the player shell**, which loads no packages
+(`JoinApp`/`joinBoot` have zero `packageLoader`/`trustedModule`/`aisModule*` references); GM-only
+is 2,485 B. Host→PF1e coupling: 146 import edges, 27 host files, 183 symbols (75 in `host/sync.ts`).
+pf1 mirror `681929d1`: 62,573 product LOC + 3,568 Quench test LOC; 4,643 framework references
+(7.4/100 LOC); 86 `foundry.*` classes, 25 utils, 19 field types (991 uses), 71 `game.*` members
+(1,216 uses; `i18n.localize` 558, `settings.get` 119), 60 `CONFIG` paths, 59 `canvas` members, 36
+Application lifecycle members, 9 core Handlebars helpers (1,927 uses), 173 Font Awesome classes;
+minified bundle 1,606,325 B; templates 582 KB; CSS 298 KB; `en.json` 145 KB / 2,819 keys; packs
+21.8 MB YAML; actor YAML avg 34.6 KB / max 93.9 KB (AIS RPC cap 64 KB). SBC 4.0.3 (last GitHub
+release): 7,151 LOC, 90 `system.*` paths written. In-repo calibration: AIS v1 = 2,441 product LOC
+for 76 facade members/RPCs (≈ 32 LOC each) with 2,240 test LOC; `src/dice` 924; `compendium*` 753;
+20.1 minified bytes per source line.
+
+**Answers.** (a) Ceiling **757 KB** (headroom 579 KiB → 1.29 MiB), but free today only **≈ 28 KB**
+(the duplicated strategic ruleset + GM-only code), **≈ 77 KB** with the import UI gated to the GM
+shell; the remaining ≈ 680 KB needs a player-side package runtime, a Svelte component-package
+contract and a dispatch interface for 183 symbols — and the host-core slot that (b)/(c) need puts
+≈ 160–310 KB back. (b) **≈ 23–45 k product LOC** (host core 8–16 k in the main file; Foundry-shaped
+runtime 15–27 k in the world zip) **+ 16–41 k tests ≈ 39–86 k**, trusted in-page tier only (the
+sandbox tier adds 4–8 k and a limits redesign); the four other repositories add 0.7–1.7 k.
+(c) pf1 **10–17 k lines modified (16–27 %) + 7–13 k shims + the same 7–14 k host slot**, SBC
+10–20 % (schema kept) or 30–40 %, statblock-library ≈ 200 LOC, data modules 0 → **≈ 25–49 k
+product LOC**, as a GPLv3 fork against 12 upstream releases in 13 months. Both routes cost the
+same order of magnitude; they differ in what they yield and when.
+
+**Not done.** No product code changed; no gates re-run (the new tools are outside `tsconfig`
+`include` and outside every test batch; `eslint tools/analysis` is clean). The spike that would
+replace the widest estimates with measurements — port `test/actor-basics.test.mjs` to vitest and
+count the stub — is named in the document and not started.
+
+## D-468 — AIS modules run at players too: `ais.profile`, per-device consent, ownership authority (2026-10-14)
+
+**Context.** The implemented AIS (D-461–D-463) ran modules and their UI on the GM device only; the
+player shell loaded no packages, and D-466/D-467 described that as the baseline. The owner rejected
+the posture: the GM must be able to share modules, UI and sheets with players, and the acceptance
+example is the shipped `pf1e-torch` lighting a torch on a *player's own token* from the *player's
+own UI*. Of the two routes costed in D-467 — (b) upgrade AIS and its adapters once for every
+module, (c) rework the modules — the owner chose (b), and asked that the native PF1e implementation
+move into the world file as part of the same programme. This entry records the first slice (P1a);
+the programme is [AIS_PLAYER_RUNTIME_PLAN.md](AIS_PLAYER_RUNTIME_PLAN.md).
+
+**Decision.**
+1. **Delivery.** A new whole message `ais.profile` (0x5e, host → client, ops channel) carries the
+   GM-approved *shared* module set: archive source, resources, runtime context, commands, hash and
+   the host grant restricted to the player-runnable subset. It is sent after every welcome
+   snapshot/catch-up and republished to all sessions on every approval/grant/provider/sharing
+   change (`HostSync.setAisProfileProvider`/`publishAisProfile`). The GM's own in-process client
+   ignores it.
+2. **Policy** (`src/app/aisPlayerProfile.ts`, pure): share only modules in the frozen boot set;
+   never appearance-only packages or bare runtime providers; never a module the host could not
+   start; never a module whose GM-device consent is not currently active; honour the GM's live
+   per-module opt-out (`WorldsRecord.automationSharing`, a device preference kept across
+   re-imports like grants, with a checkbox "Players run this module too" in the module review).
+   `fx.play`, `scene.tags.write` and `ui.theme` are never advertised to players.
+3. **Consent.** The GM's approval is necessary, never sufficient: each player allows each module
+   per device, world and exact hash (IndexedDB settings scope `ais.player-consent:<worldId>`); a
+   changed hash is a new question ("was updated"); withdrawal and un-sharing stop the module
+   immediately without a reload. Because the package hash is asserted by the host and covers the
+   whole file map (not recomputable from the delivered subset), the record also binds a digest
+   the player computes over the delivered code (`deliveredDigest`) and the capability list shown:
+   the same hash with different code is refused and flagged in the dialog, a wider capability
+   list asks again, a narrower one does not.
+4. **Authority is unchanged.** The player runtime (`src/app/playerAisRuntime.ts`) composes the
+   same sandboxed iframe and the same kernel RPC handlers over a `ClientSync` context; every write
+   becomes the player's own intent and the host's `validateOps` + Foundry-default ownership decide.
+   No host authorization code changed for this — owners could already update their token's
+   `light`/`flags.ais.*` and their actor's item quantities. A `forbidden` rejection at the player
+   is surfaced as a notice.
+5. **Player UI.** `JoinApp` gains a consent dialog, a choice dialog for `ui.select`, module status
+   notices and a token context menu (`playerTokenContextMenuModel`: *Open sheet* plus the light
+   entries when a light provider is shared; disabled with a stated reason otherwise).
+
+**Fix surfaced by the player path.** `scene.token.light.apply` wrote `flags.ais.<pkg>` as a
+dotted key, which `src/core/diff.ts` rejects when the `flags.ais` namespace does not exist yet;
+the GM e2e masked it by seeding `"flags.ais": {}`. The handler now creates the namespace when
+absent and addresses only its own key otherwise; both shapes are asserted in
+`tests/packages/aisModule.test.ts` and `tests/packages/aisReliability.test.ts`.
+
+**Verification (measured).** `tsc --noEmit` clean; `checkSvelte` 0 blocking; `eslint .` clean;
+`vitest run` **5,775 passed / 12 skipped** (D-463: 5,721), including the new
+`tests/app/playerAisRuntime.test.ts` (10: real `HostSync`↔`ClientSync` over the memory transport —
+profile on join, consent gating, revocation, hash change, same-hash/different-code refusal,
+capability widening vs. narrowing, owned-token light commit accepted and the other player's token
+refused with `forbidden`), `tests/app/aisPlayerProfile.test.ts` (5),
+`tests/app/aisRuntimeSharing.test.ts` (2: a booted `HostApp` with a mocked iframe publishes,
+un-shares, re-shares and revokes end to end) and four `playerTokenContextMenuModel` cases.
+`dist/index.html` **5,723,400 B** (+24,504 B over D-467's 5,698,896 B; 568,056 B under the gate).
+**Not run:** the browser batch `test:e2e:ais`, now including `e2e/ais_player.spec.ts` (two
+contexts, real `pf1e-torch`, consent, right-click → *Turn carried light on* → host commit → off →
+GM un-share stops the player's copy) — the authoring sandbox cannot download Playwright browsers;
+run `pnpm test:e2e:ais` before claiming it green.
+
+**Consequences.** The sentences "GM tab only; zero AIS in the player shell" in
+`AIS_PF1E_MODULE_READINESS.md` and "the player shell loads no packages" in
+`PF1E_FOUNDRY_PORT_COST_ANALYSIS.md` are now history, and §17 items 2 and 7 of
+`AUTOMATION_INTERCONNECT_DESIGN.md` are decided (host-transferred blobs keyed by hash; per
+contribution the player side is optional UI, mechanics stay host-resolved). P1b (player quickbar
+and chat commands), P2 (shared sheets/panels) and P3 (native PF1e into the world file) are planned
+in the programme document and not started.
+
+## D-469 — P1b: modules declare their own sharing and token actions; players run declared commands as themselves (2026-10-14)
+
+**Context.** D-468 made shared modules *run* at players, but a player could only reach a module
+through the dedicated light slot (`scene.token.light.action`). Any other module — a mount/dismount
+helper, a condition tracker, a loot splitter — had no player-side control at all, and the GM had
+no way to know that a module *should not* be shared (plan §4.7 item 2: every copy receives the same
+observation events, so a module that writes in reaction to an observation would act once per
+device). Macro commands (`AIS.commands.on`) were callable only under `runAs: "gm"` from a reviewed
+script macro at the host.
+
+**Decision.** Three small, generic additions to the manifest and the runtimes, no module rework:
+
+1. **`interconnect.sharing: "players" | "host-only"`** (default `"players"`). `host-only` is the
+   author's declaration that the module must run on one device only. Boot carries it as
+   `hostOnly`; `sharedWithPlayers` is forced to `false`, the profile policy
+   (`isPlayerSharedModule`) never offers it, and the GM checkbox in Settings → Packages is
+   disabled with the reason spelled out. The GM opt-out of D-468 remains for modules that do not
+   declare anything.
+2. **`interconnect.tokenActions: [{ id, label }]`** (≤ 16, ids are slot-shaped, labels 1–48
+   printable characters, requires `ui.interaction`). Both shells append the entries of every
+   *running* module to the token context menu as `module-action:<packageId>:<actionId>`; a click
+   emits the existing `ui.token.action { sceneId, tokenId, action }` event to that module. At the
+   player the entry is disabled with "You do not control this token." on foreign tokens and with
+   the module's own state otherwise ("waiting for your decision", "starting", the failure text).
+   `AisRuntime.tokenActions()/runTokenAction()` and `PlayerAisRuntime.tokenActions()/runTokenAction()`
+   are the two implementations; the menu model (`moduleActions`) is shared.
+3. **`runAs: "player"`.** `AisModuleIframe` built with `playerCommands: true` (only the player
+   runtime does this) accepts command invocations with `runAs: "player"` and refuses `"gm"`; a host
+   frame still refuses anything but `"gm"`. `PlayerAisRuntime.invokeCommand(packageId, commandId,
+   input)` runs a declared command inside the player's own frame with `callerId` = the player's
+   user id; every write the command makes travels through `ClientSync` and is validated by the host
+   under that player's ownership, exactly like a hand-made edit (no new authority anywhere). The
+   player shell's *Shared modules* card gains a command `<select>` and *Run on selected token*
+   (`data-player-ais-command`, `data-player-ais-run`, `data-player-ais-result`); Torch's
+   `light.toggle` / `light.set` / `light.off` work unchanged with `{ tokenId }` because the module
+   never relied on `context.runAs`.
+
+**Rejected.** A per-command "player-safe" flag in the manifest: the host already refuses what the
+player may not do; a second allow-list would be a declaration without an enforcement point.
+Re-using `scene.token.light.action` as a generic slot: slots are for *one* chosen provider, token
+actions are additive across modules.
+
+**Verification (measured).** `tsc --noEmit` clean; `checkSvelte` 0 blocking; `eslint` clean on
+the touched files; new tests: manifest validation (`tests/packages/packageLoader.test.ts`), boot
+`hostOnly`/`tokenActions` and profile exclusion (`tests/app/aisPlayerProfile.test.ts`), menu model
+in both shells (`tests/ui/tokenContextMenu.test.ts`), player runtime token actions + command
+invocation as `"player"` (`tests/app/playerAisRuntime.test.ts`). Full-suite and bundle numbers are
+recorded with the commit that closes this round (see D-470/D-471).
+
+## D-470 — P2a: sandboxed module panels — the module draws inside its own iframe, the shell draws the window (2026-10-14)
+
+**Context.** Plan §4.7 item 5 split P2: third-party module UI must never run in the shell page
+(design §15 isolation tiers), yet a torch kit, a loot splitter or a mount helper needs more than a
+menu entry and a `ui.select` list. `AisModuleIframe` already runs the module *inside the iframe's
+main document* (`sandbox="allow-scripts"`, opaque origin, CSP `default-src 'none'`, no network, no
+images, inline styles allowed) — the module has had a private DOM all along; the frame was simply
+`display: none`.
+
+**Decision.** Make that document the panel and keep every pixel of chrome host-owned:
+
+1. **Manifest** `interconnect.panel: { title, width?, height? }` (title 1–48 printable characters,
+   width 240–960 default 360, height 160–720 default 420, one panel per module) gated by the new
+   capability **`ui.panel`** (player-runnable; it is the player's own screen). Boot and the
+   package summary carry `panel`; `ais.profile` carries it to players.
+2. **Shell slot** `src/packages/aisPanel.ts` — plain DOM, shared by both shells: one persistent
+   layer (`aisPanelLayer()`), one `<section data-ais-panel role="dialog">` per module created
+   *hidden before the iframe* so the iframe is born inside the panel body via `hostElement` and is
+   **never re-parented** (moving an iframe reloads it, which the frame class treats as a navigation
+   and stops the module). Chrome = title, "<module name> · sandboxed module", Close; open/close
+   toggles the section and `AisModuleIframe.setVisible`. Stopped/failed/revoked modules close and
+   lose their window.
+3. **SDK/RPC** `AIS.ui.panel.open()/close()/root()` → methods `ui.panel.open` / `ui.panel.close`
+   (capability `ui.panel`; "declares no interconnect.panel" when the manifest has none).
+4. **Shell buttons** — GM: Settings → Packages shows "Panel: “title” (w×h) … Open panel"
+   (`data-ais-panel-open`, enabled while the runtime is `ready`); player: the *Shared modules*
+   card shows "Open “title”" (`data-player-ais-panel-open`).
+
+**Rejected.** Rendering module HTML in the shell (`{@html}`/component packages) for third-party
+code — that is P2b's build-signed first-party path, not a third-party one. A second iframe for
+the panel — two documents, two RPC ports, and the automation code could not touch its own UI.
+`allow-same-origin` or `allow-popups` on the panel frame — unchanged sandbox; the module cannot
+read the host page, open windows or navigate the top frame.
+
+**Consequences / limits.** No images or fonts inside a panel yet (CSP unchanged; a later decision
+may allow `blob:` images from package resources). One panel per module; no drag/resize (fixed
+bottom-right stagger). Focus: a visible sandboxed frame may take keyboard focus — the shell's
+hotkeys do not fire while the user types in a panel, which is the intended behaviour.
+
+**Verification (measured).** `tsc --noEmit` clean; `checkSvelte` 0 blocking; `eslint` clean on the
+touched files; tests: manifest bounds (`packageLoader.test.ts`), RPC handlers (`aisModule.test.ts`),
+the panel host against an element double (`tests/packages/aisPanel.test.ts`, 2), the player
+runtime's mount → attach → open/close → remove protocol (`playerAisRuntime.test.ts`) and the
+GM runtime + boot + summary + profile path (`aisRuntimeSharing.test.ts`). No browser run (see
+D-468 for the sandbox limitation).
+
+## D-471 — P3 step 1: the strategic ruleset leaves the main bundle — the host consumes the active system package in-page through the RulesModule seam (2026-10-14)
+
+**Context.** Tier T0 of the cost analysis (D-467): the PF1e strategic ruleset was compiled twice —
+once into `systems/pf1e-mass-battles/rules.js` for the sim worker (the §12 path) and once into
+the main file through three static imports (`host/turnChannel.ts` for the M07 hero-stat overlay,
+`ui/armies/armyModel.ts` for order validation in the army window, `app/e2eHook.ts` for the hero
+e2e harness). `armyModel.ts` even resolved the module *by package id* and then instantiated the
+bundled twin, with the comment "package content zips never execute in-page". That comment was
+already false for the fallback: `InlineSimRunner` (used whenever a worker cannot be created, and
+by every Node test) imports the package's `rules.js` in the page context through
+`importRulesModule`, and D-089 established page-level `import(blob:)` under the CSP.
+
+**Decision.**
+
+1. **`RulesModule.leaderStats?: { overlayKeys, fromActor }`** is the new seam for the M07 hero
+   derivation. `createMassBattlePf1e()` implements it from `combatStatsFromLeaderActor` /
+   `LEADER_STAT_OVERLAY_KEYS`; `validateRulesModule` passes the member through unchanged.
+   `TurnChannel` takes `leaderStats` as an option and overlays/writes back only through it — a
+   system without the member (mass-battle-basic) keeps units on their authored stats, which for
+   basic worlds is what the sim already assumed.
+2. **`HostApp.rulesModule`** — after the worker has validated and loaded the active package, boot
+   imports the same `rules.js` text in-page (`importRulesModule`, same shape gate) and keeps the
+   module as the host's **dispatch instance**. `rulesBoot.inPage` reports `"package"`,
+   `"builtin"`, or `{ error }` (in-page import failed while the worker still runs the package →
+   the two in-page consumers fall back to the built-in rules). No new execution tier: the GM
+   activated this package as the world's rules and the fallback runner already ran it in-page.
+3. **Consumers switched**: `armyWindowRules(rulesModule)` returns the package module or
+   mass-battle-basic (WindowHost gets a `rulesModule` prop from the GM shell; the player shell
+   passes none and keeps basic, as before); `TurnChannel` receives `rulesModule?.leaderStats`;
+   the hero e2e harness (`heroOrdersSmoke`) now takes the built artifact's text from the spec
+   (`systems/pf1e-mass-battles/rules.js`, read on the Node side) and imports it in-page — it
+   exercises the real artifact instead of an in-bundle twin.
+4. `src/packages/massBattlePf1e.ts` is now imported only by `src/packages/pf1e/rulesEntry.ts`
+   (the `rules.js` build entry) and by tests.
+
+**Measured.** `dist/index.html`: **5,738,443 B at D-470 → 5,688,191 B** (−50,252 B raw;
+gzip 1,737,982 → 1,722,431, −15,551 B) — twice the T0 estimate, because the ruleset's
+exclusive dependencies (`pf1e/deploySeed`, `envelopment`, `targeting`, `stride`, `spells`,
+`heroBridge` …) left with it. Net across this round: 5,723,400 B (D-468) → 5,688,191 B
+(−35,209 B) with P1b and P2a included (+15,043 B). Headroom under the 6 MiB gate: 603,265 B.
+`tools/analysis/pf1eCoupling.mjs`: host → PF1e **146 → 143 edges, 183 → 179 symbols**, host
+files 27 → 27 (`turnChannel.ts` still imports `pf1e/pendingRoll` and `pf1e/rollLedger`).
+Tests: `tests/packages/pf1ePackage.test.ts` boots the real built package and asserts the hero
+overlay (`hp 58, bab 6, strMod 4, dexMod 3, sr 21, drVal 5`) comes out of
+`app.rulesModule.leaderStats` — i.e. out of the artifact; `tests/host/heroStatOverlay.test.ts`
+injects the seam explicitly; `hostPackages`/`worldRecipe`/`worldFilePackages` assert
+`rulesBoot.inPage === "package"`; `tests/ui/armyModel.test.ts` covers the sync resolver. Gates:
+`tsc` 0, `eslint .` 0, svelte check 0 blocking, vitest **5,787 passed / 12 skipped (5,799)** —
+the first full-suite number since D-468's 5,775 / 12, so it also covers P1b and P2a.
+
+**What this is not.** T1–T4 are untouched: the 348 KB tactical PF1e logic and the 334 KB PF1e UI
+remain in the bundle because 143 host import edges still name PF1e symbols; moving them is the
+dispatch-interface programme of plan P3 (≈ 6–10 k LOC). This step proves the mechanism that
+programme will repeat — *a seam on `RulesModule` (or its successor contract), the host consumes
+the package's in-page instance, the bundled twin goes* — and records its first measured yield.
+
+**Open owner decision (recorded, not taken).** In-page execution of the active system package
+is here justified by activation + the existing fallback precedent. When third-party system
+packages become common, the owner may want the D-089 per-world trust grant (or a build-signed
+first-party hash list) to gate `rulesBoot.inPage`; the fallback to built-in rules already exists
+for that case.
+
+## D-472 — P3 step 2: the active rules package travels to players as a content-addressed artifact; the player shell runs it in-page after per-device consent (2026-10-14)
+
+**Context.** D-471 made the GM shell consume the active system package in-page from the world
+file. The player shell still fed its army window the built-in rules in every world (D-471 left
+`JoinApp`'s `WindowHost` without a module), so a player in a PF1e world saw mass-battle-basic
+sub-phases and validation — one instance of the "modules and UI are GM-only" posture this round
+removes. The cost analysis listed the prerequisite as "GM→player package transfer over the data
+channel, caching, consent/CSP" and the plan listed "chunked ops framing" ahead of P2b, because a
+single op cannot carry 330 KB on WebRTC data channels or relays.
+
+**Decision.**
+
+1. **No new framing.** The host publishes the package's `rules.js` bytes as a *published
+   artifact* — `HostSync.publishArtifact(sha256, bytes)` — and serves it through the §7
+   `AssetTransfer` (32 KB chunks, resume, per-peer pacing, `asset.get`/`asset.chunk`) to any
+   approved session, outside the asset manifest and its per-viewer ACL. Unknown hashes keep the
+   miss sentinel; sessions without a user are ignored as before. The transfer is created lazily
+   when there is an asset server *or* a published artifact.
+2. **Announcement rides the welcome.** `WelcomeSimInfo.artifact = { hash, size, name }` sits
+   next to the schema joiners already adopt; a change of hash alone re-announces (same as a
+   package switch), so a GM activating a new build reaches connected players.
+3. **Player side = `PlayerRulesPackage`** (`src/app/playerRulesPackage.ts`): reads the
+   announcement, asks this device once per world/package/exact hash (consent row in the
+   `settings` store, scope `rules-player-consent:<worldId>`), fetches through the shell's
+   `AssetFetcher` (so the content-addressed client cache makes a rejoin free), **verifies the
+   sha256 of the assembled bytes against the announced hash** (the cache keys by hash without
+   checking; a lying host or a poisoned cache fails closed), imports with the same
+   `importRulesModule` shape gate the host and worker use, and exposes `module` for the shell.
+   "Not now" is remembered for the hash; a changed hash asks again as an *update*; `forget`
+   drops the module and re-prompts. Without consent the shell behaves exactly as before.
+4. **Trust posture, stated in the UI.** A rules package is not an AIS module: it is evaluated in
+   the page with the app's authority. The prompt and the "World rules" card say so in plain words
+   ("not sandboxed … only load it if you trust this GM"), show the size and hash, and the
+   decision is per device. This is the D-089 in-page tier arriving on player devices under the
+   D-468 consent model rather than a GM grant; the owner question from D-471 (first-party
+   build-signed hashes that skip the prompt) stays open and now has a concrete place to land
+   (`PlayerRulesPackage.announce`).
+5. `JoinApp` passes `playerRulesModule` to `WindowHost` → `armyWindowRules(rulesModule)`: a
+   consenting player's army window validates orders and lists sub-phases from the world's own
+   package.
+
+**Measured.** Real artifact: `systems/pf1e-mass-battles/rules.js` = **329,288 B** → 11 chunks at
+32 KB, ≈0.3 s at the 1 MiB/s per-peer cap; `tests/packages/pf1ePackage.test.ts` boots the built
+package and asserts the published hash equals the welcome's `sim.artifact.hash` with
+`size > 200,000`. Unit harness (`tests/app/playerRulesPackage.test.ts`, 8 tests, host↔player over
+the memory transport with 64-byte chunks): delivery as ≥ 12 `asset.chunk` messages, consent
+persistence and re-prompt on hash change, `forget`, built-in worlds offering nothing, integrity
+failure before the importer, shape-gate failure, miss sentinel and no-user refusal.
+`dist/index.html` **5,688,191 → 5,696,558 B** (+8,367 B: controller, card, dialog, host publish);
+headroom 594,898 B. Gates: `tsc` 0, `eslint .` 0, svelte check 0 blocking, vitest **5,795
+passed / 12 skipped (5,807)**.
+
+**What this is not.** Players still run only the *strategic* package in-page; the tactical PF1e
+logic (348 KB) and UI (334 KB) remain bundled for everyone until the T2/T3 dispatch contracts
+exist. But the transport question for every later package (T2 logic, T3 components, P2b
+first-party component packages, large AIS modules) is now answered by reuse: publish under a
+sha256, name it in a message, fetch on the assets channel, verify, consent, import.
+
+## D-473 — P3 step 3: the build carries its own packages — the default world runs the first-party PF1e ruleset, and build-signed hashes skip the player prompt (2026-10-15)
+
+**Context.** D-471/D-472 moved the strategic PF1e ruleset out of the main file and into the
+world file, but a package only reached a world through a zip the GM found on disk
+(`dist/packages/`, wizard or Settings) or a starter world. The fresh default world — the wizard's
+first offer, every `?e2e=1` session, and therefore the place T1 (importers) and later T2/T3 code
+would have to keep working — stayed on the built-in `mass-battle-basic`. Moving more PF1e code
+behind the package would have moved it *out of the default world*. D-472 also left an owner
+question open: a player device prompted for ArenaStar's own code as if it were a stranger's.
+Owner decisions this round: **the default world activates the first-party PF1e package**, and
+**ArenaStar's own packages skip the player consent prompt via build-signed hashes embedded in
+the shell; third-party packages still prompt.**
+
+**Decision.**
+
+1. **The build embeds its own packages.** `pnpm build:systems` already builds `pf1e-mass-battles`
+   (`type: system`) and `pf1e-core` (`type: data`, declared companion) exactly as a GM would import
+   them; a full run now also writes `systems/.first-party/` (gitignored): the two zips plus
+   `index.json` `[{id, name, version, type, dependencies, zip, rulesSha256}]`, where `rulesSha256`
+   is the sha256 of the system package's `rules.js` **file bytes**. `vite.config.ts` inlines that
+   index with each zip as base64 into the shell (`define.__FIRST_PARTY_PACKAGES__`); `pnpm build`
+   runs `build:systems` first so a release never ships an empty list. `src/app/firstPartyPackages.ts`
+   is the only reader: `firstPartyPackages()`, `firstPartySystemPackage()`, `isFirstPartyArtifact(hash)`,
+   `firstPartyPackageBytes(entry)`, `loadFirstPartyRecipePackages()` (the ruleset plus the declared
+   companions this build also carries, read through `readZipPackage` — the same loader a GM's
+   file goes through). Every reader takes the list as an optional parameter (test seam) and treats
+   an empty list — plain `vite dev`, bare vitest — as the ordinary built-in path.
+   *Why zips, not a second bundle:* the embedded bytes are byte-identical to what `dist/packages/`
+   ships and what a world file carries, so one import path, one hash, one validation (worker
+   shape gate + in-page import) serves all three origins; `pf1e-core` rides along because
+   `checkRecipe` otherwise warns "expects pf1e-core alongside — not added" on the very first world.
+2. **Default world = first-party recipe.** `NewWorldWizard` offers a third ruleset choice,
+   `#wizard-ruleset-firstparty` ("built into this release · brings Pathfinder 1e Core"), selected by
+   default whenever the build carries a ruleset; it feeds `createWorldFromRecipe` the embedded
+   ruleset plus its companions (a GM's own pack of the same id wins), so the package rows and the
+   `activeRulesPackage` pin exist before the first boot — no activate-then-reload step. Built-in
+   and "load a package zip" stay one click away. `bootHostApp({ firstPartyRules: true })` creates
+   the auto-hosted "World One" the same way; `main.ts` turns it on for `?e2e=1&rules=pf1e`. The
+   bare `?e2e=1` world stays built-in on purpose: `app|start|workspace_profiles|worldfile|packages.spec`
+   assert the built-in path there, and the two routes let specs pick the world they need. Settings
+   → Packages gains "Built into this release … Add to this world" (`data-pkg-install-first-party`,
+   `packages.importZip` on the embedded bytes, hidden once both are present) so an existing world
+   can take the packages without a file; adding is still not activating.
+3. **Build-signed trust on the player side.** `PlayerRulesPackage` takes `trusted(hash)`;
+   `JoinApp` passes `isFirstPartyArtifact`. A trusted announcement skips the consent record and
+   loads immediately (`loading → ready`, no row in `rules-player-consent:<worldId>`), the "World
+   rules" card says *"one of ArenaStar's own packages — this release carried it"*, and `forget` is a
+   no-op for it (the decision was the build's, not the device's). An untrusted hash — a third-party
+   package, or a *different build* of pf1e-mass-battles than the player's own shell — prompts
+   exactly as D-472 specified. The equality this rests on is tested end-to-end: the hash the build
+   writes (file bytes on disk) is the hash the host publishes (re-encoded text read back from the
+   zip, D-472) is the hash the player shell matches (`tests/packages/pf1ePackage.test.ts`,
+   `tests/app/firstPartyPackages.test.ts`).
+
+**Measured.** Embedded payload: `pf1e-mass-battles-1.0.0.zip` 95,055 B + `pf1e-core-1.0.0.zip`
+28,273 B = 123,328 B → 164,440 B as base64, one copy in the bundle (verified by grepping the hash).
+`dist/index.html` **5,696,558 → 5,865,319 B** (+168,761 B raw; gzip 1,725,019 → 1,852,488 B,
++127,469 B — zip bytes do not compress twice); headroom under the 6,291,456 B gate **594,898 →
+426,137 B**. `build:systems` adds 0.4 s to `pnpm build`. Gates: `tsc` 0, `eslint .` 0, svelte check
+0 blocking, vitest **5,802 passed / 12 skipped (5,814)**; new unit coverage: list accessors,
+base64 round trip, companion resolution (declared-but-not-shipped companions are left to the GM,
+D-110), a broken embedded zip failing loudly, `bootHostApp({ firstPartyRules: true })` creating
+World One with rows + pin + published artifact, the real embedded set's hash matching its own
+`rules.js`, and the trusted-hash path in `playerRulesPackage.test.ts` (no consent row, `forget`
+no-op, an untrusted update prompts). e2e (typecheck/lint only here): `start.spec` asserts the new
+default and the built-in opt-out, `packages.spec` the Settings install; a Playwright run is still
+owed.
+
+**Trade-off stated plainly.** The single-file download stops shrinking as PF1e moves into the
+package: what leaves the main bundle (−50 KB at D-471) comes back as embedded zip bytes (+165 KB
+here, growing with T1–T3), and the raw-size headroom is now ≈426 KB. What the move buys is
+modularity, not bytes: the world file carries its rules, a GM can run a different build or a
+third-party ruleset through the same path, and players load first-party code without ceremony
+while strangers' code still asks. If the headroom becomes the constraint, the embedded zips are
+the first candidates for a side-car download (`dist/packages/` already exists) — a one-line change
+in `vite.config.ts`, not a redesign.
+
+**Consequences.** T1 (importers) can move behind the package now: the default world, the
+`?e2e=1&rules=pf1e` route and every world created by the wizard default have it active, so
+`pf1e_import.spec` / `statblock_import.spec` keep a home. P2b (first-party component packages)
+inherits the hash list and the trusted path unchanged. The starter worlds (`pnpm build:worlds`)
+are unaffected: they already carry both packages.
+
+## D-474 — P3 T1: the character importers travel with the PF1e package — `RulesModule.characterImport`, consumed by both shells and the agent bridge (2026-10-15)
+
+**Context.** The cost analysis (Appendix D, T1 finding) showed the seven importer files
+(49,017 B — Foundry PF1e actor JSON, Hero Lab XML, Roll20 sheet JSON, pasted stat block) reached
+from exactly two host files through six symbols: a trivial seam with no home, because the
+importers make PF1e *tactical* actors and the default world ran built-in strategic rules. D-473
+settled the home: the default world activates the first-party PF1e package, so the importers can
+ride in `rules.js` like the hero derivation (D-471) and the readers reach every world that wants
+them — GM device, player device (D-472/D-473) and the agent desk alike.
+
+**Decision.**
+
+1. **One seam, system-owned.** `RulesModule.characterImport?: RulesCharacterImport` =
+   `{ pasteExample, fileAccept, fileFormats, pasteFormats, read({ text, fileName?, id, ownerId? })
+   → Result<{ name, format, read[], warnings[], ops }> }` (`src/core/rules.ts`). The caller mints
+   the id (it is what a token links to and what an answer names) and names the owner; the module
+   decides what the text is, whether this system can play it (`characterImportCheck` stays the
+   gate), and what document it becomes. `validateRulesModule` accepts the seam when whole and
+   refuses a half-shaped one — a shell must not offer an Import button that fails on first click.
+2. **The PF1e package carries the readers.** `src/packages/pf1e/import/seam.ts` wraps the
+   existing importer API (unchanged; its unit tests still drive it directly) and
+   `createMassBattlePf1e()` sets `module.characterImport = pf1eCharacterImport`, so the built
+   `rules.js` carries it (`tests/packages/pf1ePackage.test.ts` reads a stat block through the
+   *loaded* module and checks the id/ownership it writes).
+3. **Shells consume, never import.** `SheetPanel` takes `rulesModule` (GM: `app.rulesModule`;
+   player: `playerRulesModule`) and shows **Import** / **Stat block** only when the live module has
+   the seam — the tooltip, accepted extensions and paste placeholder all come from the module. The
+   agent bridge's `actor.from_statblock` reads through `AgentWorldViewOptions.rules()` (threaded
+   from `createAgentManager({ rules: () => current.rulesModule })`); without a seam it answers
+   *"this world's strategic rules import no characters … activate the shipped Pathfinder 1e Mass
+   Battles Engine"* and creates nothing. `src/app/agentBridge.ts` and `src/ui/sheets/SheetPanel.svelte`
+   no longer import anything from `packages/pf1e/import`; the only remaining importers of that
+   folder are the package entry and its unit tests. A player who has loaded the package (D-472)
+   and holds the ASSISTANT role gets the same controls as the GM — no GM-only posture.
+4. **e2e homes.** `pf1e_import.spec` and `statblock_import.spec` run on `?e2e=1&rules=pf1e` and
+   assert the PF1e status line first; a new case asserts the built-in `?e2e=1` world offers no
+   import controls at all (the seam belongs to the package). Playwright cannot run in this sandbox:
+   typecheck/lint only, a run is owed.
+
+**Measured.** `rules.js` **329,288 → 439,745 B** (+110,457 B): the seven importer files (≈49 KB)
+plus ≈61 KB of PF1e helpers they need to author an actor document (`consumables`
+`attackEntryFromWeapon`, `inventory`, `skills`, `tags.normalizeTags`, `actor.parsePF1eActorSystem`,
+`rulesTables`) — helpers the sheets still use, so they now exist twice: in the main bundle and in
+the package. Package zip 95,055 → 125,778 B (+30,723 B compressed; +40,964 B as the embedded
+base64). `dist/index.html` **5,865,319 → 5,857,329 B** (−7,990 B raw; gzip 1,852,488 → 1,865,673 B,
+**+13,185 B** — the removed JS compressed well, the added zip bytes do not); headroom 434,127 B.
+The importer strings are gone from the main bundle's JS (`grep "a .por file is a zip archive"
+dist/index.html` → 0). Gates: `tsc` 0, `eslint .` 0, svelte check 0 blocking, vitest **5,805 passed
+/ 12 skipped (5,817)** (new: loaded-module import, seam shape gate, agent refusal without a seam;
+`agentProjection` / `agentHexcrawlAuthoring` contexts now pass the PF1e module, as a PF1e host does).
+
+**What this says about T2.** The single-file size is now governed by *duplication*, not by what
+leaves the shell: every PF1e module that both the package and the sheets need is paid twice until
+the tactical logic and its UI move together (T2 + T3) or the shell stops bundling the copies the
+package already carries. T1's own bytes were never the point — the point is that the shells have
+one fewer PF1e import and the player device runs the same importer the GM does. The next step
+that actually shrinks the download is T2's dispatch contract (12 modules / 79 symbols, Appendix D),
+after which the sheets' copies of `actor`, `consumables`, `inventory`, `skills` can follow the
+importers into the package.
+
+## D-475 — P2b: first-party component packages — `ui.js`, the shell's Svelte runtime as the contract, one consent for both artifacts (2026-10-15)
+
+**Context.** P3's next tier was to be T2, the tactical dispatch contract (12 modules / 79 symbols,
+Appendix D). Before cutting it, the import graph was surveyed per module, and the answer settles the
+order of work: **every PF1e tactical module the host imports is also imported by shell UI** —
+`afflictions` by `agentBridge`, `e2eHook`, `host/sync`, `PF1eAttackEditor`, `pf1eResolveFlow`;
+`spellEffects` by `host/sync` and seven sheet/combat components; `conditionApplications`,
+`rollApply`, `targeting`, `movement`, `rollLedger`/`pendingRoll` likewise; only `automationHealth`
+is host-only. A logic-only seam (a host-authority `RulesModule.tactical`) would therefore move
+nothing out of the download: the shell keeps bundling the same modules for its sheets, and the
+package carries a second copy — exactly D-474's duplication, scaled up to ≈324 KB. Moving UI first
+is no better: `PF1eActorSheet.svelte` has 23 exclusive files (439,740 B) but shares a 60-file /
+1,298,476 B tactical core with the shell, so a `ui.js` built around it duplicates that core until
+T2 lands. Only a **coordinated T2 + T3 move** shrinks bytes, and T3 has no mechanism yet: the
+shells had no way to load a Svelte component from a package. This entry builds that mechanism
+with the smallest honest payload — the per-army battle-analysis view, whose exclusive closure is
+two files / 11,333 B and whose only importer is `ArmyWindow` — so that the big move can be made
+as one step against a proven loader.
+
+**Decision.**
+
+1. **A system package may ship `ui.js` beside `rules.js`.** Manifest `ui: { entry }` (system
+   packages only; data packages are refused; path-guarded like the other entries; the loader
+   requires the file to exist and be non-empty). The module evaluates to `{ api: "arena.ui/1",
+   components: { <slot>: Component } }`; the shell mounts a component only through a slot it
+   knows (`PackageUiSlot`, today `battleAnalysis`), unknown keys are ignored, a non-function in a
+   known slot fails the shape gate (`src/packages/uiModuleLoader.ts`, same blob→data-URL import as
+   `importRulesModule`, `Result`-returning).
+2. **The shell's Svelte runtime is the contract, not a second copy.** `ui.js` is Svelte's compiled
+   output with every `svelte*` import rewritten by the build
+   (`scripts/buildSystemPackages.mjs` → `rewriteSvelteRuntimeImports`) into reads from
+   `globalThis.__ARENASTAR_SVELTE__`, which `main.ts` publishes before either shell mounts
+   (`src/app/svelteRuntime.ts`: `svelte`, `svelte/internal/client`, `svelte/store`; the
+   side-effect `disclose-version` import is dropped; any other import fails the build by name).
+   A package component is therefore a real citizen of the shell's tree — same signals and
+   scheduler, same context and stores — and styles are injected on mount (`css: "injected"`),
+   so no CSS pipeline is needed in the shell. The flip side is binding: a `ui.js` is built against
+   the shell it ships with (first-party, hash-pinned by D-473); a module compiled by another
+   Svelte version may not evaluate, and the loader reports that as the package's error. The
+   `svelte/no-svelte-internal` lint rule is disabled on that one import with the reason inline.
+3. **One consent covers both artifacts.** The host imports `ui.js` in-page after `rules.js`
+   (`HostApp.uiModule`, `rulesBoot.ui: "package" | "none" | { error }`), publishes it under its
+   sha256 **only when it evaluated**, and names it in the welcome as `sim.ui` beside
+   `sim.artifact`. A UI that fails is the package's error to show (Settings → Packages
+   `data-pkg-ui-error`), never a reason to drop its rules. The player side (`PlayerRulesPackage`)
+   treats the pair as one offer: `size` counts both, the consent record stores `uiHash`, an allow
+   covers the exact pair (a new `ui.js` beside the same rules re-prompts as an *update* — the
+   already-allowed rules keep running, the un-allowed components are withheld), first-party means
+   **both** hashes are in this build's list (`isFirstPartyArtifact` matches `rulesSha256` or
+   `uiSha256`), and a `ui.js` that fails its gate after consent leaves the rules `ready` with a
+   `uiError`. Both shells hand the module to `WindowHost` → `ArmyWindow ui=`; the analysis tab
+   mounts `ui.components.battleAnalysis` and otherwise says the ruleset ships no analysis view.
+4. **The first payload.** `src/ui/armies/PF1eBattleAnalysis.svelte` → `src/packages/pf1e/ui/BattleAnalysis.svelte`,
+   `src/packages/pf1e/uiEntry.ts` is the package's UI entry, `systems/pf1e-mass-battles/manifest.json`
+   declares `ui.entry: "ui.js"`, the first-party index carries `uiSha256`. The shell no longer
+   bundles the component (`grep "PF1e Battle Analysis (High Fidelity)" dist/index.html` → 0).
+5. **Proofs.** `tests/packages/pf1ePackage.test.ts` evaluates the **built** `ui.js` against the
+   exposed runtime in-page (refuses without it, by the contract's message), boots the package and
+   checks both published hashes, the welcome's `sim.ui` and the filled slot; `hostPackages` covers
+   a probe `ui.js` and a broken one (rules still run, nothing published); `playerRulesPackage`
+   covers the paired offer, consent record, UI-only update, non-fatal UI failure and the
+   both-hashes-trusted rule; `packageLoader` / `firstPartyPackages` cover manifest, loader and
+   trust; `tests/scripts/buildSystemPackages.test.ts` pins the rewrite rules;
+   `e2e/package_ui.spec.ts` (new hook `packageUiSmoke`) mounts the built component in the real
+   bundle — typecheck/lint only here, a run is owed.
+
+**Measured.** `ui.js` **9,790 B** (unminified single expression). `dist/index.html`
+**5,857,329 → 5,902,756 B (+45,427 B raw; gzip 1,865,673 → 1,883,914 B, +18,241 B)**; headroom
+388,700 B. Attribution by rebuilding with the namespaces stubbed: exposing `svelte/internal/client`
+as a whole namespace costs **38,978 B** (internals the shell's own components had tree-shaken
+away — transitions, legacy bindings, media helpers — now retained because a package may use them),
+`svelte` + `svelte/store` 1,177 B, the embedded zip +3,073 B (→ ≈4.1 KB base64), the rest ≈1.2 KB
+net of loader/consent/e2e-hook code minus the moved component. This is a **fixed, one-time cost of
+the mechanism**, paid now so that T3's ≈310 KB of PF1e UI can leave the shell without carrying a
+runtime; if headroom gets tight before then, the build can shrink the exposed surface to the names
+the first-party `ui.js` actually reads (at the price of refusing third-party components that need
+more). Gates: `tsc` 0, `eslint` 0, svelte check 0 blocking, vitest **5,818 passed / 12 skipped
+(5,830)**, `node scripts/size.mjs` OK.
+
+**What it does not do yet.** No GM "share this UI package" switch — the package's UI travels with
+its rules under the same consent, because today's only component is a view of data the player
+already receives; a per-package switch belongs with the sheet slot (T3). No third-party `ui.js`
+story beyond "prompts like any stranger and must match this shell's Svelte": the isolation tiers
+of the design still route foreign UI through P2a's sandboxed panels. Next: **T2 + T3 as one
+move** — the tactical dispatch contract and the PF1e sheets/combat UI leave together through
+`rules.js` + `ui.js` (actor-sheet slot next to `battleAnalysis`), which is the step that removes
+D-474's duplicated helpers and finally shrinks the download.
+
+## D-476 — AIS settings: a declared schema in the manifest, world scope as a replicated document, device scope local, one form in both shells (2026-10-15)
+
+**Context.** After D-475 the kernel could run, share and show a module, but a module author still
+had nowhere to keep configuration except `module.storage` — a per-device blob the GM cannot see,
+players cannot share and no form can render (the shipped torch module keeps four preferences in
+it behind `ui.select` menus). The readiness review listed this as R-03 (`game.settings.register/
+get/set`, world vs client scope, `onChange`); design §12 asked for namespaced, validated,
+bounded values that export with the world. The owner's instruction for this round was "AIS
+ready", not another slice of the PF1e move, so the platform gaps came first.
+
+**Decision.**
+1. **The manifest is the schema.** `interconnect.settings[]` (≤ 32 entries) declares
+   `{ key, scope: "world" | "device", type: "boolean" | "number" | "string" | "choice", label,
+   hint?, default, min?, max?, step?, maxLength?, choices? }`; `validateInterconnect` rejects
+   bad keys, scopes, types, labels, bounds, steps, choices and unknown fields by name
+   (`src/core/packageManifest.ts`, `aisSettingDeclarationError`), and `normalizeAisSettingDeclaration`
+   copies only the declared fields so no manifest extra reaches the runtime. There is no runtime
+   `register`: a key the manifest does not declare does not exist (`"declares no setting <key>"`).
+2. **World scope is a document, written by GM authority only.** Values live in one replicated
+   `settings` document per module, `ais-settings:<packageId>` (`ownership.default: 1`,
+   `flags.ais: { packageId, values }`), created/updated through ordinary ops
+   (`aisWorldSettingOps`, update diffs `flags.ais.values.<key>`, no-op writes submit nothing), so
+   they export with the world, undo like any edit and reach every player replica like any
+   limited-readable document. The player kernel refuses a world write **before any op is built**
+   (`"needs GM authority"`), because an op would merely be refused later by `validateOps`.
+   `flags.ais`, not `system`: `worldSettingsFrom` merges every settings document's `system` into
+   the core bag, and a module must never be able to shadow a core setting.
+3. **Device scope never leaves the device.** `ais-settings:<worldId>:<packageId>` rows in the
+   existing IndexedDB settings store; the GM's device values are as private as a player's.
+4. **One RPC surface for both runtimes.** `settings.list {}` → declarations with effective values;
+   `settings.get { key }`; `settings.set { key, value }` (capability `module.settings.write`;
+   `list/get` need none because the schema is the module's own manifest). Every value is coerced
+   against its declaration on read and write (`coerceAisSettingValue`: numbers snapped to
+   `min/max/step` or refused, choices checked, strings length-bounded), so a hand-edited document
+   degrades to defaults instead of crashing the module. Both runtimes raise
+   `module.settings.changed { scope, key, value }`: the host from its own `ops` bus
+   (`AisRuntime.emitWorldSettingChanges`, diffed per key), the player from the replica.
+   SDK: `AIS.settings.list/get/set/onChange`.
+5. **One form, two shells.** `src/ui/packages/AisSettingsForm.svelte` renders declarations
+   (checkbox / number / text / select, scope badge, hint, inline error from the runtime). The
+   GM's module review (Settings → Packages, `data-ais-settings`) edits both scopes through
+   `AisRuntime.moduleSettings/setModuleSetting` (exposed as `AisModuleShellApi`); the player's
+   *Shared modules* card (`data-player-ais-settings`) edits device scope and shows world scope,
+   because the declarations now ride in `ais.profile` (`AisSharedModule.settings`).
+
+**Proofs.** `tests/core/aisSettings.test.ts` (doc id, coercion matrix, op shapes, touched
+detection); `tests/packages/packageLoader.test.ts` (schema validation messages);
+`tests/packages/aisModule.test.ts` (handler contracts incl. refusals);
+`tests/app/aisRuntimeSharing.test.ts` (booted host: GM form writes world + device, module reads,
+player profile carries declarations and the replicated document);
+`tests/app/playerAisRuntime.test.ts` (player: defaults, world write refused with no op built,
+device write + event, GM commit → replica → `module.settings.changed` at the player).
+
+**Not done.** The torch module still keeps its preferences in `module.storage`; mapping them onto
+four declared settings is a module change (route (c)) and alters the demo's hash, so it waits for
+a turn in which the browser batch can be run. *(Done in D-481, with the browser batch.)*
+
+## D-477 — AIS compendium reads: `compendium.list / search / get` over the world's content packages, GM device only (2026-10-15)
+
+**Context.** R-01 was the first gap of every content-aware module: nothing in AIS could read a
+compendium pack, although the host already indexes every imported data package
+(`src/core/compendium.ts`, used by the browser, the agent bridge and the encounter tools).
+
+**Decision.** Three read-only methods behind one capability, `compendium.read`:
+`compendium.list {}` → `{ packs: [{ id, name, type, packageId, entries }] }` with
+`id = "<packageId>/<packFile>"`; `compendium.search { query 1–120, packId?, limit? 1–100 }` →
+scored hits `{ packId, entryId, name, type, score }`; `compendium.get { packId, entryId }` → a
+**copy** of the entry (`{ packId, id, name, img?, keywords?, type, data }`), refused above 48 KiB
+with the RPC-budget error. The capability is **GM-device-only**
+(`GM_DEVICE_ONLY_CAPABILITIES += "compendium.read"`): players have no replica of the package
+store, and the kernel says so (`"GM device only"`) instead of pretending with an empty list; a
+player-facing module asks its GM-side sibling through D-478 or receives the data by event.
+No UUID scheme, no `fromUuid`, no redirects — an adapter maps Foundry's
+`Compendium.<pkg>.<pack>.<Type>.<id>` onto pack id + entry id when a content guest is in scope.
+SDK: `AIS.compendium.list/search/get`.
+
+**Proofs.** `tests/packages/aisModule.test.ts` (list/search/get contracts, bounds, unknown
+pack/entry); `tests/app/aisRuntimeSharing.test.ts` (a booted host with a data package: list,
+search, get; the player profile strips the capability); `tests/app/aisPlayerProfile.test.ts`
+pins the GM-device-only set.
+
+## D-478 — AIS module bus: `modules.list` and `modules.invoke` along declared dependencies, with the device's authority (2026-10-15)
+
+**Context.** R-05: modules could not call each other except by broadcasting custom events.
+Design §7/§15 (P5) asked for "two real guest packages interoperating through a declared
+dependency". The manifest already had `interconnect.requires` (enabling a module fails until its
+required siblings are enabled) and `provides`; neither was visible to the modules themselves.
+
+**Decision.**
+- `modules.list {}` (no capability) → the other modules on this device: `{ packageId, name,
+  version, running, commands, provides, emits }`.
+- `modules.invoke { moduleId, commandId, input? }` (capability `modules.invoke`) runs a
+  **declared command** of a sibling exactly as a shell invocation would — through the kernel's
+  `invokeCommand`, so the target keeps its own grant, budgets and breaker — and returns
+  `{ result }`. The target must be named in the caller's `interconnect.requires`
+  (`"Declare <id> in interconnect.requires"`); a module cannot invoke itself; chains are capped at
+  depth 8; extra arguments are refused by name. The target sees
+  `requestId: "ais-module:<caller>:<n>"` for its logs and runs with the **device's** authority
+  (`runAs: "gm"` on the host, `"player"` at the player) — the bus never elevates.
+- `requires` / `provides` ride in `ais.profile` and in `PackageSummary`, so the GM's review and the
+  player's card show them (`data-ais-requires`, `data-ais-provides`). SDK: `AIS.modules.list/invoke`.
+
+**Proofs.** `tests/packages/aisModule.test.ts` (handler contract, self/undeclared/depth refusals);
+`tests/app/aisRuntimeSharing.test.ts` (host: torch invokes lamp, `requestId`, capability refusal
+for the un-granted direction); `tests/app/playerAisRuntime.test.ts` (player: the same with
+`runAs: "player"`).
+
+## D-479 — AIS diagnostics: per-module trace ring, counters, breaker and Restart in both shells (2026-10-15)
+
+**Context.** Design §14 and acceptance §16.11 ask that diagnostics identify module, event,
+failure and fallback, and that one faulty module be stoppable without restarting the world. The
+kernel enforced budgets but kept no record: a GM saw `failed` and an error string, nothing else.
+
+**Decision.** `src/packages/aisHealth.ts` (`createAisHealthMonitor`, DOM-free so it is unit-tested
+directly) keeps, per frame, a 64-entry trace ring — `{ at, kind: rpc | rejected | command | event |
+lifecycle, name, ok, ms?, error? }`, never payloads — and counters `{ requests, failures,
+rejected, commands, commandFailures, events }`. The dispatcher reports every admission and result
+to it (`createAisModuleDispatcher(…, onTrace)`). A breaker trips after **50 failed or rejected
+requests inside 10 s**; the frame stops with `"circuit open: 50 failed requests within 10 s"` in
+its status, other modules untouched. `AisRuntime.diagnostics(id)` / `restart(id)` (host; restart
+re-creates the frame from the frozen boot definition — new code or grants still need a reload) and
+`PlayerAisRuntime.diagnostics(id)` / `restart(id)` (player; re-reads consent, no new prompt). The
+GM's module review gains a *Health* block (`data-ais-health`: counters, circuit time, last ten
+traces, Refresh, Restart); the player's card shows **Restart** on a failed module.
+
+**Proofs.** `tests/packages/aisHealth.test.ts` (ring bound, counters, trip once, window);
+`tests/packages/aisReliability.test.ts` (dispatcher traces); `tests/app/aisRuntimeSharing.test.ts`
+and `tests/app/playerAisRuntime.test.ts` (diagnostics/restart through booted runtimes).
+
+**Measured (D-476…D-479 together).** RPC methods 18 → **26**, capabilities 18 → **21**, events +1
+(`module.settings.changed`). Bounds unchanged (RPC 64 KiB / 120 req/s / 30 cmd/s / 32 concurrent;
+command 16 KiB & 8 s; startup 5 s; storage 128 KiB / 256 keys). `dist/index.html`
+**5,902,756 → 5,936,462 B (+33,706 B raw; gzip 1,883,914 → 1,894,208 B)**, headroom 354,994 B.
+Gates: `tsc` 0, `eslint` 0, svelte check 0 blocking, vitest **5,834 passed / 12 skipped (5,846)**
+(+16 tests), `node scripts/size.mjs` OK. Browser specs were not run in the authoring sandbox.
+Readiness: R-01, R-03, R-05 closed; R-09 (ESM module graphs in the loader) and R-07 (binary
+resources) remain the known kernel residuals; R-08 is excluded by design. Author-facing summary of
+the whole surface: [AIS_MODULE_GUIDE.md](AIS_MODULE_GUIDE.md).
+
+## D-480 — Browser verification executed: npm-registry Chromium as a one-command install, the first real run of the AIS shells, and the defects it found (2026-10-15)
+
+**Context.** D-468…D-479 shipped with "browser specs were not run in the authoring sandbox", and
+the owner rightly refused that: an architecture whose GM/player shells were never opened in a
+browser is not "ready", and the repository already *documented* a working route (D-119, D-179,
+D-181, D-182, D-222: `@sparticuz/chromium` from the npm registry) which was not re-read before
+writing "cannot install browsers". That claim was false and is withdrawn.
+
+**Decision.**
+- **One-command browser install.** `pnpm e2e:browser` → `scripts/e2e/installHeadlessChromium.mjs`
+  reads the revision Playwright expects from `playwright-core/browsers.json` (1.63: revision 1243,
+  Chromium 153.0.8010.12), fetches the matching `@sparticuz/chromium` major from
+  `registry.npmjs.org` (153.0.0 = Chromium 153.0.8010.0, 69,995,309 B), brotli-decompresses the
+  headless shell, SwiftShader, the Amazon Linux 2023 libraries and the fonts, and lays them out in
+  `~/.cache/ms-playwright/chromium_headless_shell-<revision>/` with Playwright's
+  `INSTALLATION_COMPLETE`/`DEPENDENCIES_VALIDATED` markers — so plain `playwright test
+  --project=chromium` finds it (no `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`). The shipped
+  `fonts.conf` points at `/var/task`; it is rewritten to the extracted Open Sans plus
+  `/usr/share/fonts` (without this every glyph measures zero-width and layout specs fail).
+  `playwright.config.ts` detects that layout (Playwright's own download has no `al2023/` or
+  `fonts/` directory) and sets `LD_LIBRARY_PATH`/`FONTCONFIG_PATH` itself. Measured: install
+  4.5 s; smoke launch 91 ms, WebGL/WebGL2 available; `grids`+`chat` specs green with no manual
+  environment. CI is untouched (`playwright install` keeps working where the CDN is reachable).
+- **Component-prop guard.** `tests/scripts/svelteComponentProps.test.ts` parses every `.svelte`
+  file with the Svelte compiler and fails when a template passes a prop (`attr=` or `bind:attr`)
+  that the child's `$props()` does not declare (barrel re-exports resolved; rest-prop components
+  skipped). It reproduces the `WindowHost` defect below when it is reintroduced and found one
+  dead prop (`PF1eActorSheet` → `PF1eCompendiumPicker client`, removed).
+- **`cloneAisSettingDeclaration`** (`src/core/automationInterconnect.ts`) replaces
+  `structuredClone` on setting declarations everywhere (`hostBoot`, `aisRuntime`,
+  `playerAisRuntime`, `aisPlayerProfile`); the GM form shows a load error in place instead of a
+  permanent "Loading…".
+- **Event delivery** (`AisModuleIframe.emit`) exempts `module.settings.changed` from the live
+  `action.observe` check, matching the subscription rule of D-476.
+- `e2e/ais_platform.spec.ts` (2 tests) joins `test:e2e:ais` as the browser acceptance of
+  D-476…D-479; `E2E_BATCHES.md` and `README.md` carry the recipe and the results.
+
+**What the first real run found (and would never have been found by the 5,834 unit tests).**
+1. *Dead props in the GM shell.* `App.svelte` passed `aisModules` and `onOpenAisPanel` to
+   `WindowHost`, which never declared or forwarded them to `SettingsPanel` → the generated settings
+   form (D-476), Health/Restart (D-479) and "Open panel" (D-470) were inert in the real Settings
+   window; the block said "Settings become editable once the world has booted" forever. Svelte 5
+   drops unknown props silently and `.svelte` templates are not type-checked here.
+2. *`DataCloneError` on proxies.* `Root.svelte` keeps `HostApp` in `$state`, so declarations read
+   through it are Svelte proxies; `structuredClone(proxy)` throws "#<Object> could not be cloned"
+   and `moduleSettings` rejected — "Loading…" forever once (1) was fixed. Regression test:
+   `aisRuntimeSharing.test.ts` boots the runtime over a Svelte-like deep proxy (red with the old
+   code, green now).
+3. *Settings events never delivered.* The kernel allowed subscribing to `module.settings.changed`
+   without `action.observe` but `emit` demanded a current `action.observe` grant for every event,
+   so a module holding only `module.settings.write` heard nothing (`changes: []` in both shells).
+4. Spec-side errors in the never-run specs: the token centre computed as `x + width / 2` (a
+   token's `x,y` *is* its centre — `tokenRect`), the torch state read at `light.source` instead of
+   `{ sourceId, sourceItemId, active }`, `compendium.get` `type` expected as the pack type instead
+   of the entry type, the player's settings card not reached because the guide drawer
+   (`[data-player-setup]`) was never opened, and a re-opened Settings window starting collapsed.
+   `e2e/packages.spec.ts` also asserted the pre-D-471/D-475 `rulesBoot` shape (`inPage`, `ui`
+   missing) — stale since 2026-10-14.
+
+**Measured (real Chromium 153, 2 CPUs, one worker).** `test:e2e:ais` **18/18** — `ais_modules`
+12/12 (PF1e Torch 34.0 s / 36.0 s), `ais_foundry` 3/3 (Tagger adapter 58.4 s / 59.2 s),
+`ais_player` 1/1 (30.6 s), `ais_platform` 2/2 (27.3 s GM, 30.1 s player); batch 5.8 min
+(+2.4 min `ais_foundry` rerun after a bare `pnpm build` wiped `dist/worlds` — the D-222 footgun,
+still real). Adjacent: `ais_ui` 3/3, `package_ui` 1/1, `packages` 6/6, `join` 1/1, `pf1e_join`
+1/1; `test:e2e:table` **41/41 in 10.0 min** (its `package_ui` spec, D-475, had never run either).
+Gates: `tsc` 0, `eslint` 0, svelte check 0 blocking, vitest **5,836 passed / 12 skipped (5,848)**
+(+2: the proxy regression and the component-prop guard), `dist/index.html` **5,937,482 B**
+(gzip 1,894,407 B; +1,020 B for the field-wise clone and the error branch), headroom 353,974 B.
+
+**Environment facts (for later agents; verified 2026-10-15).** The sandbox is Debian 12
+(bookworm), glibc 2.36, kernel 6.1, 2 CPUs; egress only to `registry.npmjs.org`, `pypi.org`,
+`github.com`. **Chromium 153.0.8010.0 runs on it with the bundled NSS libraries**: `ldd` on the
+headless shell reports exactly `libnss3.so`, `libnssutil3.so`, `libnspr4.so` as missing from the
+host (Debian's `libnss3` is absent and `apt` has no egress); `al2023/lib` provides them plus
+`libexpat.so.1`/`libplc4.so`/`libplds4.so`; everything else resolves to the host glibc. The
+Chromium sandbox starts normally (no `PLAYWRIGHT_CHROMIUM_NO_SANDBOX`). A sandbox restore drops
+`node_modules`, `~/.cache` and `/tmp` and can rewind the local HEAD; `git fetch && git reset
+origin/<branch> && corepack pnpm install --frozen-lockfile && pnpm e2e:browser` recovers it in
+about ten seconds (measured: install 5.4 s, browser 4.2 s).
+
+**Consequences.** "Browser tests could not be run" is no longer an acceptable status line in this
+repository: the install is one command, documented in README/E2E_BATCHES, and every future
+D-entry that touches a shell reports the batch it ran. The unit suite's blind spots that this run
+exposed — cross-component prop wiring, Svelte proxies reaching structured-clone/postMessage
+boundaries, and iframe-side event delivery — now have a static guard, a proxy regression test and
+a browser spec respectively; iframe delivery stays browser-only by nature.
+
+## D-481 — `pf1e-torch` policy as declared world settings: the GM's rules reach every player's copy; prepare-script embed order fixed (2026-10-15)
+
+**Context.** D-468 made the GM share modules with players and D-476 gave AIS a settings service,
+but the first-party torch still read its policy — inventory bypass, consumable consumption,
+fallback size, preferred source — from `module.storage`, which is per device. The acceptance
+example of the whole player-side effort ("a player lights the torch on their own token") therefore
+ran with the *module defaults* on every player's device regardless of what the GM had chosen in
+"Torch settings…". D-476 recorded this as "not done … waits for a turn in which the browser batch
+can be run"; D-480 made that turn possible.
+
+**Decision.**
+- **Manifest.** `modules/pf1e-torch/manifest.json` declares `interconnect.settings`: four world
+  keys — `ignoreInventory` (boolean, off), `consumeConsumables` (boolean, on), `fallbackLight`
+  (choice `10-20 | 20-40 | 30-60 | 60-120` ft, default `20-40`), `defaultSourceId` (choice of
+  the seven catalogue ids, default `torch`) — and one device key, `quietNotices` (boolean, off:
+  mutes the module's informational notices on that device; warnings always show). Capabilities:
+  `module.storage.read/write` dropped (nothing else used storage), `module.settings.write` added.
+- **Module.** `readPreferences` maps `AIS.settings.list()` onto the old preference shape before
+  every action, so a player's copy follows the replicated value with no cache to invalidate.
+  "Torch settings…" (the `settings` token action) keeps its text menu but writes through
+  `AIS.settings.set` — only the keys that changed; on a player's device the kernel refuses world
+  keys by name and the module answers with the GM's current policy ("Torch rules are the GM's
+  world settings; only the GM can change them. A matching carried item is required; consumables
+  are not consumed; fallback light 20 / 40 ft; preferred source torch."). The same document is
+  edited by the generated form under Settings → Packages → PF1e Torch (D-476), exports with the
+  world and undoes like any edit. The menu gains a per-device "Fewer torch notices" toggle.
+- **Prepare-script order (found by the first run).** `test:fx:prepare` ran `vite build` *before*
+  `buildSystemPackages.mjs`; the gitignored `systems/.first-party/` embed set is read by
+  `vite.config.ts` at build time, so a restored sandbox or fresh checkout produced a 5,727,665 B
+  shell with **no** first-party packages. That shell is a different product: players are prompted
+  for the GM's rules package (D-473's build-hash trust cannot match), the rules dialog sits where
+  the module-consent banner should be, and both player specs fail at `[data-ais-consent]`. The
+  script now builds the embed set first, `vite build`, then the system packages again (the Vite
+  build empties `dist/`), and `vite.config.ts` warns on a production build without the embed set.
+  D-480's measured 5,937,482 B was a shell *with* the embeds, built in a tree that still had them.
+- **Player readback.** `PlayerSurface.aisWorldSettings(packageId)` returns the replicated world
+  values of one module's settings document, so a spec can wait for replication instead of racing.
+
+**Measured (this sandbox, 2 CPUs, `corepack pnpm e2e:browser` Chromium 153.0.8010.0).**
+- First `test:e2e:ais` run against the embed-less shell: 16/18 in 10.4 min — the two failures were
+  the player specs at the consent step (the rules dialog, hash `0134b0294f6d07f6…`, on screen).
+- Second run after the prepare-order fix (shell 5,937,590 B, embeds present): **17/18 in 10.3 min**
+  — the platform player spec passed again, and the one failure was this entry's own new
+  assertion (`toHaveText("Turn carried light on")` where the entry correctly reads
+  "Turn carried light on · Torch" once a source is remembered). With `toContainText` the
+  extended `e2e/ais_player.spec.ts` passes in **42.4 s**: consent → light (2→1) → out →
+  GM unticks *Consume candles and torches when lit* → `ais-settings:pf1e-torch` =
+  `{ consumeConsumables: false }` on the player replica → light again, quantity stays 1 → out →
+  un-share. AIS batch therefore 18/18 across the two runs (16 + the player spec re-run).
+- `tests/modules/pf1eTorch.test.ts`: 10 tests (8 → 10): the player-device test asserts the
+  replicated policy is followed and the world write is refused with the GM-policy message; the
+  `quietNotices` test asserts info notices are muted and a warning still shows.
+- Gates: `tsc --noEmit` 0 errors; `eslint .` 0; `checkSvelte` 99 components, 0 blocking, 3 advisory;
+  `vitest run` **440 files passed / 2 skipped, 5,838 tests passed / 12 skipped (5,850)** in 3.0 min;
+  `dist/index.html` **5,937,590 B** (gzip 1,894,457), within the 6 MB budget.
+
+**Consequences.** The torch is the worked example for D-476 in `AIS_MODULE_GUIDE.md` §5; the
+module README carries the settings table and the player-side behaviour; D-476's "not done" is
+closed. The torch's build-signed hash changed with its code, as any first-party module edit does
+(`approveExisting` in the specs re-approves it; existing worlds re-review it once). Route (b)
+holds: nothing in the kernel changed for this, only a module adopted the service. Residuals:
+R-09 (ESM module graphs) and R-02 (general document create/update) remain the next AIS gaps.
+
+## D-482 — Target A: unmodified Foundry `module.json` distributions run through AIS (kernel `settings.register` + `hidden`, Foundry import, ESM graph loader, adapter 0.2.0 `foundry-module` profile) (2026-10-15)
+
+**Owner decision (this round).** The main line is the AIS kernel and its Foundry adapter, not
+ArenaStar's own modules; D-481's torch slice was judged off-route. Asked for the end target, the
+owner chose **A — Foundry core-API modules run unmodified** (a Foundry-format distribution is
+imported untouched; the adapter maps Foundry *core* APIs onto AIS services). Modules that need
+the `pf1` system namespace stay outside this phase (Target B remains possible later). This entry
+delivers the first complete vertical slice of A, verified in Chromium.
+
+**What a GM can do now.** Drop a Foundry module's release zip (`module.json` at the root or inside
+one folder, icons/LevelDB packs and all) onto *Settings → packages*. It imports as an AIS module
+bound to `ais-foundry-v13@0.2.0` profile `foundry-module`; enable + review + approve as any module;
+after reload the module's **own** ES modules run inside the sandboxed frame, its `game.settings`
+appear in the generated settings form, and its global API is reachable from reviewed script macros
+through `api.ais.invoke(<id>, "foundry.api", { path, args })`. Proof: the pinned upstream Tagger
+1.5.4 source tree, zipped verbatim (`dist/packages/foundry-tagger-upstream-1.5.4.zip`, built by
+`buildAisDemo.mjs` from the provenance-checked files, no wrapper manifest, no bundling), imports,
+boots (`loaded: [scripts/module.js]`, `globals: ["Tagger"]`, hooks `preUpdateToken…`, keybinding
+`tagger.do-not-apply-tag-rules`), answers `Tagger.getByTag("Beacon")` with the two visible beacons
+and commits `Tagger.addTags(@uuid:…beacon-one, ["adapted"])` into the replicated token document.
+
+**Kernel (reusable by every module, not Foundry-specific).**
+- RPC method 27: `settings.register(declaration)` (capability `module.settings.write`) declares a
+  setting from code with exactly the manifest schema (`parseRuntimeAisSettingDeclaration`); an
+  identical re-registration answers `{ registered: false }`, a different shape for a known key is
+  refused, the per-module cap is `AIS_MAX_SETTINGS` (32 manifest) + `AIS_MAX_RUNTIME_SETTINGS`
+  (64 runtime). Both runtimes (`AisRuntime`, `PlayerAisRuntime`) keep `runtimeDeclarations`
+  per boot (`declarationsOf(packageId)` = manifest ⊕ runtime) and report the count in
+  `AisModuleRuntimeStatus.settings`, so the GM's `RulesetSection` and the player's guide drawer
+  render the settings block for modules whose manifest declares none and reload an open form when
+  the count grows. SDK: `AIS.settings.register(declaration)`.
+- Declarations gain `hidden: true` (kept and replicated, never rendered; the form says
+  "n internal setting(s)…", `data-ais-settings-hidden`). `AIS_MAX_SETTING_STRING` 512 → 16 384 so
+  Foundry `Object`/`Array`/`config: false` settings travel as JSON text in a hidden string setting
+  without widening `AisSettingValue` (a `json` type was considered and rejected: it would leak
+  into events, forms and IDB rows).
+- Manifest limits for real distributions: `runtime.resources` ≤ 512 entries (was 64; the byte
+  budget stays 2 MiB/file, 8 MiB total), `runtime.configuration` ≤ 64 KiB (was 16). CSP of the
+  module frame adds `blob:` to `script-src` so a module's own files can run as module scripts.
+
+**Import (`src/core/foundryModuleManifest.ts`, `packageLoader.ts`, `zipKind.ts`).** An archive
+with no `manifest.json` but a `module.json` (root or one nested folder) is *synthesized*: id slugged
+(`my_mod` → `my-mod`), title/version normalised (`v2.1` → `2.1.0`, placeholders → `0.0.0`),
+`type: "module"`, `interconnect.runtime = { provider: ais-foundry-v13, profile: foundry-module,
+configuration: module.json, resources: <every text file> }`, commands `foundry.info` +
+`foundry.api`, capabilities `runtime.execute, package.resources.read, module.settings.write,
+ui.notify, scene.tags.read/write, fx.play`, `sharing: host-only`. The module's files are stored
+**byte-identical**; two inert stubs (`ais-foundry/entry.js`, `ais-foundry/loader.js`) satisfy the
+kernel's entry/script requirements. Non-UTF-8 entries are skipped only on this path (an ArenaStar
+package with a binary still fails as before); missing/binary entry files, no `esmodules`/`scripts`,
+> 512 text files or traversal paths refuse the import with a named reason. `classifyZip` recognises
+the marker so the Settings importer no longer says "not a package".
+
+**ESM graph (`src/packages/foundryEsmGraph.ts`).** The sandbox is an opaque-origin `srcdoc`
+document: module code can only run from blob URLs minted inside the frame, and `blob:` is not a
+valid base for relative specifiers. `aisRuntimeResources()` therefore rewrites, in the kernel-side
+*resource view only*, every static/side-effect/dynamic import whose specifier the archive can
+serve (`./x.js`, `../x.js`, `/scripts/x.js`, `modules/<id>/x.js`) to the canonical pseudo-URL
+`ais-foundry://<package>/<path>`; bare specifiers, other packages' trees and URLs stay verbatim and
+are reported in `distribution.unresolved`. The adapter mints one blob per `.js/.mjs` resource and
+installs a single `<script type="importmap">` mapping those pseudo-URLs before the first module
+import. No transpiling, bundling or identifier changes. `runtimeContext.distribution` carries
+`esmodules/scripts/styles/languages/packs/systems/requires/socket/files/unresolved`.
+
+**Adapter 0.2.0 (`modules/ais-foundry-v13`).** Profile `foundry-v13-scene-tags-fx` keeps the
+0.1.0 behaviour (the wrapper guest's `requires` bumps to the exact 0.2.0; its e2e is unchanged).
+Profile `foundry-module`: reads all resources (8-way parallel `package.resource.read`), applies
+`styles[]` as `<style>`, loads `languages[]` (en first) into `game.i18n` (`localize/format/has`),
+runs `scripts[]` as classic scripts then `esmodules[]` via `import()`, then dispatches `init →
+i18nInit → (settings sync) → setup → ready → canvasInit/canvasReady`. Hook exceptions are logged
+and reported (`hookErrors`), not fatal — Foundry's behaviour. `game.settings.register/get/set/
+registerMenu` is real: `Boolean/Number(range)/String(choices)` → native typed declarations,
+everything else → hidden JSON text; keys are mapped deterministically to the AIS schema
+(`<ns>.<key>` → `ns_key`, FNV-suffixed when too long); `get` is synchronous from a local cache
+seeded by `settings.list` and kept current by `module.settings.changed` (a GM form edit reaches
+the module's `onChange`); `set` writes through `settings.set`. `game.modules` is a mutable
+`Collection` with the module's own entry (`.api` assignable); `game.user/users/world/system`
+(`game.system.id = "arenastar"` — deliberately never `pf1`), `game.scenes/canvas` over the
+projected active scene (Foundry collections iterate values), `game.keybindings/socket.on` recorded,
+`ui.notifications.*` → `ui.notify`, `foundry.utils` (merge/expand/flatten/diff/…), `CONST`, mutable
+`CONFIG`, and class stubs for every Document/Placeable/Application family so `class X extends
+FormApplication` and `instanceof Actor` work while rendering/CRUD fail explicitly with the open
+gap id (R-02 CRUD, R-04 application UI, R-06 socket emit, R-07 files). `foundry.api` resolves a
+dotted path on the module's globals or `game.modules.get(id).api`, materialises `@uuid:` arguments
+into projected documents, and returns JSON-safe results; the roots `AIS/eval/Function/window/
+document/fetch/…` are unreachable. `foundry.info` reports loaded files, languages, styles,
+settings (with AIS keys and sync state), keybindings, socket listeners, hooks, hook errors,
+warnings, unsupported calls, module globals and `loadMs`.
+
+**Measured (Chromium 153 headless shell, D-480 recipe).** New `e2e/ais_foundry_module.spec.ts`
+(2 tests, joins `test:e2e:ais`): upstream Tagger 48.0 s, core-API probe module (settings with
+`onChange`, i18n, classic script + nested ESM + absolute `/scripts/…` import, styles, keybinding,
+Handlebars helper, notifications, hidden Object setting persisted as JSON) 49.5 s. First run found
+two real defects, both fixed: the adapter's `Collection extends Map` iterated entries, not values
+(Tagger's `getFlag is not a function`), and the frame's `ready` status overwrote the runtime
+settings count (the GM form never appeared). Full AIS batch 20/20 (9.4 min + 1.6 min), player +
+package specs 7/7. Unit: `tests/packages/foundryModuleImport.test.ts` (5) incl. the real upstream
+tree zipped with a PNG and a LevelDB file; `settings.register` semantics in `aisModule.test.ts`;
+vitest 441 files / 5,843 passed / 36 skipped; tsc 0; eslint 0; `dist/index.html` 5,949,568 B
+(≈ +12 KB over D-481's 5,937,590 B).
+
+**Honest limits (what Target A does not yet give).** No Foundry UI (Application/Dialog/sheets,
+jQuery, Handlebars rendering) — modules that *are* a form do nothing visible yet (R-04); no
+document CRUD beyond tags/light (R-02); `game.socket.emit`, `game.actors/items/packs` are empty
+projections (R-06, R-01 player side); modules are host-only (GM device) in this phase; startup
+must finish within the kernel's 5 s budget (Tagger loads in well under a second); Foundry
+`packs/` (LevelDB) are listed, not loaded; module ids with characters outside the AIS slug are
+re-slugged (the Foundry id is kept for `game.modules`). Foundry core code is proprietary — every
+API above is an ArenaStar re-implementation of the surface, never copied code.
+
+## D-483 — Target A step 2: Foundry application UI (Application/FormApplication/Dialog/ApplicationV2, Handlebars, jQuery) runs inside the module sandbox; kernel `runtimeProvider.scripts` + `ui.panel.closed` (2026-10-15)
+
+**Why.** D-482 made unmodified Foundry distributions *boot* and expose their API, but every
+Foundry module that *is* a window — a settings menu, a confirm dialog, a HUD, a sheet — did nothing
+visible (R-04, the largest remaining Target-A gap). The owner's line is the kernel + adapter, so
+the answer is a reusable UI layer in the adapter, not per-module rework.
+
+**Decision.** The adapter `ais-foundry-v13` 0.3.0 ships Foundry's application surface as an
+ArenaStar re-implementation (no Foundry core code, no vendored Handlebars/jQuery) that renders into
+the module's own sandboxed frame — the D-470 panel — never into the shell's DOM:
+
+- `runtime/hbs.js` (522 lines): a Handlebars-compatible template engine (`compile`, `registerHelper`,
+  `registerPartial`, `SafeString`, `escapeExpression`, `{{#if/unless/each/with}}`, `else if`,
+  block params `as |item i|`, `../`/`@root`/`@index`/`@key`/`@first`/`@last`, sub-expressions,
+  dynamic and block partials, `~` whitespace control, standalone-line stripping, comments,
+  `noEscape`) plus Foundry's helpers (`localize`, `selectOptions` with `localize=true`/`blank`/
+  `valueAttr`/`labelAttr`, `checked`, `disabled`, `select`, `concat`, `eq/ne/lt/gt/lte/gte/and/or/not`,
+  `numberFormat`, `timeSince`, `rangePicker`, `editor`, `json`, `filePicker` (disabled control),
+  `formGroup`, `formInput`, `colorPicker`, `radioBoxes`). Depth and partial recursion
+  are bounded. Unit-tested in `tests/packages/aisFoundryHbs.test.ts` (42 cases).
+- `runtime/jq.js` (422 lines): the jQuery subset Foundry v1 code uses on `html` — selection,
+  traversal (`find/closest/parents/children/siblings/filter/not/first/last/eq/is`), attributes,
+  `data()` (camelCase + JSON), classes, `css`, `val` (number/select/multi), `prop`, `text/html/
+  append/prepend/before/after/replaceWith/remove/empty`, `show/hide/toggle`, `on/off/one` with
+  namespaces and delegation, `trigger` (synthetic `SubmitEvent` for forms), `serializeArray`,
+  `each/map/get/toArray`, `$.extend`, `$.fn.slideUp/slideDown` no-ops.
+- `runtime/ui.js` (1,252 lines): `Application` (render/close/`setPosition`/`bringToTop`/drag by
+  header/`_renderInner`/`activateListeners`/`getData`/`_getHeaderButtons`/`minimize`/`maximize`/
+  `render(force,{focus})`, `render*`/`close*`/`get<Class>HeaderButtons` hooks over the
+  inheritance chain), `FormApplication` (`submitOnChange`, `closeOnSubmit`, `_onChangeInput`,
+  `_updateObject`, `editable`, `FormDataExtended` with `data-dtype` coercion and `expandObject`),
+  `DocumentSheet` (over projected documents), `Dialog` incl. `confirm/prompt/wait` with v13
+  semantics, `Tabs`, and the V2 family: `ApplicationV2` (`DEFAULT_OPTIONS` merge over the class
+  chain, `{id}` substitution, `data-action` delegation, `actions`, `tabGroups`/`changeTab`/
+  `_prepareTabs`, `_prepareContext`, `_onRender`, `render({parts})`, `close`, `setPosition`,
+  `minimize/maximize`, event target), `HandlebarsApplicationMixin` (`PARTS`, `templates`, `forms`
+  handlers with `closeOnSubmit`/`submitOnChange`, per-part re-render), `DocumentSheetV2`,
+  `DialogV2` (`confirm/prompt/wait/input`, `rejectClose`, default button, `query` throws with the
+  gap). `ui.windows`, `ui.activeWindow`, `ui.notifications`, `renderTemplate/loadTemplates/getTemplate`
+  (templates are the module's own `.hbs` resources; `templates/` and `systems/` core paths fail
+  with a message that says why), `foundry.applications.api/ux/sheets` namespaces,
+  `game.settings.registerMenu` → `settingsMenus` + the `foundry.ui { menu }` command.
+- The frame's **window manager** keeps every window inside the panel viewport (cascade, clamp,
+  z-order, focus), asks the kernel to show the panel when the first window renders and to hide it
+  when the last one closes (`AIS.ui.panel.open/close`), and sizes from the frame (760×560 fallback
+  while hidden). The shell chrome's **Close** button now raises the new kernel event
+  **`ui.panel.closed { reason: "user" }`**, which the layer answers by really closing every window
+  (Foundry `close*` hooks run) — before this, a shell close only hid the frame and the next render
+  resurrected stale windows.
+- Sandbox form reality: the module iframe deliberately has no `allow-forms`, and browsers block
+  submission *before* `submit` fires. `ui.js` therefore synthesises `SubmitEvent` (bubbling,
+  cancelable, `submitter`, honouring `reportValidity`) for submit-button clicks and implicit Enter
+  submission, and `jq.trigger("submit")` does the same; nothing can navigate the frame.
+- Styling: a self-contained Foundry-shaped stylesheet (`.window-app`, `.window-header`,
+  `.form-group`, `.dialog-buttons`, `.application`, `.tabs`, …) and the module's own `styles[]`;
+  no FontAwesome — icon `<i>` elements render as empty boxes, which is honest, not pretty.
+
+**Kernel changes (generic).**
+- `runtimeProvider.scripts` (manifest): a provider may ship 1–16 layered classic scripts evaluated
+  in order before its `entry` (same path rules as `runtime.scripts`, validated by
+  `validatePackageManifest`, labelled per file in error stacks by `aisOwnSource`). Providers were
+  single-file before; vendoring the UI layer into `adapter.js` would have made a 3,000-line file.
+- Imported Foundry modules are synthesized with `ui.panel` + a panel (`title` = module title,
+  760×560, `foundryModuleManifest.ts`), and the `foundry.ui` command.
+- `AIS_EVENTS` gains `ui.panel.closed` (9th event). Subscription/delivery capability is now a
+  function of the event (`aisEventSubscriptionCapability`): host-state events need
+  `action.observe`, `module.settings.changed` nothing (D-476), `ui.panel.closed` the module's own
+  `ui.panel`. Both `AisRuntime` and `PlayerAisRuntime` emit it from the panel chrome's `onClose`.
+
+**Measured (Chromium 153 headless shell, 2026-10-15).** `e2e/ais_foundry_module.spec.ts` test 3
+(new): a Foundry-format module whose `init` hook defines `FsdConfig extends FormApplication`
+(own `templates/config.hbs` with a partial, `selectOptions localize=true`, `checked`, `each … as
+|item i|`, a module helper), registers it with `game.settings.registerMenu(…, {restricted: true})`,
+defines `FsdPanel extends HandlebarsApplicationMixin(ApplicationV2)` with a `data-action` handler,
+and uses `Dialog.confirm` / `DialogV2.confirm`. The GM opens the menu through `foundry.ui`, the
+panel appears (`data-ais-panel-open`), the window title/heading/CSS come from the module's lang
+file, template and stylesheet; two real clicks on the module's `+5` button, a select change and
+**Save** write `fsd_demo_radius: 30, fsd_demo_mode: "hard"` into the replicated settings document,
+`_updateObject` sees `{radius: 30, mode: "hard", enabled: true}`, `closeOnSubmit` closes the window
+and the panel hides; `Dialog.confirm` resolves `true` from a click on **Yes**, `DialogV2.confirm`
+resolves `false` from **No**, both delivered back through the macro; the V2 panel re-renders its
+PARTS from two `ping` actions (`pings: 2`) with `ui.notifications.info` landing in the shell's
+notice stack; the shell's Close empties `foundry.info().windows` and a new `foundry.ui { app }`
+instance renders into a clean frame. The whole file: **3 tests in 2.0 min**; the new
+`e2e/ais_foundry_ui_runtime.spec.ts` (3 tests: Handlebars+helpers+jQuery over a real DOM, v1
+`FormApplication` lifecycle incl. `submitOnChange`/`Dialog` buttons/`_getHeaderButtons`/drag, V2
+`PARTS`/tabs/forms/`DialogV2.prompt`) **1.5 s**. Batches: `test:e2e:ais` **24/24 (9.9 min)**,
+`ui-adapters` 5/5, `packages` 6/6; vitest **442 files / 5,887 passed / 12 skipped**; tsc 0;
+eslint 0; adapter zip 55,215 B; `dist/index.html` 5,950,392 B (+824 B over D-482 — the UI layer
+lives in the adapter package, not in the shell).
+
+**Defects the browser run found and fixed (all real, none in the test's expectations alone).**
+(1) `clone` used `structuredClone` and threw `DataCloneError` on option objects holding functions
+→ deepClone semantics. (2) the sandbox blocked native form submission before `submit` fired → the
+synthetic `SubmitEvent` path above. (3) a v1 subclass that overrides `activateListeners` without
+`super` lost the form listener — documented in the spec as Foundry's own contract. (4) a shell-side
+Close left the layer believing its panel was open → `ui.panel.closed`. (5) `foundry.ui { app }`
+constructs a fresh instance — the test originally expected the old instance's state.
+
+**Honest limits.** Still host-only (GM device) in this phase; the module's windows live inside
+*its* panel (one frame per module), not as free-floating shell windows — a Foundry module cannot
+draw over the canvas or inject into ArenaStar's sidebar (`renderActorDirectory` and friends fire
+with the module's own `html` only); no FontAwesome, ProseMirror, `TextEditor.enrichHTML` (plain
+text), `FilePicker` (disabled control), `ContextMenu`, `Draggable` beyond the header, `SearchFilter`,
+`DragDrop`; `DialogV2.query` (cross-user) throws; `DocumentSheet` renders projected documents
+read-only beyond tags/light (R-02); upstream Tagger has no templates, so the UI proof uses the
+spec's own Foundry-format module, exactly as a third party would ship it. Foundry's core templates
+(`templates/…`) are proprietary and not available — a module that relies on them must ship its own.
+
+## D-484 — Target A step 3: the adapter emulates Foundry's *resource* surface — ArenaStar's own core template library, core language keys, base CSS, `foundry.data.fields`/`DataModel` (adapter 0.4.0) (2026-10-15)
+
+**Why.** D-483's closing limit — "Foundry's core templates are proprietary; a module that relies
+on them must ship its own" — was wrong as a product position and the owner rejected it. Modules
+do not ship `templates/generic/tab-navigation.hbs`, `templates/hud/dialog.html`, the
+`COMMON.*`/`SETTINGS.*` keys or `foundry.data.fields`: the Foundry *host* provides them, and a
+module written for Foundry simply references them. A GitHub code search over the module corpus
+(2026-10-15) put the shape of that dependency beyond doubt: `templates/generic/tab-navigation.hbs`
+appears in ≈700 module files across 77 sampled repositories and `templates/generic/form-footer.hbs`
+in ≈672 / 75; then `sidebar/document-create.html` (23 repos), combat-tracker parts (13), `hud/
+dialog.html` (12), `dice/roll.html` (8) + `dice/tooltip.html` (7), `journal/toc.hbs` (7),
+`scene/token/*.hbs` (5), `sidebar/entity-create.html` (4), `sidebar/chat-message.html` (3). An
+emulator that boots a module and then fails on its first `PARTS` entry is not running the module.
+
+**Decision.** The adapter is an emulator of Foundry's resource surface, not only its API surface.
+It provides *ArenaStar's own* implementation of each resource modules reference, derived from the
+contract they depend on — the path, the context shape a module passes, the DOM markers and class
+names a module selects on afterwards (`nav.tabs[data-group] > a.item[data-tab]`, `.dialog-button
+[data-button]`, `.dice-total`, …), the language key names — and never from Foundry's files.
+Reverse-engineer the contract and make it our own; do not copy.
+
+- **`runtime/core.js` (410 lines, `__aisFoundryCore`).** Ten templates — `templates/generic/
+  {tab-navigation,form-footer,form-group,form-fields}.hbs`, `templates/hud/dialog.html`,
+  `templates/dice/{roll,tooltip,table-result}.html`, `templates/sidebar/{document-create,
+  chat-message}.html` — plus 12 aliases so every Foundry generation's name for an entry resolves to
+  the same template (`hud/dialog.hbs`, `sidebar/entity-create.html`, `chat/chat-message.hbs`,
+  `generic/*.html`, …). The templates are deliberately *better* where the contract allows it: the
+  roll card masks formula/total itself when `isPrivate`, the tooltip derives `die d<faces>` when a
+  part carries no `classes`, tab navigation honours both the v11 `cssClass` and the v13 `active`
+  shapes, dialog buttons mark the `default` one. 496 core language keys (`Yes`, `COMMON.Cancel`,
+  `SETTINGS.Save` → "Save Changes", `DOCUMENT.Actor`, `TYPES.Actor.npc`, `FOLDER.*`, `OWNERSHIP.*`,
+  `PERMISSION.*`, `KEYBINDINGS.*`, `SIDEBAR.*`, `TOKEN.*`, `COMBAT.*`, `CHAT.*`, …) in our words
+  under Foundry's key names; a base stylesheet for the classes the library's templates emit
+  (`.standard-form`, `.form-group/.form-fields/.hint`, vertical tabs, dice cards, table draws, chat
+  message, `color-picker`/`file-picker`/`range-picker` elements) with no `url()`/`@import`/
+  `@font-face` — the sandbox CSP has no `font-src`/`img-src`, and the unit test enforces it.
+- **`runtime/fields.js` (550 lines, `__aisFoundryFields`).** `foundry.data.fields`: `DataField`
+  (`clean`/`validate`/`initialize`/`toObject`/`toInput`/`toFormGroup`/`fieldPath`/`getInitialValue`,
+  `required`/`nullable`/`initial`/`label`/`hint`/`validate` options), `SchemaField` (`getField` by
+  dotted path, iteration), `BooleanField`, `NumberField` (`min/max/step/integer/positive/choices`),
+  `StringField` (`blank/trim/choices` incl. function choices), `ObjectField`, `ArrayField`,
+  `SetField`, `EmbeddedDataField` (initialises to model instances), `ColorField`, `FilePathField`,
+  `AngleField` (normalised), `AlphaField`, `HueField`, `HTMLField`, `JSONField`, `DocumentIdField`,
+  `DocumentUUIDField`, `ForeignDocumentField`, `IntegerSortField`, `DocumentOwnershipField`,
+  `DocumentTypeField`, `DocumentStatsField`, `TypedSchemaField`, `TypedObjectField`,
+  `EmbeddedCollectionField`, `EmbeddedDocumentField`, `AnyField`;
+  `foundry.data.validation.DataModelValidationFailure/Error`. `foundry.abstract.DataModel`/
+  `TypeDataModel`: `defineSchema`, cached `schema`, `migrateData → cleanData → shimData` on
+  construction, strict validation (`"Prefs validation errors: radius must be at most 60"`),
+  `updateSource` (schema-walking diff, ignores keys outside the schema as Foundry does, nested
+  diff result, `dryRun`/`fallback`), `validate`, `toObject`, `toJSON`, `clone`, `reset`,
+  `fromSource`, `fromJSON`. `foundry.applications.fields`: `createSelectInput/MultiSelect/Number/
+  Text/Textarea/Checkbox/Editor/Color/FilePath/Range`, `createFormGroup`,
+  `prepareSelectOptionGroups` — values set as *attributes* so the nodes survive `outerHTML`
+  serialisation by the Handlebars helpers (`formGroup`, `formField`, `formInput` now render through
+  this layer; duck-typed field objects still work).
+- **`runtime/ui.js`.** Template resolution: the module's own files first, then the library
+  (`core:<canonical>` compile key); `renderTemplate`, `loadTemplates`, `getTemplate`, `{{> …}}`
+  partials and V2 `PARTS` all take that path. A `templates/…` path the library lacks fails with
+  `Core template <path> is not in the AIS Foundry core library yet (10 core templates are); report
+  it with the module name so it can be added.`, `systems/…` paths name Target B. `Dialog` renders
+  through `templates/hud/dialog.html` (`options.template` overrides it, as modules do). The core CSS
+  is injected after the base sheet, before the module's own styles. `foundry.info.templates =
+  { compiled, core: [library paths the module used], missing: [core paths it asked for that the
+  library lacks] }` replaces the bare count.
+- **`runtime/adapter.js`.** `game.i18n` is seeded with the core keys and the module's language
+  files are merged over them (module keys win). `foundry.abstract.DataModel/TypeDataModel`,
+  `foundry.data.fields/validation`, `foundry.applications.fields` come from the layer (the D-482
+  stubs are gone). `game.settings.register(…, { type: SomeDataModel })` stores the model's source as
+  the hidden JSON setting (default = `new type().toObject()` or the declared instance), `get`
+  returns a fresh instance, `set` accepts an instance or source and constructs strictly (an invalid
+  source throws before anything is written); replicated updates decode to instances. `Actor.TYPES`
+  = `["base","character","npc"]`, `Item.TYPES` = `["base"]`, `JournalEntryPage/Cards/Macro` types,
+  `game.documentTypes`, `game.release {generation, build, version}`, and the `CONST` enumerations
+  modules turn into form choices (`TOKEN_DISPLAY_MODES`, `TOKEN_TURN_MARKER_MODES`,
+  `ACTIVE_EFFECT_MODES`, `DICE_ROLL_MODES`, `MACRO_TYPES`, `MEASURED_TEMPLATE_TYPES`, wall/door/
+  playlist/table/lighting/region enumerations, document-type lists).
+- **Manifest/kernel.** Adapter 0.4.0, `runtimeProvider.scripts = [hbs, jq, core, fields, ui]`;
+  `FOUNDRY_ADAPTER.version` 0.4.0 in `foundryModuleManifest.ts` (synthesised Foundry modules bind
+  to the exact adapter version); `foundry-tagger` requires 0.4.0. No new kernel capability, event or
+  RPC — the whole step lives in the adapter package, which is the point of route (b).
+
+**Measured (Chromium 153 headless shell, 2026-10-15).**
+- `e2e/ais_foundry_module.spec.ts` test 4 (new, **36.5 s** alone; file **4/4 in 2.6 min**): the
+  spec's Foundry-format module (`fsd-demo`, unchanged in kind — module.json, ESM, lang file, no
+  AIS call) gains `class FsdPrefs extends foundry.abstract.DataModel` with `NumberField`/
+  `StringField`/`BooleanField`, `game.settings.register(…, { type: FsdPrefs, default: new
+  FsdPrefs() })`, and `FsdPrefsApp extends HandlebarsApplicationMixin(ApplicationV2)` with `tag:
+  "form"` and `PARTS = { tabs: "templates/generic/tab-navigation.hbs", body: its own
+  `prefs.hbs` (only `{{formGroup field …}}` helpers and a `{{> "templates/generic/form-group.hbs"}}`
+  partial), footer: "templates/generic/form-footer.hbs" }` — it ships none of the core files. In the
+  ready hook `game.i18n.localize("COMMON.Yes")` → "Yes", `"SETTINGS.Save"` → "Save Changes",
+  `game.i18n.has("COMMON.No")` true while the module's own `FSD.Title` still resolves; `Actor.TYPES`,
+  `CONST.TOKEN_DISPLAY_MODES`, `game.release.generation === 13`; the setting reads back as a model
+  instance; `renderTemplate("templates/dice/roll.html")` yields `.dice-formula`/`.dice-total`;
+  `templates/sidebar/apps/compendium.html` fails with the diagnosable message and
+  `foundry.info.templates` reports `{ core: ["templates/dice/roll.html"], missing: [that path] }`.
+  `foundry.ui { app }` renders the form in the module's panel: the core tab strip (2 items, icon
+  glyph, `General` active), number input with `type/min/max` and value 20 under the module's own
+  "Light radius"/"In feet", select with "Soft"/"Hard", checked checkbox, "Actor" from a core key,
+  footer buttons "Save Changes"/"Reset Defaults"; clicking the `About` tab shows the core
+  `AreYouSure` text; filling 35 + `hard` and pressing the core **Save Changes** runs the module's
+  handler → `updateSource` → `game.settings.set` → replicated `fsd_demo_prefs =
+  {"radius":35,"mode":"hard","enabled":true}`, `closeOnSubmit` closes the window; a
+  `game.settings.set(…, { radius: 999 })` from the macro is refused with `radius must be at most
+  60` and the document is unchanged; the library usage list ends as `[dice/roll, generic/
+  form-footer, generic/form-group, generic/tab-navigation]`.
+- `e2e/ais_foundry_ui_runtime.spec.ts` test 4 (new; file **4/4 in 2.4 s**): the same shape against
+  the raw layer (no kernel), plus v1 `Dialog.confirm` through `templates/hud/dialog.html` and the
+  `.hbs`/`.html` alias equivalence.
+- `tests/packages/aisFoundryCore.test.ts` (new, 12 tests): every core template rendered through
+  `hbs.js` with its contract context and asserted on the DOM markers modules use; aliases;
+  no-Foundry-text and no-remote-resource guards; 496 keys; the DataField/DataModel contract without
+  a DOM (casting, validation messages, `updateSource` nested diff and schema filtering,
+  `migrateData` ordering, embedded models).
+- Gates: vitest **443 files / 5,899 passed / 12 skipped** (+12 tests), `tsc --noEmit` 0,
+  `eslint .` 0 (the runtime `.js` files are linted too), adapter zip **78,787 B** (+23,572 B over
+  0.3.0 — the library and the data layer), `dist/index.html` **5,950,392 B (unchanged)**: nothing
+  of this lives in the shell. `test:e2e:ais` batch (now 26 tests): **26/26 in 10.1 min**.
+
+**Defects the tests found and fixed (in the layer, not in the expectations).** (1) input values
+were set as DOM *properties*, which `outerHTML` drops — the Handlebars helpers rendered empty
+inputs → attributes. (2) `fieldPath` carried the model name (`Prefs.nested.x`), which would have
+mis-named every form input → root schema unnamed, model name moved into the validation error.
+(3) `updateSource` returned a flat `{"nested.y": null}` diff and accepted keys outside the schema
+(a form's extra inputs leaked into the stored source) → nested diff, schema filtering, recursion
+only through `SchemaField`s. (4) `EmbeddedDataField` initialised to plain objects → instances.
+(5) `DataModel.cleanData` skipped the schema → Foundry's migrate → clean → shim order. (6)
+`DocumentIdField` accepted any non-empty string. (7) the `form-group` template printed
+`[object Object]` for a `fields` context key → `input` is the contract. (8) a `foundry.info`
+duplicate key and a `no-prototype-builtins` violation caught by eslint on the new files.
+
+**Honest limits.** The library is the *head* of the distribution, not all of it: combat-tracker
+parts, active-effect config parts, `journal/toc.hbs`, `scene/token/*.hbs`, `sidebar/apps/*` and the
+long tail are not provided yet — a module asking for one gets a message naming the path and the
+adapter reports it in `foundry.info.templates.missing`, which is the queue for the next additions.
+Icons are text glyphs for the common `fa-*` names (`ui.js`), not a FontAwesome-compatible set.
+`DataModel` covers what settings/forms use; `Document`-level behaviour (`_preCreate`, embedded
+collections, `validateJoint` chains) stays out until R-02 CRUD exists. Everything else from D-483's
+limits list still holds (host-only, panel-confined windows, no ProseMirror/`enrichHTML`/FilePicker/
+ContextMenu/DragDrop, R-02/R-06/R-07, pf1-dependent modules = Target B).
+
+## D-485 — Target A step 4: the whole-system architecture is written down, and its first consequence ships — a generic AIS document service with the adapter's own Foundry `Document` emulation (adapter 0.5.0) (2026-10-15)
+
+**Why.** The owner asked to "continue but think about overall project architecture" before more
+slices were added. Reconnaissance of the layers showed that the open Foundry concerns (R-02
+documents, player-side modules, R-06 sockets, R-10 packs, R-07 files) all hinge on one question —
+*how does a sandboxed module reach the world?* — and that the world already answers it: ArenaStar's
+documents are Foundry-shaped (`_id/type/name/ownership/flags/system`, embedded `items/effects/
+pages/combatants`), every mutation is an `Op[]` validated host-side (rate limit → permissions →
+schema-lite → invariants) and projected per user, and each device holds a replica of what its user
+may see. So the architecture needs **no new authority model**: a module runs with the device user's
+authority, narrowed by capabilities, never widened; the host decides every write exactly as for the
+shell's own UI. That principle, the layer map (world ↔ generic kernel ↔ in-sandbox adapter ↔
+unmodified module), where each Foundry concern lives, and the ordered remaining slices are now the
+design of record in [`AIS_FOUNDRY_ARCHITECTURE.md`](AIS_FOUNDRY_ARCHITECTURE.md). This entry
+records the first slice built inside that design.
+
+**Decision.**
+
+- **Kernel (generic, Foundry-agnostic) — `src/core/aisDocuments.ts` (386 lines) + handlers.**
+  Capabilities `documents.read` / `documents.write` (23 total); RPCs `documents.context`
+  (user id, collection sizes/writability/embedded names, limits), `documents.list` (paged, ≤500
+  rows and ≈256 KiB per page, stable `next` offset), `documents.get` (ref chain, ≤1 MiB),
+  `documents.mutate` (≤32 ops, ≤512 KiB, **one atomic host transaction via `ctx.submit`** with the
+  device user's authority; 31 RPC methods total); event `documents.changed { seq, by, changes:
+  [{ kind, collection, id, parent?, diff? }], truncated }` (10 events) derived from every committed
+  envelope for exposed roots, inline diffs ≤16 KiB, subscription gated by `documents.read`.
+  Exposed collections: `actors, items, journals, rollTables, macros, folders, playlists, combats`
+  (writable) and `users, messages` (read-only); `settings, automations, actionReceipts,
+  fxInstances, compendia, prefabs, scenes` are not addressable (scenes keep their dedicated
+  services until the next slice). Embedded chains validate against the parent kind
+  (`actors→items→effects`, `journals→pages`, `combats→combatants`, depth ≤ 2). The kernel owns
+  `_id` and the kind marker `type` (not updatable through a diff; prototype-polluting path
+  segments refused), and fills what the store requires so no module has to know it: `ownership`
+  (creator = owner, Foundry semantics; embedded rows `{default: 0}`), `flags`, `system`, per-kind
+  defaults (`items: []`, `effects: []`, `pages: []`, `formula: "1d20"`, `kind: "chat"`,
+  `targetType: "actors"`, `round/turn`, combatant fields) — **recursively for inline embedded
+  arrays** (`Actor.create({ items: [...] })` yields store-shaped items with ids). Both device
+  runtimes supply the same `documents` context from their own store (GM: full world; player: the
+  host's projection) and emit the change event from their `ops` bus. `AIS.documents.*` is in the
+  runtime source for every AIS module, not just the adapter; `AIS_MODULE_GUIDE.md` §3 documents it.
+- **Adapter 0.5.0 — `runtime/documents.js` (514 lines, `__aisFoundryDocuments`), wired by
+  `adapter.js`.** Our own `Document` implementation (no Foundry code): `Actor`, `Item`,
+  `JournalEntry`, `JournalEntryPage`, `RollTable`, `Macro`, `Folder`, `Playlist`, `Combat`,
+  `Combatant`, `User`, `ChatMessage`, `ActiveEffect` with `create/createDocuments/updateDocuments/
+  deleteDocuments`, `update/delete`, `getFlag/setFlag/unsetFlag`, `createEmbeddedDocuments/
+  updateEmbeddedDocuments/deleteEmbeddedDocuments`, `getEmbeddedCollection/Document`,
+  `toObject/toJSON/clone`, `uuid`, `isOwner/permission/testUserPermission/canUserModify`,
+  `prepareData/BaseData/EmbeddedDocuments/DerivedData`, `Actor#itemTypes/getRollData`,
+  `Item#actor`, `User#isGM/isSelf/isTrusted/role/character/hasRole`, `Folder#contents/children`,
+  `Combat#started/combatant`; `WorldCollection` (`get/getName(strict)/contents/filter/find/
+  search/folders/documentClass`) and `EmbeddedCollection`. **Replica with stable instances:**
+  hydrated before `init` through `documents.context` + paged `documents.list` in parallel with the
+  module's own files, refreshed *in place* by `documents.changed` (a reference a module holds keeps
+  reflecting the world), `game.user` = the device's `User` document, `game.users/actors/items/
+  journal/tables/macros/folders/playlists/combats/messages` live, `game.combat` the started one.
+  **Writes:** `pre<Create|Update|Delete><Doc>(doc, data|changes, options, userId)` run locally and
+  may cancel (`false`); Foundry's `{ "a.-=b": null }` becomes the kernel's `"-=a.b"`; nested update
+  objects flatten to dotted paths; one `documents.mutate` per call; the promise resolves after the
+  replica applied the commit (seq-gated, 1.5 s fallback) so `await Actor.create()` returns the
+  collection's instance. **Post hooks fire from the change feed only** — `createActor`,
+  `updateItem`, `deleteJournalEntry`, … with `(doc, changes, options, userId)` — so edits made in
+  ArenaStar's own UI and the module's own take one path and fire once; embedded deletes keep the
+  pre-image for the hook. Foundry's subtype ↔ ArenaStar's kind marker: `type: "npc"` is stored in
+  `flags["ais-foundry"].type`; a document that never had one derives it deterministically (Actor:
+  `character` when a non-GM user owns it, else `npc`; Macro from `kind`; Folder from `targetType`;
+  JournalEntryPage from `src`; else `base`). Foundry page data `{ text: { content }, src }` maps to
+  the store's `text` string. `fromUuid/fromUuidSync` resolve `Actor.<id>`, `Actor.<id>.Item.<id>`,
+  `JournalEntry.<id>.JournalEntryPage.<id>`, … (scene uuids still go to the projected scene view).
+  `ChatMessage.create({ content })` posts text through `chat.post` (host-stamped author; HTML
+  flattened); `getSpeaker` exists. The synthesised Foundry manifest grants `documents.read`,
+  `documents.write`, `chat.post`. `foundry.info.documents = { userId, userName, collections,
+  hydrateMs, documents, events, writes, rejectedWrites, hookErrors }`. A module whose grant lacks
+  the capability degrades to empty collections with a warning, not a crash.
+
+**Evidence (2026-10-15, Chromium through the real import path).**
+- `e2e/ais_foundry_module.spec.ts` test 5 (new; **54.8 s** alone, file **5/5**): the unmodified
+  `fsd-demo` module (Foundry-only code) boots with `foundry.info.documents.hydrateMs` a number,
+  `writes: 0`; `game.user instanceof User`, `isGM`, its id equal to the shell's `client.user.id`.
+  Its `probeDocuments()` then runs `Actor.create({ name, type: "npc", system, flags, items: [Shield]
+  })` → `createEmbeddedDocuments("Item", [Torch])` → `torch.update({ "system.lit": true })` →
+  `setFlag` → `actor.update({ name, "system.hp.value": 4 })` → `JournalEntry.create({ pages: [{
+  type: "text", text: { content } }] })`: the returned instance has `uuid Actor.<id>`, `type
+  "npc"`, `hp 4`, `isOwner`, flags `{ origin, count: 1 }`, `itemTypes ["equipment","weapon"]`,
+  `fromUuidSync(torch.uuid) === torch`, `await fromUuid(actor.uuid) === actor`,
+  `game.actors.getName(...) === actor`, `game.actors.size` +1. The shell's own store holds
+  `{ type: "actor", flags: { "fsd-demo": {...}, "ais-foundry": { type: "npc" } }, system: { hp: {
+  value: 4, max: 5 } }, items: [{ type: "item", name: "Shield", effects: [] }, { type: "item", name:
+  "Torch", system: { lit: true } }] }` with an owner level 3, and the journal `{ type: "journal",
+  pages: [{ type: "page", text: "<p>Hold the gate</p>", src: null }] }`. Hook log, in order and once
+  each: `createActor:FSD Guard, createItem:Torch, updateItem:Torch, updateActor:FSD Guard,
+  updateActor:FSD Guard II, createJournalEntry:FSD Notes`, with `changes` `{ system: { lit: true }
+  }`, `{ flags: { "fsd-demo": { count: 1 } } }`, `{ name, system: { hp: { value: 4 } } }` and the
+  shell user id. Then the **shell** edits the actor (`submitAndWait` hp → 9): the module's instance
+  reads 9 and `updateActor` fires with `{ system: { hp: { value: 9 } } }`. Final
+  `foundry.info.documents = { writes: 6, rejectedWrites: 0, hookErrors: [] }`, `unsupportedCalls: []`.
+- `tests/packages/aisFoundryDocuments.test.ts` (new, 8 tests): the adapter layer against a kernel
+  double that runs the **real** normalisation/paging/change derivation — hydration, subtype
+  derivation (`character` vs `npc` from the users collection), create/flags/unsetFlag diffs,
+  pre-hook cancellation, read-only rejection (`Document write rejected: … read-only`), embedded
+  CRUD with stable identity, shell-originated updates/deletes, inline Foundry pages, macro/folder
+  `type` translation, player-device creator ownership.
+- `tests/core/aisDocuments.test.ts` (new, 9 tests): exposed set, ref chains, diff-path rules,
+  defaults/kind markers/creator ownership, inline embedded completion (recursive ids), op-index
+  error messages, 32-op cap, change derivation (root filtering, inline-diff cap), paging by count
+  and bytes.
+- Gates: vitest **447 files (445 passed, 2 skipped) / 5,916 passed / 12 skipped** (+17 tests),
+  `tsc --noEmit` 0, `eslint .` 0, `test:e2e:ais` (now 27 tests) **27/27 in 15.9 min** on this
+  sandbox (the first attempt hit the old 15-minute global cap with 26 passed and one not started;
+  every spec passes alone — the cap is now 25 min in `package.json`), module spec + UI layer spec
+  **9/9 in 4.8 min**. Sizes: adapter zip **89,934 B**
+  (+11,147 B over 0.4.0: `documents.js`), `dist/index.html` **5,961,700 B** (+11,308 B: the kernel
+  service, handlers and runtime-source API — the only part that belongs in the shell).
+
+**Defects the tests found and fixed (in the layer, not the expectations).** (1) `_reset` cleared
+the instance's own keys *before* capturing its embedded collections, so every update replaced
+embedded instances and a module's `item` reference went stale → capture first, refresh in place.
+(2) Kernel rows constructed through the Foundry-data path turned the store's kind marker
+(`"item"`) into a subtype flag → `fromSource` rows bypass `toSource`. (3) Own-property assignment
+would have shadowed the prototype accessors (`type`, `folder`, `role`, …) and thrown in strict mode
+for getter-only ones → keys defined on the prototype chain read `_source` instead. (4) Inline
+embedded rows of a create had no `_id`/`type` in the store → the kernel completes them recursively.
+
+**Honest limits.** Scenes and placeables are not yet addressable through `documents.*` (tags and
+token light keep their dedicated services; `TokenDocument.update` beyond tags, prototype tokens
+and `Scene.update` are the next slice). `Compendium.*` uuids and `game.packs` wait for the packs
+slice; `Roll` is still a stub and `ChatMessage.create` posts text, not cards; no `DocumentSheet`
+rendering for these documents yet (`doc.sheet` is `null`); `Folder` membership is the `folder`
+field modules write, which ArenaStar's own sidebar does not yet read; `Actor.TYPES` is a fixed
+list, not a system's. Player-side execution of Foundry-profile modules stays `host-only` until the
+sharing flip described in `AIS_FOUNDRY_ARCHITECTURE.md` §5 (the kernel side — device-user authority
+on both runtimes — is in place). The shell grew by 11 KB for the kernel service; everything
+Foundry-specific stays in the package.
+
+## D-486 — RPC latency: in-memory consent/capability snapshots + inline-diff replica (2026-10-15)
+
+**Context.** The D-485 e2e measured an awaited `actor.update` at **408 ms** and a one-document
+hydrate at 833–1,095 ms (11 RPCs) in the headless-Chromium sandbox. The shell's own
+`submitAndWait` create/update is 10–11 ms / 2 ms, so the cost was inside the AIS path.
+
+**Root cause (measured, not guessed).** A raw IndexedDB `worlds`-row `get` costs **≈207 ms per
+transaction** in this sandbox (462 B row). Host `assertCapability` performed a `getWorld` IDB read
+on **every** RPC (`documents.mutate` ×2 per write, `documents.get` ×1), and the player runtime did
+a `getSetting` IDB read per RPC — ≈400 ms of pure storage on a single write. Separately the
+adapter's replica re-fetched the whole root with `documents.get` after every change event.
+
+**Fix.**
+- Host capability/consent checks read `HostPersister.world` — the authoritative in-memory record
+  the store already maintains. Every live write goes through `patchWorld`/`writeDocuments`, and
+  rebuild/clear resets the record, so consent revocation and world-settings changes take effect
+  immediately; nothing on an RPC path touches IDB.
+- Player runtime caches consent per package (`consentCache`; `writeConsent` refreshes,
+  `forget`/`assertModuleActive` clear) — same immediate-revocation property.
+- The adapter replica applies **inline FlatDiffs** from `documents.changed` to its local copy
+  (`applyKernelDiff`/`localSource`; kernel diff semantics: dotted set, `-=path` delete, numeric
+  array index). A root re-read (`documents.get`) happens only for creates, truncated feeds and a
+  diff the local copy cannot apply. Unit test ("replica economy") asserts zero `documents.get`
+  on updates and exactly one on create.
+
+**Measured after the fix** (same e2e, D-485 test now logs hydrate/write latency and the module's
+Health trace): awaited `actor.update` **119–132 ms** (−70 %); hydrate **652–752 ms** (1 doc,
+11 RPCs); host handler time inside `documents.mutate` **3–8 ms** (Health trace `documents.trace`).
+Adapter zip 91,515 B (+1,581 B over 0.5.0's 89,934 B).
+
+**Residual latency is not AIS.** A *pure idle* macrotask hop in this sandbox costs ≈90–105 ms
+(`idleMessageMs` 88.6 / `idleTimeoutMs` 105.3 on a temp bench; update+yield ≈200 ms): the shell's
+Pixi canvas is ticker-driven and continuously renders on software GL, so every postMessage hop
+queues behind ~90 ms frames. Shell commit itself is 2 ms; a write needs ≥2 hops. On GPU hardware
+a hop is ≈1 ms and these numbers collapse. A **render-on-demand canvas** is the right shell
+architecture follow-up (continuous re-render only while the scene is dirty), tracked as a shell
+backlog item — out of scope for the AIS slice and not chased further here.
+
+**Rule of record** (now in `AIS_FOUNDRY_ARCHITECTURE.md` §4/§6): no storage read on an RPC path;
+one RPC per awaited write; replicas consume inline diffs and re-read only on create/truncated/
+unapplicable diffs; every latency claim is measured in the browser (Health trace + e2e timings),
+never assumed.
+
+**Evidence.** `tests/packages/aisFoundryDocuments.test.ts` 9/9 (new replica-economy test);
+`tsc --noEmit` 0; `eslint .` 0; vitest 5,917 passed / 12 skipped (447 files); D-485 e2e passes in
+57 s with the new measurements; `test:e2e:ais` **27/27 in 14.8 min** after the fix, logging
+hydrate 516 ms / write 123 ms / handler 3 ms (details in `E2E_BATCHES.md`).
+
+## D-487 — Multi-device AIS: player-side module execution + the cross-device package channel (2026-10-15)
+
+**Scope (one bigger slice, architecture §5 items 2+3).** AIS is the general interconnect for
+modders, not a Foundry-only machine, so the slice put BOTH halves of "interconnect" in place at
+the kernel level and mapped Foundry onto them: (a) modules run on **every device the GM shares
+them with** — the same code, the device user's authority; (b) a bounded **package channel** lets a
+module's instances talk across devices. Foundry's `game.socket` is then a thin mapping, and
+generic modules get the same power through `AIS.bus` directly.
+
+**Kernel (generic; no Foundry knowledge).**
+- Capability `bus.transmit`; host event `bus.message { channel, data, by }`; RPC
+  `bus.emit { channel, data }`; SDK `AIS.bus.emit/on/off` (`on(channel, cb)` → `cb(data, by)`).
+  Channels are 1–128 chars of `[A-Za-z0-9._:-]`, payloads bounded JSON ≤ 16 KiB.
+- Delivery: the same package's frames on **every** device, the sender's own frame included
+  (Foundry's broadcast semantics). `by` is stamped by the host from the sending session (`{id,
+  name}`) — never taken from the wire. **No cross-package delivery and no arbitrary fan-out.**
+- Wire `ais.bus` (MsgKind `0x5f`, ops channel). Host `handleAisBus`: authenticated session,
+  ephemeral rate-limit bucket, shape validation, and a relay only while the package is in the
+  current player-shared set (host-only packages never leave the GM device — anti-leak as well as
+  anti-spoof); the sender's session is skipped (it already echoed locally).
+- `interconnect.sharing: "players"` is now the synthesised manifest for imported Foundry modules
+  (was `"host-only"`); the provider manifest and the synthesised guest grant `bus.transmit`.
+
+**Foundry mapping (adapter 0.6.0).** `game.socket.on/off/emit` over `AIS.bus`: listener receives
+the payload (single argument, as socket.io delivers), the optional `emit` third-arg handler runs
+locally when not already registered, and the sender hears itself — the broadcast semantics
+Foundry modules expect. `game.socket.emit` no longer reports as an unsupported call.
+
+**The bug the browser found (the reason this slice needed two attempts).** The player joined,
+received the snapshot, and the connection died exactly when `ais.profile` arrived. Cause: one
+WebRTC user message caps at **256 KiB**, while the composed adapter source (`aisOwnSource(provider)
++ aisOwnSource(guest)`) measures **312,156 B raw** — `dc.send` throws and the session dies. Small
+generic modules (pf1e-torch) never exposed this; Foundry guests are the first fat ones. Fix:
+`packAisSharedModule`/`expandAisSharedModule` (`src/core/aisSharedModule.ts`) — payloads over
+32 KiB travel as `payloadZ` = deflateRaw of `{source, resources?, runtimeContext?}` (≈100 KiB for
+the 312 KiB composition), small modules keep the plain fields; the player runtime expands before
+the consent digest (`deliveredDigest` binds the expanded bytes), a payload that does not inflate
+drops that module with a notification, not the profile. Rule of record in the architecture doc:
+anything that grows deflates under the 256 KiB cap or rides the chunked asset pipeline — never one
+big frame.
+
+**Measured (Chromium, real import path).** `e2e/ais_bus.spec.ts` (new, in `test:e2e:ais`, 44.3 s
+alone): the feasibility world + a generic fixture (`AIS.bus` + `AIS.chat.post` +
+`documents.context`) + an **unmodified Foundry-format** fixture (`game.socket`, `Hooks.once
+("ready")`, `ChatMessage.create`, `game.modules.get(id).api`) import and boot on the GM; a player
+device joins (manual signalling), consents to both modules, and both directions of both channels
+are asserted through the chat each side's store holds: player boot announces reach the GM (payload
+`from` = the player's user id, `isGM:false` — the Foundry instance's `game.user` IS the player);
+a GM script-macro `ping`/`socketEmit` reaches the player's instances (the sender's own echo is
+asserted too). Same-package isolation is enforced at the host (the fixtures use different
+channels and never see each other's frames).
+
+**Honest limits.** Bus transport delivers to every connected device of the world for packages in
+the shared set — per-device consent gates *execution*, not transport (the same posture as
+`ais.profile`, whose sources already reach unconsented devices before the prompt). No delivery
+retroactivity: an instance that boots later does not see earlier frames (Foundry's socket is the
+same). The channel is same-package only — a module cannot address another module's instances on a
+remote device (`modules.invoke` remains same-device). Player-side Foundry still lacks
+`compendium.read`, `fx.play`, `scene.tags.write`, `ui.theme` (GM-device capabilities); those RPCs
+fail with their usual explanations. Scenes/placeables (`document.scene` slice) and packs remain
+the next slices per the architecture.
+
+**Evidence.** `tests/app/aisPlayerProfile.test.ts` +2 (pack/expand round-trip, deflate budget,
+corrupt-payload drop); `tests/packages/aisModule.test.ts` +2 (dispatcher capability gate; real
+handler bounds — channel charset/length, 16 KiB payload, `busEmit` bridge); catalog tests updated
+(`bus.message` → `bus.transmit`); `tests/net`/`tests/core/contracts` wire tables carry `ais.bus`.
+tsc 0, eslint 0. The full `test:e2e:ais` batch (28 tests) result is recorded in `E2E_BATCHES.md`.
+
+## D-488 — Transport frame hardening: shard any frame over the 256 KiB per-message cap (2026-10-16)
+
+**Why.** D-487 fixed the *symptom* for one message (`ais.profile` deflated its payload). The
+owner's question — "does this affect other data, e.g. a large map?" — was the right one, so this
+slice fixed the **cause** at the frame layer instead of per message kind.
+
+**The exposure, read off the wire paths.** One WebRTC user message caps at
+`RTCDataChannel.maxMessageSize` (256 KiB); `dc.send` throws above it and the session dies.
+- `fog.put` / `fog.state`: a whole explored map in ONE frame, and the host already accepted up to
+  **1 MiB** (`MAX_FOG_PNG_BYTES`) — 4× the cap. A player with a big explored map could kill the
+  session on save *or on join* (`fog.state` is sent right after connect).
+- `snapshot`: the join snapshot (projected world + asset manifest) in one unguarded frame.
+- Media/asset **files** were never affected: images, audio and webm ride the chunked 32 KiB
+  `AssetTransfer` (§7), and video streams use media tracks, not the data channel.
+
+**Fix (`src/net/shards.ts`, wired in `WebRTCTransport`).** `send` splits any frame over the cap
+into shard envelopes **on the same channel**, and the receiving transport reassembles before
+`onMessage`. Kind-agnostic by construction — no message schema changes, no per-kind plumbing, and
+`peerRelay` hops are covered because the split sits at the single write chokepoint.
+- Envelope: `[0]=0x00 marker | [1]=version | 2..5 u32 streamId | 6..9 u32 index | 10..13 u32 count | payload]`.
+  `0x00` is not a valid MsgKind, so a pre-D-488 peer's `deframeMessage` **rejects** an envelope
+  rather than misrouting it (asserted by a unit test).
+- Frames at or under the cap are sent untouched — zero overhead on the common path, byte-identical
+  wire format. 64 KiB payload slices by default, shrunk to fit `maxMessageSize` when smaller.
+- Reassembly is per (channel, streamId) — the sender's streamId space is shared across channels —
+  tolerates out-of-order arrival (`ephemeral` is `ordered: false`), ignores duplicate shards, drops
+  a stream whose shards disagree about `count`, and is flood-bounded: ≤ 16 concurrent streams per
+  channel, 8 MiB total pending, 60 s TTL sweep of abandoned halves.
+
+**Measured (Chromium, real WebRTC).** `runWebrtcLoopback` now also sends one 300,000-byte frame
+each way — `ops` (ordered) and `ephemeral` (unordered) — and asserts byte-identical reassembly:
+`e2e/webrtc.spec.ts` **2 passed**. `e2e/fog_big_frame.spec.ts` (new, **19.7 s**): a player joins
+with fog off, the GM seeds a stored explored map **larger than one user message** for that player
+(real incompressible PNG, within the product's own 1 MiB cap), then switches fog on — the player
+enters the scene, `fog.get` is answered with the oversized map, and the player restores the exact
+bytes with the connection alive.
+
+**The test was proven to catch the bug.** With sharding temporarily disabled (`parts = [bytes]`)
+the same spec fails with `Expected: 1728681, Received: 0` — the frame never arrives, exactly the
+old failure mode. The seeder now refuses to exceed `MAX_FOG_PNG_BYTES`, so the test can never
+exercise a state the product cannot reach (the first run seeded 1.73 MB, above the real cap; the
+target is now 600 KiB, landing ~672 KB encoded).
+
+**Honest limits.** Sharding does not reduce bandwidth — a 1 MiB map still costs 1 MiB; it only
+makes the transfer possible and keeps the session alive. The pending-byte budget (8 MiB) is a
+flood guard, not a flow-control mechanism: it drops whole streams rather than pacing them, so
+unusually large frames are still better carried by the chunked asset pipeline
+(`AssetTransfer`, §7) when a message grows without bound. `snapshot` is now covered by the
+mechanism but has no oversized fixture of its own. Test doubles that fake `RTCDataChannel`
+without `maxMessageSize` fall back to 256 KiB.
+
+**Evidence.** `tests/net/shards.test.ts` (new, **13 tests**): codec round-trips, cap-respecting
+slice sizing, malformed-envelope rejection, out-of-order/interleaved streams, duplicate shards,
+count-mismatch drop, flood refusal, TTL expiry, and the real `WebRTCTransport` send/receive path
+over fake DataChannels (logical `sentMessages` vs wire envelopes, `sentBytes` accounting).
+`tsc` 0, `eslint` 0. Also fixed two pre-existing `exactOptionalPropertyTypes` errors in
+`tests/app/aisPlayerProfile.test.ts` (D-487) that this slice's `tsc` run surfaced.
+
+**Rule of record (architecture §6):** no wire message may carry an unbounded payload — anything
+that grows either deflates under the cap or rides the chunked asset pipeline, never one big frame.
+Two-device acceptances are now required for player-affecting slices, which is how both D-487 and
+this slice found their defects.

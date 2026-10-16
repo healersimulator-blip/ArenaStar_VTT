@@ -27,6 +27,7 @@ import { callTool } from "../../src/core/agents/tools";
 import { openAgentSession } from "../../src/app/agentSession";
 import type { AgentSession } from "../../src/app/agentSession";
 import { agentWorldView } from "../../src/app/agentBridge";
+import { createMassBattlePf1e } from "../../src/packages/massBattlePf1e";
 
 const meta: StoreMeta = { worldId: "w1", name: "World One", system: "pf1e-core", systemVersion: "1.0.0" };
 const GM_ID = "gm";
@@ -163,11 +164,13 @@ function ctxOf(
   importImage?: (bytes: Uint8Array, name: string, mime: string) => Promise<{ hash: string }>,
 ): ToolContext {
   return {
-    view: agentWorldView(session.client, importImage ? { importImage } : {}),
+    // D-474: `actor.from_statblock` reads through the world's rules module — the PF1e package here.
+    view: agentWorldView(session.client, { rules: () => PF1E_RULES, ...(importImage ? { importImage } : {}) }),
     grant,
     writer: session.writer,
   };
 }
+const PF1E_RULES = createMassBattlePf1e();
 
 const gmGrant = grantFor("gm");
 const playerGrant = grantFor("player");

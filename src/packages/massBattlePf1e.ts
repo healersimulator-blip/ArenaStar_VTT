@@ -49,6 +49,7 @@ import {
 import { spellSaveDc } from "./pf1e/casting";
 import { applyHeroLeadershipAuras } from "./pf1e/heroBridge";
 import { deriveFromDocuments, parsePF1eActorSystem } from "./pf1e/actor";
+import { pf1eCharacterImport } from "./pf1e/import/seam";
 import {
   PF1eBattleAnalyticsCollector,
   type UnitAnalyticsSummary,
@@ -2082,6 +2083,13 @@ export function createMassBattlePf1e(
       };
     },
   };
+  // D-471: the host consumes the hero derivation through the RulesModule seam, not by import.
+  module.leaderStats = {
+    overlayKeys: LEADER_STAT_OVERLAY_KEYS,
+    fromActor: (actorJson) => combatStatsFromLeaderActor(actorJson) as Record<string, number> | null,
+  };
+  // D-474 (T1): the character importers travel with the package; the shells consume the seam.
+  module.characterImport = pf1eCharacterImport;
 
   return module;
 }

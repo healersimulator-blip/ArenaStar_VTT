@@ -1,6 +1,6 @@
 # Browser batches — the runnable division of `e2e/`
 
-`pnpm test:e2e` runs **all 141 spec files** in one command and is the one command that does not meet
+`pnpm test:e2e` runs **all 146 spec files** in one command and is the one command that does not meet
 the 25-minute rule. The batches below are how the suite is actually run: pick one, run it, and know
 how long it may take. `FX_TEST_BATCHES.md` covers the older FX/canvas/multilevel groups the same way.
 
@@ -8,8 +8,17 @@ how long it may take. `FX_TEST_BATCHES.md` covers the older FX/canvas/multilevel
 
 ```sh
 corepack pnpm install --frozen-lockfile
-corepack pnpm test:fx:prepare     # vite build + system packages + starter worlds
+corepack pnpm e2e:browser         # once per sandbox: Chromium from the npm registry (D-480)
+corepack pnpm test:fx:prepare     # system packages (embed set) + vite build + system packages + starter worlds
 ```
+
+The browser step exists because the sandbox cannot reach cdn.playwright.dev. It is Debian 12
+(bookworm, glibc 2.36, 2 CPUs); Chromium 153.0.8010.0 runs on it with the bundled NSS libraries
+(`libnss3`, `libnssutil3`, `libnspr4` are the only ones the host lacks — `al2023/lib` provides
+them), the Chromium sandbox starts without `PLAYWRIGHT_CHROMIUM_NO_SANDBOX`, and
+`playwright.config.ts` sets `LD_LIBRARY_PATH`/`FONTCONFIG_PATH` itself. After a sandbox restore
+(`node_modules`, `~/.cache`, `/tmp` gone, HEAD possibly rewound) the three commands above plus
+`git fetch && git reset origin/<branch>` recover the environment in about ten seconds.
 
 The specs primarily load built `dist/index.html` over `file://` (which doubles as the §15 boot
 check). The AIS batch also serves that same bundle from a test-owned HTTPS server with a temporary
@@ -23,7 +32,7 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 - **`--global-timeout` caps every batch** (15–20 minutes). A cap fails the command; it never counts
   unfinished tests as passing.
 - **A spec belongs to exactly one batch**, and `tests/scripts/e2eBatchCoverage.test.ts` asserts it at
-  unit-test speed: all 143 files / 457 tests covered, no duplicates, no batch over the cap. Add a
+  unit-test speed: all 146 files / 464 tests covered (`playwright test --list`, 2026-10-15), no duplicates, no batch over the cap. Add a
   spec without a batch and that test fails.
 
 ## The batches
@@ -31,18 +40,25 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 | script | specs | tests | cap | measured | result |
 | --- | --- | --- | --- | --- | --- |
 | `test:e2e:core` | 19 | 48 | 20 min | 9.0 min | **48 passed** |
-| `test:e2e:table` | 19 | 39 | 20 min | 10.5 min | **39 passed** |
+| `test:e2e:table` | 20 | 41 | 20 min | 10.0 min | **41 passed** (D-480, 2026-10-15; `packages.spec.ts` `rulesBoot` assertion updated for D-471/D-475) |
 | `test:e2e:hexcrawl` | 8 | 16 | 15 min | 8.2 min | **16 passed** |
 | `test:e2e:images` | 10 | 31 | 15 min | 4.9 min | **30 passed / 1 skipped** |
-| `test:e2e:net` | 4 | 5 | 15 min | 0.5 min | **4 passed** (+ `players_roster`, D-465) |
-| `test:e2e:ais` | 2 | 15 | 15 min | 6.6 min | **15 passed** |
+| `test:e2e:net` | 5 | 6 | 15 min | 0.9 min (D-488) | **6 passed** (D-488; `fog_big_frame.spec.ts` joined this batch — it is a transport test) |
+| `test:e2e:ais` | 7 | 28 | 25 min | 12.3 min (D-487; 14.8 min for 27 on the D-486 run) | **28 passed** (D-487, 2026-10-15) |
 | `test:e2e:ui-adapters` | 2 | 5 | 15 min | 1.6 min | **5 passed** |
 | `test:e2e:pf1e-combat` | 16 | 70 | 20 min | 12.7 min | 64 passed / **6 pre-existing failures** |
 | `test:e2e:pf1e-sheets` | 14 | 28 | 20 min | 4.3 min | 23 passed / **5 pre-existing failures** |
 
 The older groups in `FX_TEST_BATCHES.md` are still the right commands for their areas; measured on
-the AIS tree, `test:fx:canvas` is **25 passed / 7.3 min** and `test:multilevel` is
-**32 passed / 12.1 min**.
+the AIS tree, `test:fx:canvas` is **27 passed / 8.2 min** (D-488) and `test:multilevel` is
+**32 passed / 12.1 min**. Two batch lessons from D-488:
+- **Placement.** `e2e/fog_big_frame.spec.ts` (≈20 s) is a *transport* test and lives in
+  `test:e2e:net`, not with the canvas/fog specs.
+- **Per-test headroom.** `test:fx:canvas` grew to 27 tests / 8 min, and its last test
+  (`walls.spec.ts`) timed out at the default 30 s — it takes 14.5 s alone, but an
+  `page.evaluate` waits on the browser main thread, which on this 2-CPU software-GL sandbox is
+  far slower after eight minutes of accumulated state. The batch now passes `--timeout=60000`.
+  Keep every batch comfortably under its global cap *and* give its slowest test room.
 
 Measured on the 2-CPU sandbox with the Chromium workaround in `README.md` (`@sparticuz/chromium` +
 SwiftShader); they are observations, not guarantees.
@@ -55,6 +71,11 @@ section, not the AIS version label), `e2e/fog.spec.ts`'s Settings toggle needed 
 now-longer panel, and `visionSmoke` read the fog key as a hand-built `"scene-1:gm"` string instead of
 `fogVersionKey(...)`. A bare `pnpm build` empties `dist/` — including `dist/worlds` and
 `dist/packages` — so re-run `pnpm test:fx:prepare` before any batch that opens a starter world.
+Since D-481 the prepare script also builds the system packages *before* `vite build`: the
+gitignored `systems/.first-party/` embed set is what makes the shell recognise its own PF1e
+package (D-473); a restored sandbox or fresh checkout without it produces a shell that prompts
+players for the GM's rules, and `e2e/ais_player.spec.ts` / `ais_platform.spec.ts` then fail at
+the module-consent step. `vite build` now warns when the embed set is missing.
 
 ## AIS reliability follow-up (D-461, 2026-10-13)
 
@@ -87,6 +108,52 @@ See [AIS_FOUNDRY_FEASIBILITY.md](AIS_FOUNDRY_FEASIBILITY.md) for the exact suppo
 The existing adjacent browser checks were also rerun during this pass: **19/19** for
 `script_macros`, `worldfile`, `app`, `smoke`, and **2/2** native FX render/cancel checks.
 This is not a full rerun of all 446 tests, nor a claim that unrelated PF1e failures were repaired.
+
+## Player-side modules follow-up (D-468, 2026-10-14)
+
+`e2e/ais_player.spec.ts` joins the AIS batch: two browser contexts; the GM imports the PF1e
+starter, approves `pf1e-torch` (sharing ticked by default), hands the player an owned token with
+two torches; the player joins by manual signalling, is asked for consent naming
+"change the light carried by your tokens", allows, right-clicks the token, chooses
+*Turn carried light on* (host commit: radius > 0, torch consumed, `flags.ais.pf1e-torch`), puts it
+out again, and loses the module the moment the GM unticks sharing — with no reload and no
+`lastRejected`. Unit coverage of the same path is in `tests/app/playerAisRuntime.test.ts` (real
+`HostSync`↔`ClientSync`) and `tests/app/aisRuntimeSharing.test.ts` (booted `HostApp`).
+D-481 adds the policy leg between "out again" and the un-share: the GM unticks *Consume candles
+and torches when lit* in the torch's generated settings form (world scope), the player's replica
+receives `ais-settings:pf1e-torch` (`player.aisWorldSettings`), and the player's next *Turn
+carried light on* lights without consuming (quantity stays 1).
+
+**Executed in a real browser on 2026-10-15 (D-480): passes in 30.6 s.** The first run failed for
+a spec bug — the token centre was computed as `x + width / 2`, but a token's `x,y` *is* its centre
+(`src/canvas/tokens.ts` `tokenRect`), so the right-click landed on the token's corner — and the
+state assertion guessed `flags.ais.pf1e-torch.light.source` where the module writes
+`{ sourceId, sourceItemId, active, stateIndex }`. Both fixed; the product path needed no change.
+
+## AIS platform follow-up (D-476…D-479 → D-480, 2026-10-15)
+
+`e2e/ais_platform.spec.ts` (2 tests) joins the AIS batch: the GM's generated settings form
+(world → replicated `ais-settings:<pkg>` document, device → local), `compendium.list/search/get`
+over an imported content package, the module bus (`modules.invoke` along a declared `requires`,
+self-invocation refused), the `module.settings.changed` events, Health counters/trace and Restart;
+and a player who reads the GM's world value through the replica, edits a device value in the guide
+drawer, runs a module command against an owned token, and has a world write refused with
+"GM authority". **Its first browser run found three real product defects** that the 5,834 unit
+tests could not see (all fixed and unit-covered where a unit test can reach them):
+
+1. `WindowHost.svelte` never declared or forwarded `aisModules`/`onOpenAisPanel`, so the GM's
+   settings form, Health/Restart and "Open panel" were dead in the real Settings window.
+2. `AisRuntime.moduleSettings` cloned declarations with `structuredClone`; shells keep the app in
+   Svelte `$state`, so declarations arrive as proxies and cloning throws `DataCloneError` — the
+   block showed "Loading…" forever. `cloneAisSettingDeclaration` copies field by field, and the
+   block now shows a failure instead of a permanent "Loading…".
+3. `AisModuleIframe.emit` demanded a *current* `action.observe` grant for every event, including
+   `module.settings.changed`, which D-476 defined as subscribable without it — modules without
+   `action.observe` never heard their own settings change.
+
+Run order for a clean checkout: `pnpm e2e:browser` (once per sandbox), `pnpm test:fx:prepare`,
+then the batch. A bare `pnpm build` still wipes `dist/worlds` — `ais_foundry` fails with
+`ENOENT …/ais-foundry-feasibility-0.1.0.zip` until `build:ais-demo` runs again.
 
 ## UI adapter / self-opening preview follow-up (D-463)
 
@@ -151,3 +218,97 @@ code. They are recorded here so the failure is visible instead of hiding in an u
    that the spec never performs. The spec's own docstring says the area cast was out of scope
    "because the tree does not implement it yet" — the tree implements it now. It needs rewriting
    against the aim flow, not a relaxed assertion.
+
+## Foundry modules unmodified (D-482, 2026-10-15)
+
+`e2e/ais_foundry_module.spec.ts` (2 tests) joins the AIS batch. Test 1 imports the pinned
+upstream Tagger as a Foundry-format zip (`dist/packages/foundry-tagger-upstream-1.5.4.zip`,
+`module.json` under one folder, no ArenaStar files), approves adapter 0.2.0 + the module, reloads,
+reads `foundry.info` (own ES module loaded, `Tagger` global, hooks, keybinding) and drives
+`Tagger.getByTag` / `Tagger.addTags` through `foundry.api` from a reviewed script macro with the
+write visible in the replicated token document; the hidden token and the `AIS` root are refused.
+Test 2 builds a module that speaks only Foundry core APIs (settings with `onChange`, i18n, classic
+script + nested/absolute ESM imports, styles, keybinding, Handlebars helper, notifications, hidden
+Object setting) and checks the GM's generated settings form (3 visible + 1 internal, labels from
+the lang file, step validation, a form edit reaching the module's `onChange`, a module write
+landing in the form). **Executed in a real browser on 2026-10-15: 48.0 s + 49.5 s.** The first run
+found two product defects (adapter `Collection` iterated Map entries; the frame's `ready` status
+dropped the runtime settings count) — both fixed before the run that passed.
+
+## Foundry application UI inside the module panel (D-483, 2026-10-15)
+
+`e2e/ais_foundry_module.spec.ts` grows a third test and `e2e/ais_foundry_ui_runtime.spec.ts`
+(3 tests) joins the AIS batch. The runtime spec loads the adapter's `runtime/hbs.js`, `jq.js`,
+`ui.js` into a blank Chromium page with a fake `AIS` and checks the layer on its own in ≈1.5 s:
+Handlebars + Foundry helpers + the jQuery subset over a real DOM, the v1 `FormApplication`
+lifecycle (`submitOnChange`, `closeOnSubmit`, `Dialog` buttons, header buttons, drag) and V2
+(`PARTS`, tabs, form handlers, `DialogV2.prompt`). The module test imports a Foundry-format module
+whose `init` hook defines a `FormApplication` settings menu (own templates with a partial), an
+`ApplicationV2` panel and `Dialog`/`DialogV2` confirms, then drives them with **real clicks inside
+the module's iframe** (`page.frameLocator('iframe[title="AIS module:fsd-demo"]')`): the panel
+opens/hides with the windows, Save writes the replicated settings document, confirms resolve
+through the macro, the shell Close empties the module's windows via `ui.panel.closed`. **Executed
+2026-10-15: whole file 3 tests / 2.0 min; `test:e2e:ais` 24/24 in 9.9 min.** Five real defects
+surfaced and were fixed before the passing run (see D-483).
+
+## Foundry core resource library (D-484, 2026-10-15)
+
+Both Foundry specs grow a fourth test; the runtime spec now loads `runtime/core.js` and
+`runtime/fields.js` between `jq.js` and `ui.js`, as the manifest orders them, and its stub `i18n`
+falls back to the library's keys the way the adapter does. The layer test builds a V2 `tag: "form"`
+application whose tab strip and footer are the library's `templates/generic/tab-navigation.hbs` /
+`form-footer.hbs`, whose body is only `{{formGroup}}` helpers over `foundry.data.fields` and a
+`{{> "templates/generic/form-group.hbs"}}` partial, submits it through the core footer into a
+`DataModel.updateSource`, and checks a v1 `Dialog.confirm` rendered through
+`templates/hud/dialog.html` plus the "core template … is not in the AIS Foundry core library yet"
+error. The module test does the same end to end through the kernel: the fixture module registers a
+`type: FsdPrefs` (DataModel) setting, reads core keys (`COMMON.Yes`, `SETTINGS.Save`),
+`Actor.TYPES`, `CONST.TOKEN_DISPLAY_MODES`, renders `templates/dice/roll.html`, and its V2 form is
+driven by real clicks in the module iframe; Save replicates `fsd_demo_prefs` as the model's JSON,
+an out-of-range `game.settings.set` is refused, and `foundry.info.templates` lists what the module
+used from the library and what it asked for that the library lacks. Test 2's expectations gain the
+fifth (hidden) setting. **Executed 2026-10-15: `ais_foundry_ui_runtime.spec.ts` 4/4 in 2.4 s;
+`ais_foundry_module.spec.ts` 4/4 in 2.6 min (new test 36.5 s alone).** Eight layer defects were
+fixed before the passing runs (see D-484). **`test:e2e:ais` (now 26 tests): 26/26 in 10.1 min.**
+
+## World documents through the generic document service (D-485, 2026-10-15)
+
+`ais_foundry_module.spec.ts` grows a fifth test. The fixture module gains plain Foundry document
+code and `createActor`/`createItem`/`updateItem`/`updateActor`/`createJournalEntry` hook
+recorders; the test boots it, reads `foundry.info.documents` (hydration before `init`, the device
+user as a `User` document), runs the module's `Actor.create` (inline `items`) →
+`createEmbeddedDocuments("Item")` → `item.update` → `setFlag` → `actor.update` →
+`JournalEntry.create` (inline page) sequence through `foundry.api`, then checks the **shell's own
+store** (kind markers, `flags["ais-foundry"].type`, owner level, completed embedded rows, page
+text) and the module's hook log (order, once each, Foundry `(doc, changes, options, userId)`
+arity). Finally the shell edits the actor with `submitAndWait` and the module's held instance
+reflects it with an `updateActor` hook. **Executed 2026-10-15: new test 54.8 s alone;
+`ais_foundry_module.spec.ts` + `ais_foundry_ui_runtime.spec.ts` 9/9 in 4.8 min.** The full
+`test:e2e:ais` batch is now 27 tests; the first run in this (slower) sandbox hit the script's
+15-minute `--global-timeout` with 26 passed and `ais_player.spec.ts` not started (it passes alone in
+43.6 s); the rerun passed **27/27 in 15.9 min**, so the script's cap is now `--global-timeout=1500000`
+(25 min) — raise it again rather than trimming tests if hosts get slower.
+
+**D-486 addendum.** The D-485 test is also the project's latency probe: it logs `D-485 hydrate: …
+ms` / `D-485 write latency: … ms` and, via the GM settings Health panel, the module's host trace
+(`D-485 host trace (newest first): …`, annotation `documents.trace` with the host handler `ms`).
+After the D-486 fix (in-memory consent/capability snapshots, inline-diff replica) the full batch
+run logs 123 ms per awaited `actor.update` (was 408) and 516 ms hydrate (was 833–1,095) on this
+sandbox, of which 3 ms is the host handler (`documents.mutate` in the trace) — the rest is the
+sandbox's ≈90 ms macrotask hop (render-bound main thread), not the AIS path. Batch **27/27 in
+14.8 min** after the fix.
+
+## Multi-device modules and the cross-device channel (D-487, 2026-10-15)
+
+`ais_bus.spec.ts` (new, one test, **44.3 s** alone) is the two-device acceptance for player-side
+modules and the kernel's bounded package channel. It imports a generic AIS fixture (`AIS.bus` +
+`AIS.chat.post` + `documents.context`) and an **unmodified Foundry-format** fixture
+(`game.socket`, `Hooks.once("ready")`, `ChatMessage.create`, `game.modules.get(id).api`) on the
+GM, joins a player device with the manual-signalling dance from `ais_player.spec.ts`, consents on
+the player, and asserts both directions of both channels through each side's chat store: the
+player instances' boot announces reach the GM (payload `from` = the player's user id,
+`"isGM":false` — the Foundry instance's `game.user` is the player) and a GM script-macro
+`ping`/`socketEmit` reaches the player's instances, with the sender's own local echo asserted on
+the way. The test found the wire-budget defect (a composed adapter stack is 312 KiB raw against
+the 256 KiB WebRTC per-message cap; `ais.profile` used to kill the session at join) — profile
+payloads now travel deflated (`payloadZ`), covered by `tests/app/aisPlayerProfile.test.ts`.

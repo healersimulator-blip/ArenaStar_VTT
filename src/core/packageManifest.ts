@@ -10,12 +10,18 @@ import {
   AIS_API_VERSION,
   AIS_CAPABILITIES,
   AIS_CONTRIBUTION_MODES,
+  AIS_MAX_SETTINGS,
   type AisCapability,
   type AisContributionDeclaration,
   type AisInterconnectManifest,
   type AisModuleCommandDeclaration,
+  type AisModuleSharing,
+  type AisPanelDeclaration,
+  type AisSettingDeclaration,
+  type AisTokenActionDeclaration,
   type AisPackageRequirement,
 } from "./automationInterconnect";
+import { aisSettingDeclarationError, normalizeAisSettingDeclaration } from "./aisSettings";
 import type { Result } from "./result";
 import { err, okVal } from "./result";
 
@@ -37,6 +43,17 @@ export interface PackageRulesBlock {
   entry: string;
   /** ModelPool sys columns — must match the module's schema.modelColumns. */
   modelColumns: Record<string, ModelColumnType>;
+}
+
+/**
+ * D-475: the components a system package contributes to the shells' windows — one
+ * self-contained ESM file built against the shell's own Svelte runtime
+ * (`globalThis.__ARENASTAR_SVELTE__`), imported in-page by the GM shell and, after the D-472
+ * consent (or D-473 first-party trust), by player shells. Default export `{ api: "arena.ui/1",
+ * components: { <slot>: Component } }`.
+ */
+export interface PackageUiBlock {
+  entry: string;
 }
 
 /** Iframe module block: classic script run in the §12 sandboxed iframe. */
@@ -77,6 +94,8 @@ export interface PackageManifest {
   rules?: PackageRulesBlock;
   /** Optional (system only): classic-script module entry for the sandboxed iframe. */
   module?: PackageModuleBlock;
+  /** Optional (system only, D-475): the package's window components, loaded in-page by both shells. */
+  ui?: PackageUiBlock;
   /** Optional (system only): declarative schema migrations (§12). */
   migrations?: MigrationStep[];
   packs?: PackagePack[];
@@ -87,10 +106,11 @@ const VERSION_RE = /^\d+\.\d+\.\d+(-[A-Za-z0-9.+-]+)?$/;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const AIS_SLOT_RE = /^[a-z0-9][a-z0-9._:-]{1,127}$/;
+const hasControlChars = (text: string): boolean => Array.from(text).some((ch) => (ch.codePointAt(0) ?? 0) < 0x20);
 
 function validateInterconnect(value: unknown, id: string): Result<AisInterconnectManifest> {
   if (!isRecord(value)) return err(`package ${id}: interconnect must be an object`);
-  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities", "runtime", "runtimeProvider"]);
+  const allowed = new Set(["api", "entry", "requires", "provides", "commands", "emits", "capabilities", "runtime", "runtimeProvider", "sharing", "tokenActions", "panel", "settings"]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));
   if (unknown) return err(`package ${id}: interconnect has unsupported field ${unknown}`);
   if (value.api !== AIS_API_VERSION)
@@ -129,12 +149,18 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
   if (value.runtimeProvider !== undefined) {
     const spec = value.runtimeProvider;
     if (!isRecord(spec) || Array.isArray(spec) ||
-        Object.keys(spec).some((key) => !["contract", "profiles"].includes(key)) || spec.contract !== 1 ||
+        Object.keys(spec).some((key) => !["contract", "profiles", "scripts"].includes(key)) || spec.contract !== 1 ||
         !Array.isArray(spec.profiles) || spec.profiles.length < 1 || spec.profiles.length > 16 ||
         spec.profiles.some((profile) => typeof profile !== "string" || !AIS_SLOT_RE.test(profile)) ||
         new Set(spec.profiles).size !== spec.profiles.length)
       return err(`package ${id}: invalid runtimeProvider contract/profiles`);
-    runtimeProvider = { contract: 1, profiles: [...spec.profiles] as string[] };
+    // D-483: a provider may split its source into layers loaded before the entry (same review surface).
+    if (spec.scripts !== undefined && (!Array.isArray(spec.scripts) || spec.scripts.length < 1 || spec.scripts.length > 16 ||
+        spec.scripts.some((path) => typeof path !== "string" || !isSafePackagePath(path) || path === value.entry) ||
+        new Set(spec.scripts).size !== spec.scripts.length))
+      return err(`package ${id}: invalid runtimeProvider scripts`);
+    runtimeProvider = { contract: 1, profiles: [...spec.profiles] as string[],
+      ...(spec.scripts ? { scripts: [...spec.scripts] as string[] } : {}) };
   }
   if (value.runtime !== undefined) {
     const spec = value.runtime;
@@ -149,7 +175,7 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
       return err(`package ${id}: invalid runtime binding`);
     if (!requires.some((dependency) => dependency.id === spec.provider && dependency.version && !dependency.optional))
       return err(`package ${id}: runtime provider needs a required, exact-version dependency`);
-    if (spec.resources !== undefined && (!Array.isArray(spec.resources) || spec.resources.length > 64 ||
+    if (spec.resources !== undefined && (!Array.isArray(spec.resources) || spec.resources.length > 512 ||
         spec.resources.some((path) => typeof path !== "string" || !isSafePackagePath(path)) ||
         new Set(spec.resources).size !== spec.resources.length)) return err(`package ${id}: invalid runtime resources`);
     runtime = { provider: spec.provider, profile: spec.profile,
@@ -229,6 +255,70 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
     }
   }
 
+  let sharing: AisModuleSharing | undefined;
+  if (value.sharing !== undefined) {
+    if (value.sharing !== "players" && value.sharing !== "host-only")
+      return err(`package ${id}: interconnect.sharing must be "players" or "host-only"`);
+    sharing = value.sharing;
+  }
+
+  const tokenActions: AisTokenActionDeclaration[] = [];
+  if (value.tokenActions !== undefined) {
+    if (!Array.isArray(value.tokenActions) || value.tokenActions.length > 16)
+      return err(`package ${id}: interconnect.tokenActions must be an array of at most 16 entries`);
+    const seen = new Set<string>();
+    for (const raw of value.tokenActions) {
+      if (!isRecord(raw) || Object.keys(raw).some((key) => !["id", "label"].includes(key)))
+        return err(`package ${id}: interconnect token action must contain only id and label`);
+      if (typeof raw.id !== "string" || !AIS_SLOT_RE.test(raw.id))
+        return err(`package ${id}: interconnect token action id is invalid`);
+      if (typeof raw.label !== "string" || raw.label.trim().length === 0 || raw.label.length > 48 || hasControlChars(raw.label))
+        return err(`package ${id}: interconnect token action ${raw.id} needs a label of 1–48 printable characters`);
+      if (seen.has(raw.id)) return err(`package ${id}: interconnect repeats token action ${raw.id}`);
+      seen.add(raw.id);
+      tokenActions.push({ id: raw.id, label: raw.label.trim() });
+    }
+  }
+  if (tokenActions.length > 0 && !capabilities.includes("ui.interaction"))
+    return err(`package ${id}: interconnect.tokenActions requires the ui.interaction capability`);
+
+  let panel: AisPanelDeclaration | undefined;
+  if (value.panel !== undefined) {
+    const raw = value.panel;
+    if (!isRecord(raw) || Object.keys(raw).some((key) => !["title", "width", "height"].includes(key)))
+      return err(`package ${id}: interconnect.panel must contain only title, width and height`);
+    if (typeof raw.title !== "string" || raw.title.trim().length === 0 || raw.title.length > 48 || hasControlChars(raw.title))
+      return err(`package ${id}: interconnect.panel needs a title of 1–48 printable characters`);
+    const dimension = (key: "width" | "height", fallback: number, min: number, max: number): number | null => {
+      const v = raw[key];
+      if (v === undefined) return fallback;
+      return typeof v === "number" && Number.isInteger(v) && v >= min && v <= max ? v : null;
+    };
+    const width = dimension("width", 360, 240, 960);
+    const height = dimension("height", 420, 160, 720);
+    if (width === null || height === null)
+      return err(`package ${id}: interconnect.panel width must be an integer 240–960 and height 160–720`);
+    panel = { title: raw.title.trim(), width, height };
+    if (!capabilities.includes("ui.panel"))
+      return err(`package ${id}: interconnect.panel requires the ui.panel capability`);
+  }
+
+  // D-476: schema-declared settings (world scope replicated + GM-owned, device scope local).
+  const settings: AisSettingDeclaration[] = [];
+  if (value.settings !== undefined) {
+    if (!Array.isArray(value.settings) || value.settings.length > AIS_MAX_SETTINGS)
+      return err(`package ${id}: interconnect.settings must be an array of at most ${AIS_MAX_SETTINGS} entries`);
+    const seen = new Set<string>();
+    for (const [index, raw] of value.settings.entries()) {
+      const error = aisSettingDeclarationError(raw, index);
+      if (error) return err(`package ${id}: ${error}`);
+      const declaration = normalizeAisSettingDeclaration(raw as Record<string, unknown>);
+      if (seen.has(declaration.key)) return err(`package ${id}: interconnect.settings repeats key ${declaration.key}`);
+      seen.add(declaration.key);
+      settings.push(declaration);
+    }
+  }
+
   if (runtime?.resources?.length && !capabilities.includes("package.resources.read"))
     return err(`package ${id}: declared runtime resources require package.resources.read`);
   if ((runtimeProvider || runtime) && !capabilities.includes("runtime.execute"))
@@ -248,6 +338,10 @@ function validateInterconnect(value: unknown, id: string): Result<AisInterconnec
     ...(commands.length ? { commands } : {}),
     ...(emits.length ? { emits } : {}),
     ...(capabilities.length ? { capabilities } : {}),
+    ...(sharing ? { sharing } : {}),
+    ...(tokenActions.length ? { tokenActions } : {}),
+    ...(panel ? { panel } : {}),
+    ...(settings.length ? { settings } : {}),
   });
 }
 
@@ -305,6 +399,9 @@ export function validatePackageManifest(raw: unknown): Result<PackageManifest> {
     if (raw.interconnect !== undefined) {
       return err(`package ${id}: data-only packages must not declare interconnect code`);
     }
+    if (raw.ui !== undefined) {
+      return err(`package ${id}: data-only packages must not declare a ui block`);
+    }
   } else if (type === "module") {
     if (rules !== undefined) return err(`package ${id}: AIS modules must not declare a rules block`);
     if (raw.module !== undefined) return err(`package ${id}: AIS modules use interconnect, not the legacy module block`);
@@ -346,6 +443,14 @@ export function validatePackageManifest(raw: unknown): Result<PackageManifest> {
         return err(`package ${id}: module.trusted must be a boolean`);
       }
       manifest.module = trusted === undefined ? { entry: modEntry } : { entry: modEntry, trusted };
+    }
+    const rawUi = (raw as Record<string, unknown>).ui;
+    if (rawUi !== undefined) {
+      if (!isRecord(rawUi)) return err(`package ${id}: ui block must be an object`);
+      if (typeof rawUi.entry !== "string" || !isSafePackagePath(rawUi.entry)) {
+        return err(`package ${id}: ui.entry must be a safe package-relative path`);
+      }
+      manifest.ui = { entry: rawUi.entry };
     }
     const rawMigrations = (raw as Record<string, unknown>).migrations;
     if (rawMigrations !== undefined) {

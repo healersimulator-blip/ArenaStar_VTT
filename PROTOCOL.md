@@ -19,6 +19,27 @@ frame := [u8 MsgKind][msgpack payload]
 | `assets`    | reliable + ordered            | asset.get / asset.chunk / authorized image upload and share (24 KB upload chunks, backpressure) |
 | `sim`       | reliable + ordered            | sim.delta / sim.snapshot / turn.report (backpressure-aware)    |
 
+- **Frame sharding (D-488).** One WebRTC user message caps at `RTCDataChannel.maxMessageSize`
+  (256 KiB on the Chromium paths this product targets; `dc.send` throws above it and the session
+  dies). `WebRTCTransport.send` therefore splits any frame over that cap into shard envelopes on
+  the same channel and the receiving transport reassembles it before `onMessage`:
+
+  | offset | size | field                                                     |
+  | ------ | ---- | --------------------------------------------------------- |
+  | 0      | 1    | `0x00` marker — never a valid MsgKind, so an unsharded peer's `deframeMessage` rejects the envelope instead of misrouting it |
+  | 1      | 1    | version (`0x01`)                                          |
+  | 2..5   | u32  | streamId (sender-chosen, unique per open stream)          |
+  | 6..9   | u32  | index (0-based)                                           |
+  | 10..13 | u32  | count (≥ 2)                                               |
+  | 14..   | —    | payload slice (64 KiB by default, shrunk to fit the cap)  |
+
+  Frames at or under the cap are sent untouched, so the common path keeps its exact bytes.
+  Reassembly is per (channel, streamId), tolerates out-of-order arrival (the `ephemeral` channel
+  is unordered) and is flood-bounded: ≤ 16 concurrent streams per channel, 8 MiB total pending,
+  60 s TTL sweep. Affected today: `fog.put`/`fog.state` (the host accepts stored maps up to 1 MiB
+  — 4× the cap), `snapshot`, and `ais.profile`. Media and asset **files** were never affected:
+  they ride the chunked 32 KiB `AssetTransfer` (§7).
+
 - Ephemeral traffic never touches the Document Store or OpLog (§5).
 - Binary fields (`Uint8Array`) ride inside the msgpack payload (bin type).
 - sim.delta / sim.snapshot `bytes` = fflate-compressed, msgpack-framed
@@ -1106,6 +1127,10 @@ interface WelcomeMsg {
     };
     packageId: string | null; // null = built-in mass-battle-basic
     version: string;
+    /** D-472: the active package's rules.js as a content-addressed blob —
+     *  fetch with asset.get { assetId: hash } on the assets channel. */
+    artifact?: { hash: AssetId; size: number; name: string };
+    ui?: { hash: AssetId; size: number; name: string };       // D-475: the package's ui.js
   };
 }
 ```
@@ -1146,7 +1171,38 @@ replica requests `sim.snapshot.get` for that scene (pre-start requests are a
 host-side no-op; `start` broadcasts the first snapshot). When the host
 re-announces a _changed_ `sim` (package switch), clients discard replicas
 decoded under the old shape and re-pull a snapshot before applying further
-deltas; re-announcing identical info (reconnect) is a no-op.
+deltas; re-announcing identical info (reconnect) is a no-op. A change of
+`sim.artifact.hash` or `sim.ui.hash` alone (the GM activated a new build of
+the same package) also re-announces.
+
+`sim.artifact` (D-472) names the active package's `rules.js` as a
+**published artifact**: `hash` is the sha256 of its UTF-8 bytes and doubles as
+the `asset.get` id. The host serves published artifacts through the same
+`asset.chunk` machinery as scene media (32 KB chunks, resume, per-peer pacing)
+but outside the asset manifest and its per-viewer ACL — any approved session
+may fetch them, because they are code the GM activated for the whole table,
+not media. Unknown hashes still answer with the miss sentinel. A client MUST
+verify the assembled bytes against `hash` before evaluating them (the asset
+cache stores by hash without checking) and MUST NOT evaluate them without the
+device owner's consent for that exact hash: unlike AIS modules, a rules package
+runs in the page, unsandboxed. One exception (D-473): a client MAY treat a hash
+that its *own build* carries as first-party (`__FIRST_PARTY_PACKAGES__`,
+sha256 of the embedded `rules.js`) and load it without asking — that is the
+code this very release used to bundle, now carried by the world file. The
+exception is keyed on the exact hash, never on the package id: a different
+build of the same package prompts like any stranger's.
+
+`sim.ui` (D-475, optional) names the same package's `ui.js` — the window
+components it contributes, compiled against the host build's Svelte runtime —
+as a second published artifact with the same `{hash, size, name}` shape and the
+same fetch path. It is present only when the host itself could evaluate the
+file. A client treats the pair as **one decision**: the consent prompt sizes
+both, the stored decision binds both hashes, a changed `sim.ui.hash` beside an
+unchanged `sim.artifact.hash` re-announces and re-prompts as an update (the
+already-allowed rules may keep running; the un-allowed components MUST NOT be
+mounted), and the first-party exception applies only when *both* hashes are in
+the client build's own list. A `ui.js` that fails to evaluate or fails the
+`arena.ui/1` shape gate is reported and ignored; it never unloads the rules.
 
 ### snapshot (0x21 · host → client · ops)
 
@@ -1599,6 +1655,85 @@ Entering a stair region (outside→inside, token center, on a floor the region c
 ### stair.request (0x5d · client → host · ops)
 
 `{kind,sceneId,tokenId}`. "Take the stairs" for a controlled token already standing in a stairwell: answered with an `open` offer (even for a single destination), `locked`, or `none`. Unknown, hidden and uncontrolled tokens share the `none` answer. Rate limited with intents.
+
+### ais.profile (0x5e · host → client · ops)
+
+D-468 player-side AIS. The host's current **shared module set** for the world: every automation
+module the GM has enabled in the world profile *and* locally approved by exact hash, minus
+appearance-only and runtime-provider packages and minus modules the GM un-shared in
+Settings → Packages. Sent to every welcomed session right after the snapshot/catch-up, and
+re-sent to all sessions whenever approvals, grants, sharing or provider selections change.
+A player shell diffs profiles by `(packageId, hash)`: a module that disappears (or changes
+hash) stops immediately; a new one starts only after the **player's own consent** for that
+exact hash (stored per device and world). The GM's own in-process client ignores the message.
+
+```ts
+interface AisProfileMsg {
+  kind: "ais.profile";
+  worldId: WorldId;
+  seq: number;                       // host store seq at publication (ordering only)
+  providers: Record<string, string>; // exclusive slot → "packageId/contributionId"
+  modules: AisSharedModule[];
+}
+interface AisSharedModule {
+  packageId: string; name: string; version: string;
+  hash: string;                      // module identity; consent is keyed on it
+  source?: string;                   // entry/composed runtime source (≤ 1 MiB) — see payloadZ
+  payloadZ?: Uint8Array;             // D-487: deflate of {source, resources?, runtimeContext?}
+  resources?: Record<string, string>;
+  runtimeHash?: string; runtimeContext?: Json;
+  commands: AisModuleCommandDeclaration[];
+  capabilities: AisCapability[];     // host-granted ∩ player-runnable (no fx.play / scene.tags.write / ui.theme)
+  emittedEvents: string[];
+  tokenActions?: { id: string; label: string }[]; // D-469: manifest token-menu entries → ui.token.action
+  panel?: { title: string; width: number; height: number }; // D-470: sandboxed panel the player shell chromes
+  settings?: AisSettingDeclaration[];              // D-476: the manifest's settings schema (≤ 32)
+  requires?: { id: string; version?: string; optional?: boolean }[]; // D-478: siblings this module may invoke
+  provides?: { id: string; mode: string; contract: number }[];       // D-478: contribution slots it fills
+}
+```
+
+A module whose manifest declares `interconnect.sharing: "host-only"` is never part of
+`modules` (D-469), whatever the GM's sharing checkbox says.
+
+**Module settings (D-476)** need no message of their own. World-scope values live in one
+replicated `settings` document per module, `ais-settings:<packageId>` (`ownership.default: 1`,
+`flags.ais: { packageId, values }`), written only by GM authority through ordinary ops
+(update diffs `flags.ais.values.<key>`); every player replica carries it like any other
+limited-readable document and the player runtime raises `module.settings.changed` from the
+replica. Device-scope values never leave the device. The declarations themselves ride in
+`ais.profile` so a player shell can render the same form the GM sees.
+
+Delivery is not authority: a player's module runs in the same sandboxed iframe as on the host
+and every op it produces travels as an ordinary `intent`, so the host's `validateOps` and
+Foundry-default ownership rules decide what it may change (a torch module can light the tokens
+the player owns and nothing else). No new client → host message exists for this feature.
+
+### ais.bus (0x5f · both · ops)
+
+D-487 the bounded **package channel** — one module instance talking to the same module's
+instances on other devices (`AIS.bus` in the SDK; `game.socket` for Foundry-profile modules).
+Client → host frames are validated (shape, ephemeral rate-limit bucket) and re-stamped with the
+sending session's user; host → client frames are the relay. The host relays only for packages in
+the current player-shared set (host-only packages never leave the GM device) and skips the
+sending session (its frame already heard its local echo). Delivery reaches the same package's
+frames on every device, the sender included — no cross-package delivery, no arbitrary fan-out,
+nothing retroactive to instances that boot later.
+
+```ts
+interface AisBusMsg {
+  kind: "ais.bus";
+  worldId: WorldId;
+  packageId: string;          // ^[a-z0-9][a-z0-9-]{1,63}$
+  channel: string;            // 1–128 chars of [A-Za-z0-9._:-] (e.g. "module.my-mod")
+  data: Json;                 // bounded JSON ≤ 16 KiB
+  by: { id: string; name: string }; // sender identity, host-stamped on every relay
+}
+```
+
+A module needs the `bus.transmit` capability; its frames subscribe to `bus.message`
+`{ channel, data, by }`. Payloads travel to every connected device for shared packages —
+per-device consent gates *execution* on a device, not transport (as with `ais.profile` sources).
 
 ### Floor scopes for presentation objects; tokens always land on a floor (D-431, D-432)
 

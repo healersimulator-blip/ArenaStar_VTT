@@ -12,12 +12,19 @@ import { validatePackageManifest } from "../core/packageManifest";
 import type { Result } from "../core/result";
 import { aisOwnSource, aisRuntimeConfiguration, aisRuntimeResources } from "./aisRuntimePackage";
 import { err, okVal } from "../core/result";
+import {
+  resolveFoundryManifestPath,
+  synthesizeFoundryModulePackage,
+  type FoundryModuleManifest,
+} from "../core/foundryModuleManifest";
 
 /** Validated package contents (world-scoped fields added by the store). */
 export interface LoadedPackage {
   manifest: PackageManifest;
   /** UTF-8 decoded file texts keyed by package-relative path. */
   files: Record<string, string>;
+  /** D-482: set when the archive was a Foundry `module.json` distribution (manifest synthesized). */
+  foundry?: FoundryModuleManifest & { binaryFiles: number };
 }
 
 const decodeText = (bytes: Uint8Array): Result<string> => {
@@ -41,11 +48,34 @@ function resolveManifestPath(paths: string[]): Result<string> {
   return err("package: manifest.json not found at the package root");
 }
 
-/** Shared validation over a path → text map (folder import path). */
-export function buildPackageFromFiles(rawFiles: Record<string, string>): Result<LoadedPackage> {
+/** D-482: strip the single nested root (if any) off every path. */
+function rootedFiles(rawFiles: Record<string, string>, markerPath: string): Record<string, string> {
+  const root = markerPath.includes("/") ? `${markerPath.split("/")[0] ?? ""}/` : "";
+  const files: Record<string, string> = {};
+  for (const [path, text] of Object.entries(rawFiles))
+    if (root === "" || path.startsWith(root)) files[path.slice(root.length)] = text;
+  return files;
+}
+
+/**
+ * Shared validation over a path → text map (folder import path). An archive without
+ * `manifest.json` but with a Foundry `module.json` is synthesized into an ArenaStar module
+ * bound to the Foundry adapter (D-482); `binaryPaths` names the entries the zip reader skipped.
+ */
+export function buildPackageFromFiles(rawFiles: Record<string, string>, binaryPaths: readonly string[] = []): Result<LoadedPackage> {
   const paths = Object.keys(rawFiles);
   const manifestPath = resolveManifestPath(paths);
-  if (!manifestPath.ok) return manifestPath;
+  if (!manifestPath.ok) {
+    const foundryPath = resolveFoundryManifestPath([...paths, ...binaryPaths]);
+    if (foundryPath === null) return manifestPath;
+    const root = foundryPath.includes("/") ? `${foundryPath.split("/")[0] ?? ""}/` : "";
+    const binaries = binaryPaths.filter((path) => path.startsWith(root)).map((path) => path.slice(root.length));
+    const synthesized = synthesizeFoundryModulePackage(rootedFiles(rawFiles, foundryPath), binaries);
+    if (!synthesized.ok) return synthesized;
+    const built = buildPackageFromFiles(synthesized.value.files);
+    if (!built.ok) return built;
+    return okVal({ ...built.value, foundry: { ...synthesized.value.foundry, binaryFiles: binaries.length } });
+  }
   const manifestText = rawFiles[manifestPath.value];
   if (manifestText === undefined) return err("package: manifest.json is empty");
 
@@ -78,6 +108,15 @@ export function buildPackageFromFiles(rawFiles: Record<string, string>): Result<
     }
     if (entry.trim().length === 0) {
       return err(`package ${manifest.value.id}: rules entry is empty`);
+    }
+  }
+  if (manifest.value.ui) {
+    const uiEntry = files[manifest.value.ui.entry];
+    if (uiEntry === undefined) {
+      return err(`package ${manifest.value.id}: ui entry ${manifest.value.ui.entry} is missing`);
+    }
+    if (uiEntry.trim().length === 0) {
+      return err(`package ${manifest.value.id}: ui entry is empty`);
     }
   }
   if (manifest.value.module) {
@@ -125,25 +164,30 @@ export function buildPackageFromFiles(rawFiles: Record<string, string>): Result<
 }
 
 /** Bounded ZIP extraction also rejects traversal paths, duplicates, and unsupported compression. */
-async function unzipFiles(bytes: Uint8Array): Promise<Result<Record<string, string>>> {
+async function unzipFiles(bytes: Uint8Array): Promise<Result<{ files: Record<string, string>; binaries: string[] }>> {
   let entries: Map<string, Uint8Array>;
   try {
     entries = await extractZipEntriesBounded(bytes);
   } catch (error) {
     return err(`package: not a readable zip — ${error instanceof Error ? error.message : String(error)}`);
   }
-  const rawFiles: Record<string, string> = {};
+  const paths = [...entries.keys()];
+  // D-482: a Foundry distribution carries icons/fonts/LevelDB packs — skipped, not fatal.
+  const lenient = !resolveManifestPath(paths).ok && resolveFoundryManifestPath(paths) !== null;
+  const files: Record<string, string> = {};
+  const binaries: string[] = [];
   for (const [path, data] of entries) {
     const text = decodeText(data);
-    if (!text.ok) return err(`package: ${path} — ${text.error}`);
-    rawFiles[path] = text.value;
+    if (text.ok) files[path] = text.value;
+    else if (lenient) binaries.push(path);
+    else return err(`package: ${path} — ${text.error}`);
   }
-  return okVal(rawFiles);
+  return okVal({ files, binaries });
 }
 
 /** Read + validate a package zip (ArrayBuffer/Uint8Array). */
 export async function readZipPackage(bytes: Uint8Array): Promise<Result<LoadedPackage>> {
-  const rawFiles = await unzipFiles(bytes);
-  if (!rawFiles.ok) return rawFiles;
-  return buildPackageFromFiles(rawFiles.value);
+  const unzipped = await unzipFiles(bytes);
+  if (!unzipped.ok) return unzipped;
+  return buildPackageFromFiles(unzipped.value.files, unzipped.value.binaries);
 }

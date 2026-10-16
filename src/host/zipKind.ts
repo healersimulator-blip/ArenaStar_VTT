@@ -18,6 +18,11 @@ import {
 } from "../core/campaignCodexArchiveAudit";
 import type { PackageManifest } from "../core/packageManifest";
 import { validatePackageManifest } from "../core/packageManifest";
+import {
+  FOUNDRY_MANIFEST_PATH,
+  parseFoundryModuleManifest,
+  synthesizeFoundryPackageManifest,
+} from "../core/foundryModuleManifest";
 
 /** One embedded package as the world header advertises it (format 2 `packages.json`). */
 export interface WorldZipPackage {
@@ -55,10 +60,10 @@ const WORLD_PACKAGES_INDEX = "packages.json";
 const PACKAGE_MARKER = "manifest.json";
 
 /** `manifest.json` at the root or exactly one directory deep (packageLoader's nested root). */
-function isPackageMarker(path: string): boolean {
-  if (path === PACKAGE_MARKER) return true;
+function isPackageMarker(path: string, marker: string = PACKAGE_MARKER): boolean {
+  if (path === marker) return true;
   const parts = path.split("/");
-  return parts.length === 2 && parts[0] !== "" && parts[1] === PACKAGE_MARKER;
+  return parts.length === 2 && parts[0] !== "" && parts[1] === marker;
 }
 
 function inflateMarkers(bytes: Uint8Array): Promise<Map<string, Uint8Array>> {
@@ -71,7 +76,8 @@ function inflateMarkers(bytes: Uint8Array): Promise<Map<string, Uint8Array>> {
     filter: (file) =>
       file.name === WORLD_MARKER ||
       file.name === WORLD_PACKAGES_INDEX ||
-      isPackageMarker(file.name),
+      isPackageMarker(file.name) ||
+      isPackageMarker(file.name, FOUNDRY_MANIFEST_PATH),
   });
 }
 
@@ -290,7 +296,7 @@ export async function classifyZip(bytes: Uint8Array): Promise<ZipKind> {
     };
   }
 
-  const manifestPaths = [...markers.keys()].filter(isPackageMarker);
+  const manifestPaths = [...markers.keys()].filter((path) => isPackageMarker(path));
   // Root wins; otherwise exactly one nested root is acceptable (two folders = not a package).
   const manifestPath = manifestPaths.includes(PACKAGE_MARKER)
     ? PACKAGE_MARKER
@@ -310,10 +316,26 @@ export async function classifyZip(bytes: Uint8Array): Promise<ZipKind> {
     return { kind: "package", manifest: manifest.value };
   }
 
+  // D-482: a Foundry VTT module distribution (`module.json`) is a package too — the loader
+  // synthesizes its ArenaStar manifest; here only the header is needed for the summary line.
+  const foundryPaths = [...markers.keys()].filter((path) => isPackageMarker(path, FOUNDRY_MANIFEST_PATH));
+  const foundryPath = foundryPaths.includes(FOUNDRY_MANIFEST_PATH)
+    ? FOUNDRY_MANIFEST_PATH
+    : foundryPaths.length === 1 ? foundryPaths[0] : undefined;
+  if (foundryPath !== undefined) {
+    const parsed = parseJson(markers.get(foundryPath) as Uint8Array);
+    const foundry = parsed === undefined ? undefined : parseFoundryModuleManifest(parsed);
+    if (!foundry) return { kind: "unknown", reason: "module.json is present but is not valid JSON" };
+    if (!foundry.ok) return { kind: "unknown", reason: `Foundry module.json: ${foundry.error}` };
+    const manifest = validatePackageManifest(synthesizeFoundryPackageManifest(foundry.value, []));
+    if (!manifest.ok) return { kind: "unknown", reason: manifest.error };
+    return { kind: "package", manifest: manifest.value };
+  }
+
   return {
     kind: "unknown",
     reason:
-      "neither a world file (no world.json) nor a package (no manifest.json)",
+      "neither a world file (no world.json) nor a package (no manifest.json or Foundry module.json)",
   };
 }
 

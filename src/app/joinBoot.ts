@@ -42,6 +42,8 @@ export interface PlayerApp {
   readonly bus: ReturnType<typeof createEventBus<ClientEvents>>;
   /** Null until the DataChannel connects; then the live replica. */
   readonly client: ClientSync | null;
+  /** D-468: this device's IndexedDB (player AIS consent + module storage live here). */
+  readonly db: Awaited<ReturnType<typeof openVttDb>>;
   readonly fetcher: AssetFetcher | null;
   /** Outbound manual codes (the player's offer) for the UI. */
   takeOutbox(): string[];
@@ -82,6 +84,7 @@ export class PlayerAppImpl implements PlayerApp {
     readonly bus: ReturnType<typeof createEventBus<ClientEvents>>,
     ready: Promise<void>,
     readonly transportKind: string,
+    readonly db: Awaited<ReturnType<typeof openVttDb>>,
   ) {
     this.ready = ready;
   }
@@ -170,6 +173,7 @@ export async function bootPlayerApp(options: PlayerAppOptions): Promise<PlayerAp
     bus,
     ready,
     hostId === "host" ? "manual" : "nostr",
+    db,
   );
 
   let welcomed = false;

@@ -82,6 +82,7 @@
   import {
     applyTokenMenuEntry,
     tokenContextMenuModel,
+    parseModuleActionEntryId,
   } from "../ui/combat/tokenContextMenu";
   import {
     activateEncounter,
@@ -116,7 +117,8 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import WorkspaceDirectory, { type DirectoryItem } from "../ui/workspace/WorkspaceDirectory.svelte";
   import { workspaceUi, setWorkspacePanel, resetWorkspaceUi } from "../ui/workspace/state";
   import { workspaceTabLabel, workspaceToolInset } from "../core/workspaceUi";
-  import { AisRuntime, type AisRuntimeStatuses } from "./aisRuntime";
+  import { AisRuntime, type AisModuleShellApi, type AisRuntimeStatuses } from "./aisRuntime";
+  import { aisPanelLayer } from "../packages/aisPanel";
   import type { AisModuleSelectRequest } from "../packages/aisModuleHandlers";
   import { dice3dStats, diceInfoFromRecord, showDice3D } from "../dice/dice3d";
   import { verifyCommitRoll } from "../dice/commitReveal";
@@ -155,11 +157,11 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     type ModuleHost,
   } from "../packages/moduleHandlers";
   import type { ModuleHookName } from "../core/moduleApi";
-  import { getFog, getSetting } from "../storage/idb";
+  import { getFog, getSetting, putFog } from "../storage/idb";
   import { viewAsOptions, viewAsUser, withoutHiddenTokens } from "../core/viewAs";
   import { can } from "../core/permissions";
   import { tileContainsPoint } from "../core/automation";
-  import { sceneFogSettings } from "../core/fogExploration";
+  import { MAX_FOG_PNG_BYTES, sceneFogSettings } from "../core/fogExploration";
   import { createHexOverlaySync, repaintHexOverlay, syncHexOverlay } from "./hexOverlay";
   import {
     encounterCheck,
@@ -1334,6 +1336,8 @@ const WALL_PICK_RADIUS = 12;
     }
   }
   let aisRuntimeStatuses = $state.raw<AisRuntimeStatuses>({});
+  /** D-476/D-479: the packages view's handle on module settings + health (null until the runtime exists). */
+  let aisModulesApi = $state.raw<AisModuleShellApi | null>(null);
 
   /** The active encounter of the active scene (null before any is activated). */
   function activeCombat(): CombatDocument | null {
@@ -2558,8 +2562,19 @@ const WALL_PICK_RADIUS = 12;
     void aisRuntimeStatuses;
     return aisRuntime?.tokenLightState(token);
   }
+  function tokenModuleActionsFor() {
+    void aisRuntimeStatuses;
+    return aisRuntime?.tokenActions() ?? [];
+  }
 
   /** Send a UI intent only to the current, explicitly selected AIS light provider. */
+  /** D-469: a manifest-declared token action → `ui.token.action` to the declaring module. */
+  function runModuleActionMenuEntry(entryId: string): void {
+    const parsed = parseModuleActionEntryId(entryId);
+    if (tokenMenu && parsed) aisRuntime?.runTokenAction(tokenMenu.tokenId, parsed.packageId, parsed.actionId);
+    closeTokenMenu();
+  }
+
   function runTokenLightMenuEntry(entryId: string): void {
     if (!tokenMenu) return;
     const action = entryId === "token-light-toggle" ? "toggle"
@@ -4004,6 +4019,8 @@ const WALL_PICK_RADIUS = 12;
       // overland map cannot hang a picture on a hex.
       importImage: async (bytes, name, mime) =>
         current.pipeline.importImage(bytes, name, mime || "image/png"),
+      // D-474: the world's own rules package reads characters for `actor.from_statblock`.
+      rules: () => current.rulesModule,
     });
     // Canvas tool listeners are attached after `await createStage(...)`, i.e. after the
     // component-init context is gone — `onDestroy` may only be *called* synchronously
@@ -4084,6 +4101,7 @@ const WALL_PICK_RADIUS = 12;
       appearance?.dispose(); appearance = null;
       aisRuntime?.dispose();
       aisRuntime = null;
+      aisModulesApi = null;
       if (rtSampleTimer !== null) globalThis.clearInterval(rtSampleTimer);
       offSimBus?.();
       if (fogTimer !== null) globalThis.clearInterval(fogTimer);
@@ -5156,7 +5174,9 @@ const WALL_PICK_RADIUS = 12;
           cancelChoice: (packageId) => { if (pendingAisChoice?.packageId === packageId) finishAisChoice(null); },
           notify: (message, level) => { notifyLog = [...notifyLog.slice(-49), { message, level }]; },
           onStatus: (statuses) => { aisRuntimeStatuses = statuses; },
+          panelLayer: aisPanelLayer(),
         });
+        aisModulesApi = aisRuntime.shellApi();
         appearance = new AisAppearance(current, aisRuntime);
         offAppearance = appearance.subscribe((state) => { appearanceState = state; });
         globalThis.addEventListener("keydown", emergencyAppearance);
@@ -5220,6 +5240,37 @@ const WALL_PICK_RADIUS = 12;
             } catch {
               return 0;
             }
+          },
+          fogSeedBig: async ({ sceneId, userId, bytes }) => {
+            // D-488: a real PNG that no codec can shrink — random RGBA noise — sized so the
+            // encoded bytes clear the per-message cap the fog path must now shard across.
+            let side = 256;
+            let png = new Uint8Array(0);
+            for (let attempt = 0; attempt < 12 && png.length < bytes; attempt += 1) {
+              const canvas = document.createElement("canvas");
+              canvas.width = side;
+              canvas.height = side;
+              const ctx = canvas.getContext("2d");
+              if (!ctx) throw new Error("fogSeedBig: no 2d context");
+              const image = ctx.createImageData(side, side);
+              for (let i = 0; i < image.data.length; i += 1) image.data[i] = Math.floor(Math.random() * 256);
+              ctx.putImageData(image, 0, 0);
+              const encoded = await new Promise<Uint8Array>((resolve, reject) => {
+                canvas.toBlob((blob) => {
+                  if (!blob) { reject(new Error("fogSeedBig: encode failed")); return; }
+                  void blob.arrayBuffer().then((buffer) => resolve(new Uint8Array(buffer)), reject);
+                }, "image/png");
+              });
+              png = encoded;
+              side = Math.round(side * 1.25);
+            }
+            if (png.length < bytes) throw new Error(`fogSeedBig: only ${png.length} bytes encoded`);
+            // Never seed a map bigger than `fog.put` would accept — the test must exercise a
+            // state the product can actually reach, not an impossible one.
+            if (png.length > MAX_FOG_PNG_BYTES)
+              throw new Error(`fogSeedBig: ${png.length} bytes exceeds the ${MAX_FOG_PNG_BYTES}-byte fog cap`);
+            await putFog(current.db, { worldId: current.worldId, sceneId, userId, png });
+            return png.length;
           },
           pf1eAreaPreviewShow: (spec) => {
             const caster = spec.casterTokenId ? activeScene()?.tokens.find((t) => t._id === spec.casterTokenId) : undefined;
@@ -6021,6 +6072,7 @@ const WALL_PICK_RADIUS = 12;
                 actors: (app?.gm.client.store.getAll("actors") ??
                   []) as readonly ActorDocument[],
                 lightActions: tokenLightActionsFor(menuToken),
+                moduleActions: tokenModuleActionsFor(),
               })}
               <div
                 class="token-menu"
@@ -6048,6 +6100,7 @@ const WALL_PICK_RADIUS = 12;
                       title={entry.reason ?? ""}
                       onclick={() => {
                         if (entry.id.startsWith("token-light-")) runTokenLightMenuEntry(entry.id);
+                        else if (entry.id.startsWith("module-action:")) runModuleActionMenuEntry(entry.id);
                         else runTokenMenuEntry(entry.id as
                           | "add-combatant"
                           | "remove-combatant"
@@ -6229,6 +6282,8 @@ const WALL_PICK_RADIUS = 12;
           windows={wmWindows}
           client={app.gm.client}
           bus={app.gm.bus}
+          rulesModule={app.rulesModule}
+          uiModule={app.uiModule}
           sceneId={activeScene()?._id ?? null}
           selectedTokenId={singleSelectedTokenId()}
           {selectedItemRef}
@@ -6252,6 +6307,8 @@ const WALL_PICK_RADIUS = 12;
           packages={app.packages}
           rulesBoot={app.rulesBoot}
           {aisRuntimeStatuses}
+          onOpenAisPanel={(packageId) => { aisRuntime?.openPanel(packageId); }}
+          aisModules={aisModulesApi}
           {agents}
           bindings={DEFAULT_BINDINGS}
           isGM={true}
@@ -6417,6 +6474,7 @@ const WALL_PICK_RADIUS = 12;
               client={app.gm.client}
               bus={app.gm.bus}
               onOpenActor={openActorSheet}
+              rulesModule={app.rulesModule}
             />
           {:else if activeTab === "compendia"}
             <CompendiaPanel client={app.gm.client} packages={app.packages} />

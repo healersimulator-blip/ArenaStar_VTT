@@ -83,12 +83,21 @@
     },
   ];
 
+  // Mirrors interconnect.settings in manifest.json (world scope unless noted). The world values
+  // are the GM's and replicate to every player's copy of this module; quietNotices is per device.
   const DEFAULTS = Object.freeze({
     ignoreInventory: false,
     consumeConsumables: true,
     fallbackBrightFt: 20,
     fallbackDimFt: 40,
     defaultSourceId: "torch",
+    quietNotices: false,
+  });
+  const FALLBACK_PRESETS = Object.freeze({
+    "10-20": [10, 20],
+    "20-40": [20, 40],
+    "30-60": [30, 60],
+    "60-120": [60, 120],
   });
   const FALLBACK_ID = "personal-light";
   const LOCKED_TOKENS = new Set();
@@ -118,10 +127,17 @@
     );
   }
 
+  function fallbackKey(brightFt, dimFt) {
+    const match = Object.keys(FALLBACK_PRESETS).find(
+      (key) => FALLBACK_PRESETS[key][0] === brightFt && FALLBACK_PRESETS[key][1] === dimFt,
+    );
+    return match || "20-40";
+  }
+
+  /** Settings values (declared in the manifest) → the module's preference shape. */
   function cleanPreferences(value) {
     const raw = asRecord(value);
-    const bright = Number(raw.fallbackBrightFt);
-    const dim = Number(raw.fallbackDimFt);
+    const preset = FALLBACK_PRESETS[String(raw.fallbackLight)] || FALLBACK_PRESETS["20-40"];
     const defaultSourceId =
       typeof raw.defaultSourceId === "string" &&
       SOURCES.some((source) => source.id === raw.defaultSourceId)
@@ -130,36 +146,75 @@
     return {
       ignoreInventory: raw.ignoreInventory === true,
       consumeConsumables: raw.consumeConsumables !== false,
-      fallbackBrightFt: Number.isFinite(bright)
-        ? Math.min(120, Math.max(0, bright))
-        : DEFAULTS.fallbackBrightFt,
-      fallbackDimFt: Number.isFinite(dim)
-        ? Math.min(240, Math.max(1, dim))
-        : DEFAULTS.fallbackDimFt,
+      fallbackBrightFt: preset[0],
+      fallbackDimFt: preset[1],
       defaultSourceId,
+      quietNotices: raw.quietNotices === true,
+    };
+  }
+
+  /** The module's preference shape → the manifest's setting keys. */
+  function settingsOf(preferences) {
+    return {
+      ignoreInventory: preferences.ignoreInventory === true,
+      consumeConsumables: preferences.consumeConsumables !== false,
+      fallbackLight: fallbackKey(preferences.fallbackBrightFt, preferences.fallbackDimFt),
+      defaultSourceId: preferences.defaultSourceId,
+      quietNotices: preferences.quietNotices === true,
     };
   }
 
   async function readPreferences(api) {
     try {
-      return cleanPreferences(await (api || AIS).storage.get("preferences"));
+      const listed = await (api || AIS).settings.list();
+      const rows = Array.isArray(listed && listed.settings) ? listed.settings : [];
+      const values = {};
+      rows.forEach((row) => { values[row.key] = row.value; });
+      return cleanPreferences(values);
     } catch {
       return cleanPreferences(null);
     }
   }
 
-  async function writePreferences(value) {
-    try {
-      await AIS.storage.set("preferences", cleanPreferences(value));
-      return true;
-    } catch (error) {
-      await AIS.ui.notify(
-        "Torch preferences could not be saved: " +
-          String((error && error.message) || error),
-        "warn",
-      );
-      return false;
+  /**
+   * Writes only the keys that changed. World keys need GM authority: on a player's device the
+   * kernel refuses them by name, and the player is told whose setting it is.
+   */
+  async function writePreferences(previous, value) {
+    const before = settingsOf(cleanPreferences(settingsOf(previous)));
+    const after = settingsOf(cleanPreferences(settingsOf(value)));
+    const changed = Object.keys(after).filter((key) => after[key] !== before[key]);
+    if (changed.length === 0) return true;
+    for (const key of changed) {
+      try {
+        await AIS.settings.set(key, after[key]);
+      } catch (error) {
+        const message = String((error && error.message) || error);
+        await AIS.ui.notify(
+          /GM authority/.test(message)
+            ? "Torch rules are the GM's world settings; only the GM can change them. " + policySummary(previous)
+            : "Torch settings could not be saved: " + message,
+          "warn",
+        );
+        return false;
+      }
     }
+    return true;
+  }
+
+  function policySummary(preferences) {
+    return (
+      (preferences.ignoreInventory ? "Any listed source may be lit" : "A matching carried item is required") +
+      "; consumables are " + (preferences.consumeConsumables ? "" : "not ") + "consumed" +
+      "; fallback light " + preferences.fallbackBrightFt + " / " + preferences.fallbackDimFt + " ft" +
+      "; preferred source " + preferences.defaultSourceId + "."
+    );
+  }
+
+  /** Informational notices respect the device's quietNotices; warnings always show. */
+  async function say(preferences, message, level) {
+    if ((level || "info") === "info" && preferences && preferences.quietNotices) return;
+    return AIS.ui.notify(message, level || "info");
   }
 
   function fallbackSource(preferences) {
@@ -398,7 +453,8 @@
       sourceItemId: entry.itemId || null,
       active,
     });
-    await AIS.ui.notify(
+    await say(
+      preferences,
       `${entry.source.name} selected${active ? " and lit" : ""} for ${token.name}.`,
       "info",
     );
@@ -408,7 +464,8 @@
     const result = await AIS.ui.select({
       title: "Torch settings",
       description:
-        "Preferences are stored for this module on this host/browser. Source inventory remains on each PF1e actor.",
+        "World rules are the GM's and replicate to every player (also under Settings → Packages → PF1e Torch). " +
+        "Notice volume is per device. Source inventory remains on each PF1e actor.",
       options: [
         {
           value: "inventory:required",
@@ -461,12 +518,19 @@
         { value: "default:torch", label: "Default source: Torch" },
         { value: "default:candle", label: "Default source: Candle" },
         { value: "default:lantern", label: "Default source: Lantern" },
+        {
+          value: preferences.quietNotices ? "quiet:off" : "quiet:on",
+          label: preferences.quietNotices ? "Show torch notices on this device" : "Fewer torch notices on this device",
+          description: "Per device; warnings always show.",
+        },
         { value: "reset", label: "Restore defaults" },
       ],
     });
     if (!result || typeof result.selected !== "string") return;
     const next = Object.assign({}, preferences);
-    if (result.selected === "inventory:required") next.ignoreInventory = false;
+    if (result.selected === "quiet:on") next.quietNotices = true;
+    else if (result.selected === "quiet:off") next.quietNotices = false;
+    else if (result.selected === "inventory:required") next.ignoreInventory = false;
     else if (result.selected === "inventory:ignored")
       next.ignoreInventory = true;
     else if (result.selected === "consume:on") next.consumeConsumables = true;
@@ -485,8 +549,11 @@
       next.fallbackDimFt = 120;
     } else if (result.selected.indexOf("default:") === 0)
       next.defaultSourceId = result.selected.slice("default:".length);
-    else if (result.selected === "reset") return writePreferences(DEFAULTS);
-    if (await writePreferences(next))
+    else if (result.selected === "reset") {
+      if (await writePreferences(preferences, DEFAULTS)) await AIS.ui.notify("Torch settings restored to defaults.", "info");
+      return;
+    }
+    if (await writePreferences(preferences, next))
       await AIS.ui.notify("Torch settings saved.", "info");
   }
 
@@ -507,7 +574,7 @@
     if (action === "settings") return configure(preferences);
     if (action === "off") {
       await apply(scene, token, current, 0, false, preferences, false);
-      return AIS.ui.notify(`${current.source.name} extinguished.`, "info");
+      return say(preferences, `${current.source.name} extinguished.`, "info");
     }
     if (action === "next") {
       const at = entries.findIndex(
@@ -523,7 +590,7 @@
         preferences.consumeConsumables &&
         !!next.itemId;
       await apply(scene, token, next, 1, true, preferences, canConsume);
-      return AIS.ui.notify(`${next.source.name} lit on ${token.name}.`, "info");
+      return say(preferences, `${next.source.name} lit on ${token.name}.`, "info");
     }
     if (action === "toggle") {
       const stateCount = current.source.states.length;
@@ -536,7 +603,7 @@
       const nextIndex = active ? (previousIndex + 1) % (stateCount + 1) : 1;
       if (nextIndex === 0) {
         await apply(scene, token, current, 0, false, preferences, false);
-        return AIS.ui.notify(`${current.source.name} extinguished.`, "info");
+        return say(preferences, `${current.source.name} extinguished.`, "info");
       }
       const hasSource =
         current.source.id === FALLBACK_ID ||
@@ -563,7 +630,8 @@
         preferences,
         canConsume,
       );
-      return AIS.ui.notify(
+      return say(
+        preferences,
         `${current.source.name} ${nextIndex === 1 ? "lit" : "dimmed"} on ${token.name}.`,
         "info",
       );

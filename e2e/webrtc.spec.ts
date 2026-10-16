@@ -19,6 +19,7 @@ test.describe("WebRTC transport (§6.1, §14)", () => {
         ok: boolean;
         channels: string[];
         frames: number;
+        shard: { ok: boolean; bytes: number };
         errors: string[];
       };
     });
@@ -26,6 +27,9 @@ test.describe("WebRTC transport (§6.1, §14)", () => {
     expect(result.ok).toBe(true);
     expect(result.channels).toEqual(["ops", "ephemeral", "assets", "sim"]);
     expect(result.frames).toBe(8); // one frame per channel per direction
+    // D-488: one 300 000-byte frame each way — over the per-message cap, must arrive
+    // reassembled from shard envelopes, byte-identical (incl. the unordered channel).
+    expect(result.shard).toEqual({ ok: true, bytes: 300_000 });
   });
 });
 

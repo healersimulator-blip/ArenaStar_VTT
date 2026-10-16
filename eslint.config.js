@@ -14,6 +14,7 @@ export default tseslint.config(
       "coverage/**",
       // §12 generated package artifacts (build step: pnpm build:systems)
       "systems/**/rules.js",
+      "systems/**/ui.js",
       // Pinned Foundry checkouts for the content converter (gitignored; they carry
       // their own eslint config, which must never be linted or even discovered)
       "tools/content/vendor/**",

@@ -1,5 +1,5 @@
 import { LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
-import type { LevelFocusStateMsg, StairOfferMsg } from "../core/messages";
+import type { AisBusMsg, AisProfileMsg, LevelFocusStateMsg, StairOfferMsg } from "../core/messages";
 import { MAX_STAIR_LEVELS, STAIRS_V2_FEATURE } from "../core/levelPlay";
 import { fogVersionKey, fogLevelIdError, LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "../core/levelFog";
 /**
@@ -13,6 +13,7 @@ import { fogVersionKey, fogLevelIdError, LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEAT
  *   echo store; commit reconciles (drop pending), rejected rolls back.
  */
 import { SUPPORTED_WIRE_FEATURES, featureListError, requiredOpFeatures, requiredWorldFeatures } from "../core/capabilities";
+import { boundedJson } from "../core/scriptMacros";
 import type { WallEditGuard } from "../core/wallEditing";
 import { DocumentStore, type StoreMeta } from "../core/store";
 import { estimateClockOffset, type ClockSample } from "../core/audio";
@@ -57,6 +58,10 @@ export interface ClientEvents {
   turnPhase: TurnPhaseMsg;
   /** §5A projected turn report (report field of the wire message). */
   turnReport: TurnReportMsg;
+  /** D-468: the host's shared AIS module set for this world (also retained as `aisProfile`). */
+  aisProfile: AisProfileMsg;
+  /** D-487: a relayed frame of one package's cross-device channel (delivered to that package's frames). */
+  aisBus: AisBusMsg;
   /** §7 NTP-style probe reply (t3 is stamped by the handler). */
   pong: PongMsg;
   /** §7 host clock broadcast. */
@@ -169,6 +174,9 @@ export class ClientSync {
   private readonly bus: EventBus<ClientEvents>;
   /** §5A: the retained last turn report (see `lastTurnReport`). */
   private lastTurnReportMsg: TurnReportMsg | null = null;
+  private lastAisProfile: AisProfileMsg | null = null;
+  /** D-468: the latest `ais.profile` (a runtime created after the welcome must not miss it). */
+  get aisProfile(): AisProfileMsg | null { return this.lastAisProfile; }
   private readonly policy: OptimisticPolicy;
   private readonly now: () => number;
   private readonly ephemeralBucket: TokenBucket;
@@ -322,6 +330,19 @@ export class ClientSync {
       this.rebuildEcho();
     }
     this.send({ kind: "intent", txId, ops, ...(wallEdit ? { wallEdit } : {}) });
+  }
+
+  /**
+   * D-487: relay one frame of a module instance's cross-device channel to the host. The host
+   * stamps the sender identity and fans out to the same package's frames on every other device.
+   */
+  sendAisBus(packageId: string, channel: string, data: Json): void {
+    const worldId = this.world?.id;
+    if (!worldId) return; // not welcomed yet
+    this.send({
+      kind: "ais.bus", worldId, packageId, channel, data,
+      by: { id: this.user?.id ?? "", name: this.user?.name ?? "" },
+    });
   }
 
   // ─── §7 audio + clock sync ──────────────────────────────────────────────────
@@ -1005,6 +1026,30 @@ export class ClientSync {
       case "sim.snapshot":
         this.applySimSnapshot(msg);
         return;
+      case "ais.profile": {
+        // Bounded like every host→client payload the shell keeps: a malformed profile is dropped
+        // whole rather than half-applied (the sandbox never sees a module without its identity).
+        if (typeof msg.worldId !== "string" || !Number.isSafeInteger(msg.seq) || !Array.isArray(msg.modules) ||
+            msg.modules.length > 64 || typeof msg.providers !== "object" || msg.providers === null ||
+            !Array.from(msg.modules).every((m) => m && typeof m.packageId === "string" && typeof m.hash === "string" &&
+              // D-487: heavy modules carry `payloadZ` (deflated source payload) instead of `source`.
+              ((typeof m.source === "string" && m.source.length <= 1_048_576) ||
+                (m.payloadZ instanceof Uint8Array && m.payloadZ.byteLength <= 512 * 1024)) &&
+              Array.isArray(m.capabilities) && Array.isArray(m.commands))) return;
+        if (this.lastAisProfile && msg.seq < this.lastAisProfile.seq) return;
+        this.lastAisProfile = msg;
+        this.bus.emit("aisProfile", msg);
+        return;
+      }
+      case "ais.bus": {
+        // Strict like every retained host message: a malformed frame is dropped whole.
+        if (typeof msg.packageId !== "string" || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(msg.packageId) ||
+            typeof msg.channel !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(msg.channel) ||
+            !boundedJson(msg.data, 16 * 1024) ||
+            !msg.by || typeof msg.by.id !== "string" || typeof msg.by.name !== "string") return;
+        this.bus.emit("aisBus", msg);
+        return;
+      }
       case "turn.phase":
         this.bus.emit("turnPhase", msg);
         return;

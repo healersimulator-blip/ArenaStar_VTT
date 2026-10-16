@@ -20,11 +20,31 @@ The Lantern cycles through declared High and Low light modes before extinguishin
 
 ## Controls
 
-Right-click a token and choose **Turn carried light on**, **Next carried light source**, **Choose carried light source…**, **Extinguish carried light**, or **Torch settings…**. The source chooser is a text-only dialog rendered by the ArenaStar host. A per-module, per-browser preference panel controls inventory bypass, optional candle/torch consumption, the default source, and a configurable all-around fallback (10/20, 20/40, 30/60, or 60/120 ft.). When inventory bypass is enabled, the module skips actor-inventory reads and offers the full source list.
+Right-click a token and choose **Turn carried light on**, **Next carried light source**, **Choose carried light source…**, **Extinguish carried light**, or **Torch settings…**. The source chooser is a text-only dialog rendered by the ArenaStar host. The table's torch rules are **world settings** declared in the manifest (D-476/D-481): inventory bypass, optional candle/torch consumption, the preferred source, and the all-around fallback (10/20, 20/40, 30/60, or 60/120 ft.). The GM edits them from **Torch settings…** or in Settings → Packages → PF1e Torch → *Settings*; they replicate to every player's copy of the module, export with the world and undo like any edit. *Fewer torch notices on this device* is the one per-device setting (informational notices only; warnings always show). When inventory bypass is enabled, the module skips actor-inventory reads and offers the full source list.
+
+| Setting | Scope | Default | Effect |
+| --- | --- | --- | --- |
+| `ignoreInventory` | world | off | On: any listed source or the fallback can be lit without a matching carried item |
+| `consumeConsumables` | world | on | Lighting a candle or torch spends one item from the actor's inventory; putting it out never does |
+| `fallbackLight` | world | `20-40` | Bright / dim radius (ft) of the free personal light: `10-20`, `20-40`, `30-60`, `60-120` |
+| `defaultSourceId` | world | `torch` | Which carried source is preferred when a token carries several |
+| `quietNotices` | device | off | Mutes the module's informational notices on this device |
 
 The module's source data uses ordered state arrays, so sources can have several lit modes; the token action advances through those states and then extinguishes. Source cycling, token state, and optional inventory decrements are serialized by the host rather than written directly by module code.
 
 Directional beams are 90° cones oriented along the token's current rotation. ArenaStar's lighting renderer, light-range checks, fog reveal, worker polygon computation, and Foundry-scene importer carry that direction. A source's beam is used as a token's sight cone in total darkness when it is the only illumination at that token; ordinary ambient light and darkvision retain ArenaStar's existing full-circle perception model. Flame sources carry declarative `torch` shimmer metadata; the host renderer supports bounded `torch` and `pulse` effects for placed and carried lights, honors reduced-motion preferences, and never changes vision/range calculations.
+
+### At the players' tables (D-468)
+
+The GM's approval shares the module with the table by default (Settings → Packages → *Players run
+this module too*). A player is asked once per device and code hash; once allowed, this same module
+runs in a sandbox on the player's machine and the right-click entries above appear on the tokens
+that player controls. Every change it makes is the player's own intent: lighting a torch on an
+owned token (and consuming it from the owned actor's inventory) is accepted by the host, any other
+token is refused. *Torch settings…* on a player's device shows the GM's rules read-only — the
+kernel refuses world-scope writes without GM authority and the module says so — and lets the
+player mute informational notices on their own device. Unsharing or revoking the module on the GM
+device stops the player's copy immediately.
 
 ## Macro commands and source-change events
 
@@ -42,4 +62,4 @@ AIS publishes the typed `scene.token.light.changed` hook after a visible token l
 
 The PF1e starter world carries a version/hash-locked enabled profile and explicitly selects `pf1e-torch/scene.token.light.action`. This profile is portable; it does **not** approve executable code or grant capabilities. On each host, a human must review the package and separately approve the exact local code and requested capabilities in **Settings → Packages → Automation**. The host re-checks the profile lock and grants for every RPC and every macro command dispatch.
 
-The module requests visible-scene reads, linked-actor inventory reads, optional inventory consumption, module-scoped storage, host-rendered selection/notifications, token-light management, typed action subscription, and declared event emission. ArenaStar's token context action is the native UI replacement for a Foundry HUD hook; macro calls go through ArenaStar's existing reviewed script worker and the new typed AIS command bridge. The package never accesses Foundry globals or assumes the Foundry macro API exists.
+The module requests visible-scene reads, linked-actor inventory reads, optional inventory consumption, writes to its declared settings (`module.settings.write`; world keys need GM authority), host-rendered selection/notifications, token-light management, typed action subscription, and declared event emission. ArenaStar's token context action is the native UI replacement for a Foundry HUD hook; macro calls go through ArenaStar's existing reviewed script worker and the new typed AIS command bridge. The package never accesses Foundry globals or assumes the Foundry macro API exists.

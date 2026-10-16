@@ -12,6 +12,7 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   var pending = new Map();
   var events = new Map();
   var subscribed = new Set();
+  var busBindings = new Map();
   var commands = new Map();
   var ready = false;
   var initializers = [];
@@ -59,7 +60,7 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   }
   function createApi(commandId) {
     var call = function (method, args) { return rpc(method, args, commandId); };
-    return Object.freeze({
+    var api = {
       events: Object.freeze({
         on: function (event, callback) {
           if (typeof event !== "string" || typeof callback !== "function") throw new TypeError("AIS.events.on requires an event and callback");
@@ -70,6 +71,32 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
           return function () { callbacks.delete(callback); };
         },
         emit: function (eventId, payload) { return call("events.emit", { eventId: eventId, payload: payload }); }
+      }),
+      // D-487: the kernel's bounded cross-device channel. Delivery is same-package only (this
+      // module's frames on every device); the sender hears its own frame too, like game.socket.
+      bus: Object.freeze({
+        emit: function (channel, data) {
+          if (typeof channel !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(channel)) throw new TypeError("AIS.bus.emit requires a channel of 1-128 [A-Za-z0-9._:-] characters");
+          return call("bus.emit", { channel: channel, data: data === undefined ? null : data });
+        },
+        on: function (channel, callback) {
+          if (typeof channel !== "string" || typeof callback !== "function") throw new TypeError("AIS.bus.on requires a channel and callback");
+          var wrapper = function (payload) {
+            if (payload && payload.channel === channel) callback(payload.data, payload.by);
+          };
+          var record = { callback: callback, wrapper: wrapper, unbind: api.events.on("bus.message", wrapper) };
+          var rows = busBindings.get(channel);
+          if (!rows) { rows = new Set(); busBindings.set(channel, rows); }
+          rows.add(record);
+          return function () { rows.delete(record); record.unbind(); };
+        },
+        off: function (channel, callback) {
+          var rows = busBindings.get(channel);
+          if (!rows) return;
+          Array.from(rows).forEach(function (record) {
+            if (record.callback === callback) { rows.delete(record); record.unbind(); }
+          });
+        }
       }),
       scene: Object.freeze({ readVisible: function () { return call("scene.read.visible", {}); } }),
       resources: Object.freeze({
@@ -108,12 +135,62 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
         get: function (key) { return call("module.storage.get", { key: key }); },
         set: function (key, value) { return call("module.storage.set", { key: key, value: value }); }
       }),
+      // D-476: schema-declared settings (interconnect.settings); world scope is GM-authored.
+      settings: Object.freeze({
+        list: function () { return call("settings.list", {}); },
+        get: function (key) { return call("settings.get", { key: key }).then(function (row) { return row.value; }); },
+        set: function (key, value) { return call("settings.set", { key: key, value: value }); },
+        // D-482: declare a setting from code (same schema as interconnect.settings).
+        register: function (declaration) { return call("settings.register", declaration); },
+        onChange: function (callback) {
+          if (typeof callback !== "function") throw new TypeError("AIS.settings.onChange requires a callback");
+          return api.events.on("module.settings.changed", callback);
+        }
+      }),
+      // D-477: read-only compendium access (GM device; players get an explanatory error).
+      compendium: Object.freeze({
+        list: function () { return call("compendium.list", {}).then(function (row) { return row.packs; }); },
+        search: function (query, options) {
+          var request = { query: query };
+          if (options && options.packId !== undefined) request.packId = options.packId;
+          if (options && options.limit !== undefined) request.limit = options.limit;
+          return call("compendium.search", request).then(function (row) { return row.hits; });
+        },
+        get: function (packId, entryId) { return call("compendium.get", { packId: packId, entryId: entryId }); }
+      }),
+      // D-478: other modules on this device — public contract and kernel-routed invocation.
+      modules: Object.freeze({
+        list: function () { return call("modules.list", {}).then(function (row) { return row.modules; }); },
+        invoke: function (moduleId, commandId, input) {
+          return call("modules.invoke", { moduleId: moduleId, commandId: commandId, input: input === undefined ? null : input })
+            .then(function (row) { return row.result; });
+        }
+      }),
+      // D-485: generic documents (this device user's view; writes validated by the host).
+      documents: Object.freeze({
+        context: function () { return call("documents.context", {}); },
+        list: function (collection, offset, limit) {
+          var request = { collection: collection };
+          if (offset !== undefined) request.offset = offset;
+          if (limit !== undefined) request.limit = limit;
+          return call("documents.list", request);
+        },
+        get: function (ref) { return call("documents.get", ref).then(function (row) { return row.document; }); },
+        mutate: function (ops) { return call("documents.mutate", { ops: ops }); }
+      }),
       chat: Object.freeze({ post: function (content) { return call("chat.post", { content: content }); } }),
       ui: Object.freeze({
         notify: function (message, level) { return call("ui.notify", { message: String(message), level: level || "info" }); },
-        select: function (request) { return call("ui.select", request); }
+        select: function (request) { return call("ui.select", request); },
+        // D-470: the module's own document is the panel body; the shell draws the chrome.
+        panel: Object.freeze({
+          open: function () { return call("ui.panel.open", {}); },
+          close: function () { return call("ui.panel.close", {}); },
+          root: function () { return document.body; }
+        })
       })
-    });
+    };
+    return Object.freeze(api);
   }
   function boundedJson(value, depth, seen) {
     if (depth > 12) return false;
