@@ -53,6 +53,8 @@ export const AIS_MODULE_METHODS = [
   "documents.list",
   "documents.get",
   "documents.mutate",
+  "assets.list",
+  "assets.get",
 ] as const;
 export type AisModuleMethod = (typeof AIS_MODULE_METHODS)[number];
 
@@ -94,6 +96,8 @@ export const AIS_METHOD_CAPABILITY: Record<AisModuleMethod, AisCapability | null
   "documents.list": "documents.read",
   "documents.get": "documents.read",
   "documents.mutate": "documents.write",
+  "assets.list": "assets.read",
+  "assets.get": "assets.read",
 };
 
 export interface AisModuleRequest {

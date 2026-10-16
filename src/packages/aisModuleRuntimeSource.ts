@@ -178,6 +178,26 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
         get: function (ref) { return call("documents.get", ref).then(function (row) { return row.document; }); },
         mutate: function (ops) { return call("documents.mutate", { ops: ops }); }
       }),
+      // D-489: asset library (R-07) — list/resolve by content hash, filtered by entitlement.
+      assets: Object.freeze({
+        list: function () { return call("assets.list", {}).then(function (row) { return row.assets; }); },
+        get: function (hash, offset) {
+          var req = { hash: hash };
+          if (offset !== undefined) req.offset = offset;
+          return call("assets.get", req);
+        },
+        // Helper to fetch full asset as base64 by paging
+        fetch: function (hash) {
+          var fetchChunk = function (offset, acc) {
+            return call("assets.get", { hash: hash, offset: offset }).then(function (row) {
+              var nextAcc = acc + row.base64;
+              if (row.next === null || row.next === undefined) return { mime: row.mime, base64: nextAcc };
+              return fetchChunk(row.next, nextAcc);
+            });
+          };
+          return fetchChunk(0, "");
+        }
+      }),
       chat: Object.freeze({ post: function (content) { return call("chat.post", { content: content }); } }),
       ui: Object.freeze({
         notify: function (message, level) { return call("ui.notify", { message: String(message), level: level || "info" }); },

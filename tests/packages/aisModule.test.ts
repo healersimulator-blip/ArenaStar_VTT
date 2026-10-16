@@ -42,6 +42,8 @@ const allHandlers = (): AisModuleHandlers => ({
   "compendium.list": vi.fn(async () => ({ packs: [] })),
   "compendium.search": vi.fn(async () => ({ hits: [] })),
   "compendium.get": vi.fn(async () => ({ packId: "p/x.json", id: "e", name: "E", type: "actor", data: {} })),
+  "assets.list": vi.fn(async () => ({ assets: [] })),
+  "assets.get": vi.fn(async () => ({ mime: "image/png", base64: "", next: null, size: 0 })),
   "modules.list": vi.fn(async () => ({ modules: [] })),
   "modules.invoke": vi.fn(async () => ({ result: null })),
 });

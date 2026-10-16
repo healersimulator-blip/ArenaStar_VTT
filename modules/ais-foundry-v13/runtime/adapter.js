@@ -734,11 +734,72 @@
     renderTemplate, loadTemplates, getTemplate } = uiLayer;
   globalThis.ui.windows = uiLayer.ui.windows;
   Object.defineProperty(globalThis.ui, "activeWindow", { configurable: true, get: () => uiLayer.ui.activeWindow, set: (value) => { uiLayer.ui.activeWindow = value; } });
+  // ── R-07: FilePicker over AIS asset library ──
+  class FilePicker extends Application {
+    constructor(options = {}) {
+      super(options);
+      this.options = { type: "image", callback: null, ...options };
+      this._assets = [];
+      this._filter = "";
+    }
+    static get defaultOptions() {
+      return { ...super.defaultOptions, id: "filepicker", classes: ["filepicker"], template: null, width: 520, height: 400, title: "FilePicker" };
+    }
+    static async browse(source, path, options = {}) {
+      // Foundry's FilePicker.browse returns { files, dirs, ... }
+      try {
+        const assets = await AIS.assets.list();
+        const files = assets.filter((a) => {
+          if (options.extensions && Array.isArray(options.extensions)) {
+            const ext = a.name.split(".").pop()?.toLowerCase();
+            return options.extensions.some((e) => e.toLowerCase().includes(ext ?? ""));
+          }
+          return true;
+        }).map((a) => a.hash);
+        return { files, dirs: [], target: path ?? "", source, extensions: options.extensions ?? [] };
+      } catch {
+        return { files: [], dirs: [], target: path ?? "", source, extensions: options.extensions ?? [] };
+      }
+    }
+    async getData(options = {}) {
+      const data = await super.getData(options);
+      if (!this._assets.length) {
+        try { this._assets = await AIS.assets.list(); } catch { this._assets = []; }
+      }
+      const filtered = this._filter ? this._assets.filter((a) => a.name.toLowerCase().includes(this._filter.toLowerCase())) : this._assets;
+      return { ...data, files: filtered, filter: this._filter, type: this.options.type };
+    }
+    activateListeners(html) {
+      super.activateListeners(html);
+      const root = html[0] ?? html;
+      const input = root.querySelector?.('input[name="filter"]');
+      if (input) {
+        input.addEventListener("input", (e) => { this._filter = e.target.value; this.render(); });
+      }
+      const rows = root.querySelectorAll?.('[data-asset-hash]') ?? [];
+      for (const row of rows) {
+        row.addEventListener("click", () => {
+          const hash = row.dataset.assetHash;
+          if (typeof this.options.callback === "function") {
+            try { this.options.callback(hash); } catch (err) { console.warn(err); }
+          }
+          this.close();
+        });
+      }
+    }
+    async _renderInner() {
+      const data = await this.getData();
+      // Simple inline template — no external HBS needed
+      const filesHtml = data.files.slice(0, 100).map((a) => `<div class="file" data-asset-hash="${a.hash}" style="padding:4px;cursor:pointer;border-bottom:1px solid #444"><span>${escapeHTML(a.name)}</span> <small style="opacity:0.6">${a.hash.slice(0,8)}… ${a.size}b</small></div>`).join("");
+      return `<div class="filepicker-content" style="display:flex;flex-direction:column;height:100%"><div style="padding:8px"><input name="filter" placeholder="Filter" value="${escapeHTML(data.filter)}" style="width:100%"/></div><div style="flex:1;overflow:auto">${filesHtml || '<div style="padding:12px;opacity:0.6">No assets</div>'}</div></div>`;
+    }
+  }
+
   Object.assign(globalThis, { Application, FormApplication, DocumentSheet, Dialog, Tabs, FormDataExtended, Handlebars, renderTemplate, loadTemplates, getTemplate, $, jQuery: $,
     ActorSheet: stubClass("ActorSheet", DocumentSheet), ItemSheet: stubClass("ItemSheet", DocumentSheet),
     TokenConfig: stubClass("TokenConfig", DocumentSheet), SidebarTab: stubClass("SidebarTab", Application),
     ContextMenu: stubClass("ContextMenu"), Draggable: stubClass("Draggable"), SearchFilter: stubClass("SearchFilter"),
-    FilePicker: stubClass("FilePicker", Application), SettingsConfig: stubClass("SettingsConfig", FormApplication),
+    FilePicker, SettingsConfig: stubClass("SettingsConfig", FormApplication),
     KeybindingsConfig: stubClass("KeybindingsConfig", FormApplication), Roll: stubClass("Roll"), Collection,
     fromUuid: (uuid) => fromUuid(uuid), fromUuidSync: (uuid) => fromUuidSync(uuid),
     duplicate, mergeObject, getProperty, setProperty, hasProperty, expandObject, flattenObject, isNewerVersion, debounce,
@@ -863,9 +924,24 @@
   }
   if (uiLayer.fields) dataModelCheck = uiLayer.fields.isDataModelClass;
   globalThis.foundry.CONST = globalThis.CONST;
-  globalThis.CONFIG = { debug: { hooks: false }, compatibility: { mode: 0 }, ui: {}, Canvas: { layers: {} }, TextEditor: { enrichers: [] },
+  // Target B shim: provide minimal CONFIG roots for common systems so modules that check CONFIG.PF1 etc don't throw.
+  // These are empty by design — the adapter never emulates system rules, only the namespace.
+  const systemShim = (() => {
+    const declared = Array.isArray(dist.systems) ? dist.systems.map((e) => typeof e === "string" ? e : e.id).filter(Boolean) : [];
+    const wantsPf1 = declared.includes("pf1");
+    const wantsDnd5e = declared.includes("dnd5e");
+    const wantsPf2e = declared.includes("pf2e");
+    const id = wantsPf1 ? "pf1" : wantsDnd5e ? "dnd5e" : wantsPf2e ? "pf2e" : "arenastar";
+    return { id, wantsPf1, wantsDnd5e, wantsPf2e, declared };
+  })();
+  const baseConfig = { debug: { hooks: false }, compatibility: { mode: 0 }, ui: {}, Canvas: { layers: {} }, TextEditor: { enrichers: [] },
     statusEffects: [], specialStatusEffects: {}, controlIcons: {}, sounds: {}, fontDefinitions: {}, Dice: { rolls: [globalThis.Roll], terms: {} },
     ...Object.fromEntries(Object.keys(documentClasses).map((name) => [name.replace(/Document$/, ""), { documentClass: documentClasses[name], sheetClasses: {}, typeLabels: {}, dataModels: {} }])) };
+  // Minimal PF1/DnD5e/PF2e CONFIG so modules that branch on CONFIG.<system> don't crash.
+  baseConfig.PF1 = baseConfig.PF1 ?? { abilities: {}, skills: {}, conditions: {}, loot: {}, weaponTypes: {}, equipmentTypes: {}, spellSchools: {}, damageTypes: {}, currencies: {}, re: {} };
+  baseConfig.DND5E = baseConfig.DND5E ?? { abilities: {}, skills: {}, damageTypes: {}, conditionTypes: {}, currencies: {}, weaponTypes: {}, equipmentTypes: {}, spellSchools: {} };
+  baseConfig.PF2E = baseConfig.PF2E ?? { abilities: {}, skills: {}, damageTypes: {}, conditions: {}, weaponTypes: {} };
+  globalThis.CONFIG = baseConfig;
 
   // ── game ──
   const user = { id: "gm", _id: "gm", name: "GM", isGM: true, isSelf: true, role: 4, active: true, character: null, color: "#e0b341",
@@ -895,9 +971,10 @@
     // D-485: `game.user` is this device's User document once the replica is hydrated; the frozen GM row only bridges boot.
     get user() { return documentsLayer.me() ?? user; }, get userId() { return documentsLayer.userId() ?? user.id; },
     users: documentsLayer.collections.users, ready: false, paused: false, debug: false,
-    world: { id: "arenastar", title: "ArenaStar world", system: "arenastar", version: "0.0.0" },
-    // Deliberately NOT a Foundry system id: modules that need `pf1` must say so and stay inert.
-    system: { id: "arenastar", title: "ArenaStar VTT", version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, template: {}, flags: {} },
+    world: { id: "arenastar", title: "ArenaStar world", system: systemShim.id, version: "0.0.0" },
+    // For PF1/DnD5e/PF2e modules: if the module declares a system dependency, we report that system id so the module doesn't stay inert.
+    // The actual rules remain ArenaStar's — this is a namespace shim, not a system emulation (Target B is still separate).
+    system: { id: systemShim.id, title: systemShim.id === "arenastar" ? "ArenaStar VTT" : `${systemShim.id} (compatibility shim)`, version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, template: {}, flags: {}, id: systemShim.id },
     modules, i18n, settings,
     scenes: documentsLayer.collections.scenes, actors: documentsLayer.collections.actors, items: documentsLayer.collections.items, journal: documentsLayer.collections.journals,
     tables: documentsLayer.collections.rollTables, macros: documentsLayer.collections.macros, playlists: documentsLayer.collections.playlists,

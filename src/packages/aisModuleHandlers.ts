@@ -128,6 +128,10 @@ export interface AisModuleHandlerContext {
   settings?: AisModuleSettingsContext;
   /** D-477: absent on devices without compendia (players), where the RPCs explain so. */
   compendia?: AisCompendiumSource;
+  /** D-489: world asset manifest (hash → entry), filtered by entitlement; absent on players without manifest. */
+  assets?: () => Promise<Readonly<Record<string, { name: string; mime: string; size: number }>>>;
+  /** D-489: fetch one asset's bytes as base64 (chunked via offset), when entitled. */
+  assetBytes?: (hash: string) => Promise<{ base64: string; mime: string } | null>;
   /** D-478: module directory + kernel-routed invocation. */
   modules?: AisModuleBusContext;
   /**
@@ -816,6 +820,43 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       if (size === null || size > MAX_COMPENDIUM_ENTRY_BYTES)
         throw new Error(`Compendium entry ${entryId} exceeds the ${MAX_COMPENDIUM_ENTRY_BYTES}-byte RPC budget`);
       return payload;
+    },
+    // ── D-489: asset library (R-07) ───────────────────────────────────────────────────────
+    "assets.list": async (args, commandContext) => {
+      await ctx.assertCapability("assets.read");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).length) throw new Error("assets.list takes no arguments");
+      if (!ctx.assets) throw new Error("Asset library is unavailable on this device");
+      const manifest = await ctx.assets();
+      const assets = Object.entries(manifest).map(([hash, entry]) => ({
+        hash, name: entry.name, mime: entry.mime, size: entry.size,
+      }));
+      // Cap at 500 entries, 256 KiB budget
+      const capped = assets.slice(0, 500);
+      const payload = { assets: capped };
+      if ((byteLength(payload) ?? Infinity) > 64 * 1024) throw new Error("Asset list exceeds RPC budget; narrow via manifest");
+      return payload;
+    },
+    "assets.get": async (args, commandContext) => {
+      await ctx.assertCapability("assets.read");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).some((key) => !["hash", "offset"].includes(key)))
+        throw new Error("assets.get accepts hash and offset");
+      const hash = typeof args.hash === "string" && /^[a-f0-9]{64}$/.test(args.hash) ? args.hash : "";
+      if (!hash) throw new Error("assets.get hash must be a 64-char hex");
+      const rawOffset = args.offset;
+      const offset = rawOffset === undefined ? 0 : rawOffset;
+      if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) throw new Error("assets.get offset must be a non-negative integer");
+      if (!ctx.assets || !ctx.assetBytes) throw new Error("Asset library is unavailable on this device");
+      const manifest = await ctx.assets();
+      if (!Object.hasOwn(manifest, hash)) throw new Error("Unknown or inaccessible asset");
+      const data = await ctx.assetBytes(hash);
+      if (!data) throw new Error("Asset data unavailable");
+      const base64 = data.base64;
+      if (offset > base64.length) throw new Error("Invalid asset offset");
+      const nextOffset = offset + 8192;
+      const chunk = base64.slice(offset, nextOffset);
+      return { mime: data.mime, base64: chunk, next: nextOffset < base64.length ? nextOffset : null, size: base64.length };
     },
     // ── D-478: module-to-module bus ───────────────────────────────────────────────────────
     "modules.list": async (args, commandContext) => {

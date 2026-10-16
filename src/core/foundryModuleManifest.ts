@@ -210,6 +210,10 @@ export function synthesizeFoundryPackageManifest(foundry: FoundryModuleManifest,
         // D-485: `game.actors`/`Item.create`/`fromUuid`/`createActor` hooks over the generic document service;
         // `ChatMessage.create` posts through the chat service as this user.
         "documents.read", "documents.write", "chat.post",
+        // D-477: compendium packs as `game.packs` (R-10)
+        "compendium.read",
+        // D-489: asset library as `FilePicker` over content hashes (R-07)
+        "assets.read",
         // D-487: `game.socket` over the kernel's bounded cross-device channel (same package only).
         "bus.transmit",
       ],

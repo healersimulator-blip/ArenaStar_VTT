@@ -185,6 +185,8 @@ export const AIS_CAPABILITIES = [
   // D-487: talk to the same package's instances on other devices over the kernel's bounded
   // channel (AIS.bus; `game.socket` for Foundry-profile modules). Delivery is same-package only.
   "bus.transmit",
+  // D-489: read the world's asset library (list/resolve) — images, audio, etc. by content hash.
+  "assets.read",
 ] as const;
 export type AisCapability = (typeof AIS_CAPABILITIES)[number];
 

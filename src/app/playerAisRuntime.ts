@@ -490,6 +490,30 @@ export class PlayerAisRuntime {
           register: (declaration) => this.registerRuntimeSetting(module.packageId, declaration),
         },
         // D-477: no `compendia` — packs live on the GM device; the handler says so.
+        // D-489: asset library — player's projected manifest (only entitled assets).
+        assets: async () => {
+          const manifest = client.store.world.assetManifest ?? {};
+          const out: Record<string, { name: string; mime: string; size: number }> = {};
+          for (const [hash, entry] of Object.entries(manifest)) {
+            out[hash] = { name: entry.name, mime: entry.mime, size: entry.size ?? 0 };
+          }
+          return out;
+        },
+          assetBytes: async (hash: string) => {
+          // Players fetch via asset transfer, not direct IDB — for now return null and let FilePicker show placeholder
+          // The host will serve via asset channel; we can try IDB as fallback
+          try {
+            const { getAsset } = await import("../storage/idb");
+            const record = await getAsset(options.db, options.worldId, hash as any);
+            if (!record || !record.bytes) return null;
+            const bytes = record.bytes;
+            let binary = "";
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i] ?? 0);
+            const base64 = btoa(binary);
+            const entry = client.store.world.assetManifest?.[hash];
+            return { base64, mime: entry?.mime ?? record.mime ?? "application/octet-stream" };
+          } catch { return null; }
+        },
         // D-478: sibling modules running on this device, invoked with the player's authority.
         modules: {
           requires: module.requires ?? [],
