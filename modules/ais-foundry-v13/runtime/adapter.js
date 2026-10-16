@@ -164,13 +164,46 @@
     }
     get documentClass() { return documentClasses[this.documentName] ?? Document; }
     async getIndex({ fields } = {}) {
-      void fields;
-      if (this._index) return this._index;
+      // fields: array of dot-paths or object map; support for PF1e modules that request system fields
+      const wantsFields = fields ? (Array.isArray(fields) ? fields : typeof fields === "object" ? Object.keys(fields) : []) : [];
+      const needFull = wantsFields.length > 0;
+      if (this._index && !needFull) return this._index;
       try {
         const hits = await AIS.compendium.search({ packId: this.id, query: "", limit: 500 });
-        // hits are { packId, entryId, name, ... }
-        this._index = hits.map((hit) => ({ _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base" }));
-        return this._index;
+        if (!needFull) {
+          this._index = hits.map((hit) => ({ _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base", img: hit.img ?? "" }));
+          return this._index;
+        }
+        // When fields requested, fetch full entries (bounded parallelism) to extract requested paths
+        const results = [];
+        const concurrency = 8;
+        let idx = 0;
+        const fetchOne = async (hit) => {
+          try {
+            const entry = await AIS.compendium.get(this.id, hit.entryId);
+            if (!entry) return { _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base", img: hit.img ?? "" };
+            const raw = entry.data ?? entry;
+            const base = { _id: hit.entryId, id: hit.entryId, name: entry.name ?? hit.name, type: entry.type ?? hit.type ?? "base", img: resolveEntryImg(raw) || entry.img || hit.img || "" };
+            for (const field of wantsFields) {
+              try {
+                const val = getProperty(raw, field);
+                if (val !== undefined) setProperty(base, field, clone(val));
+              } catch {}
+            }
+            return base;
+          } catch {
+            return { _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base", img: "" };
+          }
+        };
+        const workers = Array.from({ length: concurrency }, async () => {
+          while (idx < hits.length) {
+            const i = idx++;
+            const hit = hits[i];
+            results[i] = await fetchOne(hit);
+          }
+        });
+        await Promise.all(workers);
+        return results;
       } catch (e) {
         warn(`Compendium ${this.id} getIndex failed: ${e?.message ?? e}`);
         return [];
@@ -213,11 +246,11 @@
       const parsed = JSON.parse(trimmed);
       if (Array.isArray(parsed)) {
         for (const entry of parsed) if (entry && typeof entry._id === "string") entries.push(entry);
-        return entries;
+        if (entries.length) return entries;
       }
       if (parsed && Array.isArray(parsed.entries)) {
         for (const entry of parsed.entries) if (entry && typeof entry._id === "string") entries.push(entry);
-        return entries;
+        if (entries.length) return entries;
       }
       if (parsed && typeof parsed._id === "string") { entries.push(parsed); return entries; }
     } catch {}
@@ -229,9 +262,38 @@
         if (entry && typeof entry._id === "string") entries.push(entry);
       } catch {}
     }
+    if (entries.length) return entries;
+    // YAML edge: some older Foundry packs are YAML documents separated by ---; extract minimal _id/name/type/img
+    if (text.includes("_id:") || text.includes("---")) {
+      try {
+        const docs = text.split(/^---\s*$/m);
+        for (const doc of docs) {
+          if (!doc.includes("_id:")) continue;
+          const idMatch = doc.match(/_id:\s*["']?([A-Za-z0-9]{16,})["']?/);
+          if (!idMatch) continue;
+          const nameMatch = doc.match(/^\s*name:\s*["']?(.+?)["']?\s*$/m);
+          const typeMatch = doc.match(/^\s*type:\s*["']?([A-Za-z0-9_-]+)["']?\s*$/m);
+          const imgMatch = doc.match(/^\s*img:\s*["']?(.+?)["']?\s*$/m);
+          const obj = { _id: idMatch[1], name: (nameMatch?.[1]?.trim() || idMatch[1]), type: (typeMatch?.[1]?.trim() || "base"), img: (imgMatch?.[1]?.trim() || "") };
+          // Try to preserve full doc if it looks like JSON after YAML conversion? Keep minimal.
+          entries.push(obj);
+          if (entries.length > 5000) break;
+        }
+        if (entries.length) return entries;
+      } catch {}
+    }
     return entries;
   }
 
+  function resolveEntryImg(e) {
+    try {
+      if (e && typeof e.img === "string" && e.img) return e.img;
+      if (e && typeof e.icon === "string" && e.icon) return e.icon;
+      if (e?.system && typeof e.system.img === "string" && e.system.img) return e.system.img;
+      if (e?.data && typeof e.data.img === "string" && e.data.img) return e.data.img;
+    } catch {}
+    return "";
+  }
   class FoundryCompendiumCollection extends Collection {
     constructor(packMeta, rawEntries) {
       super([]);
@@ -244,11 +306,22 @@
       this.name = packMeta.label || packMeta.name;
       this.title = packMeta.label || packMeta.name;
       this._cache = new Map();
-      this._index = rawEntries.map((e) => ({ _id: e._id, id: e._id, name: e.name, type: e.type || "base", img: e.img }));
+      this._index = rawEntries.map((e) => ({ _id: e._id, id: e._id, name: e.name, type: e.type || "base", img: resolveEntryImg(e) }));
       for (const e of rawEntries) this._cache.set(e._id, e);
     }
     get documentClass() { return documentClasses[this.documentName] ?? Document; }
-    async getIndex() { return this._index; }
+    async getIndex({ fields } = {}) {
+      if (!fields) return this._index;
+      const wants = Array.isArray(fields) ? fields : typeof fields === "object" ? Object.keys(fields) : [];
+      if (!wants.length) return this._index;
+      return this._raw.map((e) => {
+        const base = { _id: e._id, id: e._id, name: e.name, type: e.type || "base", img: resolveEntryImg(e) };
+        for (const f of wants) {
+          try { const v = getProperty(e, f); if (v !== undefined) setProperty(base, f, clone(v)); } catch {}
+        }
+        return base;
+      });
+    }
     async getDocument(entryId) {
       const cached = this._cache.get(entryId);
       if (cached instanceof Document) return cached;
@@ -825,40 +898,119 @@
     renderTemplate, loadTemplates, getTemplate } = uiLayer;
   globalThis.ui.windows = uiLayer.ui.windows;
   Object.defineProperty(globalThis.ui, "activeWindow", { configurable: true, get: () => uiLayer.ui.activeWindow, set: (value) => { uiLayer.ui.activeWindow = value; } });
-  // ── R-07: FilePicker over AIS asset library ──
+  // ── R-07: FilePicker over AIS asset library (improved: returns names, supports dirs, asset URL cache) ──
+  const assetUrlCache = new Map(); // hash -> blobUrl
+  const assetNameToHash = new Map(); // name -> hash
+  let assetListCache = null;
+  async function refreshAssetMaps() {
+    try {
+      const list = await AIS.assets.list();
+      assetListCache = list;
+      assetNameToHash.clear();
+      for (const a of list) assetNameToHash.set(a.name, a.hash);
+      return list;
+    } catch { return []; }
+  }
+  async function fetchAssetBlobUrl(hash, mime) {
+    if (assetUrlCache.has(hash)) return assetUrlCache.get(hash);
+    try {
+      let base64 = "";
+      let offset = 0;
+      let m = mime || "application/octet-stream";
+      for (;;) {
+        const chunk = await AIS.assets.get(hash, offset);
+        if (!chunk || typeof chunk.base64 !== "string") break;
+        base64 += chunk.base64;
+        m = chunk.mime || m;
+        if (chunk.next === null || chunk.next === undefined) break;
+        offset = chunk.next;
+      }
+      if (!base64) return null;
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: m });
+      const url = URL.createObjectURL(blob);
+      assetUrlCache.set(hash, url);
+      return url;
+    } catch { return null; }
+  }
+  async function resolveAssetPathToUrl(path) {
+    if (!path) return null;
+    const str = String(path);
+    if (/^[a-f0-9]{64}$/.test(str)) return fetchAssetBlobUrl(str, null);
+    const mapped = config?.assets?.[str];
+    if (mapped && /^[a-f0-9]{64}$/.test(mapped)) {
+      const list = assetListCache ?? await refreshAssetMaps();
+      const entry = list.find((a) => a.hash === mapped);
+      return fetchAssetBlobUrl(mapped, entry?.mime);
+    }
+    if (assetNameToHash.has(str)) return fetchAssetBlobUrl(assetNameToHash.get(str), null);
+    const list = assetListCache ?? await refreshAssetMaps();
+    const byName = list.find((a) => a.name === str);
+    if (byName) return fetchAssetBlobUrl(byName.hash, byName.mime);
+    return null;
+  }
+
   class FilePicker extends Application {
     constructor(options = {}) {
       super(options);
-      this.options = { type: "image", callback: null, ...options };
+      this.options = { type: "image", callback: null, current: "", ...options };
       this._assets = [];
       this._filter = "";
+      this._browsedPath = options.current || "";
     }
     static get defaultOptions() {
       return { ...super.defaultOptions, id: "filepicker", classes: ["filepicker"], template: null, width: 520, height: 400, title: "FilePicker" };
     }
-    static async browse(source, path, options = {}) {
-      // Foundry's FilePicker.browse returns { files, dirs, ... }
+    static async browse(source, target, options = {}) {
       try {
         const assets = await AIS.assets.list();
-        const files = assets.filter((a) => {
-          if (options.extensions && Array.isArray(options.extensions)) {
-            const ext = a.name.split(".").pop()?.toLowerCase();
-            return options.extensions.some((e) => e.toLowerCase().includes(ext ?? ""));
+        assetListCache = assets;
+        assetNameToHash.clear();
+        for (const a of assets) assetNameToHash.set(a.name, a.hash);
+        const t = String(target ?? "").toLowerCase();
+        const exts = (options.extensions && Array.isArray(options.extensions) ? options.extensions : []).map((e) => String(e).toLowerCase().replace(/^\./, ""));
+        let files = assets.filter((a) => {
+          const nameLower = a.name.toLowerCase();
+          if (t && !nameLower.includes(t)) {
+            const dir = a.name.includes("/") ? a.name.slice(0, a.name.lastIndexOf("/") + 1).toLowerCase() : "";
+            if (t && !dir.startsWith(t) && t !== "" && !nameLower.includes(t)) return false;
+          }
+          if (exts.length) {
+            const ext = a.name.split(".").pop()?.toLowerCase() ?? "";
+            return exts.some((e) => ext === e || e.includes(ext) || ext.includes(e));
           }
           return true;
-        }).map((a) => a.hash);
-        return { files, dirs: [], target: path ?? "", source, extensions: options.extensions ?? [] };
+        }).map((a) => a.name);
+        const dirsSet = new Set();
+        for (const a of assets) {
+          const name = a.name;
+          if (t && !name.toLowerCase().startsWith(t)) continue;
+          const rest = t ? name.slice(t.length) : name;
+          const slash = rest.indexOf("/");
+          if (slash !== -1) {
+            const dir = (t ? target : "") + rest.slice(0, slash + 1);
+            dirsSet.add(dir);
+          }
+        }
+        return { files: files.slice(0, 500), dirs: [...dirsSet].slice(0, 100), target: target ?? "", source, extensions: options.extensions ?? [] };
       } catch {
-        return { files: [], dirs: [], target: path ?? "", source, extensions: options.extensions ?? [] };
+        return { files: [], dirs: [], target: target ?? "", source, extensions: options.extensions ?? [] };
       }
     }
     async getData(options = {}) {
       const data = await super.getData(options);
       if (!this._assets.length) {
-        try { this._assets = await AIS.assets.list(); } catch { this._assets = []; }
+        try {
+          this._assets = await AIS.assets.list();
+          assetListCache = this._assets;
+          assetNameToHash.clear();
+          for (const a of this._assets) assetNameToHash.set(a.name, a.hash);
+        } catch { this._assets = []; }
       }
       const filtered = this._filter ? this._assets.filter((a) => a.name.toLowerCase().includes(this._filter.toLowerCase())) : this._assets;
-      return { ...data, files: filtered, filter: this._filter, type: this.options.type };
+      return { ...data, files: filtered, filter: this._filter, type: this.options.type, current: this._browsedPath };
     }
     activateListeners(html) {
       super.activateListeners(html);
@@ -867,12 +1019,13 @@
       if (input) {
         input.addEventListener("input", (e) => { this._filter = e.target.value; this.render(); });
       }
-      const rows = root.querySelectorAll?.('[data-asset-hash]') ?? [];
+      const rows = root.querySelectorAll?.('[data-asset-name]') ?? [];
       for (const row of rows) {
-        row.addEventListener("click", () => {
-          const hash = row.dataset.assetHash;
+        row.addEventListener("click", async () => {
+          const name = row.dataset.assetName;
+          const result = name;
           if (typeof this.options.callback === "function") {
-            try { this.options.callback(hash); } catch (err) { console.warn(err); }
+            try { this.options.callback(result); } catch (err) { console.warn(err); }
           }
           this.close();
         });
@@ -880,10 +1033,215 @@
     }
     async _renderInner() {
       const data = await this.getData();
-      // Simple inline template — no external HBS needed
-      const filesHtml = data.files.slice(0, 100).map((a) => `<div class="file" data-asset-hash="${a.hash}" style="padding:4px;cursor:pointer;border-bottom:1px solid #444"><span>${escapeHTML(a.name)}</span> <small style="opacity:0.6">${a.hash.slice(0,8)}… ${a.size}b</small></div>`).join("");
+      const filesHtml = data.files.slice(0, 100).map((a) => `<div class="file" data-asset-name="${escapeHTML(a.name)}" style="padding:4px;cursor:pointer;border-bottom:1px solid #444"><span>${escapeHTML(a.name)}</span> <small style="opacity:0.6">${a.hash.slice(0,8)}… ${a.size}b</small></div>`).join("");
       return `<div class="filepicker-content" style="display:flex;flex-direction:column;height:100%"><div style="padding:8px"><input name="filter" placeholder="Filter" value="${escapeHTML(data.filter)}" style="width:100%"/></div><div style="flex:1;overflow:auto">${filesHtml || '<div style="padding:12px;opacity:0.6">No assets</div>'}</div></div>`;
     }
+  }
+
+  // ── R-07: asset image src → blob URL resolver (MutationObserver + img setter) ──
+  const AIS_ASSET_RESOLVED_ATTR = "data-ais-asset-resolved";
+  try {
+    const originalImageSrcDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+    const originalSetAttribute = HTMLImageElement.prototype.setAttribute;
+    const isProbablyAssetPath = (str) => {
+      if (!str) return false;
+      const s = String(str);
+      if (s.startsWith("blob:") || s.startsWith("data:") || s.startsWith("http://") || s.startsWith("https://") || s.startsWith("ais-foundry://") || s.startsWith("data:")) return false;
+      if (s.startsWith("javascript:") || s.startsWith("#")) return false;
+      // Already resolved blob URL in cache
+      if (assetUrlCache.has(s)) return false;
+      // Check known mappings
+      if (config?.assets?.[s]) return true;
+      if (assetNameToHash.has(s)) return true;
+      // Heuristic: image-like path or modules/ prefix
+      if (/\.(png|jpe?g|gif|webp|svg|avif)$/i.test(s)) return true;
+      if (s.startsWith("modules/") || s.startsWith("/modules/") || s.startsWith("systems/") || s.startsWith("icons/")) return true;
+      return false;
+    };
+    const applyAssetUrlToImg = (img, originalPath) => {
+      if (!img || !(img instanceof HTMLImageElement)) return;
+      try {
+        if (img.getAttribute(AIS_ASSET_RESOLVED_ATTR) === originalPath) return;
+      } catch {}
+      resolveAssetPathToUrl(originalPath).then((url) => {
+        if (url && img) {
+          try {
+            img.setAttribute(AIS_ASSET_RESOLVED_ATTR, originalPath);
+            if (originalImageSrcDescriptor && originalImageSrcDescriptor.set) originalImageSrcDescriptor.set.call(img, url);
+            else img.src = url;
+          } catch {}
+        }
+      });
+    };
+    if (originalImageSrcDescriptor && originalImageSrcDescriptor.set) {
+      Object.defineProperty(HTMLImageElement.prototype, "src", {
+        get: originalImageSrcDescriptor.get,
+        set(value) {
+          const str = String(value ?? "");
+          if (isProbablyAssetPath(str)) {
+            applyAssetUrlToImg(this, str);
+          }
+          return originalImageSrcDescriptor.set.call(this, value);
+        },
+        configurable: true,
+      });
+    }
+    HTMLImageElement.prototype.setAttribute = function (name, value) {
+      if (String(name).toLowerCase() === "src") {
+        const str = String(value ?? "");
+        if (isProbablyAssetPath(str)) applyAssetUrlToImg(this, str);
+      }
+      return originalSetAttribute.call(this, name, value);
+    };
+    const imageObserver = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type === "childList") {
+          for (const node of m.addedNodes) {
+            if (node instanceof HTMLImageElement) {
+              const src = node.getAttribute("src") || node.src;
+              if (isProbablyAssetPath(src)) applyAssetUrlToImg(node, src);
+            } else if (node instanceof Element) {
+              const imgs = node.querySelectorAll?.("img[src]") ?? [];
+              for (const img of imgs) {
+                const src = img.getAttribute("src") || img.src;
+                if (isProbablyAssetPath(src)) applyAssetUrlToImg(img, src);
+              }
+            }
+          }
+        } else if (m.type === "attributes" && m.attributeName === "src" && m.target instanceof HTMLImageElement) {
+          const src = m.target.getAttribute("src");
+          if (isProbablyAssetPath(src)) {
+            try {
+              if (m.target.getAttribute(AIS_ASSET_RESOLVED_ATTR) !== src) applyAssetUrlToImg(m.target, src);
+            } catch { applyAssetUrlToImg(m.target, src); }
+          }
+        }
+      }
+    });
+    try {
+      imageObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["src"] });
+      document.querySelectorAll("img[src]").forEach((img) => {
+        const src = img.getAttribute("src") || img.src;
+        if (isProbablyAssetPath(src)) applyAssetUrlToImg(img, src);
+      });
+    } catch {}
+  } catch {}
+
+  // ── Roll (independent dice engine, NOT native action card / revert) ──
+  class Roll {
+    constructor(formula, data = {}, options = {}) {
+      this._formula = String(formula ?? "");
+      this.data = data && typeof data === "object" ? data : {};
+      this.options = options && typeof options === "object" ? options : {};
+      this.terms = [];
+      this._dice = [];
+      this._total = undefined;
+      this._evaluated = false;
+      this._result = null;
+    }
+    get formula() { return this._formula; }
+    get total() { return this._total; }
+    get dice() { return this._dice; }
+    get result() { return this._result; }
+    get isDeterministic() { return !/d\d|d%/i.test(this._formula); }
+    static create(formula, data, options) { return new Roll(formula, data, options); }
+    static fromTerms(terms) {
+      const formula = terms.map((t) => t.formula ?? String(t)).join("");
+      return new Roll(formula);
+    }
+    clone() { return new Roll(this._formula, clone(this.data), clone(this.options)); }
+    toJSON() { return { formula: this._formula, total: this._total, evaluated: this._evaluated, dice: this._dice }; }
+    toObject() { return this.toJSON(); }
+    toString() { return this._formula; }
+    _interpolateData(formula) {
+      return formula.replace(/@([a-zA-Z0-9_.]+)/g, (m, path) => {
+        try {
+          const v = getProperty(this.data, path);
+          if (v === undefined || v === null) return "0";
+          if (typeof v === "number" && Number.isFinite(v)) return String(v);
+          if (typeof v === "string") { const n = Number(v); return Number.isFinite(n) ? String(n) : "0"; }
+          if (typeof v === "object" && v !== null && typeof v.value === "number") return String(v.value);
+          return "0";
+        } catch { return "0"; }
+      });
+    }
+    _rollDie(faces) { return Math.floor(Math.random() * faces) + 1; }
+    _parseAndRollDice(expr) {
+      const diceTerms = [];
+      let out = "";
+      let lastIndex = 0;
+      const diceRe = /(\d*)d(\d+|%)(?:([kK][hHlL]?|[dD][hHlL]?)?(\d+)?)?/g;
+      let m;
+      while ((m = diceRe.exec(expr)) !== null) {
+        out += expr.slice(lastIndex, m.index);
+        lastIndex = m.index + m[0].length;
+        const numStr = m[1];
+        const facesStr = m[2];
+        const keepDropOp = (m[3] || "").toLowerCase();
+        const keepDropNumStr = m[4];
+        const num = numStr ? parseInt(numStr, 10) : 1;
+        const faces = facesStr === "%" ? 100 : parseInt(facesStr, 10);
+        if (!Number.isFinite(num) || num < 0 || num > 1000 || !Number.isFinite(faces) || faces <= 0 || faces > 10000) { out += "0"; continue; }
+        const results = [];
+        for (let i = 0; i < num; i++) results.push(this._rollDie(faces));
+        let kept = [...results];
+        if (keepDropOp) {
+          const k = keepDropNumStr ? parseInt(keepDropNumStr, 10) : 1;
+          if (Number.isFinite(k) && k >= 0) {
+            const sorted = [...results].sort((a, b) => a - b);
+            if (keepDropOp === "kh" || keepDropOp === "k") kept = sorted.slice(-k);
+            else if (keepDropOp === "kl") kept = sorted.slice(0, k);
+            else if (keepDropOp === "dh") kept = sorted.slice(0, Math.max(0, sorted.length - k));
+            else if (keepDropOp === "dl") kept = sorted.slice(k);
+          }
+        }
+        const total = kept.reduce((s, v) => s + v, 0);
+        diceTerms.push({ formula: m[0], number: num, faces, results, kept, total, expression: String(total) });
+        this._dice.push({ faces, number: num, results, total });
+        out += String(total);
+      }
+      out += expr.slice(lastIndex);
+      return { newExpr: out, diceTerms };
+    }
+    _safeEval(expr) {
+      const sanitized = expr.trim();
+      if (!sanitized) return 0;
+      if (!/^[0-9+\-*/().%\s]+$/.test(sanitized)) {
+        const cleaned = sanitized.replace(/[^0-9+\-*/().\s]/g, "");
+        if (!cleaned.trim()) return 0;
+        try { return Function(`"use strict"; return (${cleaned})`)(); } catch { return 0; }
+      }
+      try { const val = Function(`"use strict"; return (${sanitized})`)(); return Number.isFinite(val) ? val : 0; } catch { return 0; }
+    }
+    async evaluate({ async: isAsync = false } = {}) {
+      void isAsync;
+      const interpolated = this._interpolateData(this._formula);
+      const { newExpr, diceTerms } = this._parseAndRollDice(interpolated);
+      this.terms = diceTerms.map((dt) => ({ formula: dt.formula, total: dt.total, results: dt.results }));
+      const total = this._safeEval(newExpr);
+      this._total = total;
+      this._result = newExpr;
+      this._evaluated = true;
+      return this;
+    }
+    async roll({ async: isAsync = false } = {}) { return this.evaluate({ async: isAsync }); }
+    async toMessage(messageData = {}, { rollMode, create = true } = {}) {
+      void rollMode;
+      if (!this._evaluated) await this.evaluate();
+      const flavor = messageData.flavor ? String(messageData.flavor) : this._formula;
+      const content = messageData.content ? String(messageData.content) : `${flavor} = ${this._total}`;
+      if (create) {
+        try {
+          const cls = globalThis.ChatMessage ?? documentClasses.ChatMessage;
+          if (cls && typeof cls.create === "function") {
+            return await cls.create({ content, flavor, roll: { formula: this._formula, total: this._total, dice: this._dice } });
+          }
+        } catch {}
+        try { await AIS.chat.post(`${content}`.slice(0, 2000)); } catch {}
+      }
+      return { content, flavor, roll: { formula: this._formula, total: this._total } };
+    }
+    static async fromFormula(formula, data) { return new Roll(formula, data).evaluate(); }
   }
 
   Object.assign(globalThis, { Application, FormApplication, DocumentSheet, Dialog, Tabs, FormDataExtended, Handlebars, renderTemplate, loadTemplates, getTemplate, $, jQuery: $,
@@ -891,62 +1249,91 @@
     TokenConfig: stubClass("TokenConfig", DocumentSheet), SidebarTab: stubClass("SidebarTab", Application),
     ContextMenu: stubClass("ContextMenu"), Draggable: stubClass("Draggable"), SearchFilter: stubClass("SearchFilter"),
     FilePicker, SettingsConfig: stubClass("SettingsConfig", FormApplication),
-    KeybindingsConfig: stubClass("KeybindingsConfig", FormApplication), Roll: stubClass("Roll"), Collection,
+    KeybindingsConfig: stubClass("KeybindingsConfig", FormApplication), Roll, Collection,
     fromUuid: (uuid) => fromUuid(uuid), fromUuidSync: (uuid) => fromUuidSync(uuid),
     duplicate, mergeObject, getProperty, setProperty, hasProperty, expandObject, flattenObject, isNewerVersion, debounce,
   });
+  function resolveCompendiumUuidRedirect(uuid) {
+    try {
+      const redirects = globalThis.CONFIG?.compendium?.uuidRedirects;
+      if (!redirects || typeof redirects !== "object") return uuid;
+      const str = String(uuid);
+      // Direct match
+      if (redirects[str]) return redirects[str];
+      // Prefix match for pack renames: e.g. Compendium.pf-content.pf-magic.Item.xxx -> pf-magic-items
+      for (const [oldPrefix, newPrefix] of Object.entries(redirects)) {
+        if (typeof oldPrefix === "string" && typeof newPrefix === "string" && str.startsWith(oldPrefix)) {
+          return newPrefix + str.slice(oldPrefix.length);
+        }
+      }
+      return uuid;
+    } catch { return uuid; }
+  }
+
   function fromUuidSync(uuid) {
-    const str = String(uuid);
+    const str0 = String(uuid);
+    const str = resolveCompendiumUuidRedirect(str0);
     const parts = str.split(".");
     if (parts[0] === "Scene" && currentView?.scene.id === parts[1]) {
       if (parts.length === 2) return currentView.scene;
       const key = Object.keys(types).find((key) => types[key] === parts[2]);
       return key ? currentView.scene[key].get(parts[3]) ?? null : null;
     }
-    // Compendium UUIDs: Compendium.<package>.<pack>.<id> or Compendium.<package>.<pack>.<DocumentName>.<id>
     if (parts[0] === "Compendium" && parts.length >= 3) {
-      // Reconstruct packId as "<package>/<pack>" or "<package>/<pack>" with dots?
-      // Foundry uses Compendium.<collection>.<id> where collection is "<package>.<pack>"
-      // Our packs are identified as "<packageId>/<packFile>" via compendium.list
-      // Try to resolve via game.packs
-      const packId = parts[1].includes("/") ? parts[1] : `${parts[1]}/${parts[2]}`;
-      const entryId = parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4];
-      const pack = game.packs.get(packId) ?? game.packs.get(`${parts[1]}/${parts[2]}`) ?? game.packs.get(parts[1]);
-      if (pack && typeof pack.getDocument === "function") {
-        // Synchronous version can't await; return a placeholder that will be resolved async via fromUuid
-        // For sync path, try cache
-        if (pack._cache && pack._cache.has(entryId)) return pack._cache.get(entryId);
-        return null;
+      // Try multiple pack id forms:
+      // 1. Compendium.<packageId>/<packFile>.<id> (world packs, slash form)
+      // 2. Compendium.<package>.<pack>.<id> (Foundry dot form)
+      // 3. Compendium.<foundryId>.<packName>.<id> (module's own packs, dot form with foundryId)
+      // 4. Compendium.<foundryId>.<packName>.<DocName>.<id>
+      const candidates = [];
+      if (parts[1].includes("/")) {
+        candidates.push({ packId: parts[1], entryId: parts[2] });
+        if (parts.length >= 4) candidates.push({ packId: parts[1], entryId: parts[3] });
+        if (parts.length >= 5) candidates.push({ packId: parts[1], entryId: parts[4] });
       }
-      return null;
-    }
-    return documentsLayer.fromUuidSync(uuid);
-  }
-  async function fromUuid(uuid) {
-    const str = String(uuid);
-    const parts = str.split(".");
-    if (parts[0] === "Compendium" && parts.length >= 3) {
-      // Try packId as first part after Compendium if it contains slash, else first two parts joined by /
-      let packId = parts[1];
-      let entryId = parts[2];
-      let pack = game.packs.get(packId);
-      if (!pack && parts.length >= 4) {
-        packId = `${parts[1]}/${parts[2]}`;
-        entryId = parts[3];
-        pack = game.packs.get(packId);
-        if (!pack && parts.length >= 5) {
-          // Compendium.<package>.<pack>.<DocumentName>.<id>
-          packId = `${parts[1]}/${parts[2]}`;
-          entryId = parts[4];
-          pack = game.packs.get(packId);
+      // Dot form: <package>.<pack>
+      candidates.push({ packId: `${parts[1]}/${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
+      candidates.push({ packId: `${parts[1]}.${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
+      // Also try packId as just first part (some modules use single)
+      candidates.push({ packId: parts[1], entryId: parts[2] });
+      // Try with foundryId prefix already included in game.packs (module's own packs are `${foundryId}.${packName}`)
+      for (const cand of candidates) {
+        const pack = game.packs.get(cand.packId) ?? game.packs.get(`${foundryId}.${parts[2]}`) ?? game.packs.get(`${parts[1]}.${parts[2]}`);
+        if (pack && typeof pack.getDocument === "function") {
+          if (pack._cache && pack._cache.has(cand.entryId)) return pack._cache.get(cand.entryId);
+          // For module packs, _cache may have raw entry; try to return document if already created
+          if (pack._cache && pack._cache.get(cand.entryId) instanceof Document) return pack._cache.get(cand.entryId);
         }
       }
-      if (pack && typeof pack.getDocument === "function") {
-        try { return await pack.getDocument(entryId); } catch { return null; }
+      return null;
+    }
+    return documentsLayer.fromUuidSync(str);
+  }
+  async function fromUuid(uuid) {
+    const str0 = String(uuid);
+    const str = resolveCompendiumUuidRedirect(str0);
+    const parts = str.split(".");
+    if (parts[0] === "Compendium" && parts.length >= 3) {
+      const candidates = [];
+      if (parts[1].includes("/")) {
+        candidates.push({ packId: parts[1], entryId: parts[2] });
+        if (parts.length >= 4) candidates.push({ packId: parts[1], entryId: parts[3] });
+        if (parts.length >= 5) candidates.push({ packId: parts[1], entryId: parts[4] });
+      }
+      candidates.push({ packId: `${parts[1]}/${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
+      candidates.push({ packId: `${parts[1]}.${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
+      candidates.push({ packId: parts[1], entryId: parts[2] });
+      // Also try foundryId-prefixed pack ids
+      candidates.push({ packId: `${foundryId}.${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
+      for (const cand of candidates) {
+        const pack = game.packs.get(cand.packId) ?? game.packs.get(`${foundryId}.${parts[2]}`);
+        if (pack && typeof pack.getDocument === "function") {
+          try { const doc = await pack.getDocument(cand.entryId); if (doc) return doc; } catch {}
+        }
       }
       return null;
     }
-    return fromUuidSync(uuid);
+    return fromUuidSync(str);
   }
   globalThis.foundry = {
     utils: { getProperty, setProperty, hasProperty, mergeObject, expandObject, flattenObject, isNewerVersion, deepClone: clone, duplicate, randomID,
@@ -1027,11 +1414,15 @@
   })();
   const baseConfig = { debug: { hooks: false }, compatibility: { mode: 0 }, ui: {}, Canvas: { layers: {} }, TextEditor: { enrichers: [] },
     statusEffects: [], specialStatusEffects: {}, controlIcons: {}, sounds: {}, fontDefinitions: {}, Dice: { rolls: [globalThis.Roll], terms: {} },
+    compendium: { uuidRedirects: {} },
     ...Object.fromEntries(Object.keys(documentClasses).map((name) => [name.replace(/Document$/, ""), { documentClass: documentClasses[name], sheetClasses: {}, typeLabels: {}, dataModels: {} }])) };
   // Minimal PF1/DnD5e/PF2e CONFIG so modules that branch on CONFIG.<system> don't crash.
-  baseConfig.PF1 = baseConfig.PF1 ?? { abilities: {}, skills: {}, conditions: {}, loot: {}, weaponTypes: {}, equipmentTypes: {}, spellSchools: {}, damageTypes: {}, currencies: {}, re: {} };
-  baseConfig.DND5E = baseConfig.DND5E ?? { abilities: {}, skills: {}, damageTypes: {}, conditionTypes: {}, currencies: {}, weaponTypes: {}, equipmentTypes: {}, spellSchools: {} };
-  baseConfig.PF2E = baseConfig.PF2E ?? { abilities: {}, skills: {}, damageTypes: {}, conditions: {}, weaponTypes: {} };
+  baseConfig.PF1 = baseConfig.PF1 ?? { abilities: {}, skills: {}, conditions: {}, loot: {}, weaponTypes: {}, equipmentTypes: {}, spellSchools: {}, damageTypes: {}, currencies: {}, re: {}, compendium: { uuidRedirects: {} } };
+  baseConfig.DND5E = baseConfig.DND5E ?? { abilities: {}, skills: {}, damageTypes: {}, conditionTypes: {}, currencies: {}, weaponTypes: {}, equipmentTypes: {}, spellSchools: {}, compendium: { uuidRedirects: {} } };
+  baseConfig.PF2E = baseConfig.PF2E ?? { abilities: {}, skills: {}, damageTypes: {}, conditions: {}, weaponTypes: {}, compendium: { uuidRedirects: {} } };
+  // Ensure CONFIG.compendium.uuidRedirects is a mutable object that modules can write to (pf1-content)
+  if (!baseConfig.compendium) baseConfig.compendium = { uuidRedirects: {} };
+  if (!baseConfig.compendium.uuidRedirects || typeof baseConfig.compendium.uuidRedirects !== "object") baseConfig.compendium.uuidRedirects = {};
   globalThis.CONFIG = baseConfig;
 
   // ── game ──
@@ -1298,12 +1689,36 @@
         const worldCollections = worldPacks.map((pack) => new CompendiumCollection(pack));
         const foundryCollections = [];
         for (const packMeta of dist.packs || []) {
+          let rawEntries = [];
           const text = resourceText.get(packMeta.path);
-          if (text === undefined) {
-            warn(`Foundry pack ${packMeta.name} file ${packMeta.path} not found`);
-            continue;
+          if (text !== undefined) {
+            rawEntries = parseFoundryPackText(text);
+          } else {
+            // Directory pack (LevelDB or split files): collect all files under packMeta.path/
+            const prefix = packMeta.path.endsWith("/") ? packMeta.path : `${packMeta.path}/`;
+            const matching = [];
+            for (const [path, t] of resourceText.entries()) {
+              if (path.startsWith(prefix)) matching.push(t);
+            }
+            if (matching.length) {
+              for (const t of matching) {
+                const entries = parseFoundryPackText(t);
+                rawEntries.push(...entries);
+              }
+              // Deduplicate by _id
+              const seen = new Set();
+              rawEntries = rawEntries.filter((e) => {
+                if (seen.has(e._id)) return false;
+                seen.add(e._id);
+                return true;
+              });
+            } else {
+              // Try to handle LevelDB binary that was converted to JSON at import time (packageLoader)
+              // If still not found, warn but don't fail the module
+              warn(`Foundry pack ${packMeta.name} file ${packMeta.path} not found (checked ${prefix}*); ${resourceText.size} resources available`);
+              continue;
+            }
           }
-          const rawEntries = parseFoundryPackText(text);
           if (!rawEntries.length) {
             warn(`Foundry pack ${packMeta.name} parsed 0 entries from ${packMeta.path}`);
             continue;
@@ -1318,6 +1733,12 @@
         const all = [...worldCollections, ...foundryCollections];
         game.packs.clear();
         for (const coll of all) game.packs.set(coll.id, coll);
+        // Also populate CONFIG.compendium.uuidRedirects from world packs if needed
+        try {
+          if (globalThis.CONFIG?.compendium?.uuidRedirects) {
+            // Already mutable
+          }
+        } catch {}
         diagnostics.packs = { count: all.length, world: worldCollections.length, foundry: foundryCollections.length, ids: all.map((c) => c.id).slice(0, 30) };
       } catch (error) {
         diagnostics.packs = { error: String(error?.message ?? error) };
