@@ -146,6 +146,63 @@
   let activeApi = null;
   let activeDeadline = 0;
   let busy = false;
+
+  // ── D-477 / R-10: CompendiumCollection over AIS compendium.* RPCs ──
+  class CompendiumCollection extends Collection {
+    constructor(pack) {
+      super([]);
+      this._pack = pack;
+      this.id = pack.id;
+      this.collection = pack.id;
+      this.metadata = { id: pack.id, name: pack.name, label: pack.name, type: pack.type, packageName: pack.id.split("/")[0], packageType: "world" };
+      this.documentName = pack.type;
+      this.type = pack.type;
+      this.name = pack.name;
+      this.title = pack.name;
+      this._cache = new Map();
+      this._index = null;
+    }
+    get documentClass() { return documentClasses[this.documentName] ?? Document; }
+    async getIndex({ fields } = {}) {
+      void fields;
+      if (this._index) return this._index;
+      try {
+        const hits = await AIS.compendium.search({ packId: this.id, query: "", limit: 500 });
+        // hits are { packId, entryId, name, ... }
+        this._index = hits.map((hit) => ({ _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base" }));
+        return this._index;
+      } catch (e) {
+        warn(`Compendium ${this.id} getIndex failed: ${e?.message ?? e}`);
+        return [];
+      }
+    }
+    async getDocument(entryId) {
+      if (this._cache.has(entryId)) return this._cache.get(entryId);
+      try {
+        const entry = await AIS.compendium.get(this.id, entryId);
+        if (!entry) return null;
+        const data = entry.data ?? entry;
+        const klass = documentClasses[this.documentName] ?? Document;
+        // Convert compendium entry data to document
+        const doc = new klass(data, { fromSource: false });
+        // Ensure id matches entryId
+        doc._id = entryId; doc.id = entryId;
+        this._cache.set(entryId, doc);
+        return doc;
+      } catch (e) {
+        warn(`Compendium ${this.id} getDocument ${entryId} failed: ${e?.message ?? e}`);
+        return null;
+      }
+    }
+    get(id) { return this._cache.get(id) ?? null; }
+    getName(name) { return [...this._cache.values()].find((d) => d.name === name) ?? null; }
+    async importDocument(entryId) {
+      const doc = await this.getDocument(entryId);
+      if (!doc) throw new Error(`Compendium entry ${entryId} not found in ${this.id}`);
+      const created = await doc.constructor.create(doc.toObject(), {});
+      return created;
+    }
+  }
   const types = { tokens: "Token", lights: "AmbientLight", sounds: "AmbientSound", templates: "MeasuredTemplate",
     tiles: "Tile", walls: "Wall", drawings: "Drawing", notes: "Note", regions: "Region" };
   class SceneDocumentView {
@@ -683,17 +740,61 @@
     ContextMenu: stubClass("ContextMenu"), Draggable: stubClass("Draggable"), SearchFilter: stubClass("SearchFilter"),
     FilePicker: stubClass("FilePicker", Application), SettingsConfig: stubClass("SettingsConfig", FormApplication),
     KeybindingsConfig: stubClass("KeybindingsConfig", FormApplication), Roll: stubClass("Roll"), Collection,
-    fromUuid: async (uuid) => fromUuidSync(uuid), fromUuidSync: (uuid) => fromUuidSync(uuid),
+    fromUuid: (uuid) => fromUuid(uuid), fromUuidSync: (uuid) => fromUuidSync(uuid),
     duplicate, mergeObject, getProperty, setProperty, hasProperty, expandObject, flattenObject, isNewerVersion, debounce,
   });
   function fromUuidSync(uuid) {
-    const parts = String(uuid).split(".");
+    const str = String(uuid);
+    const parts = str.split(".");
     if (parts[0] === "Scene" && currentView?.scene.id === parts[1]) {
       if (parts.length === 2) return currentView.scene;
       const key = Object.keys(types).find((key) => types[key] === parts[2]);
       return key ? currentView.scene[key].get(parts[3]) ?? null : null;
     }
+    // Compendium UUIDs: Compendium.<package>.<pack>.<id> or Compendium.<package>.<pack>.<DocumentName>.<id>
+    if (parts[0] === "Compendium" && parts.length >= 3) {
+      // Reconstruct packId as "<package>/<pack>" or "<package>/<pack>" with dots?
+      // Foundry uses Compendium.<collection>.<id> where collection is "<package>.<pack>"
+      // Our packs are identified as "<packageId>/<packFile>" via compendium.list
+      // Try to resolve via game.packs
+      const packId = parts[1].includes("/") ? parts[1] : `${parts[1]}/${parts[2]}`;
+      const entryId = parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4];
+      const pack = game.packs.get(packId) ?? game.packs.get(`${parts[1]}/${parts[2]}`) ?? game.packs.get(parts[1]);
+      if (pack && typeof pack.getDocument === "function") {
+        // Synchronous version can't await; return a placeholder that will be resolved async via fromUuid
+        // For sync path, try cache
+        if (pack._cache && pack._cache.has(entryId)) return pack._cache.get(entryId);
+        return null;
+      }
+      return null;
+    }
     return documentsLayer.fromUuidSync(uuid);
+  }
+  async function fromUuid(uuid) {
+    const str = String(uuid);
+    const parts = str.split(".");
+    if (parts[0] === "Compendium" && parts.length >= 3) {
+      // Try packId as first part after Compendium if it contains slash, else first two parts joined by /
+      let packId = parts[1];
+      let entryId = parts[2];
+      let pack = game.packs.get(packId);
+      if (!pack && parts.length >= 4) {
+        packId = `${parts[1]}/${parts[2]}`;
+        entryId = parts[3];
+        pack = game.packs.get(packId);
+        if (!pack && parts.length >= 5) {
+          // Compendium.<package>.<pack>.<DocumentName>.<id>
+          packId = `${parts[1]}/${parts[2]}`;
+          entryId = parts[4];
+          pack = game.packs.get(packId);
+        }
+      }
+      if (pack && typeof pack.getDocument === "function") {
+        try { return await pack.getDocument(entryId); } catch { return null; }
+      }
+      return null;
+    }
+    return fromUuidSync(uuid);
   }
   globalThis.foundry = {
     utils: { getProperty, setProperty, hasProperty, mergeObject, expandObject, flattenObject, isNewerVersion, deepClone: clone, duplicate, randomID,
@@ -801,7 +902,7 @@
     scenes: documentsLayer.collections.scenes, actors: documentsLayer.collections.actors, items: documentsLayer.collections.items, journal: documentsLayer.collections.journals,
     tables: documentsLayer.collections.rollTables, macros: documentsLayer.collections.macros, playlists: documentsLayer.collections.playlists,
     combats: documentsLayer.collections.combats, folders: documentsLayer.collections.folders, messages: documentsLayer.collections.messages,
-    packs: emptyCollection("CompendiumCollection"), cards: emptyCollection("Cards"),
+    packs: new Collection([]), cards: emptyCollection("Cards"),
     get combat() { return documentsLayer.collections.combats.find((row) => (row._source.round ?? 0) > 0) ?? null; },
     get canvas() { return globalThis.canvas; },
     time: { worldTime: 0, serverTime: Date.now(), advance: () => unsupportedCall("game.time.advance (world clock; R-02)") },
@@ -1022,7 +1123,20 @@
     // D-485: the document replica hydrates alongside the module's own files; a missing grant degrades to empty collections.
     const hydrateDocuments = documentsLayer.hydrate().then((row) => { diagnostics.documents = row; })
       .catch((error) => { diagnostics.documents = { error: String(error?.message ?? error) }; warn(`World documents unavailable: ${error?.message ?? error}`); });
-    await Promise.all([readAll(dist.files), hydrateDocuments]);
+    const hydratePacks = (async () => {
+      try {
+        const packs = await AIS.compendium.list();
+        const collections = packs.map((pack) => new CompendiumCollection(pack));
+        // Replace game.packs contents
+        game.packs.clear();
+        for (const coll of collections) game.packs.set(coll.id, coll);
+        diagnostics.packs = { count: collections.length, ids: collections.map((c) => c.id).slice(0, 20) };
+      } catch (error) {
+        diagnostics.packs = { error: String(error?.message ?? error) };
+        warn(`Compendium packs unavailable: ${error?.message ?? error}`);
+      }
+    })();
+    await Promise.all([readAll(dist.files), hydrateDocuments, hydratePacks]);
     loadLanguages();
     installStyles();
     const imports = installImportMap();
