@@ -199,13 +199,12 @@ frame.
 The document bridge's latency slice (**D-486**) is done: consent/capability from in-memory
 snapshots, inline-diff application, measured end to end. Player-side execution and the cross-device
 channel (**D-487**) are done. Everything below follows in order — except one core prerequisite
-that is NOT AIS but affects every multi-device slice: **transport frame hardening**. One WebRTC
-user message caps at 256 KiB; the D-487 profile defect (312 KiB raw composition) is one instance
-of a general gap — `fog.put`/`fog.state` still accept up to 1 MiB PNGs and the join `snapshot` is
-an unguarded single frame, so a large explored map or a big world can kill a session today. The
-fix belongs at the frame layer (chunk + reassemble anything over the cap, as `AssetTransfer`
-already does for files); until it lands, no new wire message may carry an unbounded payload and
-"grows past 256 KiB" is a release-blocking shape. Tracked in `PLAN.md` (M4).
+that is NOT AIS but affects every multi-device slice: **transport frame hardening** —
+**delivered (D-488)**. One WebRTC user message caps at 256 KiB; the D-487 profile defect (312 KiB
+raw composition) was one instance of a general gap, and D-488 fixed the cause at the frame layer
+(`src/net/shards.ts`: any frame over the cap is split into shard envelopes and reassembled before
+`onMessage`), which also covers `fog.put`/`fog.state` (1 MiB stored maps) and the join `snapshot`.
+What remains is the standing rule above: no message may carry an unbounded payload.
 
 1. **Scenes and placeables through `documents.*` (slice 2).** Add `scenes` as an exposed
    collection whose rows are the *projected* scene (the player's store already is), with
@@ -251,6 +250,12 @@ already does for files); until it lands, no new wire message may carry an unboun
   create/truncated/unapplicable diffs. Latency claims are measured (Health trace + e2e timings).
 - Player-affecting slices carry a two-device acceptance (join + consent + cross-device traffic),
   as `e2e/ais_bus.spec.ts` does — the D-487 wire defect only appeared when a player connected.
+- No wire message may carry an unbounded payload. Since **D-488** the transport itself splits any
+  frame over the 256 KiB per-message cap into shard envelopes (`src/net/shards.ts`) and reassembles
+  it before `onMessage`, so this holds by construction for every kind. A payload that keeps
+  growing should still deflate (as `ais.profile` does, D-487) or ride the chunked asset pipeline
+  (§7) rather than lean on sharding — sharding keeps the session alive, it does not make a large
+  frame cheap.
 - Everything is measured in Chromium through the real import path (`e2e/ais_foundry_module.spec.ts`)
   and unit-tested against the kernel's real normalisation (`tests/packages/aisFoundryDocuments.test.ts`).
 - Diagnostics over silence: `foundry.info` reports unsupported calls, missing templates, document

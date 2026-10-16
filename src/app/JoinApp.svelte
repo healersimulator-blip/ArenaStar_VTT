@@ -1569,6 +1569,7 @@
                   sceneId: stats.sceneId,
                   enabled: stats.enabled,
                   restored: stats.restored,
+                  restoredBytes: stats.restoredBytes,
                   reveals: stats.reveals,
                   saves: stats.saves,
                   explored: layer ? layer.exploredFraction() : 0,

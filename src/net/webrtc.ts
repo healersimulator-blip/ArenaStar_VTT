@@ -13,6 +13,14 @@
  * signaling exchanges exactly one code each way).
  */
 import type { ChannelName, Transport, TransportMessageHandler, TransportStats } from "../core/net";
+import {
+  FALLBACK_MAX_MESSAGE_SIZE,
+  SHARD_ENVELOPE_BYTES,
+  SHARD_MARKER,
+  ShardReassembler,
+  parseShardEnvelope,
+  shardFrame,
+} from "./shards";
 
 export interface TurnConfig {
   urls: string[];
@@ -90,6 +98,9 @@ export class WebRTCTransport implements Transport {
   private closed = false;
   private openWaiters: (() => void)[] = [];
   private openCount = 0;
+  /** D-488: shard reassembly per channel (streams keyed channel+streamId inside). */
+  private readonly sharder = new ShardReassembler();
+  private nextStreamId = 1;
 
   /** @internal constructed by createOutgoing/createIncoming. */
   constructor(
@@ -138,7 +149,18 @@ export class WebRTCTransport implements Transport {
           : data instanceof Uint8Array
             ? data
             : undefined;
-      if (bytes) this.onMessage?.(name, bytes);
+      if (!bytes) return;
+      // D-488: frames over the per-message cap arrive as shard envelopes (marker 0x00 —
+      // never a valid MsgKind). Plain frames pass through untouched.
+      if (bytes.length > SHARD_ENVELOPE_BYTES && bytes[0] === SHARD_MARKER) {
+        const envelope = parseShardEnvelope(bytes);
+        if (envelope) {
+          const frame = this.sharder.push(name, envelope);
+          if (frame) this.onMessage?.(name, frame);
+        }
+        return;
+      }
+      this.onMessage?.(name, bytes);
     });
     dc.addEventListener("bufferedamountlow", () => {
       this.drain(name);
@@ -169,12 +191,18 @@ export class WebRTCTransport implements Transport {
   }
 
   private sendNow(channel: ChannelName, dc: RTCDataChannel, bytes: Uint8Array): void {
-    dc.send(new Uint8Array(bytes)); // strict ArrayBuffer-backed view for lib.dom
+    // D-488: frames over the per-message cap split into shard envelopes here — the single
+    // write chokepoint, so direct sends, the pending queue and `peerRelay` hops all shard
+    // identically. Frames that fit one user message leave the wire untouched.
+    const rawMax = (dc as { maxMessageSize?: number }).maxMessageSize;
+    const maxMessageSize = typeof rawMax === "number" && rawMax > 0 ? rawMax : FALLBACK_MAX_MESSAGE_SIZE;
+    const parts = bytes.length <= maxMessageSize ? [bytes] : shardFrame(bytes, maxMessageSize, this.nextStreamId++);
     const counter = this.sent.get(channel);
-    if (counter) {
-      counter.bytes += bytes.length;
-      counter.messages += 1;
+    for (const part of parts) {
+      dc.send(new Uint8Array(part)); // strict ArrayBuffer-backed view for lib.dom
+      if (counter) counter.bytes += part.length;
     }
+    if (counter) counter.messages += 1;
   }
 
   private drain(channel: ChannelName): void {
@@ -342,6 +370,8 @@ export interface LoopbackResult {
   ok: boolean;
   channels: ChannelName[];
   frames: number;
+  /** D-488: one frame over the per-message cap each way — must arrive reassembled. */
+  shard: { ok: boolean; bytes: number };
   errors: string[];
 }
 
@@ -384,7 +414,45 @@ export async function runWebrtcLoopback(): Promise<LoopbackResult> {
   const connected = outgoing.transport.stats.connected && incoming.transport.stats.connected;
   if (!connected) errors.push("loopback: transports not connected");
 
+  // D-488: a frame over the per-message cap must round-trip as shard envelopes on the
+  // real DataChannels and reassemble byte-identical — `ops` one way, `ephemeral` (the
+  // unordered channel) the other.
+  const SHARD_TEST_BYTES = 300_000;
+  const big = new Uint8Array(SHARD_TEST_BYTES);
+  for (let i = 0; i < big.length; i += 1) big[i] = (i * 31 + 7) & 0xff;
+  const equalBytes = (a: Uint8Array, b: Uint8Array): boolean => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+    return true;
+  };
+  const received: { ops: Uint8Array | null; ephemeral: Uint8Array | null } = { ops: null, ephemeral: null };
+  incoming.transport.onMessage = (channel, bytes) => {
+    if (channel === "ops" && bytes.length === SHARD_TEST_BYTES) received.ops = bytes;
+    else frames.count += 1;
+  };
+  outgoing.transport.onMessage = (channel, bytes) => {
+    if (channel === "ephemeral" && bytes.length === SHARD_TEST_BYTES) received.ephemeral = bytes;
+    else frames.count += 1;
+  };
+  outgoing.transport.send("ops", big);
+  incoming.transport.send("ephemeral", big);
+  for (let i = 0; i < 150 && (!received.ops || !received.ephemeral); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const shardOk =
+    received.ops !== null &&
+    received.ephemeral !== null &&
+    equalBytes(received.ops, big) &&
+    equalBytes(received.ephemeral, big);
+  if (!shardOk) errors.push("loopback: sharded frame did not round-trip byte-identical");
+
   outgoing.close();
   incoming.close();
-  return { ok: errors.length === 0, channels: [...CHANNEL_ORDER], frames: frames.count, errors };
+  return {
+    ok: errors.length === 0,
+    channels: [...CHANNEL_ORDER],
+    frames: frames.count,
+    shard: { ok: shardOk, bytes: SHARD_TEST_BYTES },
+    errors,
+  };
 }

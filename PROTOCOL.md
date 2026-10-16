@@ -19,6 +19,27 @@ frame := [u8 MsgKind][msgpack payload]
 | `assets`    | reliable + ordered            | asset.get / asset.chunk / authorized image upload and share (24 KB upload chunks, backpressure) |
 | `sim`       | reliable + ordered            | sim.delta / sim.snapshot / turn.report (backpressure-aware)    |
 
+- **Frame sharding (D-488).** One WebRTC user message caps at `RTCDataChannel.maxMessageSize`
+  (256 KiB on the Chromium paths this product targets; `dc.send` throws above it and the session
+  dies). `WebRTCTransport.send` therefore splits any frame over that cap into shard envelopes on
+  the same channel and the receiving transport reassembles it before `onMessage`:
+
+  | offset | size | field                                                     |
+  | ------ | ---- | --------------------------------------------------------- |
+  | 0      | 1    | `0x00` marker — never a valid MsgKind, so an unsharded peer's `deframeMessage` rejects the envelope instead of misrouting it |
+  | 1      | 1    | version (`0x01`)                                          |
+  | 2..5   | u32  | streamId (sender-chosen, unique per open stream)          |
+  | 6..9   | u32  | index (0-based)                                           |
+  | 10..13 | u32  | count (≥ 2)                                               |
+  | 14..   | —    | payload slice (64 KiB by default, shrunk to fit the cap)  |
+
+  Frames at or under the cap are sent untouched, so the common path keeps its exact bytes.
+  Reassembly is per (channel, streamId), tolerates out-of-order arrival (the `ephemeral` channel
+  is unordered) and is flood-bounded: ≤ 16 concurrent streams per channel, 8 MiB total pending,
+  60 s TTL sweep. Affected today: `fog.put`/`fog.state` (the host accepts stored maps up to 1 MiB
+  — 4× the cap), `snapshot`, and `ais.profile`. Media and asset **files** were never affected:
+  they ride the chunked 32 KiB `AssetTransfer` (§7).
+
 - Ephemeral traffic never touches the Document Store or OpLog (§5).
 - Binary fields (`Uint8Array`) ride inside the msgpack payload (bin type).
 - sim.delta / sim.snapshot `bytes` = fflate-compressed, msgpack-framed

@@ -181,8 +181,11 @@ describe("D-487: shared-module wire payloads", () => {
     const expanded = expandAisSharedModule(packed);
     expect(expanded.source).toBe(small.source);
     // A payload that does not inflate drops that module, not the profile (applyProfile catches).
-    expect(() => expandAisSharedModule({ ...small, source: undefined, payloadZ: new Uint8Array([1, 2, 3]) }))
+    const withoutSource = Object.fromEntries(
+      Object.entries(small).filter(([key]) => key !== "source"),
+    ) as AisSharedModule;
+    expect(() => expandAisSharedModule({ ...withoutSource, payloadZ: new Uint8Array([1, 2, 3]) }))
       .toThrow(/does not inflate/);
-    expect(() => expandAisSharedModule({ ...small, source: undefined })).toThrow(/carries no source/);
+    expect(() => expandAisSharedModule(withoutSource)).toThrow(/carries no source/);
   });
 });

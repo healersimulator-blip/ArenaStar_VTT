@@ -157,11 +157,11 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
     type ModuleHost,
   } from "../packages/moduleHandlers";
   import type { ModuleHookName } from "../core/moduleApi";
-  import { getFog, getSetting } from "../storage/idb";
+  import { getFog, getSetting, putFog } from "../storage/idb";
   import { viewAsOptions, viewAsUser, withoutHiddenTokens } from "../core/viewAs";
   import { can } from "../core/permissions";
   import { tileContainsPoint } from "../core/automation";
-  import { sceneFogSettings } from "../core/fogExploration";
+  import { MAX_FOG_PNG_BYTES, sceneFogSettings } from "../core/fogExploration";
   import { createHexOverlaySync, repaintHexOverlay, syncHexOverlay } from "./hexOverlay";
   import {
     encounterCheck,
@@ -5240,6 +5240,37 @@ const WALL_PICK_RADIUS = 12;
             } catch {
               return 0;
             }
+          },
+          fogSeedBig: async ({ sceneId, userId, bytes }) => {
+            // D-488: a real PNG that no codec can shrink — random RGBA noise — sized so the
+            // encoded bytes clear the per-message cap the fog path must now shard across.
+            let side = 256;
+            let png = new Uint8Array(0);
+            for (let attempt = 0; attempt < 12 && png.length < bytes; attempt += 1) {
+              const canvas = document.createElement("canvas");
+              canvas.width = side;
+              canvas.height = side;
+              const ctx = canvas.getContext("2d");
+              if (!ctx) throw new Error("fogSeedBig: no 2d context");
+              const image = ctx.createImageData(side, side);
+              for (let i = 0; i < image.data.length; i += 1) image.data[i] = Math.floor(Math.random() * 256);
+              ctx.putImageData(image, 0, 0);
+              const encoded = await new Promise<Uint8Array>((resolve, reject) => {
+                canvas.toBlob((blob) => {
+                  if (!blob) { reject(new Error("fogSeedBig: encode failed")); return; }
+                  void blob.arrayBuffer().then((buffer) => resolve(new Uint8Array(buffer)), reject);
+                }, "image/png");
+              });
+              png = encoded;
+              side = Math.round(side * 1.25);
+            }
+            if (png.length < bytes) throw new Error(`fogSeedBig: only ${png.length} bytes encoded`);
+            // Never seed a map bigger than `fog.put` would accept — the test must exercise a
+            // state the product can actually reach, not an impossible one.
+            if (png.length > MAX_FOG_PNG_BYTES)
+              throw new Error(`fogSeedBig: ${png.length} bytes exceeds the ${MAX_FOG_PNG_BYTES}-byte fog cap`);
+            await putFog(current.db, { worldId: current.worldId, sceneId, userId, png });
+            return png.length;
           },
           pf1eAreaPreviewShow: (spec) => {
             const caster = spec.casterTokenId ? activeScene()?.tokens.find((t) => t._id === spec.casterTokenId) : undefined;

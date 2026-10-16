@@ -15447,3 +15447,66 @@ corrupt-payload drop); `tests/packages/aisModule.test.ts` +2 (dispatcher capabil
 handler bounds — channel charset/length, 16 KiB payload, `busEmit` bridge); catalog tests updated
 (`bus.message` → `bus.transmit`); `tests/net`/`tests/core/contracts` wire tables carry `ais.bus`.
 tsc 0, eslint 0. The full `test:e2e:ais` batch (28 tests) result is recorded in `E2E_BATCHES.md`.
+
+## D-488 — Transport frame hardening: shard any frame over the 256 KiB per-message cap (2026-10-16)
+
+**Why.** D-487 fixed the *symptom* for one message (`ais.profile` deflated its payload). The
+owner's question — "does this affect other data, e.g. a large map?" — was the right one, so this
+slice fixed the **cause** at the frame layer instead of per message kind.
+
+**The exposure, read off the wire paths.** One WebRTC user message caps at
+`RTCDataChannel.maxMessageSize` (256 KiB); `dc.send` throws above it and the session dies.
+- `fog.put` / `fog.state`: a whole explored map in ONE frame, and the host already accepted up to
+  **1 MiB** (`MAX_FOG_PNG_BYTES`) — 4× the cap. A player with a big explored map could kill the
+  session on save *or on join* (`fog.state` is sent right after connect).
+- `snapshot`: the join snapshot (projected world + asset manifest) in one unguarded frame.
+- Media/asset **files** were never affected: images, audio and webm ride the chunked 32 KiB
+  `AssetTransfer` (§7), and video streams use media tracks, not the data channel.
+
+**Fix (`src/net/shards.ts`, wired in `WebRTCTransport`).** `send` splits any frame over the cap
+into shard envelopes **on the same channel**, and the receiving transport reassembles before
+`onMessage`. Kind-agnostic by construction — no message schema changes, no per-kind plumbing, and
+`peerRelay` hops are covered because the split sits at the single write chokepoint.
+- Envelope: `[0]=0x00 marker | [1]=version | 2..5 u32 streamId | 6..9 u32 index | 10..13 u32 count | payload]`.
+  `0x00` is not a valid MsgKind, so a pre-D-488 peer's `deframeMessage` **rejects** an envelope
+  rather than misrouting it (asserted by a unit test).
+- Frames at or under the cap are sent untouched — zero overhead on the common path, byte-identical
+  wire format. 64 KiB payload slices by default, shrunk to fit `maxMessageSize` when smaller.
+- Reassembly is per (channel, streamId) — the sender's streamId space is shared across channels —
+  tolerates out-of-order arrival (`ephemeral` is `ordered: false`), ignores duplicate shards, drops
+  a stream whose shards disagree about `count`, and is flood-bounded: ≤ 16 concurrent streams per
+  channel, 8 MiB total pending, 60 s TTL sweep of abandoned halves.
+
+**Measured (Chromium, real WebRTC).** `runWebrtcLoopback` now also sends one 300,000-byte frame
+each way — `ops` (ordered) and `ephemeral` (unordered) — and asserts byte-identical reassembly:
+`e2e/webrtc.spec.ts` **2 passed**. `e2e/fog_big_frame.spec.ts` (new, **19.7 s**): a player joins
+with fog off, the GM seeds a stored explored map **larger than one user message** for that player
+(real incompressible PNG, within the product's own 1 MiB cap), then switches fog on — the player
+enters the scene, `fog.get` is answered with the oversized map, and the player restores the exact
+bytes with the connection alive.
+
+**The test was proven to catch the bug.** With sharding temporarily disabled (`parts = [bytes]`)
+the same spec fails with `Expected: 1728681, Received: 0` — the frame never arrives, exactly the
+old failure mode. The seeder now refuses to exceed `MAX_FOG_PNG_BYTES`, so the test can never
+exercise a state the product cannot reach (the first run seeded 1.73 MB, above the real cap; the
+target is now 600 KiB, landing ~672 KB encoded).
+
+**Honest limits.** Sharding does not reduce bandwidth — a 1 MiB map still costs 1 MiB; it only
+makes the transfer possible and keeps the session alive. The pending-byte budget (8 MiB) is a
+flood guard, not a flow-control mechanism: it drops whole streams rather than pacing them, so
+unusually large frames are still better carried by the chunked asset pipeline
+(`AssetTransfer`, §7) when a message grows without bound. `snapshot` is now covered by the
+mechanism but has no oversized fixture of its own. Test doubles that fake `RTCDataChannel`
+without `maxMessageSize` fall back to 256 KiB.
+
+**Evidence.** `tests/net/shards.test.ts` (new, **13 tests**): codec round-trips, cap-respecting
+slice sizing, malformed-envelope rejection, out-of-order/interleaved streams, duplicate shards,
+count-mismatch drop, flood refusal, TTL expiry, and the real `WebRTCTransport` send/receive path
+over fake DataChannels (logical `sentMessages` vs wire envelopes, `sentBytes` accounting).
+`tsc` 0, `eslint` 0. Also fixed two pre-existing `exactOptionalPropertyTypes` errors in
+`tests/app/aisPlayerProfile.test.ts` (D-487) that this slice's `tsc` run surfaced.
+
+**Rule of record (architecture §6):** no wire message may carry an unbounded payload — anything
+that grows either deflates under the cap or rides the chunked asset pipeline, never one big frame.
+Two-device acceptances are now required for player-affecting slices, which is how both D-487 and
+this slice found their defects.

@@ -43,15 +43,22 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 | `test:e2e:table` | 20 | 41 | 20 min | 10.0 min | **41 passed** (D-480, 2026-10-15; `packages.spec.ts` `rulesBoot` assertion updated for D-471/D-475) |
 | `test:e2e:hexcrawl` | 8 | 16 | 15 min | 8.2 min | **16 passed** |
 | `test:e2e:images` | 10 | 31 | 15 min | 4.9 min | **30 passed / 1 skipped** |
-| `test:e2e:net` | 4 | 5 | 15 min | 0.5 min | **4 passed** (+ `players_roster`, D-465) |
+| `test:e2e:net` | 5 | 6 | 15 min | 0.9 min (D-488) | **6 passed** (D-488; `fog_big_frame.spec.ts` joined this batch — it is a transport test) |
 | `test:e2e:ais` | 7 | 28 | 25 min | 12.3 min (D-487; 14.8 min for 27 on the D-486 run) | **28 passed** (D-487, 2026-10-15) |
 | `test:e2e:ui-adapters` | 2 | 5 | 15 min | 1.6 min | **5 passed** |
 | `test:e2e:pf1e-combat` | 16 | 70 | 20 min | 12.7 min | 64 passed / **6 pre-existing failures** |
 | `test:e2e:pf1e-sheets` | 14 | 28 | 20 min | 4.3 min | 23 passed / **5 pre-existing failures** |
 
 The older groups in `FX_TEST_BATCHES.md` are still the right commands for their areas; measured on
-the AIS tree, `test:fx:canvas` is **25 passed / 7.3 min** and `test:multilevel` is
-**32 passed / 12.1 min**.
+the AIS tree, `test:fx:canvas` is **27 passed / 8.2 min** (D-488) and `test:multilevel` is
+**32 passed / 12.1 min**. Two batch lessons from D-488:
+- **Placement.** `e2e/fog_big_frame.spec.ts` (≈20 s) is a *transport* test and lives in
+  `test:e2e:net`, not with the canvas/fog specs.
+- **Per-test headroom.** `test:fx:canvas` grew to 27 tests / 8 min, and its last test
+  (`walls.spec.ts`) timed out at the default 30 s — it takes 14.5 s alone, but an
+  `page.evaluate` waits on the browser main thread, which on this 2-CPU software-GL sandbox is
+  far slower after eight minutes of accumulated state. The batch now passes `--timeout=60000`.
+  Keep every batch comfortably under its global cap *and* give its slowest test room.
 
 Measured on the 2-CPU sandbox with the Chromium workaround in `README.md` (`@sparticuz/chromium` +
 SwiftShader); they are observations, not guarantees.

@@ -1527,6 +1527,12 @@ export interface GmFogSurface {
    * must never change (it reads that player's map; every write stays the player's own).
    */
   fogStoredBytesFor(spec: { sceneId: string; userId: string }): Promise<number>;
+  /**
+   * D-488: seed a stored explored map of at least `bytes` for one user (a real, incompressible
+   * PNG). Lets an acceptance test put a payload **over the 256 KiB per-message cap** on the
+   * `fog.state` path without painting a giant map by hand.
+   */
+  fogSeedBig(spec: { sceneId: string; userId: string; bytes: number }): Promise<number>;
 }
 
 export interface RulesPackageSmokeResult {
@@ -1614,6 +1620,8 @@ export interface PlayerCanvasSurface {
     sceneId: string | null;
     enabled: boolean;
     restored: boolean;
+    /** D-488: bytes of the stored map this replica restored (0 = nothing stored). */
+    restoredBytes: number;
     reveals: number;
     saves: number;
     explored: number;
