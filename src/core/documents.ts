@@ -743,6 +743,8 @@ export interface UserDocument extends BaseDocument {
   type: "user";
   /** D-394: GM-controlled opt-in to save personal chat macros / unapproved script drafts. */
   canSaveMacros?: boolean;
+  /** D-489: true once the GM has set this player's display name; the player's hello no longer overwrites it. */
+  nameSetByGm?: boolean;
   role: Role;
   character: DocId | null;
   color: string;

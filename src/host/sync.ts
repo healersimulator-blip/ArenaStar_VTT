@@ -1782,6 +1782,7 @@ export class HostSync {
         role,
         character: null,
         color: "#9a9ab0",
+        nameSetByGm: false,
       };
       const committed = this.commitOps(
         [{ kind: "create", coll: "users", data: user }],
@@ -1794,6 +1795,14 @@ export class HostSync {
         this.removeSession(session.peerId, "join commit failed");
         return;
       }
+    } else if (!user.nameSetByGm && hello.displayName && hello.displayName !== user.name) {
+      this.commitOps(
+        [{ kind: "update", ref: { coll: "users", id: user._id }, diff: { name: hello.displayName } }],
+        this.systemUserId,
+        `join-name-${randomId()}`,
+        false,
+      );
+      user.name = hello.displayName;
     }
     session.user = { id: user._id, role: user.role, name: user.name };
     session.pendingHello = null;

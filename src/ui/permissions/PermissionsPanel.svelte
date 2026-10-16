@@ -72,6 +72,7 @@
   let scene = $state<SceneDocument | null>(null);
   let online = $state<string[]>([]);
   let presenceTick = $state(0);
+  let renameDraft = $state<Record<string, string>>({});
   let revision = $state(0);
   /** D-465: the roster — presence, role, colour, character and token control per player. */
   const rows = $derived.by((): PlayerRow[] => {
@@ -130,6 +131,12 @@
     if (!user) return;
     const ops = setPlayerColorOps(user, color);
     if (ops.length) client.submit(ops);
+  }
+
+  function setName(userId: string, name: string): void {
+    const user = userOf(userId);
+    if (!user || !name.trim()) return;
+    client.submit([{ kind: "update", ref: { coll: "users", id: userId }, diff: { name: name.trim(), nameSetByGm: true } }]);
   }
   function removeUser(row: PlayerRow): void {
     const user = userOf(row.id);
@@ -202,6 +209,16 @@
             <span class="dot" class:online={row.online} title={row.online ? "Connected" : "Offline"} aria-label={row.online ? "connected" : "offline"} data-perm-online={row.online ? "true" : "false"}></span>
             <input type="color" class="swatch" aria-label={`Colour for ${row.name}`} data-perm-color value={row.color || "#888888"} onchange={(event) => setColor(row, event.currentTarget.value)} />
             <span class="name">{row.name}{#if row.id === myId} <small>(you)</small>{/if}{#if row.banned} <small class="banned">banned</small>{/if}</span>
+            <span class="player-id" data-perm-user-id>{row.id}</span>
+            <input
+              class="player-name-input"
+              data-perm-player-name
+              type="text"
+              aria-label={`Player name for ${row.name}`}
+              value={renameDraft[row.id] ?? row.name}
+              oninput={(event) => { renameDraft = { ...renameDraft, [row.id]: event.currentTarget.value }; }}
+            />
+            <button type="button" class="link" data-perm-rename onclick={() => setName(row.id, renameDraft[row.id] ?? row.name)}>Rename</button>
           </td>
           <td>
             <select

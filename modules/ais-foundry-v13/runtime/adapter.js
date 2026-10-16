@@ -198,26 +198,49 @@
       for (const [key, value] of Object.entries(input)) setProperty(changed, key, clone(value));
       if (!Hooks.call(`preUpdate${this.documentName}`, this, changed, {}, "gm")) throw new Error("Document update vetoed by a pre-hook");
       const keys = Object.keys(changed);
-      if (keys.some((key) => !["flags.tagger.tags", "flags"].includes(key))) return unsupported("document fields other than tags");
-      const flags = changed.flags;
-      if (flags && (Object.keys(flags).some((key) => key !== "tagger") ||
-          Object.keys(flags.tagger || {}).some((key) => !["tags", "-=tags"].includes(key)))) return unsupported("foreign flag namespace");
-      let tags = changed["flags.tagger.tags"] ?? getProperty(changed, "flags.tagger.tags");
-      if (getProperty(changed, "flags.tagger.-=tags") === null) tags = [];
-      if (!Array.isArray(tags)) throw new Error("Tag updates require an array");
-      // Draft hook mutations are only proposals. This reply means the HOST committed.
-      const request = { sceneId: this.parent.id, collection: this._collection, id: this.id, tags };
-      let result;
-      try { result = await this._view.api.sceneTags.update({ ...request, expectedSeq: this._view.seq }); }
-      catch (error) {
-        // Foundry semantics are last-writer-wins: a stale revision is refreshed once, then retried.
-        if (!moduleProfile || !/stale/i.test(error?.message ?? "")) throw error;
-        const fresh = await this._view.api.sceneTags.snapshot();
-        this._view.seq = fresh.seq;
-        result = await this._view.api.sceneTags.update({ ...request, expectedSeq: fresh.seq });
+      const tagOnly = keys.every((key) => key === "flags" || key === "flags.tagger.tags" || key === "flags.tagger.-=tags");
+      if (tagOnly) {
+        const flags = changed.flags;
+        if (flags && (Object.keys(flags).some((key) => key !== "tagger") ||
+            Object.keys(flags.tagger || {}).some((key) => !["tags", "-=tags"].includes(key)))) return unsupported("foreign flag namespace");
+        let tags = changed["flags.tagger.tags"] ?? getProperty(changed, "flags.tagger.tags");
+        if (getProperty(changed, "flags.tagger.-=tags") === null) tags = [];
+        if (!Array.isArray(tags)) throw new Error("Tag updates require an array");
+        const request = { sceneId: this.parent.id, collection: this._collection, id: this.id, tags };
+        let result;
+        try { result = await this._view.api.sceneTags.update({ ...request, expectedSeq: this._view.seq }); }
+        catch (error) {
+          if (!moduleProfile || !/stale/i.test(error?.message ?? "")) throw error;
+          const fresh = await this._view.api.sceneTags.snapshot();
+          this._view.seq = fresh.seq;
+          result = await this._view.api.sceneTags.update({ ...request, expectedSeq: fresh.seq });
+        }
+        this._data.tags = clone(result.tags);
+        this._view.seq = result.seq;
+        Hooks.callAll(`update${this.documentName}`, this, changed, {}, "gm");
+        return this;
       }
-      this._data.tags = clone(result.tags);
-      this._view.seq = result.seq;
+      const storeChanges = {};
+      for (const [key, value] of Object.entries(changed)) {
+        if (key === "flags") continue;
+        if (key === "flags.tagger.tags") storeChanges.taggerTags = value;
+        else if (key === "flags.tagger.-=tags") storeChanges["-=taggerTags"] = null;
+        else storeChanges[key] = value;
+      }
+      const diff = {};
+      for (const [path, value] of Object.entries(flattenObject(storeChanges))) {
+        if (path === "_id") continue;
+        diff[path] = value === undefined ? null : value;
+      }
+      if (!Object.keys(diff).length) return this;
+      await AIS.documents.mutate([{ kind: "update", collection: this._collection, id: this.id, diff, parent: { collection: "scenes", id: this.parent.id } }]);
+      const fresh = await AIS.documents.get({ collection: this._collection, id: this.id, parent: { collection: "scenes", id: this.parent.id } });
+      if (fresh) {
+        this._data = clone(fresh);
+        this._id = fresh._id; this.id = fresh._id; this.name = fresh.name;
+        if (Number.isFinite(fresh.x)) this.x = fresh.x;
+        if (Number.isFinite(fresh.y)) this.y = fresh.y;
+      }
       Hooks.callAll(`update${this.documentName}`, this, changed, {}, "gm");
       return this;
     }
@@ -268,8 +291,23 @@
       this.last.assetId = mapped; return this;
     }
     anchor(location) {
-      if (location instanceof DocumentView) {
-        if (location._collection !== "tokens" || location.parent.id !== currentView?.scene.id) return unsupported("non-token anchors");
+      const isTokenDoc = (doc) => {
+        if (!doc) return false;
+        if (doc instanceof DocumentView) return doc._collection === "tokens";
+        // New world-document Token (from documents.js) — has documentName Token and a parent Scene
+        if (doc.documentName === "Token" || doc.constructor?.documentName === "Token") return true;
+        // Fallback: token-like with id and parent scene
+        return typeof doc.id === "string" && doc.parent && typeof doc.parent.id === "string";
+      };
+      if (isTokenDoc(location)) {
+        const sceneId = location.parent?.id ?? location.parent?._id;
+        if (sceneId && currentView?.scene?.id && sceneId !== currentView.scene.id) {
+          // Allow any scene that exists in the real collection, but keep the old check for tagger's filtered view
+          const realScene = documentsLayer.collections.scenes.get(sceneId);
+          if (!realScene && sceneId !== currentView.scene.id) return unsupported("non-token anchors");
+        }
+        // For tagger compatibility, still require token to be in currentView if it's a DocumentView
+        if (location instanceof DocumentView && (location._collection !== "tokens" || location.parent.id !== currentView?.scene.id)) return unsupported("non-token anchors");
         for (const kind of ["source", "target"]) {
           if (!this.refs[kind] || this.refs[kind] === location.id) { this.refs[kind] = location.id; return { kind }; }
         }
@@ -581,9 +619,19 @@
     Collection, game: () => globalThis.game });
   const Document = documentsLayer.AISDocument;
   const documentClasses = { ...documentsLayer.classes };
-  // Scene/placeable/other documents still only exist for `extends`/`instanceof` (scene services stay dedicated; slice 2).
-  for (const name of ["Scene", "TokenDocument", "Cards", "Setting", "AmbientLightDocument", "AmbientSoundDocument", "TileDocument",
-    "WallDocument", "DrawingDocument", "MeasuredTemplateDocument", "NoteDocument", "RegionDocument", "RegionBehavior", "Adventure", "FogExploration"])
+  // Slice 2: real projected scene/placeable documents from the kernel collection.
+  documentClasses.Scene = documentsLayer.classes.Scene;
+  documentClasses.TokenDocument = documentsLayer.classes.Token;
+  documentClasses.AmbientLightDocument = documentsLayer.classes.AmbientLight;
+  documentClasses.AmbientSoundDocument = documentsLayer.classes.AmbientSound;
+  documentClasses.TileDocument = documentsLayer.classes.Tile;
+  documentClasses.WallDocument = documentsLayer.classes.Wall;
+  documentClasses.DrawingDocument = documentsLayer.classes.Drawing;
+  documentClasses.MeasuredTemplateDocument = documentsLayer.classes.Template;
+  documentClasses.NoteDocument = documentsLayer.classes.Note;
+  documentClasses.RegionDocument = documentsLayer.classes.Region;
+  // Other documents still only exist for `extends`/`instanceof`.
+  for (const name of ["Cards", "Setting", "RegionBehavior", "Adventure", "FogExploration"])
     documentClasses[name] = stubClass(name, Document);
   for (const [name, klass] of Object.entries(documentClasses)) globalThis[name] = klass;
   // Chat messages are host-stamped: `ChatMessage.create({ content })` posts through the chat service as this user.
@@ -597,6 +645,24 @@
   documentClasses.ChatMessage.createDocuments = async (rows = []) => { const out = []; for (const row of rows) out.push(await postChat(row)); return out; };
   documentClasses.ChatMessage.getSpeaker = ({ actor, token, alias } = {}) => ({ actor: actor?.id ?? null, token: token?.id ?? null, alias: alias ?? actor?.name ?? null, scene: null });
   documentClasses.ChatMessage.applyRollMode = (data) => data;
+  const TokenDocumentClass = documentsLayer.classes.Token;
+  if (TokenDocumentClass?.prototype) {
+    Object.defineProperty(TokenDocumentClass.prototype, "document", { configurable: true, get() { return this; } });
+    Object.defineProperty(TokenDocumentClass.prototype, "object", { configurable: true, get() { return this; } });
+    const originalGetFlag = TokenDocumentClass.prototype.getFlag;
+    TokenDocumentClass.prototype.getFlag = function (scope, key) {
+      if (scope === "tagger" && key === "tags") return clone(this.taggerTags ?? []);
+      return typeof originalGetFlag === "function" ? originalGetFlag.call(this, scope, key) : undefined;
+    };
+    TokenDocumentClass.prototype.setFlag = function (scope, key, value) {
+      if (scope === "tagger" && key === "tags") return this.update({ taggerTags: value });
+      return unsupported(`flag ${scope}.${key}`);
+    };
+    TokenDocumentClass.prototype.unsetFlag = function (scope, key) {
+      if (scope === "tagger" && key === "tags") return this.update({ "-=taggerTags": null });
+      return unsupported(`flag ${scope}.${key}`);
+    };
+  }
   const PlaceableObject = stubClass("PlaceableObject");
   globalThis.PlaceableObject = PlaceableObject;
   for (const name of ["Token", "Tile", "Drawing", "Wall", "AmbientLight", "AmbientSound", "MeasuredTemplate", "Note", "Region"])
@@ -732,7 +798,7 @@
     // Deliberately NOT a Foundry system id: modules that need `pf1` must say so and stay inert.
     system: { id: "arenastar", title: "ArenaStar VTT", version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, template: {}, flags: {} },
     modules, i18n, settings,
-    scenes: emptyCollection("Scene"), actors: documentsLayer.collections.actors, items: documentsLayer.collections.items, journal: documentsLayer.collections.journals,
+    scenes: documentsLayer.collections.scenes, actors: documentsLayer.collections.actors, items: documentsLayer.collections.items, journal: documentsLayer.collections.journals,
     tables: documentsLayer.collections.rollTables, macros: documentsLayer.collections.macros, playlists: documentsLayer.collections.playlists,
     combats: documentsLayer.collections.combats, folders: documentsLayer.collections.folders, messages: documentsLayer.collections.messages,
     packs: emptyCollection("CompendiumCollection"), cards: emptyCollection("Cards"),
@@ -772,20 +838,40 @@
   };
   globalThis.game = game;
   Object.defineProperty(globalThis, "canvas", { configurable: true, get: () => {
-    const scene = currentView?.scene;
-    const layer = (key) => ({ name: key, placeables: scene ? scene[key].contents : [], get: (id) => scene?.[key].get(id), controlled: [], active: false,
-      get documentCollection() { return scene?.[key]; } });
-    return { ready: !!scene, id: scene?.id, scene, dimensions: scene?.dimensions, grid: scene?.grid,
-      tokens: layer("tokens"), lighting: layer("lights"), sounds: layer("sounds"), templates: layer("templates"), tiles: layer("tiles"),
-      walls: layer("walls"), drawings: layer("drawings"), notes: layer("notes"), regions: layer("regions"),
+    const tagScene = currentView?.scene;
+    const realScene = tagScene ? documentsLayer.collections.scenes.get(tagScene.id) : null;
+    // Prefer real projected scene (includes hidden for GM) for canvas, fallback to tag-filtered view
+    const scene = realScene ?? tagScene;
+    const tagLayer = (key) => ({ name: key, placeables: tagScene ? tagScene[key].contents : [], get: (id) => tagScene?.[key].get(id), controlled: [], active: false,
+      get documentCollection() { return tagScene?.[key]; } });
+    const realLayer = (key, embeddedKey) => {
+      if (!realScene) return tagLayer(key);
+      const coll = realScene[embeddedKey ?? key];
+      return { name: key, placeables: coll ? coll.contents : [], get: (id) => coll?.get(id), controlled: [], active: false,
+        get documentCollection() { return coll; } };
+    };
+    // For PF1 compatibility, canvas uses real scene; tagger's filtered view remains via tagLayer for FX checks
+    return { ready: !!scene, id: scene?.id, scene, dimensions: scene?.dimensions ?? tagScene?.dimensions, grid: scene?.grid ?? tagScene?.grid,
+      tokens: realLayer("tokens", "tokens"), lighting: realLayer("lights", "lights"), sounds: realLayer("sounds", "sounds"), templates: realLayer("templates", "templates"), tiles: realLayer("tiles", "tiles"),
+      walls: realLayer("walls", "walls"), drawings: realLayer("drawings", "drawings"), notes: realLayer("notes", "notes"), regions: realLayer("regions", "regions"),
       stage: { addChild: () => unsupportedCall("canvas.stage (the host PIXI renderer)") },
       get app() { return unsupportedCall("canvas.app (the host PIXI renderer)"); },
-      draw: () => unsupportedCall("canvas.draw"), pan: async () => undefined, animatePan: async () => undefined, hud: {}, perception: { update() {} } };
+      draw: () => unsupportedCall("canvas.draw"), pan: async () => undefined, animatePan: async () => undefined, hud: {}, perception: { update() {} },
+      // Expose tag-filtered view for backward compat where needed
+      _tagScene: tagScene };
   } });
   const refreshScene = async () => {
     await hydrate(AIS);
-    game.scenes = new Collection([currentView.scene]);
-    game.scenes.active = currentView.scene; game.scenes.current = currentView.scene; game.scenes.viewed = currentView.scene; game.scenes.projected = true;
+    const real = documentsLayer.collections.scenes.get(currentView.scene.id) ?? currentView.scene;
+    // Keep the real projected collection as the primary `game.scenes` surface (slice 2),
+    // while preserving the filtered tag view for canvas/FX anchor checks.
+    game.scenes.active = real; game.scenes.current = real; game.scenes.viewed = real; game.scenes.projected = true;
+    // `game.scenes` itself is the live `documentsLayer.collections.scenes` collection (set at boot);
+    // ensure its active/current/viewed aliases stay in sync even if the collection instance is shared.
+    if (game.scenes !== documentsLayer.collections.scenes) {
+      game.scenes = documentsLayer.collections.scenes;
+      game.scenes.active = real; game.scenes.current = real; game.scenes.viewed = real; game.scenes.projected = true;
+    }
     user.viewedScene = currentView.scene.id;
   };
 
@@ -944,6 +1030,31 @@
     const before = new Set(Object.keys(globalThis));
     await loadModules(imports);
     diagnostics.loadMs = Math.round(performance.now() - started);
+    // Slice 2: patch Tagger to preserve hidden-token exclusion while game.scenes is the real projected collection.
+    const patchTagger = () => {
+      const Tagger = globalThis.Tagger;
+      if (!Tagger || Tagger._aisPatched) return;
+      const orig = Tagger._getObjectsFromScene;
+      if (typeof orig === "function") {
+        Tagger._getObjectsFromScene = function (scene) {
+          const objs = orig.call(this, scene);
+          return objs.filter((obj) => {
+            const doc = obj?.document ?? obj;
+            if (!doc) return true;
+            if (doc.hidden === true) return false;
+            if (doc._source?.hidden === true) return false;
+            // TokenDocument from documents.js stores hidden in _source
+            if (doc._source && typeof doc._source.hidden === "boolean" && doc._source.hidden) return false;
+            return true;
+          });
+        };
+      }
+      Tagger._aisPatched = true;
+    };
+    // Try immediate patch (module may have set global in its esmodule)
+    try { patchTagger(); } catch {}
+    // Also patch on ready, when Tagger is definitely set
+    Hooks.on("ready", () => { try { patchTagger(); } catch {} });
     Hooks.callAll("init");
     Hooks.callAll("i18nInit");
     await syncSettings();
@@ -952,6 +1063,8 @@
     Hooks.callAll("ready");
     Hooks.callAll("canvasInit", globalThis.canvas);
     Hooks.callAll("canvasReady", globalThis.canvas);
+    // Second attempt after ready hooks (Tagger sets window.Tagger in ready)
+    try { patchTagger(); } catch {}
     // Globals the module installed itself (e.g. `window.Tagger`): the surface `foundry.api` reaches.
     diagnostics.globals = Object.keys(globalThis).filter((key) => !before.has(key)).slice(0, 64);
   });

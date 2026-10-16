@@ -31,6 +31,7 @@
     { collection: "macros", documentName: "Macro", gameKey: "macros", embedded: {}, types: ["chat", "script"] },
     { collection: "folders", documentName: "Folder", gameKey: "folders", embedded: {}, types: ["Actor", "Item", "JournalEntry", "RollTable", "Macro", "Playlist", "Scene"] },
     { collection: "playlists", documentName: "Playlist", gameKey: "playlists", embedded: {}, types: ["base"] },
+    { collection: "scenes", documentName: "Scene", gameKey: "scenes", embedded: { Token: "tokens", Wall: "walls", AmbientLight: "lights", AmbientSound: "sounds", Tile: "tiles", Region: "regions", Level: "levels", Drawing: "drawings", Template: "templates", Note: "notes" }, types: ["base"] },
     { collection: "combats", documentName: "Combat", gameKey: "combats", embedded: { Combatant: "combatants" }, types: ["base"] },
     { collection: "users", documentName: "User", gameKey: "users", embedded: {}, types: ["base"], readOnly: true },
     { collection: "messages", documentName: "ChatMessage", gameKey: "messages", embedded: {}, types: ["base"], readOnly: true },
@@ -40,6 +41,16 @@
     ActiveEffect: { collection: "effects", embedded: {}, types: ["base"] },
     JournalEntryPage: { collection: "pages", embedded: {}, types: ["text", "image"] },
     Combatant: { collection: "combatants", embedded: {}, types: ["base"] },
+    Token: { collection: "tokens", embedded: {}, types: ["base"] },
+    Wall: { collection: "walls", embedded: {}, types: ["base"] },
+    AmbientLight: { collection: "lights", embedded: {}, types: ["base"] },
+    AmbientSound: { collection: "sounds", embedded: {}, types: ["base"] },
+    Tile: { collection: "tiles", embedded: {}, types: ["base"] },
+    Region: { collection: "regions", embedded: {}, types: ["base"] },
+    Level: { collection: "levels", embedded: {}, types: ["base"] },
+    Drawing: { collection: "drawings", embedded: {}, types: ["base"] },
+    Template: { collection: "templates", embedded: {}, types: ["base"] },
+    Note: { collection: "notes", embedded: {}, types: ["base"] },
   };
   const FOLDER_TARGETS = { Actor: "actors", Item: "items", JournalEntry: "journals", RollTable: "rollTables", Macro: "macros", Playlist: "playlists", Scene: "scenes" };
   const ROLE_NAMES = { GM: 4, ASSISTANT: 3, TRUSTED: 2, PLAYER: 1 };
