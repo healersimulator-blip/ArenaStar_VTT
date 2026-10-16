@@ -197,7 +197,15 @@ frame.
 ## 5. Player side, sockets, packs — the next slices in this structure
 
 The document bridge's latency slice (**D-486**) is done: consent/capability from in-memory
-snapshots, inline-diff application, measured end to end. Everything below follows in order.
+snapshots, inline-diff application, measured end to end. Player-side execution and the cross-device
+channel (**D-487**) are done. Everything below follows in order — except one core prerequisite
+that is NOT AIS but affects every multi-device slice: **transport frame hardening**. One WebRTC
+user message caps at 256 KiB; the D-487 profile defect (312 KiB raw composition) is one instance
+of a general gap — `fog.put`/`fog.state` still accept up to 1 MiB PNGs and the join `snapshot` is
+an unguarded single frame, so a large explored map or a big world can kill a session today. The
+fix belongs at the frame layer (chunk + reassemble anything over the cap, as `AssetTransfer`
+already does for files); until it lands, no new wire message may carry an unbounded payload and
+"grows past 256 KiB" is a release-blocking shape. Tracked in `PLAN.md` (M4).
 
 1. **Scenes and placeables through `documents.*` (slice 2).** Add `scenes` as an exposed
    collection whose rows are the *projected* scene (the player's store already is), with
@@ -225,7 +233,11 @@ snapshots, inline-diff application, measured end to end. Everything below follow
 7. **Template/UI long tail.** Driven by `foundry.info.templates.missing` and the module corpus
    ranking (combat tracker parts, active-effect parts, `journal/toc.hbs`, `scene/token/*`,
    `sidebar/apps/*`); ProseMirror-free `enrichHTML`, `ContextMenu`, `DragDrop`, FilePicker.
-8. **Target B.** A *system provider* layer: `pf1`'s `TypeDataModel`s, sheets and `CONFIG` hooks
+8. **Profile payload caching.** `ais.profile` re-ships full module sources to every device on
+   every change (D-487 deflates them, but the bytes still travel). Content-addressed sources —
+   the profile carries hashes, devices fetch through the §7 asset pipeline and cache — turns
+   every later profile into a kilobyte. Natural home: with the files/asset-library slice.
+9. **Target B.** A *system provider* layer: `pf1`'s `TypeDataModel`s, sheets and `CONFIG` hooks
    over the same documents — the owner decides when.
 
 ## 6. Guardrails that every slice must keep
@@ -237,6 +249,8 @@ snapshots, inline-diff application, measured end to end. Everything below follow
 - RPC economy (D-486): no storage read on an RPC path (host: `HostPersister.world`; player:
   `consentCache`); one RPC per awaited write; replicas consume inline diffs and re-read only on
   create/truncated/unapplicable diffs. Latency claims are measured (Health trace + e2e timings).
+- Player-affecting slices carry a two-device acceptance (join + consent + cross-device traffic),
+  as `e2e/ais_bus.spec.ts` does — the D-487 wire defect only appeared when a player connected.
 - Everything is measured in Chromium through the real import path (`e2e/ais_foundry_module.spec.ts`)
   and unit-tested against the kernel's real normalisation (`tests/packages/aisFoundryDocuments.test.ts`).
 - Diagnostics over silence: `foundry.info` reports unsupported calls, missing templates, document
