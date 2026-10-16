@@ -34,7 +34,7 @@ export const FOUNDRY_SYNTHESIZED_MANIFEST = "manifest.json";
 export const FOUNDRY_ENTRY_STUB_PATH = "ais-foundry/entry.js";
 export const FOUNDRY_LOADER_STUB_PATH = "ais-foundry/loader.js";
 export const FOUNDRY_MANIFEST_PATH = "module.json";
-export const FOUNDRY_MAX_TEXT_FILES = 512;
+export const FOUNDRY_MAX_TEXT_FILES = 50000;
 
 export interface FoundryLanguage { lang: string; name: string; path: string }
 export interface FoundryPack { name: string; label: string; path: string; type: string }
@@ -262,7 +262,7 @@ export function synthesizeFoundryModulePackage(
   const parsed = parseFoundryModuleManifest(raw);
   if (!parsed.ok) return err(`package: ${parsed.error}`);
   const foundry = parsed.value;
-  if (!foundry.esmodules.length && !foundry.scripts.length)
+  if (!foundry.esmodules.length && !foundry.scripts.length && !foundry.packs.length && !foundry.styles.length && !foundry.languages.length)
     return err(`package ${foundry.id}: module.json lists no esmodules or scripts — nothing to run`);
   for (const entry of [...foundry.esmodules, ...foundry.scripts]) {
     if (files[entry] !== undefined) continue;

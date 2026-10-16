@@ -268,7 +268,15 @@ export function extractZipEntriesBounded(
     unzip.register(UnzipInflate);
     unzip.register(UnzipPassThrough);
     try {
-      unzip.push(bytes, true);
+      // Push in chunks to avoid fflate recursion / stack overflow on large archives (e.g. 54 MB pf1-content)
+      const CHUNK = 64 * 1024;
+      for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+        const end = Math.min(offset + CHUNK, bytes.length);
+        const final = end === bytes.length;
+        // subarray shares buffer, no copy
+        unzip.push(bytes.subarray(offset, end), final);
+        if (settled) break;
+      }
       scanFinished = true;
       finishIfReady();
     } catch (error) {
