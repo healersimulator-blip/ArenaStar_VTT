@@ -146,7 +146,7 @@ export interface AisModuleHandlerContext {
   /** Opens a host-rendered, text-only choice dialog; null means the user cancelled. */
   select: (request: AisModuleSelectRequest) => Promise<string | null>;
   /** Resolve only after a host commit; a rejected transaction must reject the RPC. */
-  submit: (ops: Op[]) => string | Promise<string>;
+  submit: (ops: Op[], action?: { label: string; system?: Record<string, Json> }) => string | Promise<string>;
   /** Shared by this world's module hosts so inventory read/modify/commit is serialized. */
   mutate?: AisMutationQueue;
   sequence?: () => number;
@@ -264,6 +264,17 @@ function storageKey(value: unknown): string {
   if (typeof value !== "string" || !STORAGE_KEY_RE.test(value))
     throw new Error("module storage key must be 1–64 safe characters");
   return value;
+}
+
+function aisAction(packageId: string, method: string): { label: string; system: Record<string, Json> } {
+  return {
+    label: `AIS ${packageId}: ${method}`.slice(0, 160),
+    system: {
+      aisModule: true as unknown as Json,
+      packageId: packageId as unknown as Json,
+      method: method as unknown as Json,
+    },
+  };
 }
 
 function safeId(value: unknown, label: string): string {
@@ -618,7 +629,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         },
       });
       assertCommandActive(commandContext);
-      const txId = await ctx.submit(ops);
+      const txId = await ctx.submit(ops, aisAction(ctx.packageId, "scene.token.light.apply"));
       assertCommandActive(commandContext);
       return { ok: true, txId, active: args.active, sourceName: args.sourceName, stateIndex: Number(args.stateIndex) };
     }),
@@ -672,7 +683,8 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         flavor: `AIS module ${ctx.packageId}`,
       };
       assertCommandActive(commandContext);
-      const txId = await ctx.submit([{ kind: "create", coll: "messages", data: doc }]);
+      const txId = await ctx.submit([{ kind: "create", coll: "messages", data: doc }],
+        aisAction(ctx.packageId, "chat.post"));
       assertCommandActive(commandContext);
       return { id, txId };
     },
@@ -755,7 +767,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         const ops = aisWorldSettingOps(settings.worldDoc(), ctx.packageId, settings.packageName, declaration.key, coerced.value);
         await ctx.assertCapability("module.settings.write");
         assertCommandActive(commandContext);
-        if (ops.length > 0) await ctx.submit(ops);
+        if (ops.length > 0) await ctx.submit(ops, aisAction(ctx.packageId, `settings.set:${declaration.key}`));
       } else {
         await putSetting(ctx.db, { scope: aisDeviceSettingsScope(ctx.worldId, ctx.packageId), key: declaration.key, value: coerced.value });
         settings.onDeviceChange?.(declaration.key, coerced.value);
@@ -947,7 +959,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       const run = async () => {
         await ctx.assertCapability("documents.write");
         assertCommandActive(commandContext);
-        const txId = await ctx.submit(normalized.value.ops);
+        const txId = await ctx.submit(normalized.value.ops, aisAction(ctx.packageId, "documents.mutate"));
         return { txId, created: normalized.value.created, seq: ctx.sequence?.() ?? null };
       };
       return ctx.mutate ? ctx.mutate(run) : run();

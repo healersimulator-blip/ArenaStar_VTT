@@ -264,11 +264,15 @@ export class AisRuntime {
           activeScene: () => this.scene(),
           actorById: (id) => app.store.get("actors", id) as ActorDocument | undefined,
           select: (request) => options.select(module.packageId, request),
-          submit: (ops) => app.gm.client.submitAndWait(ops),
+          submit: (ops, action) => app.gm.client.submitAndWait(ops, 30_000, undefined, action),
           mutate: this.mutate,
           ...(module.resources ? { resources: module.resources } : {}),
           sequence: () => app.store.seq,
-          updateSceneTags: (input) => app.host.applyAisSceneTags(input),
+          updateSceneTags: (input) => app.host.applyAisSceneTags({
+            ...input,
+            _packageId: module.packageId,
+            _method: "scene.tags.update",
+          }),
           fx: {
             play: (input) => {
               pruneFx();

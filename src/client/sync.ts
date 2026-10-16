@@ -280,7 +280,12 @@ export class ClientSync {
   }
 
   /** Submit and wait until the host commits this transaction or explicitly rejects it. */
-  submitAndWait(ops: Op[], timeoutMs = 30_000, wallEdit?: WallEditGuard): Promise<TxId> {
+  submitAndWait(
+    ops: Op[],
+    timeoutMs = 30_000,
+    wallEdit?: WallEditGuard,
+    action?: { label: string; system?: Record<string, Json> },
+  ): Promise<TxId> {
     const txId = globalThis.crypto.randomUUID();
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -310,7 +315,7 @@ export class ClientSync {
         finish(() => reject(new Error("The host did not acknowledge this edit in time.")));
       }, timeoutMs);
       try {
-        this.sendIntent(txId, ops, wallEdit);
+        this.sendIntent(txId, ops, wallEdit, action);
       } catch (error) {
         this.pending.delete(txId);
         this.inFlight.delete(txId);
@@ -320,7 +325,12 @@ export class ClientSync {
     });
   }
 
-  private sendIntent(txId: TxId, ops: Op[], wallEdit?: WallEditGuard): void {
+  private sendIntent(
+    txId: TxId,
+    ops: Op[],
+    wallEdit?: WallEditGuard,
+    action?: { label: string; system?: Record<string, Json> },
+  ): void {
     if (requiredOpFeatures(ops).some((f) => !this.supportsFeature(f)))
       throw new Error("Upgrade required: draft levels need a compatible host and GM client");
     this.inFlight.add(txId);
@@ -329,7 +339,8 @@ export class ClientSync {
       this.pending.set(txId, optimistic);
       this.rebuildEcho();
     }
-    this.send({ kind: "intent", txId, ops, ...(wallEdit ? { wallEdit } : {}) });
+    this.send({ kind: "intent", txId, ops, ...(wallEdit ? { wallEdit } : {}),
+      ...(action ? { action } : {}) });
   }
 
   /**

@@ -460,7 +460,7 @@ export class PlayerAisRuntime {
         actorById: (id) => client.store.get("actors", id) as ActorDocument | undefined,
         select: (request) => options.select(module.packageId, request),
         // Resolves only on the host's commit; a `forbidden` rejection becomes the RPC's error.
-        submit: (ops) => client.submitAndWait(ops),
+        submit: (ops, action) => client.submitAndWait(ops, 30_000, undefined, action),
         mutate: this.mutate,
         ...(module.resources ? { resources: module.resources } : {}),
         sequence: () => client.store.seq,
