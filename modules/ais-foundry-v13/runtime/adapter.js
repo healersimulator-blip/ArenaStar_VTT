@@ -1335,6 +1335,33 @@
     }
     return fromUuidSync(str);
   }
+  // DocumentSheetConfig registry for systems like pf1 that register sheets via DocumentSheetConfig.registerSheet
+  const sheetRegistry = new Map();
+  const DocumentSheetConfig = {
+    registerSheet: (docClass, scope, sheetClass, config = {}) => {
+      const docName = typeof docClass === "string" ? docClass : docClass?.documentName ?? docClass?.name ?? "unknown";
+      const key = `${docName}:${scope}:${sheetClass?.name ?? "sheet"}`;
+      sheetRegistry.set(key, { docName, scope, sheetClass, config });
+      // Also record in CONFIG for inspection
+      try {
+        const cfgName = docName.replace(/Document$/, "");
+        if (globalThis.CONFIG && globalThis.CONFIG[cfgName]) {
+          const cfg = globalThis.CONFIG[cfgName];
+          if (!cfg.sheetClasses) cfg.sheetClasses = {};
+          const scopeKey = scope;
+          if (!cfg.sheetClasses[scopeKey]) cfg.sheetClasses[scopeKey] = {};
+          cfg.sheetClasses[scopeKey][sheetClass?.name ?? "default"] = { cls: sheetClass, ...config };
+        }
+      } catch {}
+    },
+    unregisterSheet: (docClass, scope, sheetClass) => {
+      const docName = typeof docClass === "string" ? docClass : docClass?.documentName ?? docClass?.name ?? "unknown";
+      const key = `${docName}:${scope}:${sheetClass?.name ?? "sheet"}`;
+      sheetRegistry.delete(key);
+    },
+    get sheets() { return Array.from(sheetRegistry.values()); }
+  };
+
   globalThis.foundry = {
     utils: { getProperty, setProperty, hasProperty, mergeObject, expandObject, flattenObject, isNewerVersion, deepClone: clone, duplicate, randomID,
       debounce, escapeHTML, isEmpty: (value) => value === undefined || value === null || (typeof value === "object" && Object.keys(value).length === 0) || value === "",
@@ -1350,14 +1377,16 @@
       handlebars: { loadTemplates, renderTemplate, getTemplate },
       ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, Tabs, FormDataExtended,
         TextEditor: { enrichHTML: async (html) => String(html ?? ""), implementation: { enrichHTML: async (html) => String(html ?? "") } } },
-      apps: { FilePicker: globalThis.FilePicker }, ui: { Notifications: stubClass("Notifications") }, instances: uiLayer.instances },
+      apps: { FilePicker: globalThis.FilePicker, DocumentSheetConfig }, ui: { Notifications: stubClass("Notifications") }, instances: uiLayer.instances },
     documents: { ...documentClasses, collections: { WorldCollection: documentsLayer.WorldCollection, ...Object.fromEntries(["Actors", "Items", "Journal", "RollTables", "Macros", "Folders",
       "Playlists", "CombatEncounters", "Users", "Messages"].map((name) => [name, documentsLayer.WorldCollection])) }, abstract: { Document } },
     canvas: { placeables: { Token: globalThis.Token, Tile: globalThis.Tile, Drawing: globalThis.Drawing, Wall: globalThis.Wall, AmbientLight: globalThis.AmbientLight,
-      AmbientSound: globalThis.AmbientSound, MeasuredTemplate: globalThis.MeasuredTemplate, Note: globalThis.Note, Region: globalThis.Region }, layers: {} },
+      AmbientSound: globalThis.AmbientSound, MeasuredTemplate: globalThis.MeasuredTemplate, Note: globalThis.Note, Region: globalThis.Region },
+      layers: { TemplateLayer: stubClass("TemplateLayer") },
+      perception: { DetectionMode: class DetectionMode { constructor(data = {}) { Object.assign(this, data); } static get DETECTION_TYPES() { return { SIGHT: 0, SOUND: 1, MOVE: 2, LIGHT: 3, OTHER: 4 }; } } } },
     abstract: { DataModel: uiLayer.fields ? uiLayer.fields.DataModel : stubClass("DataModel"), TypeDataModel: uiLayer.fields ? uiLayer.fields.TypeDataModel : stubClass("TypeDataModel"), Document },
     data: { fields: uiLayer.fields ? uiLayer.fields.fields : {}, validation: uiLayer.fields ? uiLayer.fields.validation : {} },
-    dice: { Roll: globalThis.Roll },
+    dice: { Roll: globalThis.Roll, terms: { DiceTerm: globalThis.Roll?.prototype ? class DiceTerm {} : class DiceTerm {}, FunctionTerm: class FunctionTerm {}, StringTerm: class StringTerm {} } },
     helpers: { Hooks: globalThis.Hooks, Localization: stubClass("Localization") },
     CONST: null,
   };
@@ -1415,10 +1444,31 @@
     const id = isSelfSystem ? selfId : declared[0] ? declared[0].toLowerCase() : "arenastar";
     return { id, declared, isSelfSystem, selfIdRaw };
   })();
-  const baseConfig = { debug: { hooks: false }, compatibility: { mode: 0 }, ui: {}, Canvas: { layers: {} }, TextEditor: { enrichers: [] },
-    statusEffects: [], specialStatusEffects: {}, controlIcons: {}, sounds: {}, fontDefinitions: {}, Dice: { rolls: [globalThis.Roll], terms: {} },
+  // Generic CONFIG — emulates what pf1 system (main target) and any other system needs, not 1:1 copy. Provide mutable shims for all CONFIG.* that pf1 touches on init.
+  const baseConfig = {
+    debug: { hooks: false }, compatibility: { mode: 0 },
+    ui: { chat: null, actors: null, items: null, combat: null, tables: null, journal: null, playlists: null, compendium: null, settings: null, help: null },
+    Canvas: { layers: { templates: { layerClass: null }, sounds: {}, lighting: {}, tokens: {}, drawings: {}, walls: {} }, detectionModes: {}, visionModes: {} },
+    TextEditor: { enrichers: [] },
+    MeasuredTemplate: { objectClass: null, defaults: { angle: 90, originalAngle: 90 } },
+    Token: { objectClass: null, hudClass: null, documentClass: documentClasses.TokenDocument ?? null, rulerClass: null, movement: { actions: { climb: { getCostFunction: () => () => 1 }, crawl: { getCostFunction: () => () => 1 }, jump: { getCostFunction: () => () => 1 }, walk: {}, fly: {}, swim: {}, burrow: {} } } },
+    AmbientLight: { objectClass: null },
+    AmbientSound: { objectClass: null },
+    Tile: { objectClass: null },
+    Drawing: { objectClass: null },
+    Wall: { objectClass: null },
+    Note: { objectClass: null },
+    Region: { objectClass: null },
+    Combat: { documentClass: documentClasses.CombatDocument ?? null },
+    Combatant: { documentClass: documentClasses.CombatantDocument ?? null },
+    ChatMessage: { documentClass: documentClasses.ChatMessageDocument ?? null, dataModels: {}, popoutClass: null },
+    time: { roundTime: 6 },
+    ux: { TextEditor: null },
+    statusEffects: [], specialStatusEffects: { SWIM: "swim", UNCONSCIOUS: "unconscious", DEAD: "dead" },
+    controlIcons: {}, sounds: {}, fontDefinitions: {},
+    Dice: { rolls: [globalThis.Roll], termTypes: { FunctionTerm: null, StringTerm: null, DiceTerm: null }, terms: {}, functions: {} },
     compendium: { uuidRedirects: {} },
-    ...Object.fromEntries(Object.keys(documentClasses).map((name) => [name.replace(/Document$/, ""), { documentClass: documentClasses[name], sheetClasses: {}, typeLabels: {}, dataModels: {} }])) };
+    ...Object.fromEntries(Object.keys(documentClasses).map((name) => [name.replace(/Document$/, ""), { documentClass: documentClasses[name], sheetClasses: {}, typeLabels: {}, dataModels: {}, defaultType: null, collection: null }])) };
   // Generic system CONFIG roots: provide CONFIG.<SYSTEM> for any system so modules that check CONFIG.PF1 / CONFIG.DND5E etc don't throw.
   // PF1 is main target but adapter is generic — works for dnd5e, pf2e, etc.
   function ensureSystemConfig(sysId) {
