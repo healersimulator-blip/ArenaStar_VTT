@@ -1402,43 +1402,68 @@
   }
   if (uiLayer.fields) dataModelCheck = uiLayer.fields.isDataModelClass;
   globalThis.foundry.CONST = globalThis.CONST;
-  // System shim: pf1 is MAIN TARGET base module — provide CONFIG.PF1 etc. If this distribution IS the pf1 system (system.json id pf1), report as pf1.
-  // For content modules that declare dependency on pf1, also report pf1 so they don't stay inert.
+  // System shim: generic for any system module (pf1, dnd5e, pf2e, etc). If this distribution IS a system (system.json or id matches known system), report its id.
+  // For content modules that declare dependency on a system, report that system id so they don't stay inert. Generic — not pf1-specific.
   const systemShim = (() => {
     const declared = Array.isArray(dist.systems) ? dist.systems.map((e) => typeof e === "string" ? e : e.id).filter(Boolean) : [];
-    const selfId = typeof foundryId === "string" ? foundryId.toLowerCase() : "";
-    const isSelfPf1 = selfId === "pf1" || selfId === "pf1e";
-    const isSelfDnd5e = selfId === "dnd5e";
-    const isSelfPf2e = selfId === "pf2e";
-    const wantsPf1 = declared.includes("pf1") || isSelfPf1;
-    const wantsDnd5e = declared.includes("dnd5e") || isSelfDnd5e;
-    const wantsPf2e = declared.includes("pf2e") || isSelfPf2e;
-    const id = isSelfPf1 ? "pf1" : isSelfDnd5e ? "dnd5e" : isSelfPf2e ? "pf2e" : wantsPf1 ? "pf1" : wantsDnd5e ? "dnd5e" : wantsPf2e ? "pf2e" : "arenastar";
-    return { id, wantsPf1, wantsDnd5e, wantsPf2e, declared, isSelfSystem: isSelfPf1 || isSelfDnd5e || isSelfPf2e };
+    const selfIdRaw = typeof foundryId === "string" ? foundryId : "";
+    const selfId = selfIdRaw.toLowerCase();
+    // Heuristic: if id is known system or distribution has system.json characteristics, treat as self system. Generic list, not hardcoded to pf1 only.
+    const knownSystems = ["pf1", "pf1e", "dnd5e", "dnd5e5e", "pf2e", "swade", "wfrp4e", "co", "dcc", "shadowrun5e", "starfinder", "ose", "cyberpunk-red-core"];
+    const isSelfSystem = knownSystems.includes(selfId) || (typeof dist.title === "string" && dist.title.toLowerCase().includes("system")) || declared.length === 0 && selfId.length <= 8;
+    // Prefer self id if it's a system, else first declared system, else arenastar. Works for pf1 (main target) and any other system like dnd5e.
+    const id = isSelfSystem ? selfId : declared[0] ? declared[0].toLowerCase() : "arenastar";
+    return { id, declared, isSelfSystem, selfIdRaw };
   })();
   const baseConfig = { debug: { hooks: false }, compatibility: { mode: 0 }, ui: {}, Canvas: { layers: {} }, TextEditor: { enrichers: [] },
     statusEffects: [], specialStatusEffects: {}, controlIcons: {}, sounds: {}, fontDefinitions: {}, Dice: { rolls: [globalThis.Roll], terms: {} },
     compendium: { uuidRedirects: {} },
     ...Object.fromEntries(Object.keys(documentClasses).map((name) => [name.replace(/Document$/, ""), { documentClass: documentClasses[name], sheetClasses: {}, typeLabels: {}, dataModels: {} }])) };
-  // PF1 is MAIN TARGET — provide CONFIG.PF1 roots so base system and content modules work. Adapter provides namespace + DataModel emulation via fields.js.
-  baseConfig.PF1 = baseConfig.PF1 ?? { abilities: {}, skills: {}, conditions: {}, loot: {}, weaponTypes: {}, equipmentTypes: {}, spellSchools: {}, damageTypes: {}, currencies: {}, re: {}, compendium: { uuidRedirects: {} } };
-  baseConfig.DND5E = baseConfig.DND5E ?? { abilities: {}, skills: {}, damageTypes: {}, conditionTypes: {}, currencies: {}, weaponTypes: {}, equipmentTypes: {}, spellSchools: {}, compendium: { uuidRedirects: {} } };
-  baseConfig.PF2E = baseConfig.PF2E ?? { abilities: {}, skills: {}, damageTypes: {}, conditions: {}, weaponTypes: {}, compendium: { uuidRedirects: {} } };
-  // Ensure CONFIG.compendium.uuidRedirects is a mutable object that modules can write to (pf1-content)
+  // Generic system CONFIG roots: provide CONFIG.<SYSTEM> for any system so modules that check CONFIG.PF1 / CONFIG.DND5E etc don't throw.
+  // PF1 is main target but adapter is generic — works for dnd5e, pf2e, etc.
+  function ensureSystemConfig(sysId) {
+    if (!sysId || sysId === "arenastar") return;
+    const upper = sysId.toUpperCase();
+    const lower = sysId.toLowerCase();
+    const generic = { abilities: {}, skills: {}, conditions: {}, loot: {}, weaponTypes: {}, equipmentTypes: {}, spellSchools: {}, damageTypes: {}, currencies: {}, re: {}, conditionTypes: {}, compendium: { uuidRedirects: {} } };
+    if (!baseConfig[upper]) baseConfig[upper] = { ...generic };
+    if (!baseConfig[lower]) baseConfig[lower] = baseConfig[upper];
+    // Ensure nested compendium.uuidRedirects mutable
+    if (!baseConfig[upper].compendium) baseConfig[upper].compendium = { uuidRedirects: {} };
+    if (!baseConfig[upper].compendium.uuidRedirects || typeof baseConfig[upper].compendium.uuidRedirects !== "object") baseConfig[upper].compendium.uuidRedirects = {};
+  }
+  // Always ensure common systems + declared + self
+  ["PF1", "DND5E", "PF2E"].forEach(ensureSystemConfig);
+  if (systemShim.id) ensureSystemConfig(systemShim.id);
+  systemShim.declared.forEach(ensureSystemConfig);
+  if (systemShim.selfIdRaw) ensureSystemConfig(systemShim.selfIdRaw);
+  // Ensure CONFIG.compendium.uuidRedirects is a mutable object that modules can write to (pf1-content, etc)
   if (!baseConfig.compendium) baseConfig.compendium = { uuidRedirects: {} };
   if (!baseConfig.compendium.uuidRedirects || typeof baseConfig.compendium.uuidRedirects !== "object") baseConfig.compendium.uuidRedirects = {};
   globalThis.CONFIG = baseConfig;
-  // PF1 base module namespace — MAIN TARGET. Provide minimal pf1 registry so content modules that call pf1.utils.createTag, pf1.registry etc don't throw.
-  if (!globalThis.pf1) {
-    globalThis.pf1 = {
-      registry: { sources: { registerSource: () => {}, getSource: () => null }, register: () => {}, get: () => null },
-      utils: { createTag: (s) => s, createAndMaybeRegisterSource: () => {}, convertDistance: (v) => v },
-      config: { abilities: baseConfig.PF1?.abilities ?? {}, skills: baseConfig.PF1?.skills ?? {} },
+  // Generic system namespace: provide globalThis[systemId] (e.g. pf1, dnd5e, pf2e) with minimal registry so content modules that call pf1.utils.createTag etc don't throw.
+  // Works for any system, not just pf1 — pf1 is main target but dnd5e etc get same shim.
+  function ensureSystemGlobal(sysId) {
+    if (!sysId || sysId === "arenastar") return;
+    const lower = sysId.toLowerCase();
+    if (globalThis[lower]) return;
+    const upper = sysId.toUpperCase();
+    const cfg = baseConfig[upper] ?? baseConfig[lower] ?? {};
+    globalThis[lower] = {
+      registry: { sources: { registerSource: () => {}, getSource: () => null, register: () => {} }, register: () => {}, get: () => null, registerSource: () => {} },
+      utils: { createTag: (s) => s, createAndMaybeRegisterSource: () => {}, convertDistance: (v) => v, slugify: (s) => String(s).toLowerCase().replace(/\s+/g, "-") },
+      config: { abilities: cfg.abilities ?? {}, skills: cfg.skills ?? {} },
       documents: {},
       applications: {},
       dice: {},
+      compendium: { uuidRedirects: cfg.compendium?.uuidRedirects ?? {} },
     };
   }
+  // Ensure globals for common + current
+  ["pf1", "dnd5e", "pf2e"].forEach(ensureSystemGlobal);
+  if (systemShim.id) ensureSystemGlobal(systemShim.id);
+  systemShim.declared.forEach(ensureSystemGlobal);
+  if (systemShim.selfIdRaw) ensureSystemGlobal(systemShim.selfIdRaw);
 
   // ── game ──
   const user = { id: "gm", _id: "gm", name: "GM", isGM: true, isSelf: true, role: 4, active: true, character: null, color: "#e0b341",
@@ -1469,7 +1494,7 @@
     get user() { return documentsLayer.me() ?? user; }, get userId() { return documentsLayer.userId() ?? user.id; },
     users: documentsLayer.collections.users, ready: false, paused: false, debug: false,
     world: { id: "arenastar", title: "ArenaStar world", system: systemShim.id, version: "0.0.0" },
-    // PF1 is MAIN TARGET base module — report its id so content modules don't stay inert. System provider layer provides CONFIG.PF1, pf1 namespace, DataModels.
+    // Generic system provider: report system id (pf1 main target, but also dnd5e/pf2e/etc) so content modules don't stay inert. System provider layer provides CONFIG[SYSTEM], globalThis[system], DataModels.
     system: { id: systemShim.id, title: systemShim.id === "arenastar" ? "ArenaStar VTT" : systemShim.isSelfSystem ? `${systemShim.id} (AIS)` : `${systemShim.id} (compatibility shim)`, version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, template: {}, flags: {}, id: systemShim.id },
     modules, i18n, settings,
     scenes: documentsLayer.collections.scenes, actors: documentsLayer.collections.actors, items: documentsLayer.collections.items, journal: documentsLayer.collections.journals,

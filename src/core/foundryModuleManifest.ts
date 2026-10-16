@@ -1,5 +1,5 @@
 /**
- * D-482: Foundry VTT `module.json` → ArenaStar package manifest, so a Foundry-format module
+ * D-482: Foundry VTT `module.json`/`system.json` → ArenaStar package manifest, so a Foundry-format module or system (any system: pf1 main target, dnd5e, pf2e, etc)
  * distribution imports **unmodified** and runs through the `ais-foundry-v13` adapter's
  * `foundry-module` profile. Pure data: nothing here executes module code.
  *

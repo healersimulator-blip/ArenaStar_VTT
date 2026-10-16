@@ -11,7 +11,7 @@ slices were added. Companion documents: [`DECISIONS.md`](DECISIONS.md) (D-468…
 
 **Goal (Target A).** A Foundry VTT module **or system** written against Foundry's *core* API — its `module.json`/`system.json`
 distribution untouched — imports into an ArenaStar world and runs: settings, i18n, hooks, windows,
-documents, chat, sockets, files, packs. The **pf1 system** (`foundryvtt-pathfinder1`, `system.json` id `pf1`) is the **main target** for current AIS testing — it is the base package that `pf-content`, `pf1e-archetypes`, `statblock-library` and SBC depend on. Systems run through the same `ais-foundry-v13` provider as modules (Target A), with a system provider layer for `CONFIG.Actor.dataModels`/`CONFIG.Item.dataModels`/`pf1` namespace.
+documents, chat, sockets, files, packs. The **pf1 system** (`foundryvtt-pathfinder1`, `system.json` id `pf1`) is the **main target** for current AIS testing — it is the base package that `pf-content`, `pf1e-archetypes`, `statblock-library` and SBC depend on. **Adapter is generic** — same `ais-foundry-v13` provider runs any system (pf1, dnd5e, pf2e, swade, etc) with generic `CONFIG[SYSTEM]`, `game.system.id`, `globalThis[system]` shims, `CONFIG.Actor.dataModels`/`CONFIG.Item.dataModels` via `fields.js`. pf1 is main target but dnd5e/pF2e/etc get same support.
 
 **Rule 1 — emulate the contract, never copy the implementation.** ArenaStar provides its own
 implementation of what Foundry's *host* provides to a module (APIs, core templates, language keys,
@@ -124,7 +124,7 @@ classic scripts, styles and language files load in Foundry's order, and its hook
 | Files (`FilePicker`, `game.audio`, R-07) | asset library | — | stubs | needs an asset-library RPC (list/pick/resolve by hash) — never raw URLs |
 | Packs (`game.packs`, R-10) | compendium docs | compendium RPCs | `game.packs` empty | map `CompendiumCollection` onto `compendium.*`; LevelDB packs need an importer |
 | Canvas / PIXI | — | — | — | out of scope by design: the parent renderer is ArenaStar's; placeable *documents* are the compatibility surface |
-| Systems (`pf1`) | — | — | system provider layer (TypeDataModels, sheets, `CONFIG.Actor.dataModels`, `pf1` registry) | **Target A — main target** (pf1 system is the base for pf-content/archetypes/statblock) |
+| Systems (`pf1`, `dnd5e`, `pf2e`, any) | — | — | **generic** system provider layer (TypeDataModels, sheets, `CONFIG.Actor.dataModels`, `CONFIG[SYSTEM]`, `globalThis[system]` registry) — pf1 main target but dnd5e/pf2e/swade/etc same path | **Target A — main target generic** (pf1 base for pf-content/archetypes/statblock, but adapter supports any system) |
 
 ## 4. The document bridge (D-485/D-486) — design details that matter
 
@@ -235,7 +235,7 @@ What remains is the standing rule above: no message may carry an unbounded paylo
    every change (D-487 deflates them, but the bytes still travel). Content-addressed sources —
    the profile carries hashes, devices fetch through the §7 asset pipeline and cache — turns
    every later profile into a kilobyte. Natural home: with the files/asset-library slice.
-9. **Target A — System provider layer (main target).** `pf1`'s `TypeDataModel`s, sheets, `CONFIG.Actor.dataModels`/`CONFIG.Item.dataModels`, `CONFIG.PF1`, `pf1` registry (`pf1.utils.createTag`, `pf1.registry`, `pf1.config`), `pf1` hooks (`pf1PreAttackRoll`, `pf1RegisterSources`). This is the base package for all PF1e content modules and is the **primary target** for AIS testing. Runs through same adapter as modules, with `game.system.id = "pf1"` shim.
+9. **Target A — System provider layer (main target, generic).** Any Foundry system's `TypeDataModel`s, sheets, `CONFIG.Actor.dataModels`/`CONFIG.Item.dataModels`, `CONFIG[SYSTEM]` (e.g. `CONFIG.PF1`, `CONFIG.DND5E`, `CONFIG.PF2E`), system namespace (`pf1`/`dnd5e`/`pf2e`/`swade` etc registry: `*.utils.createTag`, `*.registry`, `*.config`), system hooks (`pf1PreAttackRoll`, `dnd5e.preRollAttack`, `pf1RegisterSources`). **pf1 is primary target** for current testing (base for all PF1e content), but adapter is **generic** — `ensureSystemConfig(sysId)` + `ensureSystemGlobal(sysId)` creates `CONFIG[UPPER]` + `globalThis[lower]` with registry/utils for any system id. Runs through same adapter as modules, with `game.system.id = <systemId>` shim (self system or first declared dependency).
 
 ## 6. Guardrails that every slice must keep
 
