@@ -12,6 +12,7 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   var pending = new Map();
   var events = new Map();
   var subscribed = new Set();
+  var busBindings = new Map();
   var commands = new Map();
   var ready = false;
   var initializers = [];
@@ -70,6 +71,32 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
           return function () { callbacks.delete(callback); };
         },
         emit: function (eventId, payload) { return call("events.emit", { eventId: eventId, payload: payload }); }
+      }),
+      // D-487: the kernel's bounded cross-device channel. Delivery is same-package only (this
+      // module's frames on every device); the sender hears its own frame too, like game.socket.
+      bus: Object.freeze({
+        emit: function (channel, data) {
+          if (typeof channel !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(channel)) throw new TypeError("AIS.bus.emit requires a channel of 1-128 [A-Za-z0-9._:-] characters");
+          return call("bus.emit", { channel: channel, data: data === undefined ? null : data });
+        },
+        on: function (channel, callback) {
+          if (typeof channel !== "string" || typeof callback !== "function") throw new TypeError("AIS.bus.on requires a channel and callback");
+          var wrapper = function (payload) {
+            if (payload && payload.channel === channel) callback(payload.data, payload.by);
+          };
+          var record = { callback: callback, wrapper: wrapper, unbind: api.events.on("bus.message", wrapper) };
+          var rows = busBindings.get(channel);
+          if (!rows) { rows = new Set(); busBindings.set(channel, rows); }
+          rows.add(record);
+          return function () { rows.delete(record); record.unbind(); };
+        },
+        off: function (channel, callback) {
+          var rows = busBindings.get(channel);
+          if (!rows) return;
+          Array.from(rows).forEach(function (record) {
+            if (record.callback === callback) { rows.delete(record); record.unbind(); }
+          });
+        }
       }),
       scene: Object.freeze({ readVisible: function () { return call("scene.read.visible", {}); } }),
       resources: Object.freeze({

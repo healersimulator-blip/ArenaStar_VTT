@@ -95,7 +95,7 @@ describe("world-packaged UI assets and inert preload", () => {
     let allowed = true;
     const api = createAisModuleHandlers({ db, worldId: "resource-unit", packageId: "theme", emittedEvents: [],
       user: () => ({ id: "gm", name: "GM" }), activeScene: () => null, actorById: () => undefined,
-      select: async () => null, submit: () => "unused", notify: vi.fn(), emitModuleEvent: vi.fn(), newId: () => "unused",
+      select: async () => null, submit: () => "unused", notify: vi.fn(), emitModuleEvent: vi.fn(), busEmit: vi.fn(), newId: () => "unused",
       resources: { "style.css": "x".repeat(12_000) }, assertCapability: async () => { if (!allowed) throw new Error("revoked"); } });
     try {
       expect(await api["package.resource.read"]({ path: "style.css", offset: 0 })).toMatchObject({ next: 8192 });

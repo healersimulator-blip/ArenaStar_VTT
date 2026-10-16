@@ -21,6 +21,7 @@
 import type { AisCapability } from "../core/automationInterconnect";
 import { cloneAisSettingDeclaration } from "../core/automationInterconnect";
 import type { AisProfileMsg, AisSharedModule } from "../core/messages";
+import { packAisSharedModule } from "../core/aisSharedModule";
 import type { HostAutomationBoot, HostAutomationModuleBoot } from "./hostBoot";
 
 export type AisProviderSelections = HostAutomationBoot["resolution"]["providers"];
@@ -100,5 +101,7 @@ export function buildAisPlayerProfile(input: AisPlayerProfileInput): Omit<AisPro
     const packageId = provider.selected?.split("/", 1)[0];
     if (provider.selected && packageId && shared.has(packageId)) providers[provider.slotId] = provider.selected;
   }
-  return { providers, modules };
+  // D-487: heavy payloads (a Foundry adapter composition is ≈312 KiB raw) deflate before the
+  // wire — one WebRTC user message caps at 256 KiB. Small modules keep the plain fields.
+  return { providers, modules: modules.map((module) => packAisSharedModule(module)) };
 }

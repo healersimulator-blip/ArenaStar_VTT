@@ -97,6 +97,7 @@ intersection with the player-runnable set) must have granted.
 | `AIS.documents.context()` / `.list(collection, offset?, limit?)` / `.get({ collection, id, parent? })` | `documents.read` | D-485; this device user's own view of `actors, items, journals, rollTables, macros, folders, playlists, combats, users, messages`; pages ≤ 500 rows / ≈256 KiB; one document ≤ 1 MiB |
 | `AIS.documents.mutate(ops)` | `documents.write` | D-485; `[{ kind: "create", collection, data, parent? } \| { kind: "update", collection, id, diff, parent? } \| { kind: "delete", collection, id, parent? }]`, ≤ 32 ops, one atomic host transaction **with this device user's authority** (a player cannot create actors; a GM device can). `_id`/`type` are kernel-owned; defaults (`ownership` = creator owns, `items: []`, …) are filled for you, recursively for inline embedded rows |
 | `AIS.events.on("documents.changed", cb)` | `documents.read` | D-485; `{ seq, by, changes: [{ kind, collection, id, parent?, diff? }] }` per committed transaction on the exposed collections (diffs ≤ 16 KiB inline; re-`get` the root otherwise) |
+| `AIS.bus.emit(channel, data)` / `AIS.bus.on(channel, cb)` / `AIS.bus.off(channel, cb)` | `bus.transmit` | D-487: your module's cross-device channel — every running instance of **your** package on every device of the table hears the frame (the sender included; `cb(data, by)` with the host-stamped sender `{id, name}`). Channels are 1–128 chars of `A-Z a-z 0-9 . _ : -`, payloads bounded JSON ≤ 16 KiB; no other package can listen in and there is no arbitrary fan-out. `game.socket` is this channel for Foundry-profile modules |
 
 Errors are ordinary rejections with a sentence you can show (`"compendium.read is not shared"`,
 `"Declare lamp in interconnect.requires"`, `"pf1e-torch declares no setting radius"`, `"between
@@ -162,6 +163,11 @@ panel button, command runner, device settings, **Restart** when failed.
 - Documents (R-02) are open since D-485 for the world collections listed in §3; scenes and
   placeables still go through the typed scene intents (tags, token light) until the next slice.
   Authority is the device user's: a player frame cannot create actors, exactly as its own UI cannot.
-- No raw sockets; players and host are coordinated by replication and ownership, not by messages
-  you send (R-06 — by design).
+- Player devices (D-487): a manifest with `interconnect.sharing: "players"` (the default) runs on
+  every device the GM shares it with — the same code, with `game.user`/`AIS.documents.context()`
+  naming that device's player and every write authorized as that player. The player consents once
+  per device before the first run; un-sharing stops the instance without a reload.
+- Cross-device messaging is the bounded per-package channel (`AIS.bus`, D-487) — same package on
+  every device, sender stamped by the host, no arbitrary fan-out and no cross-package delivery
+  (R-06). Coordination that documents can carry should still ride replication and ownership.
 - No system namespace or `CONFIG` (R-08 — by design).

@@ -90,6 +90,8 @@ export const MsgKind = {
   "stair.request": 0x5d,
   // D-468: host → player AIS module delivery (approved, shared module set).
   "ais.profile": 0x5e,
+  // D-487: a package's cross-device channel frame (both directions; host stamps the sender).
+  "ais.bus": 0x5f,
   // D-394 — permitted personal macro authoring in the GM world (not execution).
   "macros.save": 0x51,
   // SQ-02 — private acknowledgement naming the exact host-approved run a requester may cancel.
@@ -1099,10 +1101,17 @@ export interface AisSharedModule {
   name: string;
   version: string;
   hash: string;
-  source: string;
+  /**
+   * The module's executable source (runtime-provider composition included). On the wire either
+   * this or `payloadZ` is present: heavy modules travel deflated because one WebRTC user message
+   * caps at 256 KiB and a Foundry adapter composition measures ≈312 KiB raw (D-487).
+   */
+  source?: string;
   resources?: Record<string, string>;
   runtimeHash?: string;
   runtimeContext?: Json;
+  /** D-487: deflateRaw(JSON of {source, resources?, runtimeContext?}); see `expandAisSharedModule`. */
+  payloadZ?: Uint8Array;
   commands: import("./automationInterconnect").AisModuleCommandDeclaration[];
   capabilities: import("./automationInterconnect").AisCapability[];
   emittedEvents: string[];
@@ -1132,8 +1141,28 @@ export interface AisProfileMsg {
   modules: AisSharedModule[];
 }
 
+/**
+ * D-487: one bounded frame of a package's cross-device channel (the kernel's socket: `AIS.bus`,
+ * `game.socket` for Foundry-profile modules). Host→client frames carry the relay; client→host
+ * frames are re-stamped with the sending session's user before any relay (`by` is never taken
+ * from the wire). Only the same package's frames on other devices receive it — no fan-out to
+ * other packages.
+ */
+export interface AisBusMsg {
+  kind: "ais.bus";
+  worldId: WorldId;
+  packageId: string;
+  /** 1–128 characters of [A-Za-z0-9._:-] — the package's own channel name. */
+  channel: string;
+  /** Bounded JSON ≤ 16 KiB. */
+  data: Json;
+  /** Sender identity, host-stamped on every relay. */
+  by: { id: string; name: string };
+}
+
 export type WireMessage =
   | AisProfileMsg
+  | AisBusMsg
   | LevelFocusMsg
   | LevelFocusStateMsg
   | StairOfferMsg

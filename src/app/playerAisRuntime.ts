@@ -39,6 +39,7 @@ import {
 } from "../core/aisSettings";
 import type { ActorDocument, Json, SceneDocument, SettingsDocument, TokenDocument } from "../core/documents";
 import type { AisProfileMsg, AisSharedModule } from "../core/messages";
+import { expandAisSharedModule, type AisSharedModuleReady } from "../core/aisSharedModule";
 import type { Op } from "../core/ops";
 import { aisDocumentChanges } from "../core/aisDocuments";
 import {
@@ -96,14 +97,14 @@ export interface PlayerAisConsentRecord {
  * GM reviewed); this binds the player's consent to the bytes that will run, so a host cannot
  * substitute code under an already-allowed identity without the player being asked again.
  */
-export function deliveredDigest(module: AisSharedModule): string {
+export function deliveredDigest(module: AisSharedModuleReady): string {
   const files: Record<string, string> = { "$source": module.source };
   for (const [path, text] of Object.entries(module.resources ?? {})) files[`$resource/${path}`] = text;
   files.$runtime = JSON.stringify({ runtimeHash: module.runtimeHash ?? null, runtimeContext: module.runtimeContext ?? null });
   return packageContentHash(files);
 }
 
-function consentCovers(record: PlayerAisConsentRecord | null, module: AisSharedModule): boolean {
+function consentCovers(record: PlayerAisConsentRecord | null, module: AisSharedModuleReady): boolean {
   return record?.decision === "allow" && record.hash === module.hash && record.digest === deliveredDigest(module)
     && module.capabilities.every((capability) => (record.capabilities ?? []).includes(capability));
 }
@@ -181,6 +182,7 @@ export function describeAisCapability(capability: AisCapability): string {
     case "modules.invoke": return "ask other shared modules on this device to run their commands";
     case "documents.read": return "read the actors, items, journals and tables you can see, and watch them change";
     case "documents.write": return "create, edit and delete documents as you (only what you may edit yourself)";
+    case "bus.transmit": return "talk to its own copies on other devices of this table";
     default: return capability;
   }
 }
@@ -194,17 +196,20 @@ function jsonByteLength(value: unknown): number | null {
   }
 }
 
+/** `ais.profile` after `expandAisSharedModule`: every module carries its source. */
+type AisProfileReady = Omit<AisProfileMsg, "modules"> & { modules: AisSharedModuleReady[] };
+
 export class PlayerAisRuntime {
   private readonly options: PlayerAisRuntimeOptions;
   private readonly frames = new Map<string, PlayerAisFrame>();
   private commandSeq = 0;
   private readonly panels: AisPanelHost | null;
-  private readonly running = new Map<string, AisSharedModule>();
+  private readonly running = new Map<string, AisSharedModuleReady>();
   private readonly statuses: Record<string, AisModuleRuntimeStatus> = {};
   private readonly pending = new Map<string, PlayerAisPendingConsent>();
   private readonly off: Array<() => void> = [];
   private readonly mutate = createAisMutationQueue();
-  private profile: AisProfileMsg | null = null;
+  private profile: AisProfileReady | null = null;
   private applying: Promise<void> = Promise.resolve();
   private disposed = false;
   /** D-476: last world-scope values per running module (one `module.settings.changed` per key). */
@@ -247,6 +252,14 @@ export class PlayerAisRuntime {
       bus.on("turnReport", (message) => this.emit("turn.report.committed", {
         turnId: message.turnId, turn: message.report.turn, rulesVersion: message.report.rulesVersion,
       })),
+      // D-487: frames of a shared package's cross-device channel (same package only; the host
+      // stamps the sender). Delivered only when this device actually runs the package.
+      bus.on("aisBus", (message) => {
+        if (message.worldId !== this.options.worldId) return;
+        this.frames.get(message.packageId)?.emit("bus.message", {
+          channel: message.channel, data: message.data, by: message.by,
+        });
+      }),
     );
     // The profile may have arrived with the welcome, before this runtime existed.
     if (client.aisProfile) this.applyProfile(client.aisProfile);
@@ -263,13 +276,22 @@ export class PlayerAisRuntime {
 
   private applyProfile(message: AisProfileMsg): void {
     if (this.disposed || message.worldId !== this.options.worldId) return;
-    this.profile = message;
-    this.applying = this.applying.then(() => this.reconcile(message)).catch((error) => {
+    // D-487: heavy modules travel deflated; everything downstream (consent digest, start, frames)
+    // sees the ordinary fields. A payload that does not inflate drops that module, not the profile.
+    const ready: AisProfileReady = { ...message, modules: message.modules.map((module) => {
+      try { return expandAisSharedModule(module); }
+      catch (error) {
+        this.options.notify(`Module ${module.packageId}: ${error instanceof Error ? error.message : String(error)}`, "error");
+        return null;
+      }
+    }).filter((module): module is AisSharedModuleReady => module !== null) };
+    this.profile = ready;
+    this.applying = this.applying.then(() => this.reconcile(ready)).catch((error) => {
       this.options.notify(`AIS modules could not be reconciled: ${error instanceof Error ? error.message : String(error)}`, "error");
     });
   }
 
-  private async reconcile(message: AisProfileMsg): Promise<void> {
+  private async reconcile(message: AisProfileReady): Promise<void> {
     if (this.disposed) return;
     const offered = new Map(message.modules.map((module) => [module.packageId, module]));
     // 1. Anything no longer offered under the same hash stops now (and leaves the prompt).
@@ -390,7 +412,7 @@ export class PlayerAisRuntime {
     if (this.disposed) throw new Error("AIS player runtime was stopped");
   }
 
-  private start(module: AisSharedModule): void {
+  private start(module: AisSharedModuleReady): void {
     // D-482: the settings context exposes a live getter (declarations grow at runtime).
     const declarationsOf = (packageId: string): readonly AisSettingDeclaration[] => this.declarationsOf(packageId);
     const { options } = this;
@@ -448,6 +470,12 @@ export class PlayerAisRuntime {
           close: () => { panels.close(module.packageId); this.publish(); },
         } } : {}),
         emitModuleEvent: (eventId, payload) => this.emitModuleEvent(module.packageId, eventId, payload),
+        // D-487: local echo first (the sender hears itself), then cross-device through the host.
+        busEmit: (channel, data) => {
+          const by = { id: client.user?.id ?? "player", name: client.user?.name ?? "Player" };
+          this.frames.get(module.packageId)?.emit("bus.message", { channel, data, by });
+          client.sendAisBus(module.packageId, channel, data);
+        },
         newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID()}`,
         assertCapability,
         // D-476: world scope is read from the replica; only device scope is writable here.

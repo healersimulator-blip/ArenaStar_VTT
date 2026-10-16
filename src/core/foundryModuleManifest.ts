@@ -27,7 +27,7 @@ import { isSafePackagePath, validatePackageManifest, type PackageManifest } from
 import { AIS_API_VERSION } from "./automationInterconnect";
 
 /** The runtime provider every synthesized Foundry module binds to, exact version. */
-export const FOUNDRY_ADAPTER = Object.freeze({ id: "ais-foundry-v13", version: "0.5.0", profile: "foundry-module" });
+export const FOUNDRY_ADAPTER = Object.freeze({ id: "ais-foundry-v13", version: "0.6.0", profile: "foundry-module" });
 /** Path under which the synthesized ArenaStar manifest is written into the imported files. */
 export const FOUNDRY_SYNTHESIZED_MANIFEST = "manifest.json";
 /** Inert stubs the AIS kernel requires (entry + runtime script); the adapter does the loading. */
@@ -210,10 +210,14 @@ export function synthesizeFoundryPackageManifest(foundry: FoundryModuleManifest,
         // D-485: `game.actors`/`Item.create`/`fromUuid`/`createActor` hooks over the generic document service;
         // `ChatMessage.create` posts through the chat service as this user.
         "documents.read", "documents.write", "chat.post",
+        // D-487: `game.socket` over the kernel's bounded cross-device channel (same package only).
+        "bus.transmit",
       ],
       // D-483: Foundry Application / Dialog windows render inside the module's own sandboxed panel.
       panel: { title: foundryPanelTitle(foundry.title), width: FOUNDRY_PANEL_WIDTH, height: FOUNDRY_PANEL_HEIGHT },
-      sharing: "host-only",
+      // D-487: player-side execution. The same adapter stack runs in player frames with the
+      // player's own authority; the GM shares per module exactly as for generic AIS modules.
+      sharing: "players",
     },
   };
 }

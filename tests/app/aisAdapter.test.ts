@@ -43,7 +43,7 @@ let guestZip: Uint8Array;
 beforeAll(() => {
   execFileSync(process.execPath, ["scripts/buildAisDemo.mjs", "--out", stage], { timeout: 60_000, stdio: "pipe" });
   archive = new Uint8Array(readFileSync(join(stage, "worlds/ais-foundry-feasibility-0.1.0.zip")));
-  providerZip = new Uint8Array(readFileSync(join(stage, "packages/ais-foundry-v13-0.5.0.zip")));
+  providerZip = new Uint8Array(readFileSync(join(stage, "packages/ais-foundry-v13-0.6.0.zip")));
   guestZip = new Uint8Array(readFileSync(join(stage, "packages/foundry-tagger-0.1.0.zip")));
 }, 65_000);
 afterAll(() => rmSync(stage, { recursive: true, force: true }));
@@ -141,7 +141,7 @@ describe("adapter package contracts and provenance", () => {
     if (!loaded.ok) throw new Error(loaded.error);
     const provider = required(loaded.value.manifest.interconnect?.runtimeProvider);
     expect(provider.scripts).toEqual(["runtime/hbs.js", "runtime/jq.js", "runtime/core.js", "runtime/fields.js", "runtime/documents.js", "runtime/ui.js"]);
-    const source = aisOwnSource({ ...loaded.value, id: "ais-foundry-v13", version: "0.5.0" });
+    const source = aisOwnSource({ ...loaded.value, id: "ais-foundry-v13", version: "0.6.0" });
     const offsets = ["runtime/hbs.js", "runtime/jq.js", "runtime/core.js", "runtime/fields.js", "runtime/documents.js", "runtime/ui.js", "runtime/adapter.js"].map((path) => source.indexOf(`// AIS package ais-foundry-v13: "${path}"`));
     expect(offsets.every((offset, i) => offset >= 0 && (i === 0 || offset > required(offsets[i - 1])))).toBe(true);
     const raw = JSON.parse(strFromU8(required(unzipSync(providerZip)["manifest.json"]))) as { interconnect: { runtimeProvider: Record<string, unknown>; entry: string } };
@@ -150,7 +150,7 @@ describe("adapter package contracts and provenance", () => {
       manifest.interconnect.runtimeProvider = { ...manifest.interconnect.runtimeProvider, scripts };
       expect(validatePackageManifest(manifest)).toMatchObject({ ok: false, error: expect.stringContaining("invalid runtimeProvider scripts") });
     }
-    const missing = { ...loaded.value, id: "ais-foundry-v13", version: "0.5.0", files: { ...loaded.value.files } };
+    const missing = { ...loaded.value, id: "ais-foundry-v13", version: "0.6.0", files: { ...loaded.value.files } };
     Reflect.deleteProperty(missing.files, "runtime/jq.js");
     expect(() => aisOwnSource(missing)).toThrow("runtime/jq.js is missing or empty");
   });

@@ -48,8 +48,10 @@ describe("AIS v1 package profile resolution", () => {
     expect(aisEventSubscriptionCapability("ui.panel.closed")).toBe("ui.panel");
     // D-485: document change notifications carry ids and diffs; the read grant that exposes them owns the event.
     expect(aisEventSubscriptionCapability("documents.changed")).toBe("documents.read");
+    // D-487: the package's own cross-device channel; opting in is the bus grant itself.
+    expect(aisEventSubscriptionCapability("bus.message")).toBe("bus.transmit");
     for (const event of AIS_EVENTS)
-      if (event !== "module.settings.changed" && event !== "ui.panel.closed" && event !== "documents.changed")
+      if (event !== "module.settings.changed" && event !== "ui.panel.closed" && event !== "documents.changed" && event !== "bus.message")
         expect(aisEventSubscriptionCapability(event)).toBe("action.observe");
   });
 

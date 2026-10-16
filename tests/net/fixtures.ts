@@ -19,6 +19,7 @@ export function sampleMessage(kind: WireMessage["kind"]): WireMessage {
     case "ais.profile": return { kind, worldId: "w1", seq: 7, providers: { "scene.token.light.action": "torch/light" },
       modules: [{ packageId: "torch", name: "Torch", version: "1.0.0", hash: "h1", source: "AIS.commands.on('x', () => null);",
         commands: [{ id: "x", contract: 1 }], capabilities: ["action.observe"], emittedEvents: [] }] };
+    case "ais.bus": return { kind, worldId: "w1", packageId: "torch", channel: "module.torch", data: { hello: true }, by: { id: "u1", name: "GM" } };
     case "audio.cmd":
       return {
         kind: "audio.cmd",

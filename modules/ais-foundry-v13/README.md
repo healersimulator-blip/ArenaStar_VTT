@@ -1,4 +1,4 @@
-# AIS Foundry v13 adapter (0.5.0)
+# AIS Foundry v13 adapter (0.6.0)
 
 ArenaStar-authored code, loaded inside the separately approved guest's opaque AIS iframe.
 The adapter is a runtime provider, not an in-page module and not Foundry core (which is
@@ -27,12 +27,13 @@ Foundry core APIs mapped onto AIS services:
 | `game.modules.get(id)` | mutable `Collection` with the module's own entry (`.api` assignable) + a `sequencer` substitute row |
 | `game.user/users/world/system` | GM device user; `game.system.id === "arenastar"` — deliberately never `pf1` |
 | `game.scenes`, `canvas.<layer>.placeables`, `fromUuid` | the projected active scene (visible placeables), tag flags read/write through `scene.tags.*`, stale revisions refreshed once |
-| `game.keybindings.register`, `game.socket.on` | recorded (reported in `foundry.info`), not dispatched |
+| `game.keybindings.register` | recorded (reported in `foundry.info`), not dispatched |
+| `game.socket.emit/on/off` | **0.6.0 (D-487):** the kernel's bounded cross-device channel (`AIS.bus`) — every running instance of this module on every device hears the frame, sender included; the listener receives the payload; sender identity host-stamped; no cross-package delivery |
 | `ui.notifications.info/warn/error` | `ui.notify` |
 | `Hooks`, `foundry.utils.*`, `CONST`, `CONFIG`, `randomID`, `Array#deepFlatten` | local implementations |
 | `Sequence`/`Sequencer.EffectManager` | the bounded transient-FX builder over `fx.play` |
 | `Application`, `FormApplication`, `DocumentSheet`, `Dialog`, `Tabs`, `FormDataExtended`, `ApplicationV2`, `HandlebarsApplicationMixin`, `DocumentSheetV2`, `DialogV2`, `renderTemplate`/`loadTemplates`, `ui.windows`, `game.settings.registerMenu` | **D-483:** real implementations (`runtime/ui.js`) rendering into the module's own sandboxed panel; templates are the module's own `.hbs` resources compiled by `runtime/hbs.js`; `html` is the jQuery subset in `runtime/jq.js`. Windows open the panel, the last close hides it, the shell's Close raises `ui.panel.closed` and closes every window with its hooks |
-| `Actor`, `Item`, `Token`, `Scene`, `ChatMessage`, … documents | class stubs: `extends`/`instanceof` work; CRUD beyond tags/light fails explicitly naming the gap (R-02); `game.socket.emit` (R-06) and `FilePicker` uploads (R-07) likewise |
+| `Actor`, `Item`, `Token`, `Scene`, `ChatMessage`, … documents | world documents are real since 0.5.0 (below); `Scene`/`TokenDocument` beyond tags/light still fail explicitly (next slice) and `FilePicker` uploads likewise (R-07) |
 
 Commands every imported Foundry module exposes to reviewed script macros:
 
@@ -127,6 +128,24 @@ the world record from IndexedDB on every RPC (207 ms per read in that sandbox) a
 re-fetched every changed root.
 Scenes/placeables still use the projected scene view (`Scene.<id>.Token.<id>`), `Compendium.*`
 uuids and `game.packs` wait for the packs slice — see `AIS_FOUNDRY_ARCHITECTURE.md` §5.
+
+## Cross-device socket and player devices (0.6.0, D-487)
+
+`game.socket` maps onto the kernel's bounded package channel (`AIS.bus`, capability
+`bus.transmit`): `emit(name, data)` reaches this module's instances on **every device of the
+table** — the sender's own listeners included, exactly Foundry's broadcast — `on(name, handler)`
+receives the payload as its single argument, `off` removes. The host stamps the sender
+(`{id, name}` for generic modules; Foundry handlers just see the data). Channels are free-form
+socket names (`module.<id>`, `system.<id>`, …), payloads ≤ 16 KiB bounded JSON; there is no
+cross-package delivery and no arbitrary fan-out — a GM-relay pattern (player emits, the GM
+instance acts) is the intended shape.
+
+Imported Foundry modules now synthesise `sharing: "players"`: when the GM shares one in Settings →
+Packages, the same adapter stack runs in player frames with the **player's** authority —
+`game.user.isGM` is false there, `game.actors` is what that player may see, writes are validated
+as that player, and `compendium.read`/`fx.play`/`scene.tags.write` fail with their usual
+explanations (GM-device services). Heavy runtime payloads travel deflated on the wire (a composed
+adapter stack measures ≈312 KiB raw against the 256 KiB per-message budget).
 
 ## Layout (`runtimeProvider.scripts`, D-483/D-484/D-485)
 

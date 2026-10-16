@@ -9,6 +9,8 @@ import {
   sharedModuleOf,
 } from "../../src/app/aisPlayerProfile";
 import { AIS_CAPABILITIES } from "../../src/core/automationInterconnect";
+import { expandAisSharedModule, packAisSharedModule } from "../../src/core/aisSharedModule";
+import type { AisSharedModule } from "../../src/core/messages";
 import {
   bootHostApp,
   BUILTIN_SYSTEM_ID,
@@ -142,5 +144,45 @@ describe("HostPackages.setAutomationSharing — the GM's per-module opt-out", ()
     const module = (await app.packages.runtimePlan()).modules.find((m) => m.packageId === "gm-only-mod");
     expect(module).toMatchObject({ hostOnly: true, sharedWithPlayers: false, tokenActions: [{ id: "ping", label: "Ping" }] });
     await app.close();
+  });
+});
+
+describe("D-487: shared-module wire payloads", () => {
+  test("heavy modules deflate past the 256 KiB wire budget and expand losslessly", () => {
+    const big: AisSharedModule = {
+      packageId: "big-mod", name: "Big", version: "1.0.0", hash: "h-big",
+      source: `// ${"x".repeat(200_000)}`,
+      resources: { "a.txt": "y".repeat(10_000) },
+      runtimeContext: { distribution: { files: { "m.js": "z".repeat(50_000) } } },
+      commands: [], capabilities: ["bus.transmit"], emittedEvents: [],
+    };
+    const packed = packAisSharedModule(big);
+    expect(packed.source).toBeUndefined();
+    expect(packed.resources).toBeUndefined();
+    expect(packed.runtimeContext).toBeUndefined();
+    expect(packed.payloadZ instanceof Uint8Array).toBe(true);
+    const bytes = packed.payloadZ instanceof Uint8Array ? packed.payloadZ.byteLength : Infinity;
+    expect(bytes).toBeLessThan(256 * 1024); // one WebRTC user message must carry the profile
+    const expanded = expandAisSharedModule(packed);
+    expect(expanded.source).toBe(big.source);
+    expect(expanded.resources).toEqual(big.resources);
+    expect(expanded.runtimeContext).toEqual(big.runtimeContext);
+  });
+
+  test("small modules keep the plain fields and expand back unchanged", () => {
+    const small: AisSharedModule = {
+      packageId: "torch", name: "Torch", version: "1.0.0", hash: "h1",
+      source: "AIS.commands.on('x', function () { return null; });",
+      commands: [{ id: "x", contract: 1 }], capabilities: ["action.observe"], emittedEvents: [],
+    };
+    const packed = packAisSharedModule(small);
+    expect(packed.payloadZ).toBeUndefined();
+    expect(packed).toEqual(small);
+    const expanded = expandAisSharedModule(packed);
+    expect(expanded.source).toBe(small.source);
+    // A payload that does not inflate drops that module, not the profile (applyProfile catches).
+    expect(() => expandAisSharedModule({ ...small, source: undefined, payloadZ: new Uint8Array([1, 2, 3]) }))
+      .toThrow(/does not inflate/);
+    expect(() => expandAisSharedModule({ ...small, source: undefined })).toThrow(/carries no source/);
   });
 });

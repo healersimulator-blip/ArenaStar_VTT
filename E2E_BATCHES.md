@@ -44,7 +44,7 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 | `test:e2e:hexcrawl` | 8 | 16 | 15 min | 8.2 min | **16 passed** |
 | `test:e2e:images` | 10 | 31 | 15 min | 4.9 min | **30 passed / 1 skipped** |
 | `test:e2e:net` | 4 | 5 | 15 min | 0.5 min | **4 passed** (+ `players_roster`, D-465) |
-| `test:e2e:ais` | 6 | 27 | 25 min (raised from 15 in D-485) | 14.8 min (D-486 post-fix; 15.9 min D-485; 10.1 min for 26 tests on the D-484 host) | **27 passed** (D-486 re-run, 2026-10-15) |
+| `test:e2e:ais` | 7 | 28 | 25 min | 12.3 min (D-487; 14.8 min for 27 on the D-486 run) | **28 passed** (D-487, 2026-10-15) |
 | `test:e2e:ui-adapters` | 2 | 5 | 15 min | 1.6 min | **5 passed** |
 | `test:e2e:pf1e-combat` | 16 | 70 | 20 min | 12.7 min | 64 passed / **6 pre-existing failures** |
 | `test:e2e:pf1e-sheets` | 14 | 28 | 20 min | 4.3 min | 23 passed / **5 pre-existing failures** |
@@ -290,3 +290,18 @@ run logs 123 ms per awaited `actor.update` (was 408) and 516 ms hydrate (was 833
 sandbox, of which 3 ms is the host handler (`documents.mutate` in the trace) — the rest is the
 sandbox's ≈90 ms macrotask hop (render-bound main thread), not the AIS path. Batch **27/27 in
 14.8 min** after the fix.
+
+## Multi-device modules and the cross-device channel (D-487, 2026-10-15)
+
+`ais_bus.spec.ts` (new, one test, **44.3 s** alone) is the two-device acceptance for player-side
+modules and the kernel's bounded package channel. It imports a generic AIS fixture (`AIS.bus` +
+`AIS.chat.post` + `documents.context`) and an **unmodified Foundry-format** fixture
+(`game.socket`, `Hooks.once("ready")`, `ChatMessage.create`, `game.modules.get(id).api`) on the
+GM, joins a player device with the manual-signalling dance from `ais_player.spec.ts`, consents on
+the player, and asserts both directions of both channels through each side's chat store: the
+player instances' boot announces reach the GM (payload `from` = the player's user id,
+`"isGM":false` — the Foundry instance's `game.user` is the player) and a GM script-macro
+`ping`/`socketEmit` reaches the player's instances, with the sender's own local echo asserted on
+the way. The test found the wire-budget defect (a composed adapter stack is 312 KiB raw against
+the 256 KiB WebRTC per-message cap; `ais.profile` used to kill the session at join) — profile
+payloads now travel deflated (`payloadZ`), covered by `tests/app/aisPlayerProfile.test.ts`.

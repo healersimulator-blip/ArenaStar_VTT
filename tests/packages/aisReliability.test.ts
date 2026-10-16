@@ -150,7 +150,7 @@ async function fixture() {
     db, worldId: `ais-test-${crypto.randomUUID()}`, packageId: "probe", emittedEvents: [],
     user: () => ({ id: "gm", name: "GM" }), activeScene: () => scene,
     actorById: (id) => id === actor._id ? actor : undefined, select: async () => null,
-    submit: vi.fn(async () => "tx-accepted"), notify: vi.fn(), emitModuleEvent: vi.fn(),
+    submit: vi.fn(async () => "tx-accepted"), notify: vi.fn(), emitModuleEvent: vi.fn(), busEmit: vi.fn(),
     newId: () => "message-1", assertCapability: async () => {},
   };
   return { db, actor, scene, context };

@@ -1657,7 +1657,8 @@ interface AisProfileMsg {
 interface AisSharedModule {
   packageId: string; name: string; version: string;
   hash: string;                      // module identity; consent is keyed on it
-  source: string;                    // entry source (≤ 1 MiB) or composed runtime source
+  source?: string;                   // entry/composed runtime source (≤ 1 MiB) — see payloadZ
+  payloadZ?: Uint8Array;             // D-487: deflate of {source, resources?, runtimeContext?}
   resources?: Record<string, string>;
   runtimeHash?: string; runtimeContext?: Json;
   commands: AisModuleCommandDeclaration[];
@@ -1686,6 +1687,32 @@ Delivery is not authority: a player's module runs in the same sandboxed iframe a
 and every op it produces travels as an ordinary `intent`, so the host's `validateOps` and
 Foundry-default ownership rules decide what it may change (a torch module can light the tokens
 the player owns and nothing else). No new client → host message exists for this feature.
+
+### ais.bus (0x5f · both · ops)
+
+D-487 the bounded **package channel** — one module instance talking to the same module's
+instances on other devices (`AIS.bus` in the SDK; `game.socket` for Foundry-profile modules).
+Client → host frames are validated (shape, ephemeral rate-limit bucket) and re-stamped with the
+sending session's user; host → client frames are the relay. The host relays only for packages in
+the current player-shared set (host-only packages never leave the GM device) and skips the
+sending session (its frame already heard its local echo). Delivery reaches the same package's
+frames on every device, the sender included — no cross-package delivery, no arbitrary fan-out,
+nothing retroactive to instances that boot later.
+
+```ts
+interface AisBusMsg {
+  kind: "ais.bus";
+  worldId: WorldId;
+  packageId: string;          // ^[a-z0-9][a-z0-9-]{1,63}$
+  channel: string;            // 1–128 chars of [A-Za-z0-9._:-] (e.g. "module.my-mod")
+  data: Json;                 // bounded JSON ≤ 16 KiB
+  by: { id: string; name: string }; // sender identity, host-stamped on every relay
+}
+```
+
+A module needs the `bus.transmit` capability; its frames subscribe to `bus.message`
+`{ channel, data, by }`. Payloads travel to every connected device for shared packages —
+per-device consent gates *execution* on a device, not transport (as with `ais.profile` sources).
 
 ### Floor scopes for presentation objects; tokens always land on a floor (D-431, D-432)
 

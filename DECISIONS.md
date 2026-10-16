@@ -15379,3 +15379,71 @@ never assumed.
 `tsc --noEmit` 0; `eslint .` 0; vitest 5,917 passed / 12 skipped (447 files); D-485 e2e passes in
 57 s with the new measurements; `test:e2e:ais` **27/27 in 14.8 min** after the fix, logging
 hydrate 516 ms / write 123 ms / handler 3 ms (details in `E2E_BATCHES.md`).
+
+## D-487 — Multi-device AIS: player-side module execution + the cross-device package channel (2026-10-15)
+
+**Scope (one bigger slice, architecture §5 items 2+3).** AIS is the general interconnect for
+modders, not a Foundry-only machine, so the slice put BOTH halves of "interconnect" in place at
+the kernel level and mapped Foundry onto them: (a) modules run on **every device the GM shares
+them with** — the same code, the device user's authority; (b) a bounded **package channel** lets a
+module's instances talk across devices. Foundry's `game.socket` is then a thin mapping, and
+generic modules get the same power through `AIS.bus` directly.
+
+**Kernel (generic; no Foundry knowledge).**
+- Capability `bus.transmit`; host event `bus.message { channel, data, by }`; RPC
+  `bus.emit { channel, data }`; SDK `AIS.bus.emit/on/off` (`on(channel, cb)` → `cb(data, by)`).
+  Channels are 1–128 chars of `[A-Za-z0-9._:-]`, payloads bounded JSON ≤ 16 KiB.
+- Delivery: the same package's frames on **every** device, the sender's own frame included
+  (Foundry's broadcast semantics). `by` is stamped by the host from the sending session (`{id,
+  name}`) — never taken from the wire. **No cross-package delivery and no arbitrary fan-out.**
+- Wire `ais.bus` (MsgKind `0x5f`, ops channel). Host `handleAisBus`: authenticated session,
+  ephemeral rate-limit bucket, shape validation, and a relay only while the package is in the
+  current player-shared set (host-only packages never leave the GM device — anti-leak as well as
+  anti-spoof); the sender's session is skipped (it already echoed locally).
+- `interconnect.sharing: "players"` is now the synthesised manifest for imported Foundry modules
+  (was `"host-only"`); the provider manifest and the synthesised guest grant `bus.transmit`.
+
+**Foundry mapping (adapter 0.6.0).** `game.socket.on/off/emit` over `AIS.bus`: listener receives
+the payload (single argument, as socket.io delivers), the optional `emit` third-arg handler runs
+locally when not already registered, and the sender hears itself — the broadcast semantics
+Foundry modules expect. `game.socket.emit` no longer reports as an unsupported call.
+
+**The bug the browser found (the reason this slice needed two attempts).** The player joined,
+received the snapshot, and the connection died exactly when `ais.profile` arrived. Cause: one
+WebRTC user message caps at **256 KiB**, while the composed adapter source (`aisOwnSource(provider)
++ aisOwnSource(guest)`) measures **312,156 B raw** — `dc.send` throws and the session dies. Small
+generic modules (pf1e-torch) never exposed this; Foundry guests are the first fat ones. Fix:
+`packAisSharedModule`/`expandAisSharedModule` (`src/core/aisSharedModule.ts`) — payloads over
+32 KiB travel as `payloadZ` = deflateRaw of `{source, resources?, runtimeContext?}` (≈100 KiB for
+the 312 KiB composition), small modules keep the plain fields; the player runtime expands before
+the consent digest (`deliveredDigest` binds the expanded bytes), a payload that does not inflate
+drops that module with a notification, not the profile. Rule of record in the architecture doc:
+anything that grows deflates under the 256 KiB cap or rides the chunked asset pipeline — never one
+big frame.
+
+**Measured (Chromium, real import path).** `e2e/ais_bus.spec.ts` (new, in `test:e2e:ais`, 44.3 s
+alone): the feasibility world + a generic fixture (`AIS.bus` + `AIS.chat.post` +
+`documents.context`) + an **unmodified Foundry-format** fixture (`game.socket`, `Hooks.once
+("ready")`, `ChatMessage.create`, `game.modules.get(id).api`) import and boot on the GM; a player
+device joins (manual signalling), consents to both modules, and both directions of both channels
+are asserted through the chat each side's store holds: player boot announces reach the GM (payload
+`from` = the player's user id, `isGM:false` — the Foundry instance's `game.user` IS the player);
+a GM script-macro `ping`/`socketEmit` reaches the player's instances (the sender's own echo is
+asserted too). Same-package isolation is enforced at the host (the fixtures use different
+channels and never see each other's frames).
+
+**Honest limits.** Bus transport delivers to every connected device of the world for packages in
+the shared set — per-device consent gates *execution*, not transport (the same posture as
+`ais.profile`, whose sources already reach unconsented devices before the prompt). No delivery
+retroactivity: an instance that boots later does not see earlier frames (Foundry's socket is the
+same). The channel is same-package only — a module cannot address another module's instances on a
+remote device (`modules.invoke` remains same-device). Player-side Foundry still lacks
+`compendium.read`, `fx.play`, `scene.tags.write`, `ui.theme` (GM-device capabilities); those RPCs
+fail with their usual explanations. Scenes/placeables (`document.scene` slice) and packs remain
+the next slices per the architecture.
+
+**Evidence.** `tests/app/aisPlayerProfile.test.ts` +2 (pack/expand round-trip, deflate budget,
+corrupt-payload drop); `tests/packages/aisModule.test.ts` +2 (dispatcher capability gate; real
+handler bounds — channel charset/length, 16 KiB payload, `busEmit` bridge); catalog tests updated
+(`bus.message` → `bus.transmit`); `tests/net`/`tests/core/contracts` wire tables carry `ais.bus`.
+tsc 0, eslint 0. The full `test:e2e:ais` batch (28 tests) result is recorded in `E2E_BATCHES.md`.

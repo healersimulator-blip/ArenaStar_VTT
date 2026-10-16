@@ -1122,6 +1122,8 @@ export interface PlayerSurface {
   lastRejected(): { txId: string; reason: string; detail: string } | null;
   /** D-481: the replicated world values of one AIS module's settings document (null = defaults). */
   aisWorldSettings(packageId: string): Record<string, unknown> | null;
+  /** D-487: chat message texts this replica holds (cross-device bus assertions read them). */
+  aisChatTexts(): string[];
   /** D-271: the cell keys this replica holds. A closed cell is never sent, so this is the
    *  reveal set and nothing else — the browser half of the projection rule. */
   hexCellKeys(): string[];
@@ -1860,6 +1862,8 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
       const values = (doc?.flags as { ais?: { values?: Record<string, unknown> } } | undefined)?.ais?.values;
       return values && typeof values === "object" ? { ...values } : null;
     },
+    aisChatTexts: () =>
+      (client()?.store.getAll("messages") ?? []).map((message) => String((message as { content?: unknown }).content ?? "")),
     hexCellKeys: () => {
       const scenes = client()?.store.getAll("scenes") ?? [];
       const active = scenes.find((sc) => sc.active) ?? scenes[0] ?? null;

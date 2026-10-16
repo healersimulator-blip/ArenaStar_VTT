@@ -20,7 +20,8 @@ import { ClientSync, type ClientEvents } from "../../src/client/sync";
 import { createTransportPair, flushMicrotasks } from "../../src/net/memory";
 import { createEventBus, type EventBus } from "../../src/core/events";
 import { DocumentStore, OpLog, UndoStack, type StoreMeta } from "../../src/core";
-import type { AisProfileMsg, AisSharedModule, HelloMsg } from "../../src/core/messages";
+import type { AisProfileMsg, HelloMsg } from "../../src/core/messages";
+import type { AisSharedModuleReady } from "../../src/core/aisSharedModule";
 import type { Op, OpEnvelope } from "../../src/core/ops";
 import type { AisSettingDeclaration } from "../../src/core/automationInterconnect";
 import { aisWorldSettingOps } from "../../src/core/aisSettings";
@@ -71,7 +72,7 @@ function sceneDoc(tokens: TokenDocument[]): SceneDocument {
   };
 }
 
-const torchModule = (hash = "h-torch-1"): AisSharedModule => ({
+const torchModule = (hash = "h-torch-1"): AisSharedModuleReady => ({
   packageId: "pf1e-torch", name: "Torch", version: "1.0.0", hash,
   source: "AIS.events.on('ui.token.action', function () {});",
   commands: [{ id: "light.toggle", contract: 1 }],

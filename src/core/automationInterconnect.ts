@@ -30,6 +30,8 @@ export const AIS_EVENTS = [
   "ui.panel.closed",
   /** D-485: a committed transaction touched documents of a collection exposed to modules (per-root entries). */
   "documents.changed",
+  /** D-487: a frame of this package's cross-device channel (AIS.bus / the kernel's bounded socket). */
+  "bus.message",
 ] as const;
 export type AisEventName = (typeof AIS_EVENTS)[number];
 
@@ -43,6 +45,8 @@ export function aisEventSubscriptionCapability(event: AisEventName): AisCapabili
   if (event === "ui.panel.closed") return "ui.panel";
   // D-485: document change notifications carry document ids and diffs — the read grant covers them.
   if (event === "documents.changed") return "documents.read";
+  // D-487: the channel is the package's own namespace; opting in is the bus grant itself.
+  if (event === "bus.message") return "bus.transmit";
   return "action.observe";
 }
 
@@ -98,6 +102,12 @@ export interface AisEventPayloads {
   };
   /** D-485: see `aisDocumentChanges` — one entry per op on an exposed collection, root-filtered. */
   "documents.changed": import("./aisDocuments").AisDocumentsChangedPayload;
+  /** D-487: one bounded frame of a package's cross-device channel. `by` is host-stamped. */
+  "bus.message": {
+    channel: string;
+    data: import("./documents").Json;
+    by: { id: string; name: string };
+  };
 }
 
 export interface AisTokenLightChangeRef { sceneId: string; tokenId: string }
@@ -172,6 +182,9 @@ export const AIS_CAPABILITIES = [
   // observe their changes; write them as ordinary transactions under that user's authority.
   "documents.read",
   "documents.write",
+  // D-487: talk to the same package's instances on other devices over the kernel's bounded
+  // channel (AIS.bus; `game.socket` for Foundry-profile modules). Delivery is same-package only.
+  "bus.transmit",
 ] as const;
 export type AisCapability = (typeof AIS_CAPABILITIES)[number];
 

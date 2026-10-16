@@ -57,6 +57,7 @@ const EVENT_NAMES = new Set<AisEventName>([
   "module.settings.changed",
   "ui.panel.closed",
   "documents.changed",
+  "bus.message",
 ]);
 /** D-477: one compendium entry payload must fit the RPC frame with room for the envelope. */
 const MAX_COMPENDIUM_ENTRY_BYTES = 48 * 1024;
@@ -156,6 +157,12 @@ export interface AisModuleHandlerContext {
   /** D-470: the shell's panel slot for this module; absent when the manifest declares no panel. */
   panel?: { open(): void; close(): void };
   emitModuleEvent: (eventId: string, payload: Json) => void;
+  /**
+   * D-487: deliver one frame of this package's cross-device channel. The runtime echoes it to
+   * this device's own frame (the sender hears itself, as `game.socket` does) and relays it to the
+   * same package's frames on every other device through the host.
+   */
+  busEmit: (channel: string, data: Json) => void;
   newId: (prefix: string) => string;
   /** Re-checks the exact profile lock and local hash-bound consent on each host request. */
   assertCapability: (capability: AisCapability) => Promise<void>;
@@ -473,6 +480,16 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       if (!boundedJson(payload) || (byteLength(payload) ?? Infinity) > 16 * 1024)
         throw new Error("event payload must be bounded JSON no larger than 16 KiB");
       ctx.emitModuleEvent(eventId, payload);
+      return { ok: true };
+    },
+    "bus.emit": async ({ channel, data }, commandContext) => {
+      await ctx.assertCapability("bus.transmit");
+      assertCommandActive(commandContext);
+      if (typeof channel !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(channel))
+        throw new Error("AIS bus channel must be 1–128 characters of A-Z a-z 0-9 . _ : -");
+      if (!boundedJson(data) || (byteLength(data) ?? Infinity) > 16 * 1024)
+        throw new Error("AIS bus payload must be bounded JSON no larger than 16 KiB");
+      ctx.busEmit(channel, data as Json);
       return { ok: true };
     },
     "scene.read.visible": async (_args, commandContext) => {

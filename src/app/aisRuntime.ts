@@ -139,6 +139,8 @@ export class AisRuntime {
     for (const module of app.automationBoot.modules) this.start(module);
     // D-468: players receive the shared module set once the GM-device consent has been read.
     app.host.setAisProfileProvider(() => this.playerProfileBody);
+    // D-487: cross-device channel frames addressed to this device's module frames.
+    app.host.setAisBusRelay((msg) => this.deliverAisBus(msg));
     void getWorld(app.db, app.worldId).then(
       (world) => this.publishPlayerProfile(world),
       () => this.publishPlayerProfile(null),
@@ -291,6 +293,8 @@ export class AisRuntime {
             close: () => { panels.close(module.packageId); },
           } } : {}),
           emitModuleEvent: (eventId, payload) => this.emitModuleEvent(module.packageId, eventId, payload),
+          // D-487: echo to this device's own frame (the sender hears itself) and relay cross-device.
+          busEmit: (channel, data) => this.busEmit(module.packageId, channel, data),
           newId: (prefix) => `${prefix}${globalThis.crypto.randomUUID()}`,
           assertCapability,
           // D-476: the GM device writes world scope with GM authority; device scope stays local.
@@ -540,6 +544,25 @@ export class AisRuntime {
   }
 
   /**
+   * D-487: one frame of a module's cross-device channel. Local echo first (the emitting frame
+   * hears itself, as `game.socket`'s broadcast does), then the host relays to every other device
+   * where this package runs (see HostSync.publishAisBus — host-only packages never leave here).
+   */
+  private busEmit(packageId: string, channel: string, data: Json): void {
+    if (this.disposed) return;
+    const { app } = this.options;
+    const by = { id: app.gm.client.user?.id ?? "gm", name: app.gm.client.user?.name ?? "GM" };
+    this.hosts.get(packageId)?.emit("bus.message", { channel, data, by });
+    app.host.publishAisBus({ packageId, channel, data, by });
+  }
+
+  /** D-487: deliver a relayed frame from another device to this device's frame of that package. */
+  deliverAisBus(msg: { packageId: string; channel: string; data: Json; by: { id: string; name: string } }): void {
+    if (this.disposed) return;
+    this.hosts.get(msg.packageId)?.emit("bus.message", { channel: msg.channel, data: msg.data, by: msg.by });
+  }
+
+  /**
    * D-468: recompute and re-send the player-facing module set. `null` world = the authority
    * read failed, which shares nothing (the same posture `reconcile` takes for local frames).
    */
@@ -652,6 +675,7 @@ export class AisRuntime {
     for (const off of this.off) off();
     this.options.app.host.setAisMacroModuleInvoker(null);
     this.options.app.host.setAisProfileProvider(null);
+    this.options.app.host.setAisBusRelay(null);
     for (const frame of this.hosts.values()) frame.dispose("World closed");
     this.hosts.clear();
     this.panels?.dispose();

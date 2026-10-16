@@ -266,7 +266,9 @@ describe("ais-foundry-v13 documents layer", () => {
     expect(actor.flags).not.toHaveProperty("other");
     expect(t.kernel.reads).toEqual([]);
     // Embedded create needs the kernel copy (the feed carries no row data); the instance stays stable.
-    const [sword] = await (actor as unknown as { createEmbeddedDocuments: (name: string, rows: unknown[]) => Promise<DocLike[]> }).createEmbeddedDocuments("Item", [{ name: "Sword", type: "weapon", system: { dmg: 4 } }]);
+    const createdSword = await (actor as unknown as { createEmbeddedDocuments: (name: string, rows: unknown[]) => Promise<DocLike[]> }).createEmbeddedDocuments("Item", [{ name: "Sword", type: "weapon", system: { dmg: 4 } }]);
+    const sword = createdSword[0];
+    if (!sword) throw new Error("embedded create returned no row");
     expect(t.kernel.reads).toHaveLength(1);
     expect(t.layer.collections.actors?.get("a-pc")).toBe(actor);
     // Embedded update + embedded delete from another device: no re-read, hooks still fire with the pre-image.

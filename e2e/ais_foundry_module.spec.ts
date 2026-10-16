@@ -111,7 +111,7 @@ function foundryCoreApiModuleZip(): Buffer {
       `import clamp, { clamp as named } from "./lib/util.mjs";`,
       `import "/scripts/lib/side.mjs";`,
       `const MODULE_ID = "fsd-demo";`,
-      `const state = { changes: [], ready: false, classic: typeof window.FSD_CLASSIC, side: globalThis.FSD_SIDE === true };`,
+      `const state = { changes: [], ready: false, classic: typeof window.FSD_CLASSIC, side: globalThis.FSD_SIDE === true, socket: [] };`,
       `Hooks.once("init", () => {`,
       `  game.settings.register(MODULE_ID, "radius", { name: "FSD.Radius", hint: "FSD.RadiusHint", scope: "world", config: true, type: Number,`,
       `    default: 20, range: { min: 0, max: 60, step: 5 }, onChange: (value) => state.changes.push(["radius", value]) });`,
@@ -194,12 +194,17 @@ function foundryCoreApiModuleZip(): Buffer {
       `  ui.notifications.info(game.i18n.localize("FSD.Ready"));`,
       `  game.modules.get(MODULE_ID).api = { state: () => state, radius: () => game.settings.get(MODULE_ID, "radius"),`,
       `    setRadius: (value) => game.settings.set(MODULE_ID, "radius", value), documents: probeDocuments, docEvents: () => state.docEvents, bench: benchDocuments,`,
+      `    socketLog: () => state.socket, socketEmit: (data) => { game.socket.emit("module.fsd-demo", data); return true; },`,
       `    actorView: (id) => { const actor = game.actors.get(id); return actor ? { name: actor.name, hp: actor.system.hp?.value ?? null, flags: actor.flags[MODULE_ID] ?? null, items: actor.items.map((item) => item.name) } : null; } };`,
+      // D-487: announce this instance across devices (the sender hears itself; every other device hears it too).
+      `  game.socket.emit("module.fsd-demo", { hello: true, from: game.user.name });`,
       `});`,
       // D-485 probes: plain Foundry document code — classes, embedded collections, flags, uuids and the create*/update*/delete* hooks.
       `state.docEvents = [];`,
       `for (const hook of ["createActor", "updateActor", "deleteActor", "createItem", "updateItem", "deleteItem", "createJournalEntry"])`,
       `  Hooks.on(hook, (doc, changes, options, userId) => state.docEvents.push({ hook, name: doc.name, uuid: doc.uuid, changes: hook.startsWith("update") ? changes : null, userId: hook.startsWith("delete") ? options : userId }));`,
+      // D-487: game.socket over the kernel's cross-device channel (same module on every device).
+      `game.socket.on("module.fsd-demo", (data) => { state.socket.push(data); ChatMessage.create({ content: "fsd socket " + JSON.stringify(data) }).catch(() => {}); });`,
       // Measured, not asserted: what a module experiences per awaited write (mutate → commit → change event → replica refresh).
       `async function benchDocuments(id, n) {`,
       `  const actor = game.actors.get(id); const started = performance.now();`,

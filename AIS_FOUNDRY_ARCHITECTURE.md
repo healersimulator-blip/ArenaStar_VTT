@@ -1,8 +1,8 @@
 # Running Foundry modules on ArenaStar — the layered architecture
 
-*Status: design of record for Target A (D-482…D-486) and the slices that follow. Written
+*Status: design of record for Target A (D-482…D-487) and the slices that follow. Written
 2026-10-15 after the owner asked for the overall project architecture to be settled before more
-slices were added. Companion documents: [`DECISIONS.md`](DECISIONS.md) (D-468…D-486),
+slices were added. Companion documents: [`DECISIONS.md`](DECISIONS.md) (D-468…D-487),
 [`AIS_PF1E_MODULE_READINESS.md`](AIS_PF1E_MODULE_READINESS.md) (R-01…R-11 per real module),
 [`AIS_MODULE_GUIDE.md`](AIS_MODULE_GUIDE.md) (the generic module API), the adapter's own
 [`README`](modules/ais-foundry-v13/README.md).*
@@ -187,6 +187,13 @@ plain `actor.update` 408 ms; with the rule it is 119–132 ms of which the host 
 queues behind ≈90 ms Pixi frames on software GL — an idle `MessageChannel` ping is 89 ms there);
 on GPU hardware a hop is ≈1 ms. Measure in the browser before quoting any ms number.
 
+**Wire budget (D-487 — the rule that keeps player devices working).** One WebRTC user message
+caps at 256 KiB; a composed runtime-provider + guest source measures ≈312 KiB raw, so `ais.profile`
+carries heavy module payloads deflated (`payloadZ` = deflate of `{source, resources?, runtimeContext?}`;
+small modules keep the plain fields). Anything else that grows — profile-like broadcasts, future
+asset hand-offs — either deflates under the cap or rides the chunked asset pipeline; never one big
+frame.
+
 ## 5. Player side, sockets, packs — the next slices in this structure
 
 The document bridge's latency slice (**D-486**) is done: consent/capability from in-memory
@@ -197,15 +204,17 @@ snapshots, inline-diff application, measured end to end. Everything below follow
    `tokens/lights/walls/…` as embedded chains. `TokenDocument.update()` then writes any token
    field the host allows (today only `flags.tagger.tags` through `scene.tags.update`); the
    dedicated tag/light services remain as higher-level helpers.
-2. **Player-side Foundry modules.** Flip the synthesised manifest from `sharing: "host-only"` to
-   the normal D-469 sharing when the GM shares the module: the same adapter runs in player frames
-   with player authority (`game.user` = the player, `game.actors` = what they may see, writes
-   validated by the host). Device-only capabilities (`fx.play`, `scene.tags.write`,
-   `compendium.read`) stay GM-side as today; `documents.*` and `chat.post` work on both.
-3. **Sockets (R-06).** A kernel *package channel*: `events.emit` with `scope: "devices"` relays a
-   package's declared event to the same package's frames on every device (through the host, with
-   the sender's user id); `game.socket.emit("module.<id>", data)` / `.on` map onto it. No
-   arbitrary fan-out, no cross-package delivery.
+2. **Player-side Foundry modules — done (D-487).** The synthesised manifest now shares like any
+   D-469 module; the same adapter stack runs in player frames with player authority
+   (`game.user` = the player, writes validated as the player). Device-only capabilities
+   (`fx.play`, `scene.tags.write`, `compendium.read`, `ui.theme`) stay GM-side. The D-487 e2e
+   runs an unmodified Foundry module on a player device and asserts its `game.user.isGM === false`
+   view. Requires the profile wire budget below.
+3. **Sockets (R-06) — done (D-487).** The kernel's bounded *package channel* (`bus.transmit`;
+   `AIS.bus.emit/on/off` → `bus.message`): a frame reaches the same package's frames on every
+   device through the host, sender included and host-stamped (`by`), no arbitrary fan-out and no
+   cross-package delivery. `game.socket.emit("module.<id>", data)` / `.on` map onto it with
+   Foundry's broadcast semantics (the listener receives the payload).
 4. **Packs (R-10).** `game.packs` as `CompendiumCollection`s over `compendium.list/search/get`
    with `getIndex({fields})`/`getDocument`/`fromUuid("Compendium.…")`; a LevelDB → JSON pack
    importer at package import time.

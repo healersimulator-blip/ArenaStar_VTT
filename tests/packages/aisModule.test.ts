@@ -24,6 +24,7 @@ const allHandlers = (): AisModuleHandlers => ({
   "fx.stop": vi.fn(async () => ({ stopped: true })),
   "events.subscribe": vi.fn(async () => ({ ok: true })),
   "events.emit": vi.fn(async () => ({ ok: true })),
+  "bus.emit": vi.fn(async () => ({ ok: true })),
   "scene.read.visible": vi.fn(() => ({ scene: "scene-1" })),
   "actor.inventory.read": vi.fn(async () => ({ actorId: "actor-1", actorName: "Actor", items: [] })),
   "scene.token.light.apply": vi.fn(async () => ({ ok: true })),
@@ -135,6 +136,21 @@ describe("AIS module RPC capability boundary", () => {
     ]);
   });
 
+  test("D-487: bus.emit needs the bus.transmit capability before its handler runs", async () => {
+    const handlers = allHandlers();
+    const denied = await dispatch(handlers, new Set(["event.emit"]), frame(1, "bus.emit", {
+      channel: "module.demo", data: { hello: true },
+    }));
+    expect(denied).toMatchObject([{ ok: false, error: "Capability not granted: bus.transmit" }]);
+    expect(handlers["bus.emit"]).not.toHaveBeenCalled();
+
+    const allowed = await dispatch(handlers, new Set(["bus.transmit"]), frame(2, "bus.emit", {
+      channel: "module.demo", data: { hello: true },
+    }));
+    expect(allowed).toMatchObject([{ ok: true }]);
+    expect(handlers["bus.emit"]).toHaveBeenCalledWith({ channel: "module.demo", data: { hello: true } }, undefined);
+  });
+
   test("custom event emission requires its separate capability", async () => {
     const handlers = allHandlers();
     const denied = await dispatch(handlers, new Set(["action.observe"]), frame(1, "events.emit", {
@@ -194,7 +210,7 @@ describe("AIS host handlers", () => {
       select: async () => null,
       submit: () => "tx-unused",
       notify: () => undefined,
-      emitModuleEvent: (eventId, payload) => emitted.push({ eventId, payload }),
+      emitModuleEvent: (eventId, payload) => emitted.push({ eventId, payload }), busEmit: () => undefined,
       newId: (prefix) => `${prefix}one`,
       assertCapability: async (capability) => {
         if (!granted.has(capability)) throw new Error(`denied ${capability}`);
@@ -209,6 +225,39 @@ describe("AIS host handlers", () => {
     db.close();
   });
 
+  test("D-487: bus.emit bounds the channel and payload and delivers to the runtime bridge", async () => {
+    const db = await openVttDb();
+    const granted = new Set<AisCapability>(["bus.transmit"]);
+    const frames: unknown[] = [];
+    const handlers = createAisModuleHandlers({
+      worldId: "w-ais-bus",
+      packageId: "sample-mod",
+      emittedEvents: [],
+      db,
+      user: () => ({ id: "gm", name: "GM" }),
+      activeScene: sampleScene,
+      actorById: () => undefined,
+      select: async () => null,
+      submit: () => "tx-unused",
+      notify: () => undefined,
+      emitModuleEvent: () => undefined,
+      busEmit: (channel, data) => frames.push({ channel, data }),
+      newId: (prefix) => `${prefix}one`,
+      assertCapability: async (capability) => {
+        if (!granted.has(capability)) throw new Error(`denied ${capability}`);
+      },
+    });
+    await handlers["bus.emit"]({ channel: "module.demo.ping", data: { hello: true } });
+    expect(frames).toEqual([{ channel: "module.demo.ping", data: { hello: true } }]);
+    await expect(handlers["bus.emit"]({ channel: "not a channel!", data: null })).rejects.toThrow("channel");
+    await expect(handlers["bus.emit"]({ channel: "ok.name", data: { data: "x".repeat(17 * 1024) } })).rejects.toThrow("16 KiB");
+    await expect(handlers["bus.emit"]({ channel: "a".repeat(129), data: null })).rejects.toThrow("channel");
+    granted.clear();
+    await expect(handlers["bus.emit"]({ channel: "ok.name", data: null })).rejects.toThrow("denied bus.transmit");
+    expect(frames).toHaveLength(1);
+    db.close();
+  });
+
   test("D-470: ui.panel.open/close need the ui.panel capability and a shell-provided panel slot", async () => {
     const db = await openVttDb();
     const granted = new Set<string>(["ui.panel"]);
@@ -217,7 +266,7 @@ describe("AIS host handlers", () => {
       worldId: "w-ais-panel", packageId: "sample-mod", emittedEvents: [], db,
       user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
       select: async () => null, submit: () => "tx-unused", notify: () => undefined,
-      emitModuleEvent: () => undefined, newId: (prefix: string) => `${prefix}one`,
+      emitModuleEvent: () => undefined, busEmit: () => undefined, newId: (prefix: string) => `${prefix}one`,
       assertCapability: async (capability: string) => { if (!granted.has(capability)) throw new Error(`denied ${capability}`); },
     };
     const withPanel = createAisModuleHandlers({ ...base, panel: { open: () => calls.push("open"), close: () => calls.push("close") } });
@@ -247,7 +296,7 @@ describe("AIS host handlers", () => {
     const handlers = createAisModuleHandlers({
       worldId: "w-ais-settings", packageId: "torch", emittedEvents: [], db,
       user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
-      select: async () => null, notify: () => undefined, emitModuleEvent: () => undefined,
+      select: async () => null, notify: () => undefined, emitModuleEvent: () => undefined, busEmit: () => undefined,
       newId: (prefix: string) => `${prefix}one`,
       submit: (ops) => {
         submitted.push(ops);
@@ -316,7 +365,7 @@ describe("AIS host handlers", () => {
     const withRegister = createAisModuleHandlers({
       worldId: "w-ais-settings", packageId: "torch", emittedEvents: [], db,
       user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
-      select: async () => null, notify: () => undefined, emitModuleEvent: () => undefined,
+      select: async () => null, notify: () => undefined, emitModuleEvent: () => undefined, busEmit: () => undefined,
       newId: (prefix: string) => `${prefix}one`, submit: () => "tx", assertCapability: async () => undefined,
       settings: {
         get declarations() { return [...declarations, ...registered]; },
@@ -347,7 +396,7 @@ describe("AIS host handlers", () => {
     const bare = createAisModuleHandlers({
       worldId: "w-ais-settings", packageId: "bare", emittedEvents: [], db,
       user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
-      select: async () => null, submit: () => "tx", notify: () => undefined, emitModuleEvent: () => undefined,
+      select: async () => null, submit: () => "tx", notify: () => undefined, emitModuleEvent: () => undefined, busEmit: () => undefined,
       newId: (prefix: string) => `${prefix}one`, assertCapability: async () => undefined,
     });
     await expect(bare["settings.list"]({})).resolves.toEqual({ settings: [] });
@@ -366,7 +415,7 @@ describe("AIS host handlers", () => {
     const base = {
       worldId: "w-ais-compendium", packageId: "reader", emittedEvents: [], db,
       user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
-      select: async () => null, submit: () => "tx", notify: () => undefined, emitModuleEvent: () => undefined,
+      select: async () => null, submit: () => "tx", notify: () => undefined, emitModuleEvent: () => undefined, busEmit: () => undefined,
       newId: (prefix: string) => `${prefix}one`,
       assertCapability: async (capability: string) => { if (!granted.has(capability)) throw new Error(`denied ${capability}`); },
     };
@@ -410,7 +459,7 @@ describe("AIS host handlers", () => {
     const handlers = createAisModuleHandlers({
       worldId: "w-ais-bus", packageId: "caller", emittedEvents: [], db,
       user: () => ({ id: "gm", name: "GM" }), activeScene: sampleScene, actorById: () => undefined,
-      select: async () => null, submit: () => "tx", notify: () => undefined, emitModuleEvent: () => undefined,
+      select: async () => null, submit: () => "tx", notify: () => undefined, emitModuleEvent: () => undefined, busEmit: () => undefined,
       newId: (prefix: string) => `${prefix}one`,
       assertCapability: async (capability: string) => { if (!granted.has(capability)) throw new Error(`denied ${capability}`); },
       modules: {
@@ -459,7 +508,7 @@ describe("AIS host handlers", () => {
       select: async () => null,
       submit: (ops) => { submitted.push(...ops); return "tx-ais-1"; },
       notify: (message, level) => notices.push({ message, level }),
-      emitModuleEvent: vi.fn(),
+      emitModuleEvent: vi.fn(), busEmit: vi.fn(),
       newId: (prefix) => `${prefix}one`,
       assertCapability: async (capability) => {
         if (!granted.has(capability)) throw new Error(`denied ${capability}`);
@@ -539,7 +588,7 @@ describe("AIS host handlers", () => {
       select: async (request) => request.options[0]?.value ?? null,
       submit: (ops) => { submitted.push(ops); return "tx-light"; },
       notify: () => undefined,
-      emitModuleEvent: vi.fn(),
+      emitModuleEvent: vi.fn(), busEmit: vi.fn(),
       newId: (prefix) => `${prefix}one`,
       assertCapability: async (capability) => {
         if (!granted.has(capability)) throw new Error(`denied ${capability}`);

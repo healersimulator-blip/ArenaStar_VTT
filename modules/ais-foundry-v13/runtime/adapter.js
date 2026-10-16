@@ -711,7 +711,17 @@
   const modules = new Collection([selfModule, { id: "sequencer", title: "Sequencer (ArenaStar transient FX substitute)", version: "0.0.0", active: true,
     flags: { ais: { substitute: "transient-text-image-sound-v1" } } }]);
   const emptyCollection = (name) => { const c = new Collection([]); c.documentName = name; c.projected = false; return c; };
+  // D-487: `game.socket` over AIS.bus (the kernel's bounded cross-device channel). Delivery is
+  // same-package only — instances of THIS module on every device, sender included, exactly the
+  // broadcast semantics Foundry modules expect from `game.socket` (listener receives the payload).
   const socketListeners = new Map();
+  AIS.events.on("bus.message", (payload) => {
+    const handlers = payload && socketListeners.get(payload.channel);
+    if (!handlers) return;
+    for (const handler of [...handlers]) {
+      try { handler(payload.data); } catch (error) { console.warn("game.socket handler failed", error); }
+    }
+  });
   const keybindingActions = new Map();
   const game = {
     version: "13.346", release: { generation: 13, build: 346, version: "13.346", maxGeneration: 13, maxStableGeneration: 13 }, data: { version: "13.346", release: { generation: 13 } }, documentTypes,
@@ -733,8 +743,29 @@
     keybindings: { actions: keybindingActions, bindings: new Map(),
       register: (namespace, action, definition) => { bindings.set(`${namespace}.${action}`, definition); keybindingActions.set(`${namespace}.${action}`, definition); },
       get: (namespace, action) => bindings.get(`${namespace}.${action}`)?.editable ?? [], set: async () => undefined },
-    socket: { on: (event, handler) => { socketListeners.set(event, handler); }, off: (event) => { socketListeners.delete(event); },
-      emit: () => unsupportedCall("game.socket.emit (cross-device module socket; R-06)") },
+    socket: {
+      on: (event, handler) => {
+        if (typeof event !== "string" || typeof handler !== "function") throw new TypeError("game.socket.on requires an event name and a handler");
+        let handlers = socketListeners.get(event);
+        if (!handlers) { handlers = new Set(); socketListeners.set(event, handlers); }
+        handlers.add(handler);
+        return () => handlers.delete(handler);
+      },
+      off: (event, handler) => {
+        const handlers = socketListeners.get(event);
+        if (!handlers) return;
+        if (handler) handlers.delete(handler); else socketListeners.delete(event);
+      },
+      emit: (event, data, handler) => {
+        if (typeof event !== "string") throw new TypeError("game.socket.emit requires an event name");
+        // Foundry's optional third argument is a receive handler; the sender is a receiver here
+        // (the channel echoes locally), so run it now only when it is not already registered.
+        if (typeof handler === "function" && !socketListeners.get(event)?.has(handler))
+          { try { handler(data ?? null); } catch (error) { console.warn("game.socket handler failed", error); } }
+        void AIS.bus.emit(event, data === undefined ? null : data)
+          .catch((error) => console.warn("game.socket.emit failed", error));
+      },
+    },
     audio: { play: () => unsupportedCall("game.audio.play (audio; R-07)"), pending: [] },
     video: {}, tooltip: { activate() {}, deactivate() {} }, clipboard: {}, tours: { register() {} }, issues: { usabilityIssues: {} },
     togglePause: () => unsupportedCall("game.togglePause"), activeTool: "select",

@@ -23,6 +23,7 @@ const COMMAND_NAME_RE = /^[a-z0-9][a-z0-9._:-]{1,127}$/;
 export const AIS_MODULE_METHODS = [
   "events.subscribe",
   "events.emit",
+  "bus.emit",
   "scene.read.visible",
   "actor.inventory.read",
   "scene.token.light.apply",
@@ -63,6 +64,7 @@ export type AisModuleMethod = (typeof AIS_MODULE_METHODS)[number];
 export const AIS_METHOD_CAPABILITY: Record<AisModuleMethod, AisCapability | null> = {
   "events.subscribe": "action.observe",
   "events.emit": "event.emit",
+  "bus.emit": "bus.transmit",
   "scene.read.visible": "scene.read.visible",
   "actor.inventory.read": "actor.inventory.read",
   "scene.token.light.apply": "scene.token.light.manage",

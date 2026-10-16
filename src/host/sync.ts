@@ -2,7 +2,7 @@ import { aisTagProposal, parseAisTagUpdate } from "../core/aisScene";
 import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE, STAIR_OFFER_TTL_MS, levelCreationOps, stairChoiceOps, stairChoicesHere, stairMovementPlan, type StairPrompt } from "../core/levelPlay";
 import { isScopedCollection } from "../core/levelMembership";
 import { levelFocusView, LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
-import type { AisProfileMsg, LevelFocusMsg, StairChooseMsg, StairOfferMsg, StairRequestMsg } from "../core/messages";
+import type { AisBusMsg, AisProfileMsg, LevelFocusMsg, StairChooseMsg, StairOfferMsg, StairRequestMsg } from "../core/messages";
 import { fogVersionKey, fogLevelIdError, fogEpochError, LEVEL_FOG_FEATURE, LEVEL_FOG_RESET_FEATURE } from "../core/levelFog";
 import { SaveWork } from "../storage/saveCoordinator";
 import { snapshotMoveEntry } from "../core/moveDestination";
@@ -867,6 +867,8 @@ export class HostSync {
   private aisMacroModuleInvoker: AisMacroModuleInvoker | null = null;
   /** D-468: builds the shared AIS module set (`ais.profile`) for players; null = no runtime wired. */
   private aisProfileProvider: (() => Omit<AisProfileMsg, "kind" | "seq" | "worldId">) | null = null;
+  /** D-487: delivers a relayed bus frame to the host device's own frames of that package. */
+  private aisBusRelay: ((msg: AisBusMsg) => void) | null = null;
   private readonly resolveSummonSource: HostSyncOptions["resolveSummonSource"];
   private readonly summonRequests = new Map<string, number>();
   private summonTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1109,6 +1111,45 @@ export class HostSync {
     this.publishAisProfile();
   }
 
+  /** D-487: the browser host registers the local-delivery bridge for relayed bus frames. */
+  setAisBusRelay(relay: ((msg: AisBusMsg) => void) | null): void {
+    this.aisBusRelay = relay;
+  }
+
+  /**
+   * D-487: host-device emit. Relays to every authenticated session only when the package is in
+   * the current player-shared set (host-only packages never leave this device); the emitting
+   * frame already heard its own echo from the runtime.
+   */
+  publishAisBus(msg: Omit<AisBusMsg, "kind" | "worldId" | "by"> & { by: { id: string; name: string } }): void {
+    if (!this.currentAisProfile()?.modules.some((module) => module.packageId === msg.packageId)) return;
+    const frame: AisBusMsg = { kind: "ais.bus", worldId: this.store.meta.worldId, ...msg };
+    for (const session of this.sessions.values()) if (session.user) this.send(session, frame);
+  }
+
+  /**
+   * D-487: a player device's bus frame. Validated and re-stamped here, delivered to the host
+   * device's own frames of that package and relayed to every *other* session (the sender already
+   * echoed locally). Only packages in the current player-shared set may cross devices.
+   */
+  private handleAisBus(session: Session, msg: AisBusMsg): void {
+    const caller = session.user;
+    if (!caller) return;
+    if (!session.ephemeralBucket.tryRemove()) return; // fire-and-forget: drop on rate limit
+    if (typeof msg.packageId !== "string" || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(msg.packageId) ||
+        typeof msg.channel !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(msg.channel) ||
+        !boundedJson(msg.data, 16 * 1024) ||
+        (msg.worldId !== undefined && msg.worldId !== this.store.meta.worldId)) return;
+    if (!this.currentAisProfile()?.modules.some((module) => module.packageId === msg.packageId)) return;
+    const frame: AisBusMsg = {
+      kind: "ais.bus", worldId: this.store.meta.worldId, packageId: msg.packageId,
+      channel: msg.channel, data: msg.data, by: { id: caller.id, name: caller.name },
+    };
+    this.aisBusRelay?.(frame);
+    for (const other of this.sessions.values())
+      if (other.user && other.peerId !== session.peerId) this.send(other, frame);
+  }
+
   /** Re-send the current shared module set to every authenticated session. */
   publishAisProfile(): void {
     const msg = this.currentAisProfile();
@@ -1307,6 +1348,9 @@ export class HostSync {
         return;
       case "fx.stopMatching":
         this.handleFxStopMatching(session, msg);
+        return;
+      case "ais.bus":
+        this.handleAisBus(session, msg);
         return;
       case "automation.request":
         this.handleAutomationRequest(session, msg);
