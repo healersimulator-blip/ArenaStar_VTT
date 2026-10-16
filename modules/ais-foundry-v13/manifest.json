@@ -34,7 +34,9 @@
       "documents.read",
       "documents.write",
       "chat.post",
-      "bus.transmit"
+      "bus.transmit",
+      "compendium.read",
+      "assets.read"
     ]
   }
 }

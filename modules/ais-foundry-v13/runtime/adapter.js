@@ -203,6 +203,97 @@
       return created;
     }
   }
+
+  // ── R-10: Foundry module's own packs (NDJSON .db or JSON) from its distribution ──
+  function parseFoundryPackText(text) {
+    const entries = [];
+    const trimmed = text.trim();
+    if (!trimmed) return entries;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed) if (entry && typeof entry._id === "string") entries.push(entry);
+        return entries;
+      }
+      if (parsed && Array.isArray(parsed.entries)) {
+        for (const entry of parsed.entries) if (entry && typeof entry._id === "string") entries.push(entry);
+        return entries;
+      }
+      if (parsed && typeof parsed._id === "string") { entries.push(parsed); return entries; }
+    } catch {}
+    for (const line of text.split("\n")) {
+      const l = line.trim();
+      if (!l) continue;
+      try {
+        const entry = JSON.parse(l);
+        if (entry && typeof entry._id === "string") entries.push(entry);
+      } catch {}
+    }
+    return entries;
+  }
+
+  class FoundryCompendiumCollection extends Collection {
+    constructor(packMeta, rawEntries) {
+      super([]);
+      this._raw = rawEntries;
+      this.id = `${foundryId}.${packMeta.name}`;
+      this.collection = this.id;
+      this.metadata = { id: this.id, name: packMeta.label || packMeta.name, label: packMeta.label || packMeta.name, type: packMeta.type, packageName: foundryId, packageType: "module" };
+      this.documentName = packMeta.type === "JournalEntry" ? "JournalEntry" : packMeta.type === "Actor" ? "Actor" : packMeta.type === "Item" ? "Item" : packMeta.type;
+      this.type = packMeta.type;
+      this.name = packMeta.label || packMeta.name;
+      this.title = packMeta.label || packMeta.name;
+      this._cache = new Map();
+      this._index = rawEntries.map((e) => ({ _id: e._id, id: e._id, name: e.name, type: e.type || "base", img: e.img }));
+      for (const e of rawEntries) this._cache.set(e._id, e);
+    }
+    get documentClass() { return documentClasses[this.documentName] ?? Document; }
+    async getIndex() { return this._index; }
+    async getDocument(entryId) {
+      const cached = this._cache.get(entryId);
+      if (cached instanceof Document) return cached;
+      const raw = this._raw.find((e) => e._id === entryId);
+      if (!raw) return null;
+      try {
+        const klass = documentClasses[this.documentName] ?? Document;
+        const data = { ...raw, _id: entryId };
+        const doc = new klass(data, { fromSource: false });
+        doc._id = entryId; doc.id = entryId;
+        this._cache.set(entryId, doc);
+        return doc;
+      } catch (e) {
+        warn(`Foundry pack ${this.id} getDocument ${entryId} failed: ${e?.message ?? e}`);
+        return null;
+      }
+    }
+    get(id) {
+      const v = this._cache.get(id);
+      return v instanceof Document ? v : null;
+    }
+    getName(name) {
+      for (const v of this._cache.values()) {
+        if (v instanceof Document && v.name === name) return v;
+        if (v && typeof v === "object" && v.name === name) {
+          const raw = v;
+          const klass = documentClasses[this.documentName] ?? Document;
+          try {
+            const doc = new klass({ ...raw }, { fromSource: false });
+            doc._id = raw._id; doc.id = raw._id;
+            this._cache.set(raw._id, doc);
+            return doc;
+          } catch { return null; }
+        }
+      }
+      return null;
+    }
+    async importDocument(entryId) {
+      const doc = await this.getDocument(entryId);
+      if (!doc) throw new Error(`Compendium entry ${entryId} not found in ${this.id}`);
+      const obj = typeof doc.toObject === "function" ? doc.toObject() : { ...doc };
+      const created = await (doc.constructor.create ? doc.constructor.create(obj, {}) : Document.create(obj));
+      return created;
+    }
+  }
   const types = { tokens: "Token", lights: "AmbientLight", sounds: "AmbientSound", templates: "MeasuredTemplate",
     tiles: "Tile", walls: "Wall", drawings: "Drawing", notes: "Note", regions: "Region" };
   class SceneDocumentView {
@@ -1200,20 +1291,40 @@
     // D-485: the document replica hydrates alongside the module's own files; a missing grant degrades to empty collections.
     const hydrateDocuments = documentsLayer.hydrate().then((row) => { diagnostics.documents = row; })
       .catch((error) => { diagnostics.documents = { error: String(error?.message ?? error) }; warn(`World documents unavailable: ${error?.message ?? error}`); });
+    await readAll(dist.files);
     const hydratePacks = (async () => {
       try {
-        const packs = await AIS.compendium.list();
-        const collections = packs.map((pack) => new CompendiumCollection(pack));
-        // Replace game.packs contents
+        const worldPacks = await AIS.compendium.list().catch(() => []);
+        const worldCollections = worldPacks.map((pack) => new CompendiumCollection(pack));
+        const foundryCollections = [];
+        for (const packMeta of dist.packs || []) {
+          const text = resourceText.get(packMeta.path);
+          if (text === undefined) {
+            warn(`Foundry pack ${packMeta.name} file ${packMeta.path} not found`);
+            continue;
+          }
+          const rawEntries = parseFoundryPackText(text);
+          if (!rawEntries.length) {
+            warn(`Foundry pack ${packMeta.name} parsed 0 entries from ${packMeta.path}`);
+            continue;
+          }
+          try {
+            const coll = new FoundryCompendiumCollection(packMeta, rawEntries);
+            foundryCollections.push(coll);
+          } catch (e) {
+            warn(`Foundry pack ${packMeta.name} failed: ${e?.message ?? e}`);
+          }
+        }
+        const all = [...worldCollections, ...foundryCollections];
         game.packs.clear();
-        for (const coll of collections) game.packs.set(coll.id, coll);
-        diagnostics.packs = { count: collections.length, ids: collections.map((c) => c.id).slice(0, 20) };
+        for (const coll of all) game.packs.set(coll.id, coll);
+        diagnostics.packs = { count: all.length, world: worldCollections.length, foundry: foundryCollections.length, ids: all.map((c) => c.id).slice(0, 30) };
       } catch (error) {
         diagnostics.packs = { error: String(error?.message ?? error) };
         warn(`Compendium packs unavailable: ${error?.message ?? error}`);
       }
     })();
-    await Promise.all([readAll(dist.files), hydrateDocuments, hydratePacks]);
+    await Promise.all([hydrateDocuments, hydratePacks]);
     loadLanguages();
     installStyles();
     const imports = installImportMap();
