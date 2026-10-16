@@ -9,21 +9,23 @@ slices were added. Companion documents: [`DECISIONS.md`](DECISIONS.md) (D-468…
 
 ## 1. Goal and the two rules everything follows
 
+**IMPORTANT: AIS is NOT a 1:1 carbon copy of Foundry.** It does **not** vendor Foundry code, does **not** re-implement Foundry's entire core, and does **not** try to be Foundry. Instead, AIS provides a **generic kernel** (L1) with capabilities (documents, settings, compendium, bus, assets, etc) and the **adapter** (`ais-foundry-v13` L2) **EMULATES** the Foundry contract that a module needs to work: `game`, `Hooks`, `CONFIG`, `CONST`, `foundry.*`, `ui.*`, `Document` classes, `Roll`, `FilePicker`, `CompendiumCollection`, `fromUuid`, etc. The adapter is a compatibility shim — it provides what the module touches, not the whole Foundry engine. Canvas/PIXI, for example, is out of scope by design: ArenaStar's renderer is own, placeable *documents* are the surface.
+
 **Goal (Target A).** A Foundry VTT module **or system** written against Foundry's *core* API — its `module.json`/`system.json`
 distribution untouched — imports into an ArenaStar world and runs: settings, i18n, hooks, windows,
-documents, chat, sockets, files, packs. The **pf1 system** (`foundryvtt-pathfinder1`, `system.json` id `pf1`) is the **main target** for current AIS testing — it is the base package that `pf-content`, `pf1e-archetypes`, `statblock-library` and SBC depend on. **Adapter is generic** — same `ais-foundry-v13` provider runs any system (pf1, dnd5e, pf2e, swade, etc) with generic `CONFIG[SYSTEM]`, `game.system.id`, `globalThis[system]` shims, `CONFIG.Actor.dataModels`/`CONFIG.Item.dataModels` via `fields.js`. pf1 is main target but dnd5e/pF2e/etc get same support.
+documents, chat, sockets, files, packs. The **pf1 system** (`foundryvtt-pathfinder1`, `system.json` id `pf1`) is the **main target** for current AIS testing — it is the base package that `pf-content`, `pf1e-archetypes`, `statblock-library` and SBC depend on. **Adapter is generic** — same `ais-foundry-v13` provider runs any system (pf1, dnd5e, pf2e, swade, etc) with generic `CONFIG[SYSTEM]`, `game.system.id`, `globalThis[system]` shims, `CONFIG.Actor.dataModels`/`CONFIG.Item.dataModels` via `fields.js`. pf1 is main target but dnd5e/pF2e/etc get same support. **Emulation, not duplication**: adapter implements only what real modules actually call (measured via `foundry.info.templates.missing` + corpus ranking), not every Foundry API.
 
 **Rule 1 — emulate the contract, never copy the implementation.** ArenaStar provides its own
 implementation of what Foundry's *host* provides to a module (APIs, core templates, language keys,
 base CSS, data fields, documents). Nothing from Foundry's code or files is vendored. A module must
-not be asked to ship what Foundry would have given it (D-484).
+not be asked to ship what Foundry would have given it (D-484). **This is emulation**: e.g. `Roll` is own parser/evaluator (interpolation `@abilities.str.mod`, `NdM`, `kh/kl/dh/dl`, `d%`, safe eval), `FilePicker` is own UI over `AIS.assets` (list/pick/resolve by hash, never raw URLs), `CompendiumCollection` maps to `compendium.*` RPCs, `ChatMessage.create` → `AIS.chat.post` (host stamps author), `CONFIG.PF1`/`CONFIG.DND5E`/`CONFIG[SYSTEM]` are mutable shims, `globalThis.pf1`/`dnd5e`/any system is minimal registry so content modules don't throw. We don't copy Foundry's Roll, FilePicker, or pf1 system — we emulate the surface they need.
 
 **Rule 2 — the kernel stays generic; Foundry lives in the adapter.** Every capability added for
 Foundry compatibility is an ordinary AIS service that any ArenaStar module can use (settings,
 compendium, module bus, documents). The Foundry-specific mapping — names, subtypes, hook
 signatures, `game.*` — is confined to the `ais-foundry-v13` runtime provider that runs *inside*
 the module's sandbox. This keeps route (b) ("upgrade AIS + adapters, reusable") honest: the
-first-party PF1e packages and third-party AIS modules get the same services.
+first-party PF1e packages and third-party AIS modules get the same services. **Adapter is generic for any system**, not pf1-specific: `ensureSystemConfig(sysId)` + `ensureSystemGlobal(sysId)` creates `CONFIG[UPPER]` + `globalThis[lower]` for any id.
 
 ## 2. The layers
 

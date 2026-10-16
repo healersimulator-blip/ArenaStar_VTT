@@ -256,9 +256,21 @@ export interface SynthesizedFoundryPackage {
 export function synthesizeFoundryModulePackage(
   files: Record<string, string>, binaryPaths: readonly string[] = [],
 ): Result<SynthesizedFoundryPackage> {
-  const configPath = files[FOUNDRY_MANIFEST_PATH] !== undefined ? FOUNDRY_MANIFEST_PATH
-    : files[FOUNDRY_SYSTEM_MANIFEST_PATH] !== undefined ? FOUNDRY_SYSTEM_MANIFEST_PATH
-    : null;
+  // Generic: find module.json or system.json at any depth (systems use public/system.json)
+  let configPath: string | null = null;
+  if (files[FOUNDRY_MANIFEST_PATH] !== undefined) configPath = FOUNDRY_MANIFEST_PATH;
+  else if (files[FOUNDRY_SYSTEM_MANIFEST_PATH] !== undefined) configPath = FOUNDRY_SYSTEM_MANIFEST_PATH;
+  else {
+    const sysCandidates = Object.keys(files).filter(k => k.endsWith(`/${FOUNDRY_SYSTEM_MANIFEST_PATH}`) || k === FOUNDRY_SYSTEM_MANIFEST_PATH || k.endsWith(`/${FOUNDRY_SYSTEM_MANIFEST_PATH}`));
+    // Actually check for any key ending with system.json
+    const allKeys = Object.keys(files);
+    const sysKey = allKeys.find(k => k.endsWith(FOUNDRY_SYSTEM_MANIFEST_PATH));
+    if (sysKey) configPath = sysKey;
+    else {
+      const modKey = allKeys.find(k => k.endsWith(FOUNDRY_MANIFEST_PATH));
+      if (modKey) configPath = modKey;
+    }
+  }
   if (configPath === null) return err("package: module.json or system.json not found at the package root");
   const text = files[configPath];
   if (text === undefined) return err(`package: ${configPath} not found at the package root`);
@@ -295,19 +307,28 @@ export function synthesizeFoundryModulePackage(
   return okVal({ manifest: manifest.value, files: out, foundry });
 }
 
-/** `module.json` or `system.json` at the zip root or inside exactly one top-level folder (the shape packages use). */
+/** `module.json` or `system.json` at the zip root or inside nested folders (systems use public/system.json). Generic for any system. */
 export function resolveFoundryManifestPath(paths: readonly string[]): string | null {
   if (paths.includes(FOUNDRY_MANIFEST_PATH)) return FOUNDRY_MANIFEST_PATH;
   if (paths.includes(FOUNDRY_SYSTEM_MANIFEST_PATH)) return FOUNDRY_SYSTEM_MANIFEST_PATH;
-  const moduleRoots = new Set(paths.filter((p) => p.endsWith(`/${FOUNDRY_MANIFEST_PATH}`)).map((p) => p.split("/")[0] ?? ""));
-  if (moduleRoots.size === 1) {
-    const root = [...moduleRoots][0] ?? "";
-    if (root !== "") return `${root}/${FOUNDRY_MANIFEST_PATH}`;
+  // Check for any nested system.json / module.json (e.g. public/system.json, dist/system.json)
+  const systemCandidates = paths.filter((p) => p.endsWith(`/${FOUNDRY_SYSTEM_MANIFEST_PATH}`) || p.endsWith(`/public/${FOUNDRY_SYSTEM_MANIFEST_PATH}`));
+  if (systemCandidates.length === 1) return systemCandidates[0] ?? null;
+  if (systemCandidates.length > 1) {
+    // Prefer public/system.json or shortest path
+    const pub = systemCandidates.find((p) => p.endsWith(`/public/${FOUNDRY_SYSTEM_MANIFEST_PATH}`));
+    if (pub) return pub;
+    return systemCandidates.sort((a,b)=>a.length-b.length)[0] ?? null;
   }
-  const systemRoots = new Set(paths.filter((p) => p.endsWith(`/${FOUNDRY_SYSTEM_MANIFEST_PATH}`)).map((p) => p.split("/")[0] ?? ""));
-  if (systemRoots.size === 1) {
-    const root = [...systemRoots][0] ?? "";
-    if (root !== "") return `${root}/${FOUNDRY_SYSTEM_MANIFEST_PATH}`;
+  const moduleCandidates = paths.filter((p) => p.endsWith(`/${FOUNDRY_MANIFEST_PATH}`));
+  if (moduleCandidates.length === 1) return moduleCandidates[0] ?? null;
+  if (moduleCandidates.length > 1) {
+    return moduleCandidates.sort((a,b)=>a.length-b.length)[0] ?? null;
   }
+  // Fallback to any file ending with system.json/module.json at any depth
+  const anySystem = paths.find((p) => p.endsWith(FOUNDRY_SYSTEM_MANIFEST_PATH));
+  if (anySystem) return anySystem;
+  const anyModule = paths.find((p) => p.endsWith(FOUNDRY_MANIFEST_PATH));
+  if (anyModule) return anyModule;
   return null;
 }

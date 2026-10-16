@@ -1,11 +1,13 @@
 # Five PF1e Foundry repositories vs. ArenaStar's AIS + adapter — readiness and gaps
 
+**IMPORTANT: AIS is NOT a 1:1 carbon copy of Foundry — it EMULATES what a module needs to work.** Adapter `ais-foundry-v13` provides own `Roll`, `FilePicker`, `CompendiumCollection`, `CONFIG[SYSTEM]`, `game.system`, `globalThis[system]`, `fromUuid`, `Documents`, `ChatMessage.create→AIS.chat.post`, `bus.transmit`, etc. It does not vendor Foundry code, does not re-implement entire core, and does not try to be Foundry. Canvas/PIXI is out of scope by design — ArenaStar's renderer is own, placeable documents are the surface. This doc rates whether real PF1e repos run under that emulation.
+
 **Date:** 2026-10-14 · **Scope:** a feasibility slice, not a compatibility certification (proposal §10
 defines what "compatible" would mean; nothing here reaches that bar). Companion documents:
 `FOUNDRY_AIS_ADAPTER_PROPOSAL.md` (§7.4 systems, §9 phases P0–P6, §10 verification),
 `AUTOMATION_INTERCONNECT_DESIGN.md` (§15–§16), `AIS_FOUNDRY_FEASIBILITY.md` (what D-462 actually
 loads), `tools/adopt/INVENTORY.md` (licence facts, rows 1–3 and 16–18), `tools/convert/README.md`
-(the data route).
+(the data route), `AIS_FOUNDRY_ARCHITECTURE.md` (emulation principle, generic system provider).
 
 The five repositories the question named:
 
