@@ -261,7 +261,6 @@ export function synthesizeFoundryModulePackage(
   if (files[FOUNDRY_MANIFEST_PATH] !== undefined) configPath = FOUNDRY_MANIFEST_PATH;
   else if (files[FOUNDRY_SYSTEM_MANIFEST_PATH] !== undefined) configPath = FOUNDRY_SYSTEM_MANIFEST_PATH;
   else {
-    const sysCandidates = Object.keys(files).filter(k => k.endsWith(`/${FOUNDRY_SYSTEM_MANIFEST_PATH}`) || k === FOUNDRY_SYSTEM_MANIFEST_PATH || k.endsWith(`/${FOUNDRY_SYSTEM_MANIFEST_PATH}`));
     // Actually check for any key ending with system.json
     const allKeys = Object.keys(files);
     const sysKey = allKeys.find(k => k.endsWith(FOUNDRY_SYSTEM_MANIFEST_PATH));

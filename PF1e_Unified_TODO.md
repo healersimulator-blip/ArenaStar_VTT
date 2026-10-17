@@ -1668,3 +1668,23 @@ scene's own browser spec (`e2e/pf1e_entangle.spec.ts`, both save branches) is ex
 6. ~~Reconcile **Combat_Resolver_5** (`combat_resolver_5.html` — re-attach when available) phase names / damage-order tie-breakers verbatim against F02 before marking it landed.~~ **Done 2026-09-14 (D-223)** — file at `Examples/combat_resolver_5.html`; findings and transcription recorded in §13 item 5 and D-223.
 
 Original I PR labels map to this sequence: PR-A/P0 is already landed; B/P1, C/P2, D/P3, E/P4, F–H/P5–P7, I/P8, F01/F02 as post-P7 features. The old G milestone estimates and M task numbers are historical cross-references, not a second schedule or additional copies of these tasks.
+
+## 2026-10-17 — genuine unified/integral replacement
+
+The fabricated integral fixture is replaced by the pinned upstream stack.
+**The real gameplay gate passes**: derived stats and feat changes, Fireball
+casting/damage/preparation, persisted chat/HP, healing transaction Undo/Redo,
+and reload persistence. See [the reproducible report](docs/PF1_UNIFIED_INTEGRAL.md).
+Full suite: 6,014 passed / 12 existing skips. This does not certify archetype
+application, statblock conversion, targeting/saves, templates, Entangle,
+elevations, multiplayer gameplay, or whole-spell reroll/revert.
+
+## 2026-10-17 — Entangle / native FX acceptance
+
+The genuine Entangle scene now passes via native Wizard editing/binding and
+reviewed GM controls: real PF1 casting, failed-save confirmation, derived −4
+Dexterity penalty / −2 attack, persistent target FX, release, and upstream expiry
+evaluation at a demo time offset. See [the exact scope and run instructions](docs/PF1_ENTANGLE_FX.md).
+This supersedes older statements that Entangle has no genuine-stack proof; it
+does not certify automatic area adjudication or native substitutes as upstream.
+Full unit suite: 6,018 passed / 12 existing skips.

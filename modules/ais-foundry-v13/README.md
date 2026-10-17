@@ -1,12 +1,12 @@
 # AIS Foundry v13 adapter (0.6.0)
 
-**IMPORTANT: This adapter is NOT a 1:1 carbon copy of Foundry — it EMULATES what a module/system needs to work.** ArenaStar-authored code, loaded inside the separately approved guest's opaque AIS iframe. The adapter is a runtime provider, not an in-page module and not Foundry core (which is proprietary — every API here is a re-implementation of the surface, never copied code). It provides generic emulation for any system (pf1 main target, but also dnd5e, pf2e, swade, etc) via `ensureSystemConfig` + `ensureSystemGlobal`.
+**IMPORTANT: This adapter is NOT a 1:1 carbon copy of Foundry — it EMULATES what a module/system needs to work.** ArenaStar-authored code, loaded inside the separately approved guest's opaque AIS iframe. The adapter is a runtime provider, not an in-page module and not Foundry core (which is proprietary — every API here is a re-implementation of the surface, never copied code). It provides generic emulation for any system (pf1 main target, with generic shims for other systems, not a compatibility guarantee) via `ensureSystemConfig` + `ensureSystemGlobal`.
 
 ## Emulation principle (not duplication)
 
 AIS does not try to be Foundry. Instead:
 - **Kernel (L1)** is generic: `documents.*`, `settings.*`, `compendium.*`, `bus.*`, `assets.*`, `ui.panel`, etc — any AIS module can use them.
-- **Adapter (L2)** emulates Foundry contract that real modules actually call: `game`, `Hooks`, `CONFIG`, `CONST`, `foundry.*`, `ui.*`, `Document` classes, `Roll` (own parser: interpolation `@abilities.str.mod`, `NdM`, `kh/kl/dh/dl`, `d%`, safe eval), `FilePicker` (own UI over `AIS.assets` list/pick/resolve by hash, never raw URLs, blob URL cache paging 8192), `CompendiumCollection` (over `compendium.*` RPCs, fields concurrency 8, img fallback), `ChatMessage.create→AIS.chat.post` (host stamps author), `fromUuid` with `CONFIG.compendium.uuidRedirects` mutable, `CONFIG[SYSTEM]` + `globalThis[system]` shims for any system id, `Actor.create` with inline items, `game.socket` via `bus.transmit`.
+- **Adapter (L2)** emulates Foundry contract that real modules actually call: `game`, `Hooks`, `CONFIG`, `CONST`, `foundry.*`, `ui.*`, `Document` classes, `Roll` (own parser: interpolation `@abilities.str.mod`, `NdM`, `kh/kl/dh/dl`, `d%`, CSP-safe arithmetic grammar), `FilePicker` (own UI over `AIS.assets` list/pick/resolve by hash, never raw URLs, bounded blob URL caching), `CompendiumCollection` (over `compendium.*` RPCs, fields concurrency 8, img fallback), `ChatMessage.create→AIS.chat.post` (host stamps author), `fromUuid` with `CONFIG.compendium.uuidRedirects` mutable, `CONFIG[SYSTEM]` + `globalThis[system]` shims for any system id, `Actor.create` with inline items, `game.socket` via `bus.transmit`.
 - Canvas/PIXI is out of scope by design: ArenaStar's renderer is own, placeable documents are the surface.
 - pf1 is **main target** base module (provides `CONFIG.PF1`, `pf1` registry, hooks), but adapter is **generic** — same path works for dnd5e (`CONFIG.DND5E`, `globalThis.dnd5e`), pf2e, swade, custom systems via `ensureSystemConfig(sysId)` + `ensureSystemGlobal(sysId)`.
 
@@ -56,14 +56,33 @@ Commands every imported Foundry module exposes to reviewed script macros:
   documents; results are JSON-safe copies; the roots `AIS`, `eval`, `Function`, `window`,
   `document`, `fetch`, … are unreachable.
 
-Limits in this phase: host-only (GM device); startup within the kernel's 5 s budget; windows live
-inside the module's panel (no shell DOM: no sidebar injection, no canvas overlays); icons are the
-core library's own glyph set for the common `fa-*` names, not FontAwesome; no ProseMirror/
-`enrichHTML`, `FilePicker` (disabled control), `ContextMenu`, `DragDrop`; the core template
-library covers the paths modules reference most (below) — a core path it lacks fails with a
-message naming the path, and `foundry.info.templates.missing` lists it; no document CRUD beyond
-tags/light, no socket emit, no file storage; `packs/` are listed, not loaded; `game.actors/items/
-packs` are empty projections.
+Current limits: this is a compatibility layer, not a complete Foundry engine. Module windows
+live inside their own sandboxed panel; Canvas/PIXI and network APIs remain unsupported. GM and
+player runtimes use their own authority and entitled asset sources. JSON/NDJSON and split-JSON
+packs are supported; raw LevelDB releases must first be exported as a **consistent snapshot**.
+YAML is not parsed into metadata-only fake documents. Missing or invalid templates fail explicitly.
+Unknown API stubs and lifecycle-hook diagnostics are not proof of successful system initialization.
+
+### PR51 refactor notes
+
+- `runtime/hbs.js` supports PF1's program-local `{{#*inline "name"}}` declarations and
+  `{{> @partial-block}}` layout bodies, with inherited scopes, shadowing and bounded recursion.
+  Real PF1 11.11 startup, Fireball retrieval and the full content fixture's indexes pass in Chromium.
+- `runtime/roll.js` implements bounded arithmetic/dice parsing without `eval` or `Function`.
+  The real iframe CSP remains unchanged. Unsupported syntax throws; totals are not replaced with zero.
+- `runtime/packs.js` owns collections, stable live indexes, parsers and UUID resolution. World
+  indexes browse one pack in bounded pages rather than issuing an invalid empty search or truncating
+  at the search cap. Index/field hydration is throttled to the ordinary RPC budget.
+- `system.json` importer metadata determines self-system identity. A short module ID or a title
+  containing "system" cannot become `game.system.id` accidentally.
+- `foundry.info` retains its diagnostic sections with bounded lists/strings. Counts may exceed
+  the displayed samples; this endpoint is not a full resource export.
+- DataModel choices remain strict. Set fields clean each element before deduplication.
+- The legacy four-player fixture is synthetic smoke coverage. The integral fixture is now
+  a genuine upstream **red gameplay gate**; see [the report](../../docs/PF1_UNIFIED_INTEGRAL.md).
+  Imported-PF1 Fireball lookup and
+  dice evaluation do **not** establish spell casting, damage, saves, conditions, FX, or Revert.
+  See [the refactor validation report](../../REFACTOR_PR51.md) for exact scope and limitations.
 
 ## Core resource library (`runtime/core.js`, `runtime/fields.js`, D-484)
 
@@ -184,3 +203,49 @@ Build with `corepack pnpm build:ais-demo` (or `test:fx:prepare`). The build writ
 ZIP, the bundled Tagger guest, the **verbatim upstream Tagger distribution**
 (`foundry-tagger-upstream-1.5.4.zip`, provenance-checked files only) and the demonstration world
 into `dist/`. See `AIS_FOUNDRY_FEASIBILITY.md` and DECISIONS.md D-482.
+
+### Large document RPC transport
+
+The kernel's 64 KiB per-message cap is not a per-character size cap. The SDK automatically
+chunks large `documents.mutate` requests and `documents.get/list/context` responses. Writes
+are reassembled before the normal capability/lifetime/rate/replay/normalization/host
+transaction path; chunks never commit partial documents. Mutation ops retain their 512 KiB
+and 32-op budgets, reads retain the 1 MiB budget, and ordinary RPCs remain limited to 64 KiB.
+One partial request per port is retained, with ordered indexes, a byte budget and a 30-second
+expiry. Document data has a bounded 32-level JSON depth budget for embedded item/action
+structures, rather than the generic 12-level RPC budget. Keys, arrays, types and permissions
+are still validated. This enables actual PF1 Battle Mage + Fireball import/readback; it does
+not by itself establish player runtime delivery or imported sheet usability.
+
+
+## Shared catalogue (2026-10-17)
+
+Foundry data packs from approved distributions are now projected into AIS's
+permission-aware compendium service. Sibling adapters mount the original
+collection IDs in `game.packs`; `fromUuid` resolves across distributions without
+copying executable globals or passing source documents through test code.
+Players may read public packs from currently shared, locally consented providers
+with `compendium.read`; native GM packs stay host-only. This supersedes the older
+blanket player-compendium denial described above. Consent/removal updates sibling
+registries, cached gets recheck authority, and catalogue documents stay read-only.
+See [AIS catalogue contracts and tests](../../docs/AIS_CATALOGUE.md).
+
+
+## Genuine PF1 gameplay gate (2026-10-17)
+
+The selected unmodified PF1 11.11 stack now passes the integral browser gate:
+derived stats/feat effects, quickcast damage and preparation, host chat/HP,
+healing transaction Undo/Redo, and reload persistence. See
+[the exact verification and remaining scope](../../docs/PF1_UNIFIED_INTEGRAL.md).
+Showdown 2.1.0 is vendored unchanged in `runtime/vendor/` with its license;
+our CSP-safe Roll implementation is independently authored, not Foundry code.
+
+## 2026-10-17 — Entangle / native FX acceptance
+
+The genuine Entangle scene now passes via native Wizard editing/binding and
+reviewed GM controls: real PF1 casting, failed-save confirmation, derived −4
+Dexterity penalty / −2 attack, persistent target FX, release, and upstream expiry
+evaluation at a demo time offset. See [the exact scope and run instructions](../../docs/PF1_ENTANGLE_FX.md).
+This supersedes older statements that Entangle has no genuine-stack proof; it
+does not certify automatic area adjudication or native substitutes as upstream.
+Full unit suite: 6,018 passed / 12 existing skips.

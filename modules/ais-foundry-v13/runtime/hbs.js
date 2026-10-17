@@ -10,10 +10,11 @@
  *   built-ins if/unless/each/with/lookup/log (@index @key @first @last @root @../x), ../paths,
  *   this/./[literal segments]/a.b.c/a/b, string/number/boolean/null literals, (subexpressions),
  *   {{> partial}} {{> partial context key=value}} {{> (dynamic)}} {{#> partial}}fallback{{/partial}},
+ *   {{#*inline "name"}}...{{/inline}} (program-local scopes), {{> @partial-block}},
  *   helpers receive (…params, options{name,hash,data,fn,inverse,lookupProperty}) with `this` = context,
  *   SafeString / escapeExpression (same characters as Handlebars), standalone-line stripping.
  *
- * Not implemented (explicit errors): raw blocks {{{{…}}}}, inline partials {{#*inline}}, decorators,
+ * Not implemented (explicit errors): raw blocks {{{{…}}}}, decorators other than inline partials,
  * precompiled templates, strict/assumeObjects modes.
  */
 (() => {
@@ -178,7 +179,7 @@
       if (type === "mustache") {
         if (body.startsWith("!")) type = "comment";
         else if (body.startsWith("#>")) { type = "partialBlock"; body = body.slice(2); }
-        else if (body.startsWith("#*")) throw new Error("Handlebars: inline partials/decorators are not supported");
+        else if (body.startsWith("#*")) { type = "inline"; body = body.slice(2); }
         else if (body.startsWith("#")) { type = "open"; body = body.slice(1); }
         else if (body.startsWith("/")) { type = "close"; body = body.slice(1); }
         else if (body === "^" || body === "else" || /^else\s/.test(body)) { type = "else"; body = body === "^" ? "" : body.slice(4); }
@@ -190,7 +191,7 @@
       i = close + closer.length;
     }
     // Whitespace control and standalone-line stripping.
-    const STANDALONE = new Set(["comment", "open", "openInverse", "close", "else", "partialBlock"]);
+    const STANDALONE = new Set(["comment", "open", "openInverse", "close", "else", "partialBlock", "inline"]);
     for (let k = 0; k < tokens.length; k++) {
       const token = tokens[k];
       if (token.kind !== "tag") continue;
@@ -221,6 +222,15 @@
         case "raw": {
           const call = parseExpression(token.body);
           current().push({ type: "mustache", ...call, escaped: token.type === "mustache" });
+          break;
+        }
+        case "inline": {
+          const call = parseExpression(token.body);
+          if (call.path.original !== "inline" || call.params.length !== 1 || call.params[0].type !== "lit" || typeof call.params[0].value !== "string" || call.hash)
+            throw new Error("Handlebars: inline partials require one literal name; other decorators are unsupported");
+          const node = { type: "inline", ...call, name: call.params[0].value, body: [] };
+          current().push(node);
+          stack.push(node);
           break;
         }
         case "open":
@@ -403,7 +413,7 @@
       const blockParams = blockParamNames.length && options.blockParams
         ? Object.fromEntries(blockParamNames.map((name, i) => [name, options.blockParams[i]])) : null;
       if (context === frame.context && !blockParams) return options.data && options.data !== frame.data ? { ...frame, data: options.data } : frame;
-      return { context, parent: frame, data: options.data ?? frame.data, blockParams, noEscape: frame.noEscape };
+      return { context, parent: frame, data: options.data ?? frame.data, blockParams, noEscape: frame.noEscape, partials: frame.partials };
     };
     const program = (nodes, frame, blockParamNames) => nodes
       ? (context, options = {}) => render(nodes, childFrame(frame, context, options, blockParamNames))
@@ -439,8 +449,8 @@
       if (Array.isArray(value)) return value.length ? builtinHelpers.each.call(frame.context, value, options) : options.inverse(frame.context);
       return options.fn(value);
     };
-    const resolvePartial = (name) => {
-      let source = env.partials[name];
+    const resolvePartial = (name, frame) => {
+      let source = frame.partials?.[name] ?? env.partials[name];
       if (source === undefined && env.partialResolver) source = env.partialResolver(name);
       if (source === undefined || source === null) return null;
       if (isFunction(source)) return source;
@@ -454,28 +464,52 @@
       const name = node.name.type === "lit" ? String(node.name.value) : toText(evaluate(node.name, frame));
       let context = node.context ? evaluate(node.context, frame) : frame.context;
       if (node.hash) context = Object.assign({}, context, evaluateHash(node.hash, frame));
-      const fn = resolvePartial(name);
+      if (node.fallback) {
+        frame = inlineScope(node.fallback, frame);
+        const caller = frame;
+        frame = { ...frame, partials: Object.assign(Object.create(frame.partials ?? null), {
+          "@partial-block": (value, options) => render(node.fallback, childFrame(caller, value, options)),
+        }) };
+      }
+      const fn = resolvePartial(name, frame);
       if (!fn) {
         if (node.fallback) return render(node.fallback, childFrame(frame, context));
         throw new Error(`The partial ${name} could not be found`);
       }
       return fn(context, { data: frame.data, _frame: frame });
     };
+    // Declarations are program-local, hoisted, and inherited by nested programs
+    // and partial calls. Never leak a render's inline partials into env.partials.
+    const inlineScope = (nodes, frame) => {
+      const declarations = nodes.filter((node) => node.type === "inline");
+      if (!declarations.length) return frame;
+      const partials = Object.create(frame.partials ?? null);
+      const scoped = { ...frame, partials };
+      for (const node of declarations) partials[node.name] = (context, options = {}) =>
+        render(node.body, { ...scoped, context, parent: options._frame ?? scoped, data: options.data ?? scoped.data });
+      return scoped;
+    };
+    let renderDepth = 0;
     const render = (nodes, frame) => {
-      let out = "";
-      for (const node of nodes) {
-        if (node.type === "content") out += node.value;
-        else if (node.type === "mustache") {
-          const value = invoke(node, frame, null, false);
-          out += node.escaped && !frame.noEscape ? escapeExpression(value) : toText(value);
-        } else if (node.type === "block") {
-          const value = node.inverted
-            ? invoke({ ...node, params: node.params, hash: node.hash }, frame, { body: node.inverse ?? [], inverse: node.body, blockParams: node.blockParams }, false)
-            : invoke(node, frame, { body: node.body, inverse: node.inverse, blockParams: node.blockParams }, false);
-          out += toText(value);
-        } else if (node.type === "partial") out += renderPartial(node, frame);
-      }
-      return out;
+      if (renderDepth >= 128) throw new Error("Handlebars: partial/block recursion limit exceeded");
+      renderDepth += 1;
+      try {
+        frame = inlineScope(nodes, frame);
+        let out = "";
+        for (const node of nodes) {
+          if (node.type === "content") out += node.value;
+          else if (node.type === "mustache") {
+            const value = invoke(node, frame, null, false);
+            out += node.escaped && !frame.noEscape ? escapeExpression(value) : toText(value);
+          } else if (node.type === "block") {
+            const value = node.inverted
+              ? invoke({ ...node, params: node.params, hash: node.hash }, frame, { body: node.inverse ?? [], inverse: node.body, blockParams: node.blockParams }, false)
+              : invoke(node, frame, { body: node.body, inverse: node.inverse, blockParams: node.blockParams }, false);
+            out += toText(value);
+          } else if (node.type === "partial") out += renderPartial(node, frame);
+        }
+        return out;
+      } finally { renderDepth -= 1; }
     };
     const compile = (source, compileOptions = {}) => {
       if (typeof source !== "string") throw new Error("Handlebars.compile needs a template string");
@@ -490,7 +524,7 @@
         const parentFrame = runtimeOptions._frame;
         const data = runtimeOptions.data ?? (parentFrame ? parentFrame.data : { root: context });
         if (data && !("root" in data)) data.root = context;
-        const frame = { context, parent: parentFrame ?? null, data, blockParams: null, noEscape: noEscape || parentFrame?.noEscape };
+        const frame = { context, parent: parentFrame ?? null, data, blockParams: null, noEscape: noEscape || parentFrame?.noEscape, partials: parentFrame?.partials ?? runtimeOptions.partials };
         return render(ast, frame);
       };
       template.ast = ast;

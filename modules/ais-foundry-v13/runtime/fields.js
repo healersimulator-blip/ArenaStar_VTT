@@ -211,7 +211,7 @@
       initialize(value) { return value; }
       toObject(value) { return deepClone(value); }
       apply(fn, value, options = {}) { return typeof fn === "string" ? this[fn](value, options) : fn.call(this, value, options); }
-      _getChoices() { const choices = this.choices; return typeof choices === "function" ? choices() : choices; }
+      _getChoices() { const choices = typeof this.choices === "function" ? this.choices() : this.choices; return choices instanceof Set ? [...choices] : choices; }
       /** Render the field's input. Subclasses implement `_toInput`; `config.input` lets a template substitute its own builder. */
       toInput(config = {}) {
         const input = typeof config.input === "function" ? config.input(this, config) : this._toInput({ ...config, name: config.name ?? this.fieldPath, value: config.value === undefined ? this.getInitialValue() : config.value });
@@ -256,6 +256,7 @@
       constructor(options = {}, context) {
         super(options, context);
         if (options.choices !== undefined && !Object.hasOwn(options, "blank")) this.blank = false;
+        if (options.blank === false && this.nullable && !Object.hasOwn(options, "initial")) this.initial = null;
         if (options.choices !== undefined && !Object.hasOwn(options, "initial") && !this.blank && !this.nullable) {
           const choices = this._getChoices();
           const first = Array.isArray(choices) ? choices[0] : choices ? Object.keys(choices)[0] : undefined;
@@ -304,7 +305,7 @@
       _validateType(value) { return typeof value === "string" && (/^[A-Za-z0-9]{16}$/.test(value) || (value.length >= 8 && !/\s/.test(value))); }
     }
     class DocumentUUIDField extends StringField {
-      static get _defaults() { return { ...super._defaults, required: true, blank: false, nullable: true, initial: null }; }
+      static get _defaults() { return { ...super._defaults, required: true, blank: true, nullable: true, initial: null }; }
     }
     class ForeignDocumentField extends DocumentIdField {
       constructor(model, options = {}, context) { super(options, context); this.model = model; }
@@ -341,6 +342,7 @@
         return true;
       }
       clean(value, options) { const cleaned = super.clean(value, options); return Array.isArray(cleaned) && this.element instanceof DataField ? cleaned.map((item) => this.element.clean(item, options)) : cleaned; }
+      initialize(value, model) { return Array.isArray(value) && this.element instanceof DataField ? value.map(item => this.element.initialize(item, model)) : value; }
       _toInput(config) {
         const choices = config.choices ?? this.element?._getChoices?.();
         if (choices) return createMultiSelectInput({ ...config, options: choices, localize: config.localize ?? true });
@@ -357,15 +359,12 @@
         return new Set();
       }
       clean(value, options = {}) {
-        if (value === undefined || value === null) {
-          if (value === null && this.nullable) return null;
-          const initial = this.getInitialValue(options.source);
-          return initial instanceof Set ? initial : new Set(Array.isArray(initial) ? initial : []);
-        }
-        return this._cast(value);
+        if (value === null && this.nullable) return null;
+        const values = this._cast(value === undefined || value === null ? this.getInitialValue(options.source) : value);
+        return new Set([...values].map((item) => this.element instanceof DataField ? this.element.clean(item, options) : item));
       }
       _validateType(value) { return value instanceof Set ? super._validateType([...value]) : false; }
-      initialize(value) { return value instanceof Set ? value : new Set(Array.isArray(value) ? value : []); }
+      initialize(value, model) { if (value === null && this.nullable) return null; return new Set([...(value ?? [])].map(item => this.element instanceof DataField ? this.element.initialize(item, model) : item)); }
       toObject(value) { return value instanceof Set ? [...value] : Array.isArray(value) ? [...value] : []; }
       _toInput(config) { return super._toInput({ ...config, value: config.value instanceof Set ? [...config.value] : config.value }); }
     }
@@ -377,6 +376,13 @@
       }
       static recursive = true;
       static get _defaults() { return { ...super._defaults, required: true, nullable: false, initial: undefined }; }
+      extendFields(fields) {
+        for (const [name, field] of Object.entries(fields)) {
+          if (["__proto__", "constructor", "prototype"].includes(name) || !(field instanceof DataField)) throw new TypeError("SchemaField.extendFields requires named DataFields");
+          field.name = name; field.parent = this; this.fields[name] = field;
+        }
+        return this;
+      }
       keys() { return Object.keys(this.fields); }
       values() { return Object.values(this.fields); }
       entries() { return Object.entries(this.fields); }
@@ -417,6 +423,14 @@
       _toInput() { throw new Error("A SchemaField has no single input; render its `fields` individually."); }
     }
     class EmbeddedDataField extends SchemaField {
+      clean(value, options = {}) {
+        if (value === undefined || value === null) return super.clean(value, options);
+        // Embedded models must migrate before schema cleaning removes legacy
+        // keys. Otherwise a valid old document permanently loses its meaning.
+        const source = deepClone(value);
+        const migrated = this.model?.migrateData?.(source, options) ?? source;
+        return this.model?.cleanData ? this.model.cleanData(migrated, options) : super.clean(migrated, options);
+      }
       constructor(model, options = {}, context) { super(typeof model?.defineSchema === "function" ? model.defineSchema() : {}, options, context); this.model = model; }
       initialize(value, model) {
         if (value === undefined || value === null) return value;
@@ -441,6 +455,22 @@
     class DocumentTypeField extends StringField {
       constructor(documentClass, options = {}, context) { super({ choices: () => documentClass?.TYPES ?? ["base"], blank: false, ...options }, context); this.documentClass = documentClass; }
     }
+    /** An object whose arbitrary keys all use the same field contract. */
+    class TypeDataField extends ObjectField {
+      constructor(element, options = {}, context) { super(options, context); this.element = element; }
+      clean(value, options = {}) {
+        const data = super.clean(value, options);
+        if (data === null || data === undefined) return data;
+        return Object.fromEntries(Object.entries(data).map(([key, item]) => [key, this.element.clean(item, options)]));
+      }
+      _validateType(value, options) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+        for (const item of Object.values(value)) { const failure = this.element.validate(item, options); if (failure) return failure; }
+        return true;
+      }
+      initialize(value, model) { return Object.fromEntries(Object.entries(value ?? {}).map(([key, item]) => [key, this.element.initialize(item, model)])); }
+      toObject(value) { return Object.fromEntries(Object.entries(value ?? {}).map(([key, item]) => [key, this.element.toObject(item)])); }
+    }
     class TypedSchemaField extends DataField {
       constructor(types = {}, options = {}, context) { super(options, context); this.types = types; }
       _cast(value) { return value && typeof value === "object" ? value : {}; }
@@ -448,11 +478,11 @@
     }
     class EmbeddedCollectionField extends ArrayField {}
     class EmbeddedDocumentField extends EmbeddedDataField {}
-    class TypedObjectField extends ObjectField {
-      constructor(element, options = {}, context) { super(options, context); this.element = element; }
+    class TypedObjectField extends TypeDataField {
+      constructor(element, options = {}, context) { super(element, options, context); }
     }
     const fields = Object.freeze({
-      DataField, BooleanField, NumberField, StringField, HTMLField, JSONField, ColorField, FilePathField, DocumentIdField, DocumentUUIDField,
+      DataField, TypeDataField, BooleanField, NumberField, StringField, HTMLField, JSONField, ColorField, FilePathField, DocumentIdField, DocumentUUIDField,
       ForeignDocumentField, AngleField, AlphaField, HueField, IntegerSortField, ObjectField, AnyField, ArrayField, SetField, SchemaField,
       EmbeddedDataField, DocumentOwnershipField, DocumentTypeField, TypedSchemaField, EmbeddedCollectionField, EmbeddedDocumentField, TypedObjectField, DocumentStatsField,
     });
@@ -462,22 +492,15 @@
     const schemaCache = new WeakMap();
     class DataModel {
       constructor(data = {}, { parent = null, strict = true, ...options } = {}) {
-        this.parent = parent;
+        Object.defineProperty(this, "parent", { value: parent, writable: true, configurable: true });
         const schema = this.constructor.schema;
-        this._source = this._initializeSource(data, options);
+        Object.defineProperty(this, "_source", { value: this._initializeSource(data, options), writable: true, configurable: true });
         const failure = strict ? schema.validate(this._source, {}) : undefined;
-        if (failure) {
-          // For AIS emulation, don't hard-fail on validation errors from pf1's data models
-          // (e.g. Condition hud.exclude.element, journal blank). Log and continue.
-          try { console.warn(`${this.constructor.name} validation warning: ${failure.message}`); } catch {}
-          // Still throw for truly critical models? For now, only throw if not Condition-related
-          // to allow pf1 to boot. We check if failure message contains known lenient fields.
-          const msg = String(failure.message || "");
-          const lenient = msg.includes("hud.exclude.element") || msg.includes("journal may not be blank") || msg.includes("is not a valid value");
-          if (!lenient) throw failure.asError(this.constructor.name);
-        }
-        this.#initialize();
+        if (failure) throw failure.asError(this.constructor.name);
+        this._configure(options);
+        this._initialize(options);
       }
+      _configure() {}
       static defineSchema() { return {}; }
       static get schema() {
         let schema = schemaCache.get(this);
@@ -488,7 +511,7 @@
       /** Foundry's order: migrate → clean (schema casts + initial values) → shim. */
       _initializeSource(data, options = {}) {
         let source = data instanceof DataModel ? data.toObject() : data && typeof data === "object" ? data : {};
-        try { source = this.constructor.migrateData(source) ?? source; } catch (error) { console.warn(`${this.constructor.name}.migrateData failed`, error); }
+        try { source = this.constructor.migrateData(source, options) ?? source; } catch (error) { console.warn(`${this.constructor.name}.migrateData failed`, error); }
         source = this.constructor.cleanData(source, options);
         return this.constructor.shimData(source, options) ?? source;
       }
@@ -498,11 +521,11 @@
       static fromSource(source, options = {}) { return new this(source, { strict: false, ...options }); }
       static fromJSON(json) { return this.fromSource(JSON.parse(json)); }
       static validateJoint() {}
-      #initialize() {
+      _initialize() {
         const initialized = this.schema.initialize(this._source, this);
         for (const [name, value] of Object.entries(initialized)) Object.defineProperty(this, name, { configurable: true, enumerable: true, writable: true, value });
       }
-      reset() { this.#initialize(); }
+      reset() { this._initialize(); }
       toObject(source = true) { return source ? deepClone(this._source) : this.schema.toObject(this); }
       toJSON() { return this.toObject(true); }
       clone(data = {}, context = {}) { return new this.constructor({ ...this.toObject(), ...data }, { parent: this.parent, ...context }); }
@@ -533,7 +556,7 @@
         }
         if (dryRun) return diff;
         this._source = next;
-        this.#initialize();
+        this._initialize();
         return diff;
       }
     }
@@ -541,6 +564,8 @@
       static LOCALIZATION_PREFIXES = [];
       prepareBaseData() {}
       prepareDerivedData() {}
+      async _preUpdate() {}
+      async _preCreate() {}
     }
     const isDataModelClass = (value) => typeof value === "function" && Object.prototype.isPrototypeOf.call(DataModel.prototype, value.prototype);
 

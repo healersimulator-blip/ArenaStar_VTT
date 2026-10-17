@@ -1,3 +1,4 @@
+import type { ActionDescriptor } from "./actionRevert";
 import type { LevelFocusView } from "./levelNavigation";
 /**
  * §13 Message protocol — every message type, with a 1-byte MsgKind prefix in
@@ -162,7 +163,7 @@ export interface IntentMsg {
   /** GM wall-editor precondition, checked only by the host; never part of committed Ops. */
   wallEdit?: WallEditGuard;
   /** Optional durable action audit — host generates the ID, client supplies label+system. */
-  action?: { label: string; system?: Record<string, Json> };
+  action?: ActionDescriptor;
 }
 
 /** §11: rolls are executed on the host from `roll` intents. */

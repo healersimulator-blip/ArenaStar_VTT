@@ -64,9 +64,10 @@
     let userId = null;
     let userName = "GM";
 
+    const configuredClass = (name) => globalThis.CONFIG?.[name]?.documentClass ?? classes[name];
     class WorldCollection extends deps.Collection {
       constructor(documentName) { super([]); this.documentName = documentName; this.projected = true; }
-      get documentClass() { return classes[this.documentName]; }
+      get documentClass() { return configuredClass(this.documentName); }
       get name() { return `${this.documentName}s`; }
       get folders() { return new deps.Collection(collections.folders ? collections.folders.filter((folder) => folder.type === this.documentName) : []); }
       getName(name, { strict = false } = {}) {
@@ -85,7 +86,7 @@
 
     class EmbeddedCollection extends deps.Collection {
       constructor(parent, documentName, rows) { super(rows); this.parent = parent; this.documentName = documentName; }
-      get documentClass() { return classes[this.documentName]; }
+      get documentClass() { return configuredClass(this.documentName); }
       get invalidDocumentIds() { return new Set(); }
     }
 
@@ -95,9 +96,9 @@
       if (!ownership) return 0;
       return typeof ownership[userId] === "number" ? ownership[userId] : typeof ownership.default === "number" ? ownership.default : 0;
     };
-    const uuidOf = (doc) => (doc.parent ? `${doc.parent.uuid}.${doc.documentName}.${doc.id}` : `${doc.documentName}.${doc.id}`);
+    const uuidOf = (doc) => (doc.parent ? `${doc.parent.uuid}.${doc.documentName}.${doc.id}` : doc.pack ? `Compendium.${doc.pack}.${doc.documentName}.${doc.id}` : `${doc.documentName}.${doc.id}`);
     /** Foundry `{ "a.-=b": null }` and `{ "-=a": null }` → kernel `{ "-=a.b": null }`. */
-    const toKernelDiff = (changes) => {
+    const toKernelDiff = (changes, source = {}) => {
       const flat = flattenObject(changes ?? {});
       const diff = {};
       for (const [path, value] of Object.entries(flat)) {
@@ -106,7 +107,26 @@
           diff[`-=${key}`] = null;
         } else if (path !== "_id") diff[path] = value === undefined ? null : value;
       }
-      return diff;
+      // Foundry updates may create missing containers; the kernel deliberately
+      // rejects missing dotted intermediates. Materialize only the first missing
+      // branch, retaining the kernel's strict diff and schema validation.
+      const result = {};
+      for (const [path, value] of Object.entries(diff)) {
+        if (path.startsWith("-=")) { result[path] = value; continue; }
+        const parts = path.split(".");
+        if (parts.some((part) => !part || ["__proto__", "constructor", "prototype"].includes(part))) throw new Error("Unsafe document update path");
+        let cursor = source, missing = -1;
+        for (let i = 0; i < parts.length - 1; i++) {
+          if (cursor?.[parts[i]] == null) { missing = i; break; }
+          cursor = cursor[parts[i]];
+        }
+        if (missing < 0) { result[path] = value; continue; }
+        const prefix = parts.slice(0, missing + 1).join(".");
+        let branch = result[prefix] ??= {};
+        for (const part of parts.slice(missing + 1, -1)) branch = branch[part] ??= {};
+        branch[parts.at(-1)] = value;
+      }
+      return result;
     };
     const fromKernelDiff = (diff) => {
       const changes = {};
@@ -121,17 +141,25 @@
     const refOf = (doc) => (doc.parent ? { collection: doc.constructor.aisCollection, id: doc.id, parent: refOf(doc.parent) } : { collection: doc.constructor.aisCollection, id: doc.id });
 
     class AISDocument {
+      #pack = null;
       constructor(data = {}, context = {}) {
+        this.#pack = typeof context.pack === "string" ? context.pack : null;
         Object.defineProperty(this, "parent", { value: context.parent ?? null, writable: true, configurable: true });
         Object.defineProperty(this, "_source", { value: {}, writable: true, configurable: true });
         Object.defineProperty(this, "apps", { value: {}, writable: true, configurable: true });
+        Object.defineProperty(this, "_aisSourceKeys", { value: new Set(), configurable: false });
         // Kernel rows (`fromSource`) already carry the store shape; module data is Foundry-shaped.
-        this._reset(context.fromSource ? clone(data) : this.constructor.toSource(data, context.parent ?? null));
+        this._source = context.fromSource ? clone(data) : this.constructor.toSource(data, context.parent ?? null);
+        this._configure(context);
+        this._initialize(context);
       }
+      _configure() {}
+      _initialize() { this._reset(this._source, this.parent === null); }
       static get documentName() { return this.metadata.name; }
       static get collectionName() { return this.metadata.collection; }
       static get aisCollection() { return this.metadata.aisCollection; }
       static get hasTypeData() { return true; }
+      static get implementation() { return configuredClass(this.documentName); }
       static get TYPES() { return [...this.metadata.types]; }
       static get hierarchy() { return Object.keys(this.metadata.embedded); }
       static getEmbeddedCollectionName(name) { return this.metadata.embedded[name] ?? null; }
@@ -146,30 +174,38 @@
           else if (this.documentName === "Folder") source.targetType = FOLDER_TARGETS[type] ?? "actors";
           else { source.flags = source.flags ?? {}; source.flags[SUBTYPE_SCOPE] = { ...(source.flags[SUBTYPE_SCOPE] ?? {}), type: String(type) }; }
         }
+        if (this.documentName === "Token") {
+          const size = parent?.grid?.size ?? parent?._source?.grid?.size ?? 100;
+          for (const key of ["width", "height"]) if (typeof source[key] === "number") source[key] *= size;
+        }
         if (this.documentName === "JournalEntryPage") {
           // Foundry pages carry `{ text: { content }, src }`; the store keeps `text` as the HTML string.
           if (source.text && typeof source.text === "object") source.text = String(source.text.content ?? "");
           if (source.src === undefined) source.src = null;
         }
         for (const [documentName, key] of Object.entries(this.metadata.embedded))
-          if (Array.isArray(source[key])) source[key] = source[key].map((row) => (row instanceof AISDocument ? row.toObject() : classes[documentName].toSource(row, null)));
+          if (Array.isArray(source[key])) source[key] = source[key].map((row) => (row instanceof AISDocument ? row.toObject() : classes[documentName].toSource(row, this.documentName === "Scene" ? { grid: source.grid } : null)));
         void parent;
         return source;
       }
       /** Replace this instance's data in place (identity stays stable for module references). */
-      _reset(source) {
+      _reset(source, prepare = true) {
         const previousEmbedded = new Map(Object.values(this.constructor.metadata.embedded).map((key) => [key, this[key] instanceof EmbeddedCollection ? this[key] : null]));
-        for (const key of Object.keys(this)) if (key !== "parent" && key !== "_source" && key !== "apps") Reflect.deleteProperty(this, key);
+        for (const key of this._aisSourceKeys) Reflect.deleteProperty(this, key);
+        this._aisSourceKeys.clear();
         this._source = source;
         const prototype = Object.getPrototypeOf(this);
         for (const [key, value] of Object.entries(source)) {
           // Embedded arrays become collections; accessor-backed fields (`type`, `folder`, `role`, …) read `_source`.
           if (key === "_id" || this.constructor.metadata.embeddedKeys.has(key) || key in prototype) continue;
           this[key] = clone(value);
+          this._aisSourceKeys.add(key);
         }
         this._id = source._id;
         this.flags = this.flags ?? {};
         this.system = this.system ?? {};
+        const Model = globalThis.CONFIG?.[this.documentName]?.dataModels?.[this.type];
+        if (typeof Model === "function") this.system = new Model(clone(source.system ?? {}), { parent: this, strict: false });
         this.ownership = this.ownership ?? { default: 0 };
         this.name = this.name ?? "";
         for (const [documentName, key] of Object.entries(this.constructor.metadata.embedded)) {
@@ -177,16 +213,17 @@
           const previous = previousEmbedded.get(key) ?? null;
           const instances = rows.map((row) => {
             const existing = previous?.get(row._id);
-            if (existing) { existing._reset(row); return existing; }
-            return new classes[documentName](row, { parent: this, fromSource: true });
+            if (existing) { existing._reset(row, false); return existing; }
+            return new (configuredClass(documentName))(row, { parent: this, fromSource: true });
           });
           this[key] = new EmbeddedCollection(this, documentName, instances);
         }
-        try { this.prepareData(); } catch (error) { if (stats.hookErrors.length < 32) stats.hookErrors.push({ hook: "prepareData", error: String(error?.message ?? error) }); }
+        try { if (prepare) this.prepareData(); } catch (error) { if (stats.hookErrors.length < 32) stats.hookErrors.push({ hook: "prepareData", error: String(error?.stack ?? error?.message ?? error).slice(0, 3000) }); }
       }
       get id() { return this._id; }
       get documentName() { return this.constructor.documentName; }
       get collectionName() { return this.constructor.collectionName; }
+      get collection() { return this.parent ? this.parent.getEmbeddedCollection(this.documentName) : collections[this.constructor.aisCollection]; }
       get uuid() { return uuidOf(this); }
       get isEmbedded() { return this.parent !== null; }
       get type() {
@@ -200,11 +237,11 @@
       get isOwner() { return this.testUserPermission(game()?.user, "OWNER"); }
       get visible() { return this.testUserPermission(game()?.user, "LIMITED"); }
       get limited() { return this.permission === 1; }
-      get sheet() { return null; }
+      get sheet() { return deps.sheetFor?.(this) ?? null; }
       get link() { return `@UUID[${this.uuid}]{${this.name}}`; }
-      get compendium() { return null; }
-      get pack() { return null; }
-      get inCompendium() { return false; }
+      get compendium() { return this.pack ? game()?.packs?.get(this.pack) ?? null : null; }
+      get pack() { return this.parent?.pack ?? this.#pack; }
+      get inCompendium() { return this.pack !== null; }
       get folder() { return typeof this._source.folder === "string" ? collections.folders?.get(this._source.folder) ?? null : null; }
       set folder(value) { this._source.folder = value?.id ?? value ?? null; }
       testUserPermission(user, permission, { exact = false } = {}) {
@@ -215,10 +252,13 @@
         const level = typeof ownership?.[user?.id] === "number" ? ownership[user.id] : ownership?.default ?? 0;
         return exact ? level === required : level >= required;
       }
-      canUserModify(user, action) { return action === "create" ? this.constructor.canUserCreate(user) : this.testUserPermission(user, "OWNER"); }
-      prepareData() { this.prepareBaseData(); this.prepareEmbeddedDocuments(); this.prepareDerivedData(); }
+      canUserModify(user, action) { if (this.inCompendium) return false; return action === "create" ? this.constructor.canUserCreate(user) : this.testUserPermission(user, "OWNER"); }
+      prepareData() { this.system?.prepareBaseData?.(); this.prepareBaseData(); this.prepareEmbeddedDocuments(); this.system?.prepareDerivedData?.(); this.prepareDerivedData(); }
+      async _preUpdate(changes, options, user) { return this.system?._preUpdate?.(changes, options, user); }
       prepareBaseData() {}
-      prepareEmbeddedDocuments() {}
+      prepareEmbeddedDocuments() {
+        for (const key of this.constructor.metadata.embeddedKeys) for (const document of this[key] ?? []) document.prepareData();
+      }
       prepareDerivedData() {}
       render() {}
       getFlag(scope, key) { return getProperty(this._source.flags ?? {}, `${scope}.${key}`); }
@@ -242,25 +282,30 @@
         return found ?? null;
       }
       async createEmbeddedDocuments(name, data = [], options = {}) {
+        if (this.inCompendium) throw new Error("Compendium documents are read-only; import a world copy first");
         const klass = classes[name];
         if (!klass || !this.constructor.metadata.embedded[name]) throw new Error(`${this.documentName} has no embedded ${name} documents`);
         return klass.createDocuments(data, { ...options, parent: this });
       }
       async updateEmbeddedDocuments(name, updates = [], options = {}) {
+        if (this.inCompendium) throw new Error("Compendium documents are read-only; import a world copy first");
         const klass = classes[name];
         if (!klass || !this.constructor.metadata.embedded[name]) throw new Error(`${this.documentName} has no embedded ${name} documents`);
         return klass.updateDocuments(updates, { ...options, parent: this });
       }
       async deleteEmbeddedDocuments(name, ids = [], options = {}) {
+        if (this.inCompendium) throw new Error("Compendium documents are read-only; import a world copy first");
         const klass = classes[name];
         if (!klass || !this.constructor.metadata.embedded[name]) throw new Error(`${this.documentName} has no embedded ${name} documents`);
         return klass.deleteDocuments(ids, { ...options, parent: this });
       }
       async update(changes = {}, options = {}) {
+        if (this.inCompendium) throw new Error("Compendium documents are read-only; import a world copy first");
         const [updated] = await this.constructor.updateDocuments([{ ...changes, _id: this.id }], { ...options, parent: this.parent });
         return updated ?? this;
       }
       async delete(options = {}) {
+        if (this.inCompendium) throw new Error("Compendium documents are read-only; import a world copy first");
         await this.constructor.deleteDocuments([this.id], { ...options, parent: this.parent });
         return this;
       }
@@ -270,6 +315,8 @@
       }
       static get(id) { return collections[this.aisCollection]?.get(id) ?? null; }
       static async createDocuments(data = [], context = {}) {
+        const configured = configuredClass(this.documentName);
+        if (this === classes[this.documentName] && configured !== this) return configured.createDocuments(data, context);
         const { parent = null, ...options } = context;
         const prepared = [];
         for (const entry of data) {
@@ -290,10 +337,20 @@
           const id = entry?._id;
           const doc = parent ? parent.getEmbeddedCollection(this.documentName).get(id) : collections[this.aisCollection]?.get(id);
           if (!doc) throw new Error(`${this.documentName} ${id} does not exist`);
-          const changes = this.toSource(entry, parent);
+          const source = this.toSource(entry, parent);
+          const checkPaths = (value) => {
+            if (!value || typeof value !== "object") return;
+            for (const [key, child] of Object.entries(value)) {
+              if (key.split(".").some(part => ["__proto__", "prototype", "constructor"].includes(part))) throw new Error("Unsafe document update path");
+              checkPaths(child);
+            }
+          };
+          checkPaths(source);
+          const changes = expandObject(source);
+          if (await doc._preUpdate(changes, options, userId) === false) continue;
           const allowed = Hooks.call(`preUpdate${this.documentName}`, doc, changes, options, userId);
           if (allowed === false) continue;
-          const diff = toKernelDiff(changes);
+          const diff = toKernelDiff(changes, doc._source);
           if (!Object.keys(diff).length) continue;
           ops.push({ kind: "update", collection: this.aisCollection, id, diff, ...(parent ? { parent: refOf(parent) } : {}) });
           touched.push(doc);
@@ -369,9 +426,29 @@
       const users = collections.users;
       return owners.some((id) => { const user = users?.get(id); return user ? !user.isGM : true; }) ? "character" : "npc";
     };
-    Object.defineProperty(classes.Actor.prototype, "itemTypes", { get() { const out = {}; for (const item of this.items) (out[item.type] = out[item.type] ?? []).push(item); return out; } });
+    Object.defineProperty(classes.Actor.prototype, "itemTypes", { get() { const out = Object.fromEntries([...new Set(["base", ...Object.keys(globalThis.CONFIG?.Item?.dataModels ?? {})])].map((type) => [type, []])); for (const item of this.items) (out[item.type] = out[item.type] ?? []).push(item); return out; } });
     Object.defineProperty(classes.Actor.prototype, "prototypeToken", { get() { return this._source.prototypeToken ?? { name: this.name, flags: {} }; } });
-    classes.Actor.prototype.getActiveTokens = function () { return []; };
+    Object.defineProperty(classes.ActiveEffect.prototype, "statuses", { get() { return new Set(this._source.statuses ?? []); } });
+    Object.defineProperty(classes.ActiveEffect.prototype, "duration", { get() { return this._source.duration ?? {}; } });
+    Object.defineProperty(classes.ActiveEffect.prototype, "disabled", { get() { return this._source.disabled === true; } });
+    Object.defineProperty(classes.ActiveEffect.prototype, "active", { get() { return !this.disabled && !this.isSuppressed; } });
+    classes.Actor.prototype.allApplicableEffects = function* () {
+      yield* this.effects ?? [];
+      for (const item of this.items ?? []) for (const effect of item.effects ?? []) if (effect.transfer) yield effect;
+    };
+    Object.defineProperty(classes.Actor.prototype, "appliedEffects", { get() { return [...this.allApplicableEffects()].filter((effect) => !effect.disabled && !effect.isSuppressed); } });
+    Object.defineProperty(classes.Actor.prototype, "statuses", { get() { return new Set(this.appliedEffects.flatMap((effect) => [...(effect.statuses ?? [])])); } });
+    classes.Actor.prototype.getDependentTokens = function ({ scenes = [...(collections.scenes?.values() ?? [])] } = {}) {
+      return scenes.flatMap((scene) => [...(scene.tokens?.values() ?? [])].filter((token) => token._source.actorId === this.id));
+    };
+    classes.Actor.prototype.getActiveTokens = function () { return this.getDependentTokens({ scenes: [...collections.scenes.values()].filter((scene) => scene.active) }).map((token) => token.object).filter(Boolean); };
+    // Foundry token dimensions are grid cells; the native renderer stores pixels.
+    for (const key of ["width", "height"]) Object.defineProperty(classes.Token.prototype, key, {
+      get() { return this._source[key] / (this.parent?.grid?.size ?? 100); },
+    });
+    Object.defineProperty(classes.Token.prototype, "center", { get() { return { x: this.x + this._source.width / 2, y: this.y + this._source.height / 2 }; } });
+    Object.defineProperty(classes.Token.prototype, "actor", { get() { return this._source.actorId ? collections.actors.get(this._source.actorId) ?? null : null; } });
+    Object.defineProperty(classes.Token.prototype, "isLinked", { get() { return this._source.actorLink === true; } });
     classes.Actor.prototype.getRollData = function () { return clone(this.system); };
     classes.Item.prototype.getRollData = function () { return clone(this.system); };
     Object.defineProperty(classes.Item.prototype, "actor", { get() { return this.parent?.documentName === "Actor" ? this.parent : null; } });
@@ -395,6 +472,9 @@
     classes.User.prototype.hasRole = function (role) { const want = typeof role === "number" ? role : ROLE_NAMES[String(role).toUpperCase()] ?? 0; return this.role >= want; };
     classes.User.prototype.can = function () { return this.isGM; };
     classes.User.prototype.hasPermission = function () { return this.isGM; };
+    classes.ChatMessage.getSpeakerActor = ({ actor } = {}) => actor ? collections.actors.get(actor) ?? null : null;
+    Object.defineProperty(classes.ChatMessage.prototype, "speaker", { get() { return this._source.speaker ?? { alias: collections.users.get(this._source.author)?.name ?? userName }; } });
+    Object.defineProperty(classes.ChatMessage.prototype, "rolls", { get() { return this._source.rolls ?? []; } });
     Object.defineProperty(classes.ChatMessage.prototype, "isAuthor", { get() { return this._source.author === userId || this._source.user === userId; } });
     Object.defineProperty(classes.Combat.prototype, "started", { get() { return (this._source.round ?? 0) > 0; } });
     Object.defineProperty(classes.Combat.prototype, "combatant", { get() { return this.combatants.contents[this._source.turn ?? 0] ?? null; } });
@@ -416,7 +496,7 @@
         let offset = 0;
         for (;;) {
           const page = await AIS.documents.list(root.collection, offset);
-          for (const row of page.rows) collection.set(row._id, new classes[root.documentName](row, { fromSource: true }));
+          for (const row of page.rows) collection.set(row._id, new (configuredClass(root.documentName))(row, { fromSource: true }));
           if (page.next === null) break;
           offset = page.next;
         }
@@ -431,8 +511,8 @@
     };
 
     const chainOf = (change) => { const chain = []; let cursor = change; while (cursor) { chain.unshift({ collection: cursor.collection, id: cursor.id }); cursor = cursor.parent; } return chain; };
-    const rootClassFor = (collection) => { const root = ROOTS.find((candidate) => candidate.collection === collection); return root ? classes[root.documentName] : null; };
-    const embeddedClassFor = (collection) => { const name = Object.keys(EMBEDDED).find((key) => EMBEDDED[key].collection === collection); return name ? classes[name] : null; };
+    const rootClassFor = (collection) => { const root = ROOTS.find((candidate) => candidate.collection === collection); return root ? configuredClass(root.documentName) : null; };
+    const embeddedClassFor = (collection) => { const name = Object.keys(EMBEDDED).find((key) => EMBEDDED[key].collection === collection); return name ? configuredClass(name) : null; };
     const fire = (name, ...args) => {
       try { Hooks.callAll(name, ...args); } catch (error) { if (stats.hookErrors.length < 32) stats.hookErrors.push({ hook: name, error: String(error?.message ?? error) }); }
     };
@@ -568,9 +648,18 @@
     };
     const fromUuid = async (uuid) => fromUuidSyncLocal(uuid);
 
+    const configureDocuments = () => {
+      for (const root of ROOTS) {
+        const collection = collections[root.collection];
+        const Class = configuredClass(root.documentName);
+        for (const row of [...collection.values()]) {
+          if (row.constructor !== Class) collection.set(row.id, new Class(row.toObject(), { fromSource: true }));
+        }
+      }
+    };
     const describe = () => ({ ...stats, userId, userName, collections: { ...stats.collections } });
     const me = () => (userId ? collections.users.get(userId) ?? null : null);
-    return { AISDocument, classes, collections, hydrate, describe, fromUuidSync: fromUuidSyncLocal, fromUuid, me, gameKeys: Object.fromEntries(ROOTS.map((root) => [root.gameKey, root.collection])),
+    return { AISDocument, classes, collections, hydrate, configureDocuments, describe, fromUuidSync: fromUuidSyncLocal, fromUuid, me, gameKeys: Object.fromEntries(ROOTS.map((root) => [root.gameKey, root.collection])),
       userId: () => userId, userName: () => userName, WorldCollection, EmbeddedCollection };
   }
 

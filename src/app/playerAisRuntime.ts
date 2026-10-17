@@ -1,3 +1,5 @@
+import { createFoundryCatalogue } from "../packages/aisFoundryCatalogue";
+import { createAisAssetSource } from "../packages/aisAssetSource";
 /**
  * D-468: the player-side AIS runtime. The same sandboxed iframe, the same kernel RPC handlers
  * and the same module code as on the GM device — composed over the player's live replica
@@ -104,8 +106,8 @@ export function deliveredDigest(module: AisSharedModuleReady): string {
   return packageContentHash(files);
 }
 
-function consentCovers(record: PlayerAisConsentRecord | null, module: AisSharedModuleReady): boolean {
-  return record?.decision === "allow" && record.hash === module.hash && record.digest === deliveredDigest(module)
+function consentCovers(record: PlayerAisConsentRecord | null, module: AisSharedModuleReady, digest: string): boolean {
+  return record?.decision === "allow" && record.hash === module.hash && record.digest === digest
     && module.capabilities.every((capability) => (record.capabilities ?? []).includes(capability));
 }
 
@@ -134,6 +136,8 @@ export interface PlayerAisRuntimeOptions {
   bus: EventBus<ClientEvents>;
   db: IDBPDatabase;
   worldId: string;
+  /** Uses the player's normal entitled asset transfer/cache, not the host IDB. */
+  assetBytes?: (hash: string, mime: string) => Promise<Uint8Array | undefined>;
   /** The scene the player is viewing (the shell owns that choice). */
   activeScene: () => SceneDocument | null;
   select: (packageId: string, request: AisModuleSelectRequest) => Promise<string | null>;
@@ -178,7 +182,7 @@ export function describeAisCapability(capability: AisCapability): string {
     case "ui.theme": return "restyle the interface";
     case "ui.panel": return "show its own panel in a window on your screen";
     case "module.settings.write": return "change its own declared settings on this device";
-    case "compendium.read": return "read compendium packs (GM device only; nothing on yours)";
+    case "compendium.read": return "read public compendium packs from modules you have allowed on this device";
     case "modules.invoke": return "ask other shared modules on this device to run their commands";
     case "documents.read": return "read the actors, items, journals and tables you can see, and watch them change";
     case "documents.write": return "create, edit and delete documents as you (only what you may edit yourself)";
@@ -204,6 +208,7 @@ export class PlayerAisRuntime {
   private readonly frames = new Map<string, PlayerAisFrame>();
   private commandSeq = 0;
   private readonly panels: AisPanelHost | null;
+  private readonly foundryCatalogue = createFoundryCatalogue();
   private readonly running = new Map<string, AisSharedModuleReady>();
   private readonly statuses: Record<string, AisModuleRuntimeStatus> = {};
   private readonly pending = new Map<string, PlayerAisPendingConsent>();
@@ -274,6 +279,15 @@ export class PlayerAisRuntime {
   /** Resolves when the most recent profile has been fully applied (tests and shells awaiting state). */
   settled(): Promise<void> { return this.applying; }
 
+  // Expanded profiles are private immutable snapshots. Re-hashing a multi-MB runtime
+  // on every resource RPC makes boot quadratic; identity changes on every new offer.
+  private readonly deliveredDigests = new WeakMap<AisSharedModuleReady, string>();
+  private digestOf(module: AisSharedModuleReady): string {
+    let digest = this.deliveredDigests.get(module);
+    if (digest === undefined) { digest = deliveredDigest(module); this.deliveredDigests.set(module, digest); }
+    return digest;
+  }
+
   private applyProfile(message: AisProfileMsg): void {
     if (this.disposed || message.worldId !== this.options.worldId) return;
     // D-487: heavy modules travel deflated; everything downstream (consent digest, start, frames)
@@ -309,13 +323,13 @@ export class PlayerAisRuntime {
       if (this.running.has(module.packageId) || this.pending.has(module.packageId)) continue;
       const record = await this.consentRecord(module.packageId);
       if (this.disposed) return;
-      if (consentCovers(record, module)) { this.start(module); continue; }
+      if (consentCovers(record, module, this.digestOf(module))) { this.start(module); continue; }
       if (record?.hash === module.hash && record.decision === "deny") {
         this.statuses[module.packageId] = { state: "stopped", error: "Declined on this device" };
         continue;
       }
       const sameHashDifferentCode = record?.decision === "allow" && record.hash === module.hash
-        && record.digest !== undefined && record.digest !== deliveredDigest(module);
+        && record.digest !== undefined && record.digest !== this.digestOf(module);
       if (sameHashDifferentCode) {
         this.statuses[module.packageId] = { state: "failed", error: "Delivered code does not match the code allowed under this hash" };
         this.options.notify(`Module ${module.name}: the host delivered code that differs from what you allowed under the same hash. It was not started.`, "warn");
@@ -371,7 +385,7 @@ export class PlayerAisRuntime {
     const module = this.profile?.modules.find((candidate) => candidate.packageId === packageId);
     if (!entry || !module || module.hash !== entry.hash) return;
     await this.writeConsent(packageId, {
-      hash: module.hash, digest: deliveredDigest(module), capabilities: [...module.capabilities],
+      hash: module.hash, digest: this.digestOf(module), capabilities: [...module.capabilities],
       decision: "allow", at: (this.options.now ?? Date.now)(),
     });
     if (this.disposed) return;
@@ -405,7 +419,7 @@ export class PlayerAisRuntime {
     const offered = this.profile?.modules.find((candidate) => candidate.packageId === module.packageId);
     if (!offered || offered.hash !== module.hash) throw new Error(`AIS module ${module.packageId} is no longer shared by the GM`);
     const record = await this.consentRecord(module.packageId);
-    if (!consentCovers(record, offered))
+    if (!consentCovers(record, offered, this.digestOf(offered)))
       throw new Error(`AIS module ${module.packageId} is not allowed on this device`);
     if (capability && !offered.capabilities.includes(capability))
       throw new Error(`AIS capability ${capability} is not shared for ${module.packageId}`);
@@ -463,6 +477,15 @@ export class PlayerAisRuntime {
         submit: (ops, action) => client.submitAndWait(ops, 30_000, undefined, action),
         mutate: this.mutate,
         ...(module.resources ? { resources: module.resources } : {}),
+        compendia: async () => {
+          const entries: Awaited<ReturnType<import("../packages/aisModuleHandlers").AisCompendiumSource>>[number][] = [];
+          for (const provider of this.running.values()) {
+            try { await this.assertModuleActive(provider); } catch { continue; }
+            if (this.running.get(provider.packageId) !== provider) continue;
+            entries.push(...this.foundryCatalogue(provider, { isGM: false, id: client.user?.id ?? "player" }));
+          }
+          return entries;
+        },
         sequence: () => client.store.seq,
         notify: options.notify,
         ...(panelBody && panels ? { panel: {
@@ -489,31 +512,9 @@ export class PlayerAisRuntime {
             this.frames.get(module.packageId)?.emit("module.settings.changed", { scope: "device", key, value }),
           register: (declaration) => this.registerRuntimeSetting(module.packageId, declaration),
         },
-        // D-477: no `compendia` — packs live on the GM device; the handler says so.
-        // D-489: asset library — player's projected manifest (only entitled assets).
-        assets: async () => {
-          const manifest = client.store.world.assetManifest ?? {};
-          const out: Record<string, { name: string; mime: string; size: number }> = {};
-          for (const [hash, entry] of Object.entries(manifest)) {
-            out[hash] = { name: entry.name, mime: entry.mime, size: entry.size ?? 0 };
-          }
-          return out;
-        },
-          assetBytes: async (hash: string) => {
-          // Players fetch via asset transfer, not direct IDB — for now return null and let FilePicker show placeholder
-          // The host will serve via asset channel; we can try IDB as fallback
-          try {
-            const { getAsset } = await import("../storage/idb");
-            const record = await getAsset(options.db, options.worldId, hash as any);
-            if (!record || !record.bytes) return null;
-            const bytes = record.bytes;
-            let binary = "";
-            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i] ?? 0);
-            const base64 = btoa(binary);
-            const entry = client.store.world.assetManifest?.[hash];
-            return { base64, mime: entry?.mime ?? record.mime ?? "application/octet-stream" };
-          } catch { return null; }
-        },
+        // Native host packs stay host-only. The catalogue above contains consented shared data only.
+        ...createAisAssetSource(() => client.store.world.assetManifest ?? {},
+          (hash, mime) => options.assetBytes?.(hash, mime) ?? Promise.resolve(undefined)),
         // D-478: sibling modules running on this device, invoked with the player's authority.
         modules: {
           requires: module.requires ?? [],
@@ -531,6 +532,7 @@ export class PlayerAisRuntime {
     if (panelBody && panels) panels.attach(module.packageId, { setVisible: (visible) => frame.setVisible?.(visible) });
     this.frames.set(module.packageId, frame);
     this.running.set(module.packageId, module);
+    this.emit("compendium.changed", { reason: "providers" });
     this.statuses[module.packageId] = frame.status;
     if (module.settings?.length)
       this.worldSettingValues.set(module.packageId, aisWorldSettingValues(this.worldSettingsDoc(module.packageId), module.settings));
@@ -647,7 +649,7 @@ export class PlayerAisRuntime {
     if (!module || this.disposed) return false;
     this.stop(packageId, "Restarted on this device");
     const record = await this.consentRecord(packageId);
-    if (this.disposed || !consentCovers(record, module)) return false;
+    if (this.disposed || !consentCovers(record, module, this.digestOf(module))) return false;
     this.start(module);
     this.publish();
     return true;
@@ -657,11 +659,17 @@ export class PlayerAisRuntime {
     const frame = this.frames.get(packageId);
     this.frames.delete(packageId);
     this.running.delete(packageId);
+    this.emit("compendium.changed", { reason: "providers" });
     frame?.dispose(reason);
     // D-470: the frame removed itself; its host-chromed window goes with it.
     this.panels?.remove(packageId);
     this.statuses[packageId] = { state: "stopped", error: reason };
     this.options.cancelChoice(packageId);
+  }
+
+  /** Shell request routed to registered sheets inside approved, consented runtimes. */
+  openDocumentSheet(collection: "actors" | "items", id: string): void {
+    this.emit("documents.sheet.open", { collection, id });
   }
 
   private emit<K extends AisEventName>(event: K, payload: AisEventPayloads[K]): void {

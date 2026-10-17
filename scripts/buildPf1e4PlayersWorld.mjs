@@ -7,60 +7,13 @@
  * - Levels
  * - Used by e2e/pf1e_4players.spec.ts to verify 4 simultaneous connections, rights, movement, charsheet/compendium
  */
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { packageFilesFromDir, packageDirectoryHash, packageContentHashFromMap } from "./lib/packageFixture.mjs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { strToU8, zipSync } from "fflate";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-
-function listPackageFiles(dir) {
-  const out = [];
-  const walk = (current, prefix) => {
-    for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
-      if (entry.isDirectory()) walk(join(current, entry.name), rel);
-      else if (entry.isFile()) out.push(rel);
-    }
-  };
-  walk(dir, "");
-  return out;
-}
-
-function packageDirectoryHash(dir) {
-  const files = listPackageFiles(dir).sort();
-  const hash = createHash("sha256");
-  const uint32 = (v) => { const b = Buffer.alloc(4); b.writeUInt32BE(v); return b; };
-  hash.update(uint32(files.length));
-  for (const rel of files) {
-    const pathBytes = Buffer.from(rel, "utf8");
-    const textBytes = Buffer.from(readFileSync(join(dir, rel), "utf8"), "utf8");
-    hash.update(uint32(pathBytes.byteLength)).update(uint32(textBytes.byteLength)).update(pathBytes).update(textBytes);
-  }
-  return hash.digest("hex");
-}
-
-function packageFilesFromDir(dir) {
-  const files = {};
-  for (const rel of listPackageFiles(dir)) {
-    files[rel] = readFileSync(join(dir, rel), "utf8");
-  }
-  return files;
-}
-
-function packageContentHashFromMap(files) {
-  const entries = Object.entries(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  const hash = createHash("sha256");
-  const uint32 = (v) => { const b = Buffer.alloc(4); b.writeUInt32BE(v); return b; };
-  hash.update(uint32(entries.length));
-  for (const [p, text] of entries) {
-    const pb = Buffer.from(p, "utf8");
-    const bb = Buffer.from(text, "utf8");
-    hash.update(uint32(pb.byteLength)).update(uint32(bb.byteLength)).update(pb).update(bb);
-  }
-  return hash.digest("hex");
-}
 
 const json = (v) => strToU8(JSON.stringify(v, null, 2));
 const zip = (files) => zipSync(files, { level: 6, mtime: new Date("2020-01-01T00:00:00Z") });

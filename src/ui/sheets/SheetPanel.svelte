@@ -361,6 +361,9 @@
         </label>
       {/if}
 
+      {#if coll === "actors" && !isPF1eActor(selected) && selected.flags?.["ais-foundry"] && onOpenActor}
+        <button type="button" data-open-foundry-sheet onclick={() => onOpenActor?.(selected._id)}>Open character sheet window</button>
+      {/if}
       {#if coll === "actors" && isPF1eActor(selected)}
         {#if onOpenActor}
           <button type="button" data-open-pf1e-sheet onclick={() => onOpenActor?.(selected._id)}

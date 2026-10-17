@@ -1,3 +1,5 @@
+import { AIS_SHARED_COMPRESSED_BYTES } from "../core/aisSharedModule";
+import type { ActionDescriptor } from "../core/actionRevert";
 import { LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
 import type { AisBusMsg, AisProfileMsg, LevelFocusStateMsg, StairOfferMsg } from "../core/messages";
 import { MAX_STAIR_LEVELS, STAIRS_V2_FEATURE } from "../core/levelPlay";
@@ -284,7 +286,7 @@ export class ClientSync {
     ops: Op[],
     timeoutMs = 30_000,
     wallEdit?: WallEditGuard,
-    action?: { label: string; system?: Record<string, Json> },
+    action?: ActionDescriptor,
   ): Promise<TxId> {
     const txId = globalThis.crypto.randomUUID();
     return new Promise((resolve, reject) => {
@@ -329,7 +331,7 @@ export class ClientSync {
     txId: TxId,
     ops: Op[],
     wallEdit?: WallEditGuard,
-    action?: { label: string; system?: Record<string, Json> },
+    action?: ActionDescriptor,
   ): void {
     if (requiredOpFeatures(ops).some((f) => !this.supportsFeature(f)))
       throw new Error("Upgrade required: draft levels need a compatible host and GM client");
@@ -1045,7 +1047,7 @@ export class ClientSync {
             !Array.from(msg.modules).every((m) => m && typeof m.packageId === "string" && typeof m.hash === "string" &&
               // D-487: heavy modules carry `payloadZ` (deflated source payload) instead of `source`.
               ((typeof m.source === "string" && m.source.length <= 1_048_576) ||
-                (m.payloadZ instanceof Uint8Array && m.payloadZ.byteLength <= 512 * 1024)) &&
+                (m.payloadZ instanceof Uint8Array && m.payloadZ.byteLength <= AIS_SHARED_COMPRESSED_BYTES)) &&
               Array.isArray(m.capabilities) && Array.isArray(m.commands))) return;
         if (this.lastAisProfile && msg.seq < this.lastAisProfile.seq) return;
         this.lastAisProfile = msg;

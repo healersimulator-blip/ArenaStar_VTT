@@ -412,7 +412,7 @@ describe("AIS host handlers", () => {
     const pack: CompendiumPack = { name: "Bestiary", type: "actors", entries: [
       { id: "goblin", name: "Goblin", keywords: ["humanoid"], data: { type: "character", name: "Goblin", system: { cr: 0.33 } } },
       { id: "ogre", name: "Ogre", data: { type: "character", name: "Ogre", system: { cr: 3 } } },
-      { id: "huge", name: "Huge Entry", data: { type: "character", name: "Huge Entry", system: { blob: "x".repeat(50 * 1024) } } },
+      { id: "huge", name: "Huge Entry", data: { type: "character", name: "Huge Entry", system: { blob: "x".repeat(1024 * 1024 + 1) } } },
     ] };
     const base = {
       worldId: "w-ais-compendium", packageId: "reader", emittedEvents: [], db,

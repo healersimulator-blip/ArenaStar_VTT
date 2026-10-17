@@ -421,9 +421,9 @@
     Array.isArray(view.authored.attacks) ? view.authored.attacks.length : 0,
   );
 
-  function pf1eTargetActors(): ActorDocument[] {
+  function pf1eTargetActors(includeSelf = false): ActorDocument[] {
     return (client.store.getAll("actors") as readonly ActorDocument[]).filter(
-      (a) => a._id !== doc._id && isPF1eActor(a),
+      (a) => (includeSelf || a._id !== doc._id) && isPF1eActor(a),
     );
   }
 
@@ -3235,7 +3235,7 @@
           >Target
           <select bind:value={castTargetId} data-cast-target>
             <option value="">—</option>
-            {#each pf1eTargetActors() as target (target._id)}
+            {#each pf1eTargetActors(true) as target (target._id)}
               <option value={target._id}>{target.name}</option>
             {/each}
           </select>

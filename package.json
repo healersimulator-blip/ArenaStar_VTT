@@ -7,7 +7,7 @@
   "engines": {
     "node": ">=20"
   },
-  "description": "Serverless browser-only Virtual Tabletop — single self-contained index.html (host = GM tab)",
+  "description": "Serverless browser-only Virtual Tabletop \u2014 single self-contained index.html (host = GM tab)",
   "scripts": {
     "dev": "vite",
     "build": "node scripts/buildSystemPackages.mjs && vite build",
@@ -25,8 +25,11 @@
     "build:ui-demo": "node scripts/buildUiDemo.mjs",
     "build:ais-demo": "node scripts/buildAisDemo.mjs",
     "build:worlds": "node scripts/buildStarterWorlds.mjs",
+    "build:worlds:pf1-unified": "node scripts/buildPf1eIntegralWorld.mjs",
+    "test:e2e:pf1-integral": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=600000 e2e/pf1e_integral.spec.ts",
     "coverage:rules": "node scripts/coverage.mjs",
     "content:convert": "node tools/convert/index.mjs",
+    "fetch:foundry-fixtures": "node scripts/fetchFoundryFixtures.mjs",
     "content:fetch": "node tools/content/fetch.mjs",
     "content:package": "node scripts/buildContentPackage.mjs",
     "test:fx:prepare": "node scripts/buildSystemPackages.mjs && vite build && node scripts/buildSystemPackages.mjs && node scripts/buildStarterWorlds.mjs && node scripts/buildAisDemo.mjs && node scripts/buildUiDemo.mjs",
@@ -35,7 +38,7 @@
     "test:e2e:table": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=1200000 e2e/dice3d.spec.ts e2e/commitroll.spec.ts e2e/roll_apply.spec.ts e2e/roll_ledger.spec.ts e2e/pending_rolls.spec.ts e2e/saves.spec.ts e2e/worldfile.spec.ts e2e/packages.spec.ts e2e/package_ui.spec.ts e2e/models.spec.ts e2e/video_background.spec.ts e2e/quickbar.spec.ts e2e/macro_hotbar.spec.ts e2e/macro_item_args.spec.ts e2e/player_world_macros.spec.ts e2e/prefab_regions.spec.ts e2e/automation_placeables.spec.ts e2e/gm_view_as.spec.ts e2e/gmextras.spec.ts e2e/cloud_backup.spec.ts",
     "test:e2e:hexcrawl": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=900000 e2e/hexcrawl_encounters.spec.ts e2e/hexcrawl_help.spec.ts e2e/hexcrawl_travel.spec.ts e2e/hexcrawl_scene.spec.ts e2e/hexcrawl_player_fields.spec.ts e2e/hexcrawl_tables.spec.ts e2e/hexcrawl_starter_world.spec.ts e2e/hexcrawl_fog.spec.ts",
     "test:e2e:images": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=900000 e2e/image-handling.spec.ts e2e/image_geometry.spec.ts e2e/image_library.spec.ts e2e/library_placement.spec.ts e2e/background_layer.spec.ts e2e/content_world.spec.ts e2e/starter_compendia.spec.ts e2e/compendium_scale.spec.ts e2e/campaign_codex.spec.ts e2e/fx_spell_binding.spec.ts",
-    "test:e2e:ais": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=1500000 e2e/ais_modules.spec.ts e2e/ais_bus.spec.ts e2e/ais_foundry.spec.ts e2e/ais_foundry_module.spec.ts e2e/ais_foundry_ui_runtime.spec.ts e2e/ais_player.spec.ts e2e/ais_platform.spec.ts",
+    "test:e2e:ais": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=1500000 e2e/ais_modules.spec.ts e2e/ais_bus.spec.ts e2e/ais_foundry.spec.ts e2e/ais_foundry_module.spec.ts e2e/ais_foundry_ui_runtime.spec.ts e2e/ais_player.spec.ts e2e/ais_platform.spec.ts e2e/ais_foundry_roll.spec.ts",
     "test:e2e:ui-adapters": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=900000 e2e/ais_ui.spec.ts e2e/workspace_profiles.spec.ts",
     "test:e2e:net": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=900000 e2e/webrtc.spec.ts e2e/fog_big_frame.spec.ts e2e/nostr.spec.ts e2e/realtime.spec.ts e2e/players_roster.spec.ts",
     "test:e2e:pf1e-combat": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=1200000 e2e/pf1e_opportunity.spec.ts e2e/pf1e_touch.spec.ts e2e/pf1e_firearms.spec.ts e2e/pf1e_flanking.spec.ts e2e/pf1e_concentration.spec.ts e2e/pf1e_casting.spec.ts e2e/pf1e_cast_flow.spec.ts e2e/pf1e_targeting.spec.ts e2e/pf1e_threat_overlay.spec.ts e2e/pf1e_ready_fire.spec.ts e2e/pf1e_ready_delay.spec.ts e2e/pf1e_pending_cast.spec.ts e2e/pf1e_mounted.spec.ts e2e/pf1e_entangle.spec.ts e2e/pf1e_poison.spec.ts e2e/pf1e_dying.spec.ts",
@@ -46,7 +49,17 @@
     "test:fx:canvas": "playwright test --project=chromium --workers=1 --retries=0 --timeout=60000 --global-timeout=900000 e2e/assets.spec.ts e2e/canvas_rail.spec.ts e2e/canvas_toolbar.spec.ts e2e/join.spec.ts e2e/vision.spec.ts e2e/walls.spec.ts e2e/fog.spec.ts e2e/fog_lighting.spec.ts e2e/fog_player.spec.ts",
     "test:multilevel": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=1200000 e2e/isolated_floors.spec.ts e2e/level_ambient.spec.ts e2e/level_bindings.spec.ts e2e/level_drafts.spec.ts e2e/level_perception.spec.ts e2e/player_floor_focus.spec.ts e2e/faux_overhead.spec.ts e2e/wall_editing.spec.ts e2e/stairwell_choice.spec.ts e2e/stairs_pass_door.spec.ts e2e/gm_floor_view.spec.ts e2e/level_tools.spec.ts e2e/elevation_cues.spec.ts e2e/level_import.spec.ts e2e/lower_floors.spec.ts e2e/floor_surface.spec.ts e2e/cross_floor_tokens.spec.ts e2e/floor_light.spec.ts e2e/floor_areas.spec.ts e2e/floor_falls.spec.ts e2e/foundry_import.spec.ts e2e/stairs_tool.spec.ts e2e/roofs.spec.ts e2e/roofs_player.spec.ts e2e/ephemera.spec.ts e2e/ice_beacon_scene.spec.ts",
     "cloud:serve": "node tools/cloud/server.mjs",
-    "test:cloud": "node --test tools/cloud/server.test.mjs"
+    "test:cloud": "node --test tools/cloud/server.test.mjs",
+    "test:e2e:real-users:prepare": "npm run fetch:foundry-fixtures && npm run build && node scripts/buildRealPf1WorldFiltered.mjs",
+    "test:e2e:real-users:native": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=360000 e2e/player_session_acceptance.spec.ts",
+    "test:e2e:real-users:pf1": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=360000 e2e/real_pf1_player_acceptance.spec.ts",
+    "test:e2e:real-users": "npm run test:e2e:real-users:native && npm run test:e2e:real-users:import && npm run test:e2e:real-users:pf1",
+    "test:e2e:real-users:content:prepare": "npm run fetch:foundry-fixtures && npm run build && node scripts/buildRealPf1FullWorld.mjs",
+    "test:e2e:real-users:content": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=480000 e2e/real_pf1_full.spec.ts --grep 'PF1 Content item|fresh player catalogue'",
+    "test:e2e:real-users:import": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=300000 e2e/real_pf1_document_import.spec.ts",
+    "test:e2e:real-users:boot": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=600000 e2e/real_pf1_boot2.spec.ts e2e/real_pf1_fireball.spec.ts",
+    "test:e2e:legacy-pf1-fixtures": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=600000 e2e/pf1e_4players.spec.ts",
+    "test:e2e:pf1-entangle": "playwright test --project=chromium --workers=1 --retries=0 --global-timeout=600000 e2e/real_pf1_entangle_fx.spec.ts"
   },
   "dependencies": {
     "@fontsource/inter": "5.3.0",

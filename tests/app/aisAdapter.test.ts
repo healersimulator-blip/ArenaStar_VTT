@@ -18,6 +18,7 @@ import { aisOwnSource, aisRuntimeConfiguration, aisRuntimePackage } from "../../
 import { aisTagSnapshot, aisTagProposal, parseAisTagUpdate } from "../../src/core/aisScene";
 import { packageContentHash } from "../../src/packages/packageHash";
 import type { AisModuleIframeOptions } from "../../src/packages/aisModuleIframe";
+import type { MacroDocument } from "../../src/core/documents";
 import type { AisCapability } from "../../src/core/automationInterconnect";
 
 // Only these host-composition tests replace the DOM shell. Browser tests separately run the
@@ -140,9 +141,9 @@ describe("adapter package contracts and provenance", () => {
     const loaded = await readZipPackage(providerZip);
     if (!loaded.ok) throw new Error(loaded.error);
     const provider = required(loaded.value.manifest.interconnect?.runtimeProvider);
-    expect(provider.scripts).toEqual(["runtime/hbs.js", "runtime/jq.js", "runtime/core.js", "runtime/fields.js", "runtime/documents.js", "runtime/ui.js"]);
+    expect(provider.scripts).toEqual(["runtime/vendor/showdown.min.js", "runtime/hbs.js", "runtime/jq.js", "runtime/core.js", "runtime/fields.js", "runtime/documents.js", "runtime/ui.js", "runtime/roll.js", "runtime/packs.js", "runtime/native-fx.js"]);
     const source = aisOwnSource({ ...loaded.value, id: "ais-foundry-v13", version: "0.6.0" });
-    const offsets = ["runtime/hbs.js", "runtime/jq.js", "runtime/core.js", "runtime/fields.js", "runtime/documents.js", "runtime/ui.js", "runtime/adapter.js"].map((path) => source.indexOf(`// AIS package ais-foundry-v13: "${path}"`));
+    const offsets = ["runtime/vendor/showdown.min.js", "runtime/hbs.js", "runtime/jq.js", "runtime/core.js", "runtime/fields.js", "runtime/documents.js", "runtime/ui.js", "runtime/roll.js", "runtime/packs.js", "runtime/native-fx.js", "runtime/adapter.js"].map((path) => source.indexOf(`// AIS package ais-foundry-v13: "${path}"`));
     expect(offsets.every((offset, i) => offset >= 0 && (i === 0 || offset > required(offsets[i - 1])))).toBe(true);
     const raw = JSON.parse(strFromU8(required(unzipSync(providerZip)["manifest.json"]))) as { interconnect: { runtimeProvider: Record<string, unknown>; entry: string } };
     for (const scripts of [[], ["../x.js"], ["runtime/adapter.js"], ["runtime/ui.js", "runtime/ui.js"], Array.from({ length: 17 }, (_, i) => `runtime/${i}.js`)]) {
@@ -280,6 +281,26 @@ describe("host-validated scene proposals and reused native FX", () => {
       expect(() => parseAisTagUpdate({ ...request, role: "GM" })).toThrow("Invalid");
       expect(() => parseAisTagUpdate({ ...request, tags: ["dup", "dup"] })).toThrow("unique");
       expect(() => aisTagProposal(scene, 9999, parseAisTagUpdate(request))).toThrow("stale");
+    } finally { await app.close(); }
+  });
+
+  test("AIS saved Wizard FX retains persistence and checks the actual caller and anchors", async () => {
+    const { app } = await fresh();
+    try {
+      const caller = required(app.gm.client.user);
+      await app.gm.client.submitAndWait([{ kind: "create", coll: "macros", data: {
+        _id: "native-loop", type: "macro", name: "Native loop", kind: "sequence", command: "",
+        ownership: { default: 0, [caller.id]: 3 }, flags: {}, system: {},
+        sequence: { version: 1, persistent: true, sections: [{ id: "text", kind: "text", startMs: 0, durationMs: 1000, at: { kind: "target" }, text: "Vines" }] },
+      } as MacroDocument }]);
+      expect(() => app.host.playAisMacroFx("scene-1", { macroId: "native-loop", targetTokenId: "beacon-one" }, { id: "outsider", name: "Player", role: "PLAYER" })).toThrow("published");
+      expect(() => app.host.playAisMacroFx("scene-1", { macroId: "native-loop", targetTokenId: "missing-token" }, caller)).toThrow("visible");
+      expect(() => app.host.playAisMacroFx("scene-1", { macroId: "native-loop", targetTokenId: 5 }, caller)).toThrow("Invalid");
+      const run = app.host.playAisMacroFx("scene-1", { macroId: "native-loop", targetTokenId: "beacon-one" }, caller);
+      expect(run.persistent).toBe(true);
+      expect(app.store.getAll("fxInstances")).toHaveLength(1);
+      expect(app.host.stopAisFx(run.runId)).toBe(true);
+      expect(app.store.getAll("fxInstances")).toHaveLength(0);
     } finally { await app.close(); }
   });
 

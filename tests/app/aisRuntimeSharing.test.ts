@@ -216,7 +216,7 @@ describe("AisRuntime → ais.profile", () => {
       // Players receive the declarations with the shared module and the replicated document itself.
       const rex = await joinPlayer(app, "rex");
       expect(rex.profiles.at(-1)?.modules.find((m) => m.packageId === "torch")).toMatchObject({
-        settings, requires: [{ id: "lamp" }], capabilities: ["action.observe", "module.settings.write", "modules.invoke"],
+        settings, requires: [{ id: "lamp" }], capabilities: ["action.observe", "module.settings.write", "modules.invoke", "compendium.read"],
       });
       expect(rex.client.store.get("settings", "ais-settings:torch")).toMatchObject({ flags: { ais: { values: { radius: 45 } } } });
 

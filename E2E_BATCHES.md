@@ -312,3 +312,26 @@ player instances' boot announces reach the GM (payload `from` = the player's use
 the way. The test found the wire-budget defect (a composed adapter stack is 312 KiB raw against
 the 256 KiB WebRTC per-message cap; `ais.profile` used to kill the session at join) — profile
 payloads now travel deflated (`payloadZ`), covered by `tests/app/aisPlayerProfile.test.ts`.
+
+### Real PF1 integral gate (2026-10-17)
+
+`test:e2e:pf1-integral` is the bounded, no-retry genuine upstream scenario gate;
+prepare it with `npm run build:worlds:pf1-unified` after building the application
+and fetching the pinned external archives. It is now **passing**, with exact coverage in [PF1_UNIFIED_INTEGRAL.md](docs/PF1_UNIFIED_INTEGRAL.md).
+The obsolete `debug_ais_ready.spec.ts` mock-fixture diagnostic was removed;
+startup coverage is provided by the genuine integral and boot gates instead.
+
+`test:e2e:real-users` delegates to its native/import/PF1 child batches rather
+than listing their specs twice. `test:e2e:real-users:boot` owns the minimal
+upstream boot and Fireball-document/generic-roll specs (not casting proof).
+`test:e2e:legacy-pf1-fixtures` owns the synthetic four-player fixture smoke;
+it must not be interpreted as genuine upstream rule automation.
+
+### Genuine Entangle / native FX
+
+`npm run test:e2e:pf1-entangle` owns `real_pf1_entangle_fx.spec.ts` alone.
+Prepare it with the same genuine unified-world builder. It reviews/runs the
+shipped scene controls, edits/binds the native Wizard timeline, verifies PF1
+condition modifiers, and checks rendered persistent FX and release/expiry.
+See [PF1_ENTANGLE_FX.md](docs/PF1_ENTANGLE_FX.md). The native `pf1e_entangle.spec.ts`
+remains in the native combat batch and is not upstream acceptance evidence.
