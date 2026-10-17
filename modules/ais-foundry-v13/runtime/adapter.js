@@ -20,6 +20,11 @@
     throw new Error("Runtime configuration needs upstream id/version");
   const unsupported = (name) => { throw new Error(`Foundry compatibility profile does not support ${name}`); };
   /** Foundry `deepClone` semantics: plain data is copied, class instances/functions/DOM nodes are shared. */
+  // The guest models a standalone Foundry window, not a child of the Arena
+  // host. Hide ancestor WindowProxies after the SDK has established its private
+  // MessagePort. This grants no host access and avoids accidental cross-origin
+  // reads through free browser globals in otherwise valid module code.
+  Object.defineProperty(globalThis, "parent", { value: globalThis, configurable: true });
   const clone = (value, depth = 0) => {
     if (value === null || typeof value !== "object") return value;
     if (depth > 100) throw new Error("deepClone: maximum depth exceeded");
@@ -31,6 +36,7 @@
     for (const [key, item] of Object.entries(value)) out[key] = clone(item, depth + 1);
     return out;
   };
+  if (!Math.clamp) Object.defineProperty(Math, "clamp", { value: (value, min, max) => Math.min(max, Math.max(min, value)), configurable: true });
   // Foundry extends Array prototype with helpers like findSplice; pf1 system uses them. Polyfill for AIS emulation.
   if (!Array.prototype.findSplice) {
     Object.defineProperty(Array.prototype, "findSplice", {
@@ -133,6 +139,10 @@
     return true;
   };
   globalThis.Hooks = Object.freeze({ on, off,
+    onError: (location, error, { msg = location } = {}) => {
+      if (hookErrors.length < 32) hookErrors.push({ hook: location, error: String(error?.stack ?? error) });
+      console.error(msg, error);
+    },
     once: (name, callback) => on(name, callback, { once: true }),
     call: (name, ...args) => dispatch(name, args, true),
     callAll: (name, ...args) => { dispatch(name, args, false); return true; },
@@ -141,6 +151,30 @@
   // A Foundry convenience extension, installed in this isolated realm only.
   Object.defineProperty(Array.prototype, "deepFlatten", { configurable: true,
     value: function () { return this.flat(Infinity); } });
+  // Foundry's collection conveniences live only inside this sandbox realm.
+  for (const [name, fn] of Object.entries({
+    map(callback, thisArg) { return new Set([...this].map((value) => callback.call(thisArg, value, value, this))); },
+    filter(callback, thisArg) { return new Set([...this].filter((value) => callback.call(thisArg, value, value, this))); },
+    find(callback, thisArg) { return [...this].find((value) => callback.call(thisArg, value, value, this)); },
+    some(callback, thisArg) { return [...this].some((value) => callback.call(thisArg, value, value, this)); },
+    every(callback, thisArg) { return [...this].every((value) => callback.call(thisArg, value, value, this)); },
+    reduce(callback, ...initial) { return [...this].reduce(callback, ...initial); },
+  })) if (!Object.hasOwn(Set.prototype, name)) Object.defineProperty(Set.prototype, name, { configurable: true, value: fn });
+  Object.defineProperties(Math, {
+    clamp: { configurable: true, value: (value, min, max) => Math.min(max, Math.max(min, value)) },
+    toDegrees: { configurable: true, value: (radians) => radians * 180 / Math.PI },
+    toRadians: { configurable: true, value: (degrees) => degrees * Math.PI / 180 },
+    normalizeDegrees: { configurable: true, value: (degrees) => ((degrees % 360) + 360) % 360 },
+  });
+  if (!Number.isNumeric) Object.defineProperty(Number, "isNumeric", { configurable: true, value: (value) => (typeof value === "number" || typeof value === "string" && value.trim() !== "") && Number.isFinite(Number(value)) });
+  if (!Array.fromRange) Object.defineProperty(Array, "fromRange", { configurable: true, value: (length, min = 0) => Array.from({ length }, (_, index) => min + index) });
+  for (const [name, fn] of Object.entries({
+    filterJoin(separator = " ") { return this.filter((value) => value !== undefined && value !== null && value !== "").join(separator); },
+    partition(predicate) { const yes = [], no = []; this.forEach((value, index) => (predicate(value, index, this) ? yes : no).push(value)); return [yes, no]; },
+    equals(other) { return Array.isArray(other) && this.length === other.length && this.every((value, index) => Array.isArray(value) ? value.equals(other[index]) : value === other[index]); },
+  })) if (!Object.hasOwn(Array.prototype, name)) Object.defineProperty(Array.prototype, name, { configurable: true, value: fn });
+  if (!Number.prototype.toNearest) Object.defineProperty(Number.prototype, "toNearest", { configurable: true, value: function (interval = 1, method = "round") { if (!["round", "ceil", "floor", "trunc"].includes(method) || !Number.isFinite(interval) || interval <= 0) throw new Error("Invalid rounding interval or method"); return Math[method](Number(this) / interval) * interval; } });
+  if (!String.prototype.capitalize) Object.defineProperty(String.prototype, "capitalize", { configurable: true, value: function () { return this.charAt(0).toUpperCase() + this.slice(1); } });
   globalThis.randomID = randomID;
 
   class Collection extends Map {
@@ -148,6 +182,10 @@
     /** Foundry collections iterate VALUES (`for (const token of scene.tokens)`), unlike Map. */
     [Symbol.iterator]() { return this.values(); }
     get contents() { return [...this.values()]; }
+    first() { return this.values().next().value; }
+    last() { return this.contents.at(-1); }
+    every(fn) { return this.contents.every(fn); }
+    partition(fn) { return this.contents.partition(fn); }
     getName(name) { return this.contents.find((row) => row.name === name); }
     find(fn) { return this.contents.find(fn); }
     filter(fn) { return this.contents.filter(fn); }
@@ -161,238 +199,6 @@
   let activeDeadline = 0;
   let busy = false;
 
-  // ── D-477 / R-10: CompendiumCollection over AIS compendium.* RPCs ──
-  class CompendiumCollection extends Collection {
-    constructor(pack) {
-      super([]);
-      this._pack = pack;
-      this.id = pack.id;
-      this.collection = pack.id;
-      this.metadata = { id: pack.id, name: pack.name, label: pack.name, type: pack.type, packageName: pack.id.split("/")[0], packageType: "world" };
-      this.documentName = pack.type;
-      this.type = pack.type;
-      this.name = pack.name;
-      this.title = pack.name;
-      this._cache = new Map();
-      this._index = null;
-    }
-    get documentClass() { return documentClasses[this.documentName] ?? Document; }
-    get index() {
-      // PF1 expects pack.index to be a Collection with size, values(), etc.
-      const coll = new Collection(this._index.map(e => [e._id, e]));
-      // Also provide size via Map's size, and make it iterable as values
-      return coll;
-    }
-    async getIndex({ fields } = {}) {
-      // fields: array of dot-paths or object map; support for PF1e modules that request system fields
-      const wantsFields = fields ? (Array.isArray(fields) ? fields : typeof fields === "object" ? Object.keys(fields) : []) : [];
-      const needFull = wantsFields.length > 0;
-      if (this._index && !needFull) return this._index;
-      try {
-        const hits = await AIS.compendium.search({ packId: this.id, query: "", limit: 500 });
-        if (!needFull) {
-          this._index = hits.map((hit) => ({ _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base", img: hit.img ?? "" }));
-          return this._index;
-        }
-        // When fields requested, fetch full entries (bounded parallelism) to extract requested paths
-        const results = [];
-        const concurrency = 8;
-        let idx = 0;
-        const fetchOne = async (hit) => {
-          try {
-            const entry = await AIS.compendium.get(this.id, hit.entryId);
-            if (!entry) return { _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base", img: hit.img ?? "" };
-            const raw = entry.data ?? entry;
-            const base = { _id: hit.entryId, id: hit.entryId, name: entry.name ?? hit.name, type: entry.type ?? hit.type ?? "base", img: resolveEntryImg(raw) || entry.img || hit.img || "" };
-            for (const field of wantsFields) {
-              try {
-                const val = getProperty(raw, field);
-                if (val !== undefined) setProperty(base, field, clone(val));
-              } catch {}
-            }
-            return base;
-          } catch {
-            return { _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base", img: "" };
-          }
-        };
-        const workers = Array.from({ length: concurrency }, async () => {
-          while (idx < hits.length) {
-            const i = idx++;
-            const hit = hits[i];
-            results[i] = await fetchOne(hit);
-          }
-        });
-        await Promise.all(workers);
-        return results;
-      } catch (e) {
-        warn(`Compendium ${this.id} getIndex failed: ${e?.message ?? e}`);
-        return [];
-      }
-    }
-    async getDocument(entryId) {
-      if (this._cache.has(entryId)) return this._cache.get(entryId);
-      try {
-        const entry = await AIS.compendium.get(this.id, entryId);
-        if (!entry) return null;
-        const data = entry.data ?? entry;
-        const klass = documentClasses[this.documentName] ?? Document;
-        // Convert compendium entry data to document
-        const doc = new klass(data, { fromSource: false });
-        // Ensure id matches entryId
-        doc._id = entryId; doc.id = entryId;
-        this._cache.set(entryId, doc);
-        return doc;
-      } catch (e) {
-        warn(`Compendium ${this.id} getDocument ${entryId} failed: ${e?.message ?? e}`);
-        return null;
-      }
-    }
-    get(id) { return this._cache.get(id) ?? null; }
-    getName(name) { return [...this._cache.values()].find((d) => d.name === name) ?? null; }
-    async importDocument(entryId) {
-      const doc = await this.getDocument(entryId);
-      if (!doc) throw new Error(`Compendium entry ${entryId} not found in ${this.id}`);
-      const created = await doc.constructor.create(doc.toObject(), {});
-      return created;
-    }
-  }
-
-  // ── R-10: Foundry module's own packs (NDJSON .db or JSON) from its distribution ──
-  function parseFoundryPackText(text) {
-    const entries = [];
-    const trimmed = text.trim();
-    if (!trimmed) return entries;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) {
-        for (const entry of parsed) if (entry && typeof entry._id === "string") entries.push(entry);
-        if (entries.length) return entries;
-      }
-      if (parsed && Array.isArray(parsed.entries)) {
-        for (const entry of parsed.entries) if (entry && typeof entry._id === "string") entries.push(entry);
-        if (entries.length) return entries;
-      }
-      if (parsed && typeof parsed._id === "string") { entries.push(parsed); return entries; }
-    } catch {}
-    for (const line of text.split("\n")) {
-      const l = line.trim();
-      if (!l) continue;
-      try {
-        const entry = JSON.parse(l);
-        if (entry && typeof entry._id === "string") entries.push(entry);
-      } catch {}
-    }
-    if (entries.length) return entries;
-    // YAML edge: some older Foundry packs are YAML documents separated by ---; extract minimal _id/name/type/img
-    if (text.includes("_id:") || text.includes("---")) {
-      try {
-        const docs = text.split(/^---\s*$/m);
-        for (const doc of docs) {
-          if (!doc.includes("_id:")) continue;
-          const idMatch = doc.match(/_id:\s*["']?([A-Za-z0-9]{16,})["']?/);
-          if (!idMatch) continue;
-          const nameMatch = doc.match(/^\s*name:\s*["']?(.+?)["']?\s*$/m);
-          const typeMatch = doc.match(/^\s*type:\s*["']?([A-Za-z0-9_-]+)["']?\s*$/m);
-          const imgMatch = doc.match(/^\s*img:\s*["']?(.+?)["']?\s*$/m);
-          const obj = { _id: idMatch[1], name: (nameMatch?.[1]?.trim() || idMatch[1]), type: (typeMatch?.[1]?.trim() || "base"), img: (imgMatch?.[1]?.trim() || "") };
-          // Try to preserve full doc if it looks like JSON after YAML conversion? Keep minimal.
-          entries.push(obj);
-          if (entries.length > 5000) break;
-        }
-        if (entries.length) return entries;
-      } catch {}
-    }
-    return entries;
-  }
-
-  function resolveEntryImg(e) {
-    try {
-      if (e && typeof e.img === "string" && e.img) return e.img;
-      if (e && typeof e.icon === "string" && e.icon) return e.icon;
-      if (e?.system && typeof e.system.img === "string" && e.system.img) return e.system.img;
-      if (e?.data && typeof e.data.img === "string" && e.data.img) return e.data.img;
-    } catch {}
-    return "";
-  }
-  class FoundryCompendiumCollection extends Collection {
-    constructor(packMeta, rawEntries) {
-      super([]);
-      this._raw = rawEntries;
-      this.id = `${foundryId}.${packMeta.name}`;
-      this.collection = this.id;
-      this.metadata = { id: this.id, name: packMeta.label || packMeta.name, label: packMeta.label || packMeta.name, type: packMeta.type, packageName: foundryId, packageType: "module" };
-      this.documentName = packMeta.type === "JournalEntry" ? "JournalEntry" : packMeta.type === "Actor" ? "Actor" : packMeta.type === "Item" ? "Item" : packMeta.type;
-      this.type = packMeta.type;
-      this.name = packMeta.label || packMeta.name;
-      this.title = packMeta.label || packMeta.name;
-      this._cache = new Map();
-      this._index = rawEntries.map((e) => ({ _id: e._id, id: e._id, name: e.name, type: e.type || "base", img: resolveEntryImg(e) }));
-      for (const e of rawEntries) this._cache.set(e._id, e);
-    }
-    get documentClass() { return documentClasses[this.documentName] ?? Document; }
-    get index() {
-      // PF1 expects pack.index to be a Collection with size, values(), etc.
-      const coll = new Collection(this._index.map(e => [e._id, e]));
-      // Also provide size via Map's size, and make it iterable as values
-      return coll;
-    }
-    async getIndex({ fields } = {}) {
-      if (!fields) return this._index;
-      const wants = Array.isArray(fields) ? fields : typeof fields === "object" ? Object.keys(fields) : [];
-      if (!wants.length) return this._index;
-      return this._raw.map((e) => {
-        const base = { _id: e._id, id: e._id, name: e.name, type: e.type || "base", img: resolveEntryImg(e) };
-        for (const f of wants) {
-          try { const v = getProperty(e, f); if (v !== undefined) setProperty(base, f, clone(v)); } catch {}
-        }
-        return base;
-      });
-    }
-    async getDocument(entryId) {
-      const cached = this._cache.get(entryId);
-      if (cached instanceof Document) return cached;
-      const raw = this._raw.find((e) => e._id === entryId);
-      if (!raw) return null;
-      try {
-        const klass = documentClasses[this.documentName] ?? Document;
-        const data = { ...raw, _id: entryId };
-        const doc = new klass(data, { fromSource: false });
-        doc._id = entryId; doc.id = entryId;
-        this._cache.set(entryId, doc);
-        return doc;
-      } catch (e) {
-        warn(`Foundry pack ${this.id} getDocument ${entryId} failed: ${e?.message ?? e}`);
-        return null;
-      }
-    }
-    get(id) {
-      const v = this._cache.get(id);
-      return v instanceof Document ? v : null;
-    }
-    getName(name) {
-      for (const v of this._cache.values()) {
-        if (v instanceof Document && v.name === name) return v;
-        if (v && typeof v === "object" && v.name === name) {
-          const raw = v;
-          const klass = documentClasses[this.documentName] ?? Document;
-          try {
-            const doc = new klass({ ...raw }, { fromSource: false });
-            doc._id = raw._id; doc.id = raw._id;
-            this._cache.set(raw._id, doc);
-            return doc;
-          } catch { return null; }
-        }
-      }
-      return null;
-    }
-    async importDocument(entryId) {
-      const doc = await this.getDocument(entryId);
-      if (!doc) throw new Error(`Compendium entry ${entryId} not found in ${this.id}`);
-      const obj = typeof doc.toObject === "function" ? doc.toObject() : { ...doc };
-      const created = await (doc.constructor.create ? doc.constructor.create(obj, {}) : Document.create(obj));
-      return created;
-    }
-  }
   const types = { tokens: "Token", lights: "AmbientLight", sounds: "AmbientSound", templates: "MeasuredTemplate",
     tiles: "Tile", walls: "Wall", drawings: "Drawing", notes: "Note", regions: "Region" };
   class SceneDocumentView {
@@ -865,24 +671,14 @@
     let value;
     try { value = JSON.parse(raw); } catch { value = clone(row.data.default) ?? {}; }
     if (isDataModelClass(row.data.type)) { try { return new row.data.type(value && typeof value === "object" ? value : {}, { strict: false }); } catch { return value; } }
-    // PF1 SetField (e.g. hiddenCompendiums) is stored as JSON array but used as Set with .has()
-    try {
-      const t = row.data.type;
-      const isSetField = t && typeof t === "object" && (t.constructor?.name === "SetField" || (typeof t._cast === "function" && t._cast([]) instanceof Set) || (t.element && typeof t.toObject === "function"));
-      if (isSetField && Array.isArray(value)) return new Set(value);
-      // Also detect when fieldInitial was Set (hiddenCompendiums etc)
-      if (Array.isArray(value) && row.data && typeof row.data.type === "object") {
-        // Heuristic: if setting key suggests Set (hiddenCompendiums, sources) and value is array of strings, return Set
-        if ((row.key && (row.key.includes("Compendium") || row.key === "sources")) || (t && t.constructor?.name?.includes("Set"))) {
-          if (value.every(v => typeof v === "string")) return new Set(value);
-        }
-      }
-    } catch {}
+    const field = row.data.type;
+    if (field && typeof field === "object" && typeof field.initialize === "function")
+      return field.initialize(value);
     return value;
   };
   const encodeSetting = (row, value) => {
     if (row.kind !== "json") return value;
-    const source = value && typeof value.toObject === "function" ? value.toObject() : value;
+    const source = value instanceof Set ? [...value] : value && typeof value.toObject === "function" ? value.toObject() : value;
     const text = JSON.stringify(source === undefined ? null : source);
     if (text.length > 16384) throw new Error(`Setting ${row.namespace}.${row.key} exceeds the 16 KiB JSON cap`);
     return text;
@@ -930,10 +726,11 @@
       return clone(row.value);
     },
   };
+  settings.register("core", "rollMode", { scope: "client", config: false, type: String, default: "publicroll" });
   const syncSettings = async () => {
     await Promise.all(pendingRegistrations);
     try {
-      const listed = await AIS.settings.list();
+      const listed = await AIS.settings.list({ compact: true });
       for (const entry of listed.settings) {
         const row = settingByAisKey.get(entry.key);
         if (row && row.synced) row.value = decodeSetting(row, entry.value);
@@ -968,7 +765,7 @@
 
   // ── D-485: world documents over the kernel's generic document service (documents.js, loaded before this file). ──
   const documentsLayer = globalThis.__aisFoundryDocuments.install({ AIS, Hooks: globalThis.Hooks, warn, clone, flattenObject, expandObject, getProperty, mergeObject,
-    Collection, game: () => globalThis.game });
+    Collection, game: () => globalThis.game, sheetFor: (document) => sheetForDocument(document) });
   const Document = documentsLayer.AISDocument;
   const documentClasses = { ...documentsLayer.classes };
   // Slice 2: real projected scene/placeable documents from the kernel collection.
@@ -985,18 +782,30 @@
   // Other documents still only exist for `extends`/`instanceof`.
   for (const name of ["Cards", "Setting", "RegionBehavior", "Adventure", "FogExploration"])
     documentClasses[name] = stubClass(name, Document);
+  const { CompendiumCollection, FoundryCompendiumCollection, parseFoundryPackText, resolveCompendiumReference } = globalThis.__aisFoundryPacks.install({
+    AIS, Collection, Document, documentClasses, foundryId, clone, getProperty, setProperty, warn,
+  });
   for (const [name, klass] of Object.entries(documentClasses)) globalThis[name] = klass;
   // Chat messages are host-stamped: `ChatMessage.create({ content })` posts through the chat service as this user.
   const postChat = async (data = {}) => {
     const content = String(data.content ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     if (!content) throw new Error("ChatMessage.create needs content");
-    await AIS.chat.post(content.slice(0, 2000));
-    return new documentClasses.ChatMessage({ content: data.content ?? "", flags: data.flags ?? {}, speaker: data.speaker ?? {} }, { fromSource: true });
+    if (data.blind || data.whisper?.length) throw new Error("Private Foundry chat requires a private AIS chat transport");
+    const { id } = await AIS.chat.post(content.slice(0, 2000));
+    return new documentClasses.ChatMessage({ _id: id, content: data.content ?? "", flags: data.flags ?? {}, speaker: data.speaker ?? {} }, { fromSource: true });
   };
   documentClasses.ChatMessage.create = postChat;
   documentClasses.ChatMessage.createDocuments = async (rows = []) => { const out = []; for (const row of rows) out.push(await postChat(row)); return out; };
   documentClasses.ChatMessage.getSpeaker = ({ actor, token, alias } = {}) => ({ actor: actor?.id ?? null, token: token?.id ?? null, alias: alias ?? actor?.name ?? null, scene: null });
-  documentClasses.ChatMessage.applyRollMode = (data) => data;
+  documentClasses.ChatMessage.applyRollMode = (data, mode = "publicroll") => {
+    if (!["publicroll", "gmroll", "blindroll", "selfroll"].includes(mode)) throw new Error("Unknown roll mode");
+    data.whisper = mode === "publicroll" ? [] : mode === "selfroll" ? [game.user.id] : game.users.filter(user => user.isGM).map(user => user.id);
+    data.blind = mode === "blindroll";
+    return data;
+  };
+  documentClasses.ChatMessage.prototype.applyRollMode = function (mode) {
+    this.constructor.applyRollMode(this._source, mode); return this;
+  };
   const TokenDocumentClass = documentsLayer.classes.Token;
   if (TokenDocumentClass?.prototype) {
     Object.defineProperty(TokenDocumentClass.prototype, "document", { configurable: true, get() { return this; } });
@@ -1033,7 +842,10 @@
   const assetUrlCache = new Map(); // hash -> blobUrl
   const assetNameToHash = new Map(); // name -> hash
   let assetListCache = null;
-  async function refreshAssetMaps() {
+  let assetListRequest = null;
+  function refreshAssetMaps() {
+    if (assetListRequest) return assetListRequest;
+    assetListRequest = (async () => {
     try {
       const list = await AIS.assets.list();
       assetListCache = list;
@@ -1041,6 +853,8 @@
       for (const a of list) assetNameToHash.set(a.name, a.hash);
       return list;
     } catch { return []; }
+    })().finally(() => { assetListRequest = null; });
+    return assetListRequest;
   }
   async function fetchAssetBlobUrl(hash, mime) {
     if (assetUrlCache.has(hash)) return assetUrlCache.get(hash);
@@ -1258,134 +1072,8 @@
     } catch {}
   } catch {}
 
-  // ── Roll (independent dice engine, NOT native action card / revert) ──
-  class Roll {
-    constructor(formula, data = {}, options = {}) {
-      this._formula = String(formula ?? "");
-      this.data = data && typeof data === "object" ? data : {};
-      this.options = options && typeof options === "object" ? options : {};
-      this.terms = [];
-      this._dice = [];
-      this._total = undefined;
-      this._evaluated = false;
-      this._result = null;
-    }
-    get formula() { return this._formula; }
-    get total() { return this._total; }
-    get dice() { return this._dice; }
-    get result() { return this._result; }
-    get isDeterministic() { return !/d\d|d%/i.test(this._formula); }
-    static create(formula, data, options) { return new Roll(formula, data, options); }
-    static fromTerms(terms) {
-      const formula = terms.map((t) => t.formula ?? String(t)).join("");
-      return new Roll(formula);
-    }
-    clone() { return new Roll(this._formula, clone(this.data), clone(this.options)); }
-    toJSON() { return { formula: this._formula, total: this._total, evaluated: this._evaluated, dice: this._dice }; }
-    toObject() { return this.toJSON(); }
-    toString() { return this._formula; }
-    _interpolateData(formula) {
-      return formula.replace(/@([a-zA-Z0-9_.]+)/g, (m, path) => {
-        try {
-          const v = getProperty(this.data, path);
-          if (v === undefined || v === null) return "0";
-          if (typeof v === "number" && Number.isFinite(v)) return String(v);
-          if (typeof v === "string") { const n = Number(v); return Number.isFinite(n) ? String(n) : "0"; }
-          if (typeof v === "object" && v !== null && typeof v.value === "number") return String(v.value);
-          return "0";
-        } catch { return "0"; }
-      });
-    }
-    _rollDie(faces) { return Math.floor(Math.random() * faces) + 1; }
-    _parseAndRollDice(expr) {
-      const diceTerms = [];
-      let out = "";
-      let lastIndex = 0;
-      const diceRe = /(\d*)d(\d+|%)(?:([kK][hHlL]?|[dD][hHlL]?)?(\d+)?)?/g;
-      let m;
-      while ((m = diceRe.exec(expr)) !== null) {
-        out += expr.slice(lastIndex, m.index);
-        lastIndex = m.index + m[0].length;
-        const numStr = m[1];
-        const facesStr = m[2];
-        const keepDropOp = (m[3] || "").toLowerCase();
-        const keepDropNumStr = m[4];
-        const num = numStr ? parseInt(numStr, 10) : 1;
-        const faces = facesStr === "%" ? 100 : parseInt(facesStr, 10);
-        if (!Number.isFinite(num) || num < 0 || num > 1000 || !Number.isFinite(faces) || faces <= 0 || faces > 10000) { out += "0"; continue; }
-        const results = [];
-        for (let i = 0; i < num; i++) results.push(this._rollDie(faces));
-        let kept = [...results];
-        if (keepDropOp) {
-          const k = keepDropNumStr ? parseInt(keepDropNumStr, 10) : 1;
-          if (Number.isFinite(k) && k >= 0) {
-            const sorted = [...results].sort((a, b) => a - b);
-            if (keepDropOp === "kh" || keepDropOp === "k") kept = sorted.slice(-k);
-            else if (keepDropOp === "kl") kept = sorted.slice(0, k);
-            else if (keepDropOp === "dh") kept = sorted.slice(0, Math.max(0, sorted.length - k));
-            else if (keepDropOp === "dl") kept = sorted.slice(k);
-          }
-        }
-        const total = kept.reduce((s, v) => s + v, 0);
-        diceTerms.push({ formula: m[0], number: num, faces, results, kept, total, expression: String(total) });
-        this._dice.push({ faces, number: num, results, total });
-        out += String(total);
-      }
-      out += expr.slice(lastIndex);
-      return { newExpr: out, diceTerms };
-    }
-    _safeEval(expr) {
-      const sanitized = expr.trim();
-      if (!sanitized) return 0;
-      if (!/^[0-9+\-*/().%\s]+$/.test(sanitized)) {
-        const cleaned = sanitized.replace(/[^0-9+\-*/().\s]/g, "");
-        if (!cleaned.trim()) return 0;
-        try { return Function(`"use strict"; return (${cleaned})`)(); } catch { return 0; }
-      }
-      try { const val = Function(`"use strict"; return (${sanitized})`)(); return Number.isFinite(val) ? val : 0; } catch { return 0; }
-    }
-    async evaluate({ async: isAsync = false } = {}) {
-      void isAsync;
-      const interpolated = this._interpolateData(this._formula);
-      const { newExpr, diceTerms } = this._parseAndRollDice(interpolated);
-      this.terms = diceTerms.map((dt) => ({ formula: dt.formula, total: dt.total, results: dt.results }));
-      const total = this._safeEval(newExpr);
-      this._total = total;
-      this._result = newExpr;
-      this._evaluated = true;
-      return this;
-    }
-    async roll({ async: isAsync = false } = {}) { return this.evaluate({ async: isAsync }); }
-    async toMessage(messageData = {}, { rollMode, create = true } = {}) {
-      void rollMode;
-      if (!this._evaluated) await this.evaluate();
-      const flavor = messageData.flavor ? String(messageData.flavor) : this._formula;
-      const content = messageData.content ? String(messageData.content) : `${flavor} = ${this._total}`;
-      if (create) {
-        try {
-          const cls = globalThis.ChatMessage ?? documentClasses.ChatMessage;
-          if (cls && typeof cls.create === "function") {
-            return await cls.create({ content, flavor, roll: { formula: this._formula, total: this._total, dice: this._dice } });
-          }
-        } catch {}
-        try { await AIS.chat.post(`${content}`.slice(0, 2000)); } catch {}
-      }
-      return { content, flavor, roll: { formula: this._formula, total: this._total } };
-    }
-    static async fromFormula(formula, data) { return new Roll(formula, data).evaluate(); }
-    static validate(formula) {
-      try {
-        if (typeof formula !== "string" || !formula.trim()) return false;
-        // Basic validation: allow dice notation, numbers, operators, parentheses, @ vars
-        // For AIS emulation, any non-empty string with allowed chars is considered valid
-        // to avoid blocking pf1's roll validation during boot
-        return true;
-      } catch { return false; }
-    }
-    static isDeterministic(formula) {
-      try { return !/d\d|d%/i.test(String(formula ?? "")); } catch { return true; }
-    }
-  }
+  const { Roll, terms: diceTerms } = globalThis.__aisFoundryRoll.install({ clone, getProperty,
+    postMessage: (data) => globalThis.ChatMessage.create(data) });
   // Foundry global Color (used by pf1 system for token colors, etc)
   class Color {
     constructor(value = 0) {
@@ -1429,11 +1117,37 @@
     get b() { return this.rgb[2]; }
   }
 
+  class SearchFilter {
+    constructor({ inputSelector, contentSelector, callback, initial = "", delay = 200 } = {}) {
+      Object.assign(this, { inputSelector, contentSelector, callback, query: initial, delay });
+    }
+    bind(element) {
+      this.unbind();
+      this.element = element?.[0] ?? element;
+      this.input = this.element?.querySelector(this.inputSelector);
+      this.content = this.element?.querySelector(this.contentSelector);
+      this.listener = (event) => {
+        clearTimeout(this.timer);
+        this.timer = setTimeout(() => this.filter(event, this.input.value), this.delay);
+      };
+      this.input?.addEventListener("input", this.listener);
+      if (this.query) this.filter(null, this.query);
+      return this;
+    }
+    unbind() { clearTimeout(this.timer); this.input?.removeEventListener("input", this.listener); this.element = this.input = this.content = null; }
+    filter(event, query) {
+      this.query = SearchFilter.cleanQuery(query);
+      const escaped = this.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(escaped, "i");
+      if (this.content) this.callback?.(event, this.query, regex, this.content);
+    }
+    static cleanQuery(query) { return String(query ?? "").trim().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); }
+  }
   Object.assign(globalThis, { Application, FormApplication, DocumentSheet, Dialog, Tabs, FormDataExtended, Handlebars, renderTemplate, loadTemplates, getTemplate, $, jQuery: $,
     Color,
     ActorSheet: stubClass("ActorSheet", DocumentSheet), ItemSheet: stubClass("ItemSheet", DocumentSheet),
     TokenConfig: stubClass("TokenConfig", DocumentSheet), SidebarTab: stubClass("SidebarTab", Application),
-    ContextMenu: stubClass("ContextMenu"), Draggable: stubClass("Draggable"), SearchFilter: stubClass("SearchFilter"),
+    ContextMenu: stubClass("ContextMenu"), Draggable: stubClass("Draggable"), SearchFilter,
     FilePicker, SettingsConfig: stubClass("SettingsConfig", FormApplication),
     KeybindingsConfig: stubClass("KeybindingsConfig", FormApplication), Roll, Collection,
     fromUuid: (uuid) => fromUuid(uuid), fromUuidSync: (uuid) => fromUuidSync(uuid),
@@ -1465,59 +1179,18 @@
       const key = Object.keys(types).find((key) => types[key] === parts[2]);
       return key ? currentView.scene[key].get(parts[3]) ?? null : null;
     }
-    if (parts[0] === "Compendium" && parts.length >= 3) {
-      // Try multiple pack id forms:
-      // 1. Compendium.<packageId>/<packFile>.<id> (world packs, slash form)
-      // 2. Compendium.<package>.<pack>.<id> (Foundry dot form)
-      // 3. Compendium.<foundryId>.<packName>.<id> (module's own packs, dot form with foundryId)
-      // 4. Compendium.<foundryId>.<packName>.<DocName>.<id>
-      const candidates = [];
-      if (parts[1].includes("/")) {
-        candidates.push({ packId: parts[1], entryId: parts[2] });
-        if (parts.length >= 4) candidates.push({ packId: parts[1], entryId: parts[3] });
-        if (parts.length >= 5) candidates.push({ packId: parts[1], entryId: parts[4] });
-      }
-      // Dot form: <package>.<pack>
-      candidates.push({ packId: `${parts[1]}/${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
-      candidates.push({ packId: `${parts[1]}.${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
-      // Also try packId as just first part (some modules use single)
-      candidates.push({ packId: parts[1], entryId: parts[2] });
-      // Try with foundryId prefix already included in game.packs (module's own packs are `${foundryId}.${packName}`)
-      for (const cand of candidates) {
-        const pack = game.packs.get(cand.packId) ?? game.packs.get(`${foundryId}.${parts[2]}`) ?? game.packs.get(`${parts[1]}.${parts[2]}`);
-        if (pack && typeof pack.getDocument === "function") {
-          if (pack._cache && pack._cache.has(cand.entryId)) return pack._cache.get(cand.entryId);
-          // For module packs, _cache may have raw entry; try to return document if already created
-          if (pack._cache && pack._cache.get(cand.entryId) instanceof Document) return pack._cache.get(cand.entryId);
-        }
-      }
-      return null;
+    if (parts[0] === "Compendium") {
+      const ref = resolveCompendiumReference(str, game.packs);
+      return ref?.pack.get(ref.entryId) ?? null;
     }
     return documentsLayer.fromUuidSync(str);
   }
   async function fromUuid(uuid) {
     const str0 = String(uuid);
     const str = resolveCompendiumUuidRedirect(str0);
-    const parts = str.split(".");
-    if (parts[0] === "Compendium" && parts.length >= 3) {
-      const candidates = [];
-      if (parts[1].includes("/")) {
-        candidates.push({ packId: parts[1], entryId: parts[2] });
-        if (parts.length >= 4) candidates.push({ packId: parts[1], entryId: parts[3] });
-        if (parts.length >= 5) candidates.push({ packId: parts[1], entryId: parts[4] });
-      }
-      candidates.push({ packId: `${parts[1]}/${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
-      candidates.push({ packId: `${parts[1]}.${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
-      candidates.push({ packId: parts[1], entryId: parts[2] });
-      // Also try foundryId-prefixed pack ids
-      candidates.push({ packId: `${foundryId}.${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
-      for (const cand of candidates) {
-        const pack = game.packs.get(cand.packId) ?? game.packs.get(`${foundryId}.${parts[2]}`);
-        if (pack && typeof pack.getDocument === "function") {
-          try { const doc = await pack.getDocument(cand.entryId); if (doc) return doc; } catch {}
-        }
-      }
-      return null;
+    if (str.startsWith("Compendium.")) {
+      const ref = resolveCompendiumReference(str, game.packs);
+      return ref ? ref.pack.getDocument(ref.entryId) : null;
     }
     return fromUuidSync(str);
   }
@@ -1548,6 +1221,47 @@
     get sheets() { return Array.from(sheetRegistry.values()); }
   };
 
+  const cachedSheets = new WeakMap();
+  function sheetForDocument(document) {
+    const override = document.getFlag?.("core", "sheetClass");
+    const choices = [...sheetRegistry.entries()].filter(([, row]) => row.docName === document.documentName &&
+      (!row.config.types?.length || row.config.types.includes(document.type)));
+    const choice = choices.find(([id]) => id === override) ?? choices.find(([, row]) => row.config.makeDefault) ?? choices[0];
+    if (!choice) return null;
+    const Sheet = choice[1].sheetClass;
+    const cached = cachedSheets.get(document);
+    if (cached?.constructor === Sheet) return cached;
+    const modern = Sheet.prototype instanceof ApplicationV2;
+    const sheet = modern ? new Sheet({ document, editable: document.isOwner }) : new Sheet(document, { editable: document.isOwner });
+    cachedSheets.set(document, sheet);
+    return sheet;
+  }
+  AIS.events.on("documents.sheet.open", async ({ collection, id }) => {
+    const document = documentsLayer.collections[collection]?.get(id);
+    if (!document?.visible) return;
+    const sheet = document.sheet;
+    if (!sheet) return;
+    try { await sheet.render(true); }
+    catch (error) { console.error(error); ui.notifications.error(`Cannot open ${document.name}: ${error?.message ?? error}`); }
+  });
+  class ActorSheetV2 extends DocumentSheetV2 { get actor() { return this.document; } }
+  class ItemSheetV2 extends DocumentSheetV2 { get item() { return this.document; } }
+
+  class TextEditor {
+    static get implementation() { return globalThis.CONFIG?.ux?.TextEditor ?? this; }
+    static async enrichHTML(html) {
+      const text = String(html ?? "");
+      if (text.length > 1024 * 1024) throw new Error("Rich text exceeds the document budget");
+      const template = document.createElement("template");
+      template.innerHTML = text;
+      for (const element of template.content.querySelectorAll("script,iframe,object,embed,style,link,base,meta")) element.remove();
+      for (const element of template.content.querySelectorAll("*")) for (const attribute of [...element.attributes]) {
+        if (/^on/i.test(attribute.name) || ["srcdoc"].includes(attribute.name.toLowerCase()) ||
+            ["href", "src", "xlink:href", "action", "formaction"].includes(attribute.name.toLowerCase()) && /^\s*(javascript:|vbscript:|data:)/i.test(attribute.value)) element.removeAttribute(attribute.name);
+      }
+      return template.innerHTML;
+    }
+  }
   globalThis.foundry = {
     utils: { getProperty, setProperty, hasProperty, mergeObject, expandObject, flattenObject, isNewerVersion, deepClone: clone, duplicate, randomID,
       debounce, escapeHTML, isEmpty: (value) => value === undefined || value === null || (typeof value === "object" && Object.keys(value).length === 0) || value === "",
@@ -1578,11 +1292,11 @@
       Semaphore: class { constructor(max = 1) { this.max = max; } add(fn, ...args) { return Promise.resolve().then(() => fn(...args)); } } },
     applications: { api: { ApplicationV2, DialogV2, HandlebarsApplicationMixin, DocumentSheetV2, Application, FormApplication, DocumentSheet, Dialog },
       fields: uiLayer.fields ? uiLayer.fields.applications : {},
-      sheets: { ActorSheetV2: stubClass("ActorSheetV2", DocumentSheetV2), ItemSheetV2: stubClass("ItemSheetV2", DocumentSheetV2),
-        ActorSheet: stubClass("ActorSheet", DocumentSheet), ItemSheet: stubClass("ItemSheet", DocumentSheet), TokenConfig: stubClass("TokenConfig", DocumentSheet), JournalSheet: stubClass("JournalSheet", DocumentSheet), journal: { JournalSheet: stubClass("JournalSheet", DocumentSheet) } },
+      sheets: { ActorSheetV2, ItemSheetV2,
+        ActorSheet: ActorSheetV2, ItemSheet: ItemSheetV2, TokenConfig: stubClass("TokenConfig", DocumentSheet), JournalSheet: stubClass("JournalSheet", DocumentSheet), journal: { JournalSheet: stubClass("JournalSheet", DocumentSheet) } },
       handlebars: { loadTemplates, renderTemplate, getTemplate },
       ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, Tabs, FormDataExtended, DragDrop: stubClass("DragDrop"),
-        TextEditor: { enrichHTML: async (html) => String(html ?? ""), implementation: { enrichHTML: async (html) => String(html ?? "") } } },
+        TextEditor },
       apps: { FilePicker: globalThis.FilePicker, DocumentSheetConfig, ImagePopout: (() => { const C = stubClass("ImagePopout", Application); C._handleShareImage = async () => {}; C.shareImage = async () => {}; return C; })() }, ui: { Notifications: stubClass("Notifications") }, instances: uiLayer.instances },
     documents: { ...documentClasses, collections: { WorldCollection: documentsLayer.WorldCollection, ...Object.fromEntries(["Actors", "Items", "Journal", "RollTables", "Macros", "Folders",
       "Playlists", "CombatEncounters", "Users", "Messages"].map((name) => [name, documentsLayer.WorldCollection])) }, abstract: { Document },
@@ -1594,7 +1308,7 @@
       perception: { DetectionMode: class DetectionMode { constructor(data = {}) { Object.assign(this, data); } static get DETECTION_TYPES() { return { SIGHT: 0, SOUND: 1, MOVE: 2, LIGHT: 3, OTHER: 4 }; } } } },
     abstract: { DataModel: uiLayer.fields ? uiLayer.fields.DataModel : stubClass("DataModel"), TypeDataModel: uiLayer.fields ? uiLayer.fields.TypeDataModel : stubClass("TypeDataModel"), Document },
     data: { fields: uiLayer.fields ? uiLayer.fields.fields : {}, validation: uiLayer.fields ? uiLayer.fields.validation : {} },
-    dice: { Roll: globalThis.Roll, terms: { DiceTerm: globalThis.Roll?.prototype ? class DiceTerm {} : class DiceTerm {}, FunctionTerm: class FunctionTerm {}, StringTerm: class StringTerm {} } },
+    dice: { Roll: globalThis.Roll, terms: diceTerms },
     helpers: { Hooks: globalThis.Hooks, Localization: stubClass("Localization") },
     CONST: null,
     // Fallbacks for pf1 system (and any system) that touches other foundry.* namespaces
@@ -1632,27 +1346,7 @@
       return proxy;
     };
     globalThis.foundry = wrapDeep(globalThis.foundry, "foundry");
-    // Foundry mixins are functions that take a base class and return a new class; stub them as such so `class X extends HandlebarsApplicationMixin(Y)` works
-    try {
-      const mixinStub = (Base) => {
-        const B = Base || Object;
-        return class extends B {};
-      };
-      if (globalThis.foundry.applications?.api) {
-        const api = globalThis.foundry.applications.api;
-        // Preserve real ApplicationV2 etc if already set, but ensure mixin is function
-        if (typeof api.HandlebarsApplicationMixin !== "function" || api.HandlebarsApplicationMixin.toString().includes("class")) {
-          api.HandlebarsApplicationMixin = mixinStub;
-        }
-        // Some systems use foundry.applications.api.DocumentSheetV2 as base for mixin, ensure it's a class
-        // Other mixins that may appear
-        for (const key of Object.keys(api)) {
-          if (key.toLowerCase().includes("mixin") && typeof api[key] !== "function") {
-            api[key] = mixinStub;
-          }
-        }
-      }
-    } catch {}
+    // Never replace installed UI implementations with namespace stubs.
   })();
   globalThis.CONST = {
     KEYBINDING_PRECEDENCE: { PRIORITY: 0, NORMAL: 1, DEFERRED: 2 },
@@ -1701,10 +1395,9 @@
     const declared = Array.isArray(dist.systems) ? dist.systems.map((e) => typeof e === "string" ? e : e.id).filter(Boolean) : [];
     const selfIdRaw = typeof foundryId === "string" ? foundryId : "";
     const selfId = selfIdRaw.toLowerCase();
-    // Heuristic: if id is known system or distribution has system.json characteristics, treat as self system. Generic list, not hardcoded to pf1 only.
-    const knownSystems = ["pf1", "pf1e", "dnd5e", "dnd5e5e", "pf2e", "swade", "wfrp4e", "co", "dcc", "shadowrun5e", "starfinder", "ose", "cyberpunk-red-core"];
-    const isSelfSystem = knownSystems.includes(selfId) || (typeof dist.title === "string" && dist.title.toLowerCase().includes("system")) || declared.length === 0 && selfId.length <= 8;
-    // Prefer self id if it's a system, else first declared system, else arenastar. Works for pf1 (main target) and any other system like dnd5e.
+    // Importer metadata is authoritative; a short module ID (e.g. tagger)
+    // or a title containing "system" must never masquerade as a game system.
+    const isSelfSystem = dist.kind === "system";
     const id = isSelfSystem ? selfId : declared[0] ? declared[0].toLowerCase() : "arenastar";
     return { id, declared, isSelfSystem, selfIdRaw };
   })();
@@ -1728,10 +1421,10 @@
     Combatant: { documentClass: documentClasses.CombatantDocument ?? null },
     ChatMessage: { documentClass: documentClasses.ChatMessageDocument ?? null, dataModels: {}, popoutClass: null },
     time: { roundTime: 6, earthCalendarConfig: { name: "Earth", days: { values: [] }, months: { values: [] }, description: "" }, worldCalendarConfig: null, worldCalendarClass: null, golarianCalendarConfig: null, golarianCalendarClass: null },
-    ux: { TextEditor: null },
+    ux: { TextEditor },
     statusEffects: [], specialStatusEffects: { SWIM: "swim", UNCONSCIOUS: "unconscious", DEAD: "dead" },
     controlIcons: {}, sounds: {}, fontDefinitions: {},
-    Dice: { rolls: [globalThis.Roll], termTypes: { FunctionTerm: null, StringTerm: null, DiceTerm: null }, terms: {}, functions: {} },
+    Dice: { rolls: [globalThis.Roll], termTypes: diceTerms, terms: {}, functions: {} },
     compendium: { uuidRedirects: {} },
   };
   // Fix: ChatMessage was overwritten by generic spread above — restore popoutClass so pf1's ChatPopoutPF1 can extend it
@@ -1837,9 +1530,9 @@
     users: documentsLayer.collections.users, ready: false, paused: false, debug: false,
     world: { id: "arenastar", title: "ArenaStar world", system: systemShim.id, version: "0.0.0" },
     // PF1 compatibility: game.model and game.system.model used by older code paths (e.g. conditions registry choices: () => Object.keys(game.model.Actor))
-    model: { Actor: { character: {}, npc: {}, base: {} }, Item: { base: {} }, JournalEntryPage: {} },
+    get model() { return Object.fromEntries(Object.entries(globalThis.CONFIG ?? {}).filter(([, value]) => value?.dataModels).map(([name, value]) => [name, Object.fromEntries(Object.keys(value.dataModels).map((type) => [type, {}]))])); },
     // Generic system provider: report system id (pf1 main target, but also dnd5e/pf2e/etc) so content modules don't stay inert. System provider layer provides CONFIG[SYSTEM], globalThis[system], DataModels.
-    system: { id: systemShim.id, title: systemShim.id === "arenastar" ? "ArenaStar VTT" : systemShim.isSelfSystem ? `${systemShim.id} (AIS)` : `${systemShim.id} (compatibility shim)`, version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, model: { Actor: { character: {}, npc: {}, base: {} }, Item: { base: {} } }, template: {}, flags: {}, grid: { units: "ft", distance: 5, type: 1 }, id: systemShim.id },
+    system: { id: systemShim.id, title: systemShim.id === "arenastar" ? "ArenaStar VTT" : systemShim.isSelfSystem ? `${systemShim.id} (AIS)` : `${systemShim.id} (compatibility shim)`, version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, model: { Actor: { character: {}, npc: {}, base: {} }, Item: { base: {} } }, template: {}, flags: {}, grid: { units: "ft", distance: 5, type: 1 } },
     modules, i18n, settings,
     scenes: documentsLayer.collections.scenes, actors: documentsLayer.collections.actors, items: documentsLayer.collections.items, journal: documentsLayer.collections.journals,
     tables: documentsLayer.collections.rollTables, macros: documentsLayer.collections.macros, playlists: documentsLayer.collections.playlists,
@@ -2029,28 +1722,75 @@
     return { holder, value };
   };
 
+  // Only the system realm owns system-prepared actor/effect models. Content
+  // module realms must not duplicate playback of the same world effect.
+  const nativeFx = dist.kind === "system" ? globalThis.__aisFoundryNativeFx.install({
+    AIS, Hooks, game, fromUuid: globalThis.fromUuid, scene: () => globalThis.canvas?.scene,
+    reportError: error => Hooks.onError("nativeFx", error),
+  }) : null;
   globalThis.FoundryAdapter = Object.freeze({
+    nativeFxIdle: () => nativeFx?.idle() ?? Promise.resolve(),
+    // Public document methods remain inside the guest; their writes still use
+    // the ordinary permission-checked AIS transport. No expression evaluation.
+    documentValue: async (uuid, path) => {
+      const doc = await globalThis.fromUuid(uuid);
+      if (!doc?.visible) throw new Error("Document is not visible");
+      if (safeParts(path).some(part => part.startsWith("_"))) throw new Error("Private document path");
+      return jsonSafe(getProperty(doc, path));
+    },
+    callDocument: async (uuid, method, args = []) => {
+      const doc = await globalThis.fromUuid(uuid);
+      if (!doc?.isOwner) throw new Error("Document is not owned");
+      if (safeParts(method).some(part => part.startsWith("_")) || !Array.isArray(args)) throw new Error("Invalid document method");
+      const fn = getProperty(doc, method);
+      if (typeof fn !== "function") throw new Error("Document method is unavailable");
+      const parts = safeParts(method); parts.pop();
+      const holder = parts.length ? getProperty(doc, parts.join(".")) : doc;
+      await fn.apply(holder, args);
+      await nativeFx?.idle();
+      return { completed: true, uuid: doc.uuid, method };
+    },
     info: () => {
-      // Minimal bounded info to stay under 16 KiB RPC limit even with 500+ files
-      const loaded = diagnostics.loaded.slice(0, 16).map(r => ({ path: String(r.path).slice(0, 128), kind: r.kind }));
-      const hookErrs = hookErrors.slice(0, 8).map(e => ({ hook: String(e.hook).slice(0, 64), error: String(e.error).slice(0, 256) }));
-      return {
-        profile: context.profile,
-        foundryId,
-        packageId: context.packageId,
-        title: String(selfModule.title).slice(0, 128),
-        version: String(selfModule.version).slice(0, 32),
-        runtimeHash: String(context.runtimeHash).slice(0, 32),
-        systemId: String(game.system.id).slice(0, 32),
-        ready: !!game.ready,
-        loadedCount: diagnostics.loaded.length,
-        loaded,
-        hookErrors: hookErrs,
-        hookCount: hooks.size,
+      // Preserve the diagnostic contract for ordinary modules, while bounding
+      // every section independently for systems with thousands of resources.
+      const limit = (rows) => rows.slice(0, 16);
+      const info = {
+        profile: context.profile, foundryId, packageId: context.packageId,
+        title: shortText(selfModule.title, 128), version: shortText(selfModule.version, 32),
+        runtimeHash: context.runtimeHash, systemId: game.system.id,
+        declaredSystems: limit(dist.systems), declaredRequires: limit(dist.requires), socket: dist.socket === true,
+        loadedCount: diagnostics.loaded.length, loaded: limit(diagnostics.loaded),
+        styles: limit(diagnostics.styles), languages: limit(diagnostics.languages),
+        unresolvedImports: limit(dist.unresolved ?? []),
         settingsCount: settingRows.size,
-        warningsCount: diagnostics.warnings.length,
-        loadMs: diagnostics.loadMs ?? null,
+        settings: limit([...settingRows.values()]).map((row) => ({ key: `${row.namespace}.${row.key}`,
+          aisKey: row.aisKey, scope: row.scope, kind: row.kind, synced: row.synced, hidden: row.declaration.hidden === true })),
+        keybindings: limit([...bindings.keys()]), socketListeners: limit([...socketListeners.keys()]),
+        hookCount: hooks.size, hookNames: limit([...hooks.keys()]),
+        hookErrors: limit(hookErrors).map((row) => ({ hook: shortText(row.hook, 64), error: shortText(row.error, 256) })),
+        warningsCount: diagnostics.warnings.length, warnings: limit(diagnostics.warnings),
+        unsupportedCalls: limit(diagnostics.unsupportedCalls), moduleApi: selfModule.api ? limit(Object.keys(selfModule.api)) : [],
+        globals: limit(diagnostics.globals ?? []), loadMs: diagnostics.loadMs ?? null, ready: game.ready,
+        windows: limit(uiLayer.describeWindows()),
+        menus: limit([...settingsMenus]).map(([key, menu]) => ({ key, name: menu.name ?? "", label: menu.label ?? "",
+          type: menu.type?.name ?? null, restricted: menu.restricted === true })),
+        templates: uiLayer.describeTemplates(),
+        documents: diagnostics.documents?.error ? diagnostics.documents : documentsLayer.describe(),
+        packs: diagnostics.packs ?? null,
+        nativeFx: nativeFx?.describe() ?? null,
       };
+      // Even pathological upstream strings must fit the 16 KiB command result.
+      // Keep keys and counts stable; progressively truncate array sections only.
+      const compactInfo = (value, count) => {
+        if (Array.isArray(value)) return value.slice(0, count).map((item) => compactInfo(item, count));
+        if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, compactInfo(item, count)]));
+        return typeof value === "string" ? value.slice(0, Math.max(64, count * 128)) : value;
+      };
+      let safe = jsonSafe(info);
+      for (let count = 8; new TextEncoder().encode(JSON.stringify(safe)).length > 14000 && count >= 0; count = count === 0 ? -1 : Math.floor(count / 2)) {
+        safe = compactInfo(safe, count);
+      }
+      return safe;
     },
   });
 
@@ -2092,6 +1832,28 @@
     return { ...app.toObject(), windows: uiLayer.describeWindows() };
   });
 
+  // Catalogue membership changes independently of executable module startup.
+  // Serialize refreshes so an older snapshot cannot overwrite a later revocation.
+  let catalogueRefresh = Promise.resolve();
+  function refreshSharedCatalogue() {
+    catalogueRefresh = catalogueRefresh.catch(() => {}).then(async () => {
+      const rows = await AIS.compendium.list();
+      const next = new Set(rows.map(row => row.collectionId ?? row.id));
+      for (const [id, pack] of game.packs.entries()) if (pack._aisCatalogue && !next.has(id)) game.packs.delete(id);
+      for (const row of rows) {
+        const id = row.collectionId ?? row.id;
+        const current = game.packs.get(id);
+        if (current && !current._aisCatalogue) continue;
+        const pack = new CompendiumCollection(row);
+        pack._aisCatalogue = true;
+        game.packs.set(id, pack);
+      }
+    });
+    return catalogueRefresh;
+  }
+  AIS.events.on("compendium.changed", () => {
+    void refreshSharedCatalogue().catch(error => warn(`Catalogue refresh failed: ${error.message}`));
+  });
   AIS.runtime.initialize(async () => {
     const started = performance.now();
     // D-485: the document replica hydrates alongside the module's own files; a missing grant degrades to empty collections.
@@ -2101,7 +1863,7 @@
     const hydratePacks = (async () => {
       try {
         const worldPacks = await AIS.compendium.list().catch(() => []);
-        const worldCollections = worldPacks.map((pack) => new CompendiumCollection(pack));
+        const worldCollections = worldPacks.map((pack) => { const collection = new CompendiumCollection(pack); collection._aisCatalogue = true; return collection; });
         const foundryCollections = [];
         for (const packMeta of dist.packs || []) {
           let rawEntries = [];
@@ -2161,12 +1923,12 @@
       }
     })();
     await Promise.all([hydrateDocuments, hydratePacks]);
+    await catalogueRefresh;
     loadLanguages();
     installStyles();
     const imports = installImportMap();
     await refreshScene();
     const before = new Set(Object.keys(globalThis));
-    try { console.log("AIS DEBUG CONFIG.Token", String(CONFIG?.Token?.hudClass), "CONFIG.Token", CONFIG?.Token, "CONFIG.ChatMessage.popoutClass", String(CONFIG?.ChatMessage?.popoutClass)); } catch(e) { console.warn("AIS DEBUG CONFIG log failed", e); }
     await loadModules(imports);
     diagnostics.loadMs = Math.round(performance.now() - started);
     // Slice 2: patch Tagger to preserve hidden-token exclusion while game.scenes is the real projected collection.
@@ -2198,118 +1960,14 @@
     Hooks.callAll("i18nInit");
     await syncSettings();
     Hooks.callAll("setup");
+    documentsLayer.configureDocuments();
     game.ready = true;
     Hooks.callAll("ready");
     Hooks.callAll("canvasInit", globalThis.canvas);
     Hooks.callAll("canvasReady", globalThis.canvas);
+    await nativeFx?.restore();
     // Second attempt after ready hooks (Tagger sets window.Tagger in ready)
     try { patchTagger(); } catch {}
-    // Test helper for e2e: Fireball vs Ogres (level 5 wizard, 5d6, DM revert check)
-    globalThis.__aisTestFireball = async () => {
-      const out = {};
-      try {
-        // Find Fireball spell
-        const spells = game.packs.get("pf1.spells");
-        let fireballId = null;
-        if (spells) {
-          const idx = await spells.getIndex();
-          const arr = Array.isArray(idx) ? idx : [...idx.values()];
-          const fb = arr.find(e=>e.name==="Fireball");
-          fireballId = fb?._id ?? fb?.id ?? null;
-          out.fireballId = fireballId;
-          out.fireballName = fb?.name ?? null;
-        }
-        // Find Ogre (from any pack)
-        let ogrePackId = null, ogreEntryId = null, ogreName = null;
-        for (const key of [...game.packs.keys()]) {
-          try {
-            const pack = game.packs.get(key);
-            const idx = await pack.getIndex();
-            const arr = Array.isArray(idx) ? idx : [...idx.values()];
-            const ogre = arr.find(e=>String(e.name).toLowerCase().includes("ogre"));
-            if (ogre) { ogrePackId = key; ogreEntryId = ogre._id ?? ogre.id; ogreName = ogre.name; break; }
-          } catch {}
-        }
-        out.ogrePackId = ogrePackId;
-        out.ogreEntryId = ogreEntryId;
-        out.ogreName = ogreName;
-        // Create wizard actor level 5 if not exists
-        try {
-          const existing = game.actors?.getName?.("Wizard 5") ?? [...(game.actors?.values?.() ?? [])].find(a=>a.name==="Wizard 5");
-          if (!existing) {
-            const actorData = {
-              name: "Wizard 5",
-              type: "character",
-              system: { details: { level: { value: 5 } }, attributes: { hd: { total: 5 } } },
-              items: []
-            };
-            const created = await Actor.create(actorData);
-            out.wizardId = created?.id ?? created?._id ?? null;
-            out.wizardName = created?.name ?? "Wizard 5";
-          } else {
-            out.wizardId = existing.id;
-            out.wizardName = existing.name;
-          }
-        } catch(e) { out.wizardError = String(e?.stack ?? e); }
-        // Fireball calculation: at CL 5, 5d6
-        out.casterLevel = 5;
-        out.fireballDice = "5d6";
-        out.fireballExpected = { dice: 5, sides: 6, level: 5 };
-        // Simulate roll: 5d6 average 17.5, min 5 max 30
-        out.calculation = "Fireball at CL 5 = 5d6 (1d6 per CL, max 10d6)";
-        out.correct = true;
-      } catch(e) { out.error = String(e?.stack ?? e); }
-      return out;
-    };
-    // Test helper for e2e: compendium access check (Ogre, Fireball) – checks pf1 and statblock-library
-    globalThis.__aisTestCompendium = async () => {
-      const out = {};
-      try {
-        out.packs = [...game.packs.keys()];
-        const basic = game.packs.get("pf1.basic-monsters");
-        out.basicId = basic?.id ?? null;
-        if (basic) {
-          const idx = await basic.getIndex();
-          out.basicCount = idx.length ?? idx.size ?? 0;
-          const arr = Array.isArray(idx) ? idx : [...idx.values()];
-          out.basicSample = arr.slice(0,3).map(e=>e.name);
-          out.ogreBasic = arr.find(e=>String(e.name).toLowerCase().includes("ogre"))?.name ?? null;
-        }
-        const spells = game.packs.get("pf1.spells");
-        out.spellsId = spells?.id ?? null;
-        if (spells) {
-          const idx = await spells.getIndex();
-          const arr = Array.isArray(idx) ? idx : [...idx.values()];
-          out.spellsCount = arr.length;
-          out.fireball = arr.find(e=>e.name==="Fireball")?.name ?? null;
-        }
-        // Check statblock-library for Ogre (bestiaries)
-        for (const key of [...game.packs.keys()]) {
-          if (!key.includes("bestiaries")) continue;
-          try {
-            const pack = game.packs.get(key);
-            const idx = await pack.getIndex();
-            const arr = Array.isArray(idx) ? idx : [...idx.values()];
-            const ogre = arr.find(e=>String(e.name).toLowerCase().includes("ogre"));
-            if (ogre) { out.ogre = ogre.name; out.ogrePack = key; break; }
-          } catch {}
-        }
-        // Fallback: any pack with ogre
-        if (!out.ogre) {
-          for (const key of [...game.packs.keys()]) {
-            try {
-              const pack = game.packs.get(key);
-              const idx = await pack.getIndex();
-              const arr = Array.isArray(idx) ? idx : [...idx.values()];
-              const ogre = arr.find(e=>String(e.name).toLowerCase().includes("ogre"));
-              if (ogre) { out.ogre = ogre.name; out.ogrePack = key; break; }
-            } catch {}
-          }
-        }
-        out.pfContentPacks = [...game.packs.keys()].filter(k=>k.includes("pf-content") || k.includes("pf-"));
-      } catch(e) { out.error = String(e?.stack ?? e); }
-      return out;
-    };
     // Globals the module installed itself (e.g. `window.Tagger`): the surface `foundry.api` reaches.
     diagnostics.globals = Object.keys(globalThis).filter((key) => !before.has(key)).slice(0, 64);
   });

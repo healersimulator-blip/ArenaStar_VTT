@@ -80,9 +80,9 @@ describe("buildAisPlayerProfile — what the GM shares", () => {
     expect(sharedModuleOf(module)).toMatchObject({ runtimeHash: "rt1", runtimeContext: { profile: "foundry" }, capabilities: ["action.observe", "runtime.execute"] });
   });
 
-  test("the GM-device-only set is exactly FX, scene-tag writes, themes and compendium reads", () => {
+  test("the GM-device-only set excludes shared public compendium reads", () => {
     // D-477: compendia live in the host's package store; players have no replica of them.
-    expect([...GM_DEVICE_ONLY_CAPABILITIES].sort()).toEqual(["compendium.read", "fx.play", "scene.tags.write", "ui.theme"]);
+    expect([...GM_DEVICE_ONLY_CAPABILITIES].sort()).toEqual(["fx.play", "scene.tags.write", "ui.theme"]);
     expect(playerRunnableCapabilities([...AIS_CAPABILITIES])).toEqual(
       AIS_CAPABILITIES.filter((capability) => !GM_DEVICE_ONLY_CAPABILITIES.has(capability)),
     );

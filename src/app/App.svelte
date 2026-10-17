@@ -2925,6 +2925,11 @@ const WALL_PICK_RADIUS = 12;
 
   function openActorSheet(actorId: string, tab?: string): void {
     if (!app) return;
+    const actor = app.gm.client.store.get("actors", actorId);
+    if (actor?.flags?.["ais-foundry"]) {
+      aisRuntime?.openDocumentSheet("actors", actorId);
+      return;
+    }
     const rect = canvasHost?.getBoundingClientRect();
     openPF1eSheetWindow(
       wm,

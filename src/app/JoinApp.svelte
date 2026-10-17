@@ -16,9 +16,9 @@
   import { elevationCues, elevationViewer, lowerTokenLabels, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
   import { onDestroy, onMount } from "svelte";
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
-  import { openVttDb } from "../storage/idb";
+
   import { loadRecentGames, saveRecentGame, type RecentGame } from "./recentGames";
-  import { getSetting, putSetting } from "../storage/idb";
+  import { openVttDb, getSetting, putSetting } from "../storage/idb";
   import { parseInvite } from "./hostShare";
   import { createStage, type Stage } from "../canvas/stage";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
@@ -371,6 +371,11 @@
 
   function openActorSheet(actorId: string): void {
     if (!app?.client) return;
+    const actor = app.client.store.get("actors", actorId);
+    if (actor?.flags?.["ais-foundry"]) {
+      playerAis?.openDocumentSheet("actors", actorId);
+      return;
+    }
     const rect = canvasHost?.getBoundingClientRect();
     openPF1eSheetWindow(
       wm,
@@ -634,19 +639,20 @@
         startPlayerRules(playerApp);
         const worldName = playerApp.client?.world?.name ?? "—";
         if (db) {
-          void saveRecentGame(db, {
+          const historyDb = db;
+          void saveRecentGame(historyDb, {
             roomId: invite.roomId,
             inviteLink: inviteRaw,
             hostWorldName: worldName,
             lastPlayedAt: Date.now(),
             hostPubkey: invite.hostPubkey,
             playerName: chosenName ?? playerApp.displayName,
-          });
+          }).then(() => loadRecentGames(historyDb)).then((games) => { recentGames = games; })
+            .catch((error) => console.warn("vtt: recent game save failed", error));
           if (chosenName) {
             globalPlayerName = chosenName;
-            void putSetting(db, { scope: "client", key: "playerDisplayName", value: chosenName as never });
+            void putSetting(db, { scope: "client", key: "playerDisplayName", value: chosenName });
           }
-          void loadRecentGames(db).then((games) => (recentGames = games));
         }
       });
       if (new URLSearchParams(globalThis.location.search).has("e2e")) {
@@ -769,6 +775,7 @@
       bus: playerApp.bus,
       db: playerApp.db,
       worldId: client.world?.id ?? "",
+      assetBytes: async (hash, mime) => playerApp.fetcher?.request(hash, "scene", mime),
       activeScene,
       select: requestAisChoice,
       cancelChoice: (packageId) => { if (pendingAisChoice?.packageId === packageId) finishAisChoice(null); },
@@ -2076,7 +2083,7 @@
         type="text"
         data-global-player-name
         bind:value={globalPlayerName}
-        onblur={() => { if (db && globalPlayerName.trim()) void putSetting(db, { scope: "client", key: "playerDisplayName", value: globalPlayerName.trim() as never }); }}
+        onblur={() => { if (db && globalPlayerName.trim()) void putSetting(db, { scope: "client", key: "playerDisplayName", value: globalPlayerName.trim() }); }}
         placeholder="Default name"
         autocomplete="off"
       />

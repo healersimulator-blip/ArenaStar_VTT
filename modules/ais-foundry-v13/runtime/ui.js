@@ -60,56 +60,18 @@
       const found = templateSource(path);
       if (!found) {
         const normalized = normalizeTemplatePath(path);
-        // Try to resolve systems/<foundryId>/... as module's own template (pf1 emulated as module)
-        if (/^systems\//.test(String(path))) {
-          const withoutSystems = String(path).replace(/^systems\/[^\/]+\//, "");
-          if (resources.has(withoutSystems) || resources.has(normalized)) {
-            // Resolve as module template
-            const key = resources.has(withoutSystems) ? withoutSystems : normalized;
-            const src = resources.get(key);
-            if (src) {
-              let fn = compiledTemplates.get(key);
-              if (!fn) {
-                try { fn = Handlebars.compile(src); }
-                catch (e) { try { console.warn(`AIS HBS fallback for ${key}: ${e instanceof Error ? e.message : String(e)}`); } catch {} fn = () => ""; }
-                compiledTemplates.set(key, fn);
-              }
-              return fn;
-            }
-          }
-        }
         if (/^templates\//.test(normalized)) {
           templateDiagnostics.missing.add(normalized);
           throw new Error(`Core template ${normalized} is not in the AIS Foundry core library yet (${core ? core.templatePaths.length : 0} core templates are); report it with the module name so it can be added.`);
         }
-        if (/^systems\//.test(normalized)) {
-          // If it's systems/<self>/... and we have it as module file, allow; otherwise still forbid foreign systems
-          const maybe = normalized.replace(/^systems\/[^\/]+\//, "");
-          if (resources.has(maybe)) {
-            const src = resources.get(maybe);
-            let fn = compiledTemplates.get(maybe);
-            if (!fn) {
-              try { fn = Handlebars.compile(src); }
-              catch (e) { try { console.warn(`AIS HBS fallback for ${maybe}: ${e instanceof Error ? e.message : String(e)}`); } catch {} fn = () => ""; }
-              compiledTemplates.set(maybe, fn);
-            }
-            return fn;
-          }
-          throw new Error(`Template ${normalized} belongs to a game system; system templates are outside the Foundry core-API target (Target B).`);
-        }
+        if (/^systems\//.test(normalized)) throw new Error(`Template ${normalized} belongs to another system's distribution.`);
         throw new Error(`Template ${path} is not part of ${foundryId}'s distribution.`);
       }
       if (found.origin === "core") templateDiagnostics.core.add(found.canonical);
       let fn = compiledTemplates.get(found.key);
       if (!fn) {
-        try {
-          fn = Handlebars.compile(found.source);
-        } catch (e) {
-          // PF1 system templates use inline partials/decorators which our minimal HBS doesn't support.
-          // For boot compatibility, register a dummy that returns empty string and warn once.
-          try { console.warn(`AIS HBS fallback for ${found.key}: ${e instanceof Error ? e.message : String(e)}`); } catch {}
-          fn = () => "";
-        }
+        // Unsupported syntax is a real compatibility error, not an empty UI.
+        fn = Handlebars.compile(found.source);
         compiledTemplates.set(found.key, fn);
       }
       return fn;
@@ -688,7 +650,7 @@
       static get defaultOptions() {
         return mergeObject(super.defaultOptions, { classes: ["form"], closeOnSubmit: true, editable: true, sheetConfig: false, submitOnChange: false, submitOnClose: false });
       }
-      get isEditable() { return this.options.editable !== false; }
+      get isEditable() { return this.options.editable !== false && !this.document?.inCompendium && this.document?.isOwner !== false; }
       getData() { return { object: this.object, options: this.options, title: this.title }; }
       async _render(force, options) {
         await super._render(force, options);
@@ -879,7 +841,7 @@
         if (parent && typeof parent.inheritanceChain === "function") yield* parent.inheritanceChain();
       }
       static get BASE_APPLICATION() { return ApplicationV2; }
-      #element = null; #content = null; #state = 0; #position; #events = new Map(); #uniqueId; #renderPromise = null; #listenersAttached = false;
+      #frameElements = {}; #element = null; #content = null; #state = 0; #position; #events = new Map(); #uniqueId; #renderPromise = null; #listenersAttached = false;
       constructor(options = {}) {
         this.#uniqueId = String(++v2Ids);
         this.options = Object.freeze(this._initializeApplicationOptions(options));
@@ -906,7 +868,7 @@
       get hasFrame() { return this.options.window?.frame !== false; }
       get minimized() { return this.#element?.classList.contains("minimized") === true; }
       get classList() { return this.#element?.classList; }
-      get window() { return { header: this.#element?.querySelector(".window-header") ?? null, title: this.#element?.querySelector(".window-title") ?? null, content: this.#content, close: this.#element?.querySelector('[data-action="close"]') ?? null }; }
+      get window() { return this.#frameElements; }
       get form() { return this.#element instanceof HTMLFormElement ? this.#element : this.#element?.querySelector("form") ?? null; }
       addEventListener(type, listener, { once = false } = {}) { if (!this.#events.has(type)) this.#events.set(type, []); this.#events.get(type).push({ listener, once }); }
       removeEventListener(type, listener) { this.#events.set(type, (this.#events.get(type) ?? []).filter((entry) => entry.listener !== listener)); }
@@ -1007,12 +969,19 @@
           minimize.type = "button"; minimize.className = "header-control icon fa-solid fa-window-minimize"; minimize.dataset.action = "toggleMinimize"; minimize.setAttribute("aria-label", "Minimize");
           header.appendChild(minimize);
         }
+        const controls = doc.createElement("button");
+        controls.type = "button";
+        controls.className = "header-control icon fa-solid fa-ellipsis-vertical";
+        controls.dataset.action = "toggleControls";
+        controls.setAttribute("aria-label", "Window controls");
+        header.appendChild(controls);
         const close = doc.createElement("button");
         close.type = "button"; close.className = "header-control icon fa-solid fa-xmark"; close.dataset.action = "close"; close.setAttribute("aria-label", "Close");
         header.appendChild(close);
         const content = doc.createElement(win.contentTag ?? "section");
         content.className = ["window-content", ...(win.contentClasses ?? [])].join(" ");
         element.append(header, content);
+        this.#frameElements = { header, title: header.querySelector(".window-title"), content, close, controls };
         makeDraggable(header, element, this.#position);
         if (win.resizable) element.style.resize = "both";
         return element;
@@ -1128,15 +1097,18 @@
     const HandlebarsApplicationMixin = (Base) => class HandlebarsApplication extends Base {
       static PARTS = {};
       #parts = {};
+      #renderParts = {};
+      _configureRenderParts() { return Object.fromEntries(Object.entries(this.constructor.PARTS ?? {}).map(([id, part]) => [id, { ...part, scrollable: [...(part.scrollable ?? [])] }])); }
       get parts() { return this.#parts; }
       _configureRenderOptions(options) {
         super._configureRenderOptions(options);
-        options.parts ??= Object.keys(this.constructor.PARTS ?? {});
+        this.#renderParts = this._configureRenderParts(options);
+        options.parts ??= Object.keys(this.#renderParts);
       }
       async _preFirstRender(context, options) {
         await super._preFirstRender(context, options);
         const templates = new Set();
-        for (const part of Object.values(this.constructor.PARTS ?? {})) {
+        for (const part of Object.values(this.#renderParts)) {
           if (part.template) templates.add(part.template);
           for (const extra of part.templates ?? []) templates.add(extra);
         }
@@ -1146,7 +1118,7 @@
       async _renderHTML(context, options) {
         const rendered = {};
         for (const partId of options.parts ?? []) {
-          const part = this.constructor.PARTS?.[partId];
+          const part = this.#renderParts[partId];
           if (!part) { warn(`${this.constructor.name}: part "${partId}" is not configured`); continue; }
           const partContext = await this._preparePartContext(partId, { ...context, partId }, options);
           const html = await renderTemplate(part.template, partContext);
@@ -1174,7 +1146,7 @@
         }
       }
       _attachPartListeners(partId, element) {
-        const part = this.constructor.PARTS?.[partId];
+        const part = this.#renderParts[partId];
         for (const [selector, formConfig] of Object.entries(part?.forms ?? {})) {
           const forms = element.matches(selector) ? [element] : [...element.querySelectorAll(selector)];
           for (const form of forms) {
@@ -1194,7 +1166,7 @@
       }
       get document() { return this.#document; }
       get title() { return this.#document?.name ?? super.title; }
-      get isEditable() { return this.options.editable !== false; }
+      get isEditable() { return this.options.editable !== false && !this.document?.inCompendium && this.document?.isOwner !== false; }
       _initializeApplicationOptions(options) {
         const merged = super._initializeApplicationOptions(options);
         if (typeof merged.form?.handler !== "function")

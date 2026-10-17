@@ -100,7 +100,7 @@ describe("D-482: Foundry module.json import", () => {
     expect(result.text).toContain(`import lw from "lib-wrapper";`);
     expect(result.text).toContain(`import sys from "/systems/pf1/pf1.mjs";`);
     expect(result.text).toContain(`import "./side-effect.js";`);
-    expect([...result.unresolved].sort()).toEqual(["./not-code.js", "./side-effect.js", "/systems/pf1/pf1.mjs"]);
+    expect([...result.unresolved].sort()).toEqual(["./side-effect.js", "/systems/pf1/pf1.mjs"]);
   });
 
   test("the upstream Tagger zip (nested root, icons, LevelDB pack) imports as an AIS guest of the Foundry adapter", async () => {
@@ -147,7 +147,7 @@ describe("D-482: Foundry module.json import", () => {
       foundryId: "tagger", packageId: "tagger", title: "Tagger", esmodules: ["scripts/module.js"], scripts: [], styles: [],
       languages: [], packs: [], systems: [], requires: [], socket: false, unresolved: [],
     });
-    expect(distribution?.files).toEqual(["LICENSE", "module.json", "scripts/constants.js", "scripts/hotkeys.js", "scripts/module.js"]);
+    expect(distribution?.files).toEqual(["LICENSE", "__ais_shims/empty.js", "module.json", "scripts/constants.js", "scripts/hotkeys.js", "scripts/module.js"]);
   });
 
   test("a root-level module.json works too, and a plain ArenaStar package still refuses binaries", async () => {
@@ -159,4 +159,12 @@ describe("D-482: Foundry module.json import", () => {
     }));
     expect(ours).toMatchObject({ ok: false, error: expect.stringContaining("binary files are not supported") });
   });
+});
+
+test("Vite environment rewrite preserves comments and strings", () => {
+  const source = `// import.meta.env.DEV\nconst label = "import.meta.env.PROD";\nconst dev = import.meta.env.DEV;`;
+  const result = rewriteFoundryModuleSource(source, "main.mjs", "probe", "probe", () => false);
+  expect(result.text).toContain('// import.meta.env.DEV');
+  expect(result.text).toContain('"import.meta.env.PROD"');
+  expect(result.text).toContain('const dev = ({ DEV: false, PROD: true }).DEV');
 });

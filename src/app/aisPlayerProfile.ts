@@ -31,8 +31,7 @@ export const GM_DEVICE_ONLY_CAPABILITIES: ReadonlySet<AisCapability> = new Set<A
   "fx.play",
   "scene.tags.write",
   "ui.theme",
-  // D-477: compendium packs are host-side package records, never replicated to players.
-  "compendium.read",
+  // Public Foundry catalogues are readable only from approved, consented shared snapshots.
 ]);
 
 export function playerRunnableCapabilities(capabilities: readonly AisCapability[]): AisCapability[] {

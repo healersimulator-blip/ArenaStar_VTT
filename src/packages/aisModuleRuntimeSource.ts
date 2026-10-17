@@ -1,8 +1,17 @@
+import pixiSource from "../../node_modules/pixi.js/dist/pixi.min.js?raw";
 /** Minimal AIS SDK injected before an independent module's classic-script entry point. */
 import type { Json } from "../core/documents";
 
-export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = null): string {
+export function aisModuleRuntimeSource(
+  bootId: string,
+  runtimeContext: Json = null,
+): string {
+  const foundry = runtimeContext !== null && typeof runtimeContext === "object" && !Array.isArray(runtimeContext) && runtimeContext.profile === "foundry-module";
+  // Use the application's actual pinned, MIT-licensed Pixi library in Foundry
+  // sandboxes too; never fake graphics types or copy a proprietary Foundry bundle.
+  const graphics = foundry ? `(function () { ${pixiSource}\n globalThis.PIXI = Object.assign({}, PIXI, { DisplayObject: PIXI.Container }); })();` : "";
   return `
+${graphics}
 "use strict";
 (function (bootId, runtimeContext) {
   var channel = new MessageChannel();
@@ -17,6 +26,7 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   var ready = false;
   var initializers = [];
   var starting = false;
+  var nextCompendiumReadAt = 0;
 
   function post(frame) { port.postMessage(frame); }
   function fail(error) {
@@ -43,13 +53,18 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   function rpc(method, args, commandId) {
     return new Promise(function (resolve, reject) {
       if (failed) { reject(new Error("AIS module has stopped")); return; }
-      if (pending.size >= 128) { reject(new Error("AIS RPC concurrency limit exceeded")); return; }
+      if (pending.size >= 32) { reject(new Error("AIS RPC concurrency limit exceeded (" + Array.from(pending.values()).map(function (row) { return row.method; }).join(", ") + ")")); return; }
       var id = nextId++;
       var frame = { vttAisRpc: 1, kind: "request", id: id, method: method,
         args: args === undefined ? {} : args,
         ...(commandId ? { commandId: commandId } : {}) };
-      if (!boundedJson(frame, 0, new Set()) || byteLength(frame) > 64 * 1024) {
-        reject(new Error("AIS RPC request must be bounded JSON no larger than 64 KiB")); return;
+      if (!boundedJson(frame, 0, new Set(), method === "documents.mutate" ? 32 : 12)) {
+        reject(new Error("AIS RPC request must be bounded JSON")); return;
+      }
+      var frameBytes = byteLength(frame);
+      var chunked = frameBytes > 64 * 1024;
+      if (frameBytes > (method === "documents.mutate" ? 512 * 1024 + 1024 : 64 * 1024)) {
+        reject(new Error("AIS RPC request exceeds the bounded document or ordinary request budget")); return;
       }
       // A host-rendered selection can wait for a human. Resource reads can be large (multi-MB packs)
       // and may need longer than 10s when many concurrent reads contend on IndexedDB.
@@ -60,8 +75,16 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
           reject(new Error("AIS RPC timed out: " + method));
         }
       }, timeout);
-      pending.set(id, { resolve: resolve, reject: reject, timer: timer });
-      post(frame);
+      pending.set(id, { resolve: resolve, reject: reject, timer: timer, method: method });
+      if (!chunked) post(frame);
+      else {
+        var text = JSON.stringify(frame);
+        var total = Math.ceil(text.length / 8192);
+        for (var index = 0; index < total; index++) post({
+          vttAisRpc: 1, kind: "request-chunk", id: id, index: index, total: total,
+          text: text.slice(index * 8192, (index + 1) * 8192)
+        });
+      }
     });
   }
   function subscribe(event) {
@@ -74,6 +97,15 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   }
   function createApi(commandId) {
     var call = function (method, args) { return rpc(method, args, commandId); };
+    // Large index/field hydration must not exhaust the frame's ordinary RPC
+    // budget. Share reservations across command APIs in this frame.
+    var compendiumCall = async function (method, args) {
+      var at = Math.max(Date.now(), nextCompendiumReadAt);
+      nextCompendiumReadAt = at + 20;
+      var delay = at - Date.now();
+      if (delay > 0) await new Promise(function (resolve) { setTimeout(resolve, delay); });
+      return call(method, args);
+    };
     var api = {
       events: Object.freeze({
         on: function (event, callback) {
@@ -151,11 +183,21 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
       }),
       // D-476: schema-declared settings (interconnect.settings); world scope is GM-authored.
       settings: Object.freeze({
-        list: function () { return call("settings.list", {}); },
+        list: async function (options) {
+          var rows = [], offset = 0;
+          for (var page = 0; page < 1024; page++) {
+            var row = await call("settings.list", { offset: offset, compact: !!(options && options.compact) });
+            rows.push.apply(rows, row.settings);
+            if (row.next === null || row.next === undefined) return { settings: rows };
+            if (!Number.isSafeInteger(row.next) || row.next <= offset) throw new Error("Invalid settings stream");
+            offset = row.next;
+          }
+          throw new Error("Settings transfer budget exceeded");
+        },
         get: function (key) { return call("settings.get", { key: key }).then(function (row) { return row.value; }); },
         set: function (key, value) { return call("settings.set", { key: key, value: value }); },
         // D-482: declare a setting from code (same schema as interconnect.settings).
-        register: function (declaration) { return call("settings.register", declaration); },
+        register: function (declaration) { return compendiumCall("settings.register", declaration); },
         onChange: function (callback) {
           if (typeof callback !== "function") throw new TypeError("AIS.settings.onChange requires a callback");
           return api.events.on("module.settings.changed", callback);
@@ -163,14 +205,25 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
       }),
       // D-477: read-only compendium access (GM device; players get an explanatory error).
       compendium: Object.freeze({
-        list: function () { return call("compendium.list", {}).then(function (row) { return row.packs; }); },
+        list: function () { return compendiumCall("compendium.list", {}).then(function (row) { return row.packs; }); },
+        index: async function (packId) {
+          var entries = [], offset = 0;
+          for (var page = 0; page < 10000; page++) {
+            var row = await compendiumCall("compendium.search", { query: "", packId: packId, browse: true, offset: offset, limit: 100 });
+            entries.push.apply(entries, row.hits);
+            if (row.next === null) return entries;
+            if (!Number.isSafeInteger(row.next) || row.next <= offset) throw new Error("Invalid compendium index stream");
+            offset = row.next;
+          }
+          throw new Error("Compendium index transfer budget exceeded");
+        },
         search: function (query, options) {
           var request = { query: query };
           if (options && options.packId !== undefined) request.packId = options.packId;
           if (options && options.limit !== undefined) request.limit = options.limit;
-          return call("compendium.search", request).then(function (row) { return row.hits; });
+          return compendiumCall("compendium.search", request).then(function (row) { return row.hits; });
         },
-        get: function (packId, entryId) { return call("compendium.get", { packId: packId, entryId: entryId }); }
+        get: function (packId, entryId) { return compendiumCall("compendium.get", { packId: packId, entryId: entryId }); }
       }),
       // D-478: other modules on this device — public contract and kernel-routed invocation.
       modules: Object.freeze({
@@ -201,15 +254,16 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
           return call("assets.get", req);
         },
         // Helper to fetch full asset as base64 by paging
-        fetch: function (hash) {
-          var fetchChunk = function (offset, acc) {
-            return call("assets.get", { hash: hash, offset: offset }).then(function (row) {
-              var nextAcc = acc + row.base64;
-              if (row.next === null || row.next === undefined) return { mime: row.mime, base64: nextAcc };
-              return fetchChunk(row.next, nextAcc);
-            });
-          };
-          return fetchChunk(0, "");
+        fetch: async function (hash) {
+          var parts = [], offset = 0;
+          for (var page = 0; page < 16384; page++) {
+            var row = await call("assets.get", { hash: hash, offset: offset });
+            parts.push(row.base64);
+            if (row.next === null) return { mime: row.mime, base64: parts.join("") };
+            if (!Number.isSafeInteger(row.next) || row.next <= offset) throw new Error("Invalid asset stream");
+            offset = row.next;
+          }
+          throw new Error("Asset transfer budget exceeded");
         }
       }),
       chat: Object.freeze({ post: function (content) { return call("chat.post", { content: content }); } }),
@@ -226,20 +280,21 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
     };
     return Object.freeze(api);
   }
-  function boundedJson(value, depth, seen) {
-    if (depth > 12) return false;
+  function boundedJson(value, depth, seen, maxDepth) {
+    if (maxDepth === undefined) maxDepth = 12;
+    if (depth > maxDepth) return false;
     if (value === null || typeof value === "string" || typeof value === "boolean") return true;
     if (typeof value === "number") return Number.isFinite(value);
     if (typeof value !== "object") return false;
     if (seen.has(value)) return false;
     seen.add(value);
     var valid;
-    if (Array.isArray(value)) valid = value.length <= 1024 && value.every(function (item) { return boundedJson(item, depth + 1, seen); });
+    if (Array.isArray(value)) valid = value.length <= 1024 && value.every(function (item) { return boundedJson(item, depth + 1, seen, maxDepth); });
     else {
       if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
       var keys = Object.keys(value);
       valid = keys.length <= 1024 && keys.every(function (key) {
-        return key !== "__proto__" && key !== "constructor" && boundedJson(value[key], depth + 1, seen);
+        return key !== "__proto__" && key !== "constructor" && boundedJson(value[key], depth + 1, seen, maxDepth);
       });
     }
     seen.delete(value);
@@ -289,6 +344,32 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
     if (data.kind === "command") {
       runCommand(data);
       return;
+    }
+    if (data.kind === "response-chunk") {
+      var receiving = pending.get(data.id);
+      if (!receiving) return;
+      try {
+        if (!["documents.get", "documents.list", "documents.context", "compendium.get"].includes(receiving.method) ||
+            byteLength(data) > 64 * 1024 || !Number.isSafeInteger(data.total) || data.total < 1 || data.total > 129 ||
+            !Number.isSafeInteger(data.index) || typeof data.text !== "string" || data.text.length < 1 || data.text.length > 8192) {
+          throw new Error("Invalid AIS document response stream");
+        }
+        if (!receiving.stream) receiving.stream = { next: 0, total: data.total, text: "", bytes: 0 };
+        var stream = receiving.stream;
+        if (stream.next !== data.index || stream.total !== data.total) throw new Error("Out-of-order AIS document response");
+        stream.bytes += new TextEncoder().encode(data.text).length;
+        if (stream.bytes > 1024 * 1024 + 1024) throw new Error("AIS document response exceeds transfer budget");
+        stream.text += data.text;
+        stream.next++;
+        if (stream.next !== stream.total) return;
+        var assembled = JSON.parse(stream.text);
+        if (assembled.id !== data.id || assembled.kind !== "response" || !boundedJson(assembled, 0, new Set(), 32)) {
+          throw new Error("Invalid assembled AIS document response");
+        }
+        data = assembled;
+      } catch (error) {
+        pending.delete(data.id); clearTimeout(receiving.timer); receiving.reject(error); return;
+      }
     }
     if (data.kind === "response") {
       var waiter = pending.get(data.id);

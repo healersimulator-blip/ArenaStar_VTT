@@ -1,0 +1,2391 @@
+{
+  "schemaVersion": 1,
+  "scope": "Declared packs in pinned archives only; top-level documents, not embedded items. Keyed change objects are normalized to arrays as the native inventory reader does. Mapper acceptance is syntactic, not semantic or gameplay parity. Missing source pack files are reported, not treated as empty packs.",
+  "upstream": [
+    {
+      "id": "pf1-system",
+      "version": "11.11",
+      "commit": "fc067cd7c3ff0fd79548a149d82ed3d5be9fda1a",
+      "upstream": "https://gitlab.com/foundryvtt_pathfinder1e/foundryvtt-pathfinder1",
+      "mirror": "https://github.com/gabrieldosprazeres/foundryvtt-pathfinder1",
+      "archiveSha256": "24650f8eb233eb0fa4d6139d61a45a1b5aef8fa12c7d477ce2fd8da04eb635ff",
+      "declaredPackCount": 21,
+      "scripts": [
+        "pf1.js"
+      ],
+      "packs": [
+        {
+          "name": "basic-monsters",
+          "documentKind": "Actor",
+          "storage": "yaml-source",
+          "documents": 15,
+          "documentTypes": {
+            "npc": 15
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "classes",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 49,
+          "documentTypes": {
+            "class": 49
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "companion-features",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 10,
+          "documentTypes": {
+            "feat": 9,
+            "class": 1
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 2,
+            "entries": 3,
+            "acceptedMods": 0,
+            "refusedEntries": 3,
+            "notes": 0,
+            "refusalReasons": {
+              "`set` overwrites a path — the app's mechanic is typed mods (D-112), so this is not applied": 2,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 1
+            },
+            "operators": {
+              "set": 2,
+              "add": 1
+            }
+          }
+        },
+        {
+          "name": "mythic-paths",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 6,
+          "documentTypes": {
+            "class": 6
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "buffs",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 185,
+          "documentTypes": {
+            "buff": 185
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 131,
+            "entries": 264,
+            "acceptedMods": 87,
+            "refusedEntries": 177,
+            "notes": 3,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 62,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 89,
+              "`set` overwrites a path — the app's mechanic is typed mods (D-112), so this is not applied": 26
+            },
+            "operators": {
+              "add": 238,
+              "set": 26
+            }
+          }
+        },
+        {
+          "name": "spells",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 3028,
+          "documentTypes": {
+            "spell": 3028
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "feats",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 390,
+          "documentTypes": {
+            "feat": 390
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 46,
+            "entries": 57,
+            "acceptedMods": 6,
+            "refusedEntries": 51,
+            "notes": 0,
+            "refusalReasons": {
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 23,
+              "no mapping for this path (see the item sheet's changes list)": 28
+            },
+            "operators": {
+              "add": 57
+            }
+          }
+        },
+        {
+          "name": "items",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 1089,
+          "documentTypes": {
+            "loot": 685,
+            "container": 71,
+            "weapon": 23,
+            "equipment": 300,
+            "consumable": 10
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 111,
+            "entries": 163,
+            "acceptedMods": 128,
+            "refusedEntries": 35,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 30,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 2,
+              "`set` overwrites a path — the app's mechanic is typed mods (D-112), so this is not applied": 3
+            },
+            "operators": {
+              "add": 160,
+              "set": 3
+            }
+          }
+        },
+        {
+          "name": "armors-and-shields",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 70,
+          "documentTypes": {
+            "equipment": 70
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 1,
+            "entries": 1,
+            "acceptedMods": 1,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {
+              "add": 1
+            }
+          }
+        },
+        {
+          "name": "weapons-and-ammo",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 500,
+          "documentTypes": {
+            "ammo": 97,
+            "weapon": 403
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "technology",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 274,
+          "documentTypes": {
+            "equipment": 69,
+            "implant": 27,
+            "loot": 95,
+            "consumable": 40,
+            "weapon": 43
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 35,
+            "entries": 56,
+            "acceptedMods": 43,
+            "refusedEntries": 13,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 13
+            },
+            "operators": {
+              "add": 56
+            }
+          }
+        },
+        {
+          "name": "monster-abilities",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 44,
+          "documentTypes": {
+            "feat": 31,
+            "attack": 13
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 6,
+            "entries": 6,
+            "acceptedMods": 0,
+            "refusedEntries": 6,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 1,
+              "`set` overwrites a path — the app's mechanic is typed mods (D-112), so this is not applied": 5
+            },
+            "operators": {
+              "add": 1,
+              "set": 5
+            }
+          }
+        },
+        {
+          "name": "racial-hd",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 13,
+          "documentTypes": {
+            "class": 13
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 1,
+            "entries": 1,
+            "acceptedMods": 0,
+            "refusedEntries": 1,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 1
+            },
+            "operators": {
+              "add": 1
+            }
+          }
+        },
+        {
+          "name": "races",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 80,
+          "documentTypes": {
+            "race": 80
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 80,
+            "entries": 320,
+            "acceptedMods": 314,
+            "refusedEntries": 6,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 5,
+              "`set` overwrites a path — the app's mechanic is typed mods (D-112), so this is not applied": 1
+            },
+            "operators": {
+              "add": 319,
+              "set": 1
+            }
+          }
+        },
+        {
+          "name": "class-abilities",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 4669,
+          "documentTypes": {
+            "feat": 4669
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 246,
+            "entries": 316,
+            "acceptedMods": 52,
+            "refusedEntries": 264,
+            "notes": 0,
+            "refusalReasons": {
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 113,
+              "no mapping for this path (see the item sheet's changes list)": 148,
+              "`set` overwrites a path — the app's mechanic is typed mods (D-112), so this is not applied": 3
+            },
+            "operators": {
+              "add": 313,
+              "set": 3
+            }
+          }
+        },
+        {
+          "name": "monster-templates",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 198,
+          "documentTypes": {
+            "feat": 198
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 179,
+            "entries": 875,
+            "acceptedMods": 617,
+            "refusedEntries": 258,
+            "notes": 24,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 184,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 41,
+              "`set` overwrites a path — the app's mechanic is typed mods (D-112), so this is not applied": 33
+            },
+            "operators": {
+              "add": 842,
+              "set": 33
+            }
+          }
+        },
+        {
+          "name": "template-abilities",
+          "documentKind": "Item",
+          "storage": "yaml-source",
+          "documents": 188,
+          "documentTypes": {
+            "feat": 184,
+            "attack": 3,
+            "buff": 1
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 20,
+            "entries": 26,
+            "acceptedMods": 9,
+            "refusedEntries": 17,
+            "notes": 0,
+            "refusalReasons": {
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 1,
+              "no mapping for this path (see the item sheet's changes list)": 11,
+              "`set` overwrites a path — the app's mechanic is typed mods (D-112), so this is not applied": 5
+            },
+            "operators": {
+              "add": 21,
+              "set": 5
+            }
+          }
+        },
+        {
+          "name": "macros",
+          "documentKind": "Macro",
+          "storage": "yaml-source",
+          "documents": 8,
+          "documentTypes": {
+            "script": 8
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "roll-tables",
+          "documentKind": "RollTable",
+          "storage": "yaml-source",
+          "documents": 19,
+          "documentTypes": {
+            "RollTable": 19
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "ultimate-equipment",
+          "documentKind": "RollTable",
+          "storage": "yaml-source",
+          "documents": 269,
+          "documentTypes": {
+            "RollTable": 269
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "rules",
+          "documentKind": "JournalEntry",
+          "storage": "yaml-source",
+          "documents": 10,
+          "documentTypes": {
+            "JournalEntry": 10
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        }
+      ],
+      "nativeActorAdmission": [
+        {
+          "name": "Acolyte",
+          "accepted": true,
+          "importedItems": 7,
+          "warningLines": 6
+        },
+        {
+          "name": "Battle Mage",
+          "accepted": true,
+          "importedItems": 13,
+          "warningLines": 7
+        },
+        {
+          "name": "Fire Beetle",
+          "accepted": true,
+          "importedItems": 0,
+          "warningLines": 4
+        },
+        {
+          "name": "Goblin Alchemist",
+          "accepted": true,
+          "importedItems": 9,
+          "warningLines": 6
+        },
+        {
+          "name": "Goblin",
+          "accepted": true,
+          "importedItems": 5,
+          "warningLines": 5
+        },
+        {
+          "name": "Homunculus",
+          "accepted": true,
+          "importedItems": 0,
+          "warningLines": 5
+        },
+        {
+          "name": "Human Bandit",
+          "accepted": true,
+          "importedItems": 7,
+          "warningLines": 5
+        },
+        {
+          "name": "Human Skeleton",
+          "accepted": true,
+          "importedItems": 2,
+          "warningLines": 3
+        },
+        {
+          "name": "Human Zombie",
+          "accepted": true,
+          "importedItems": 0,
+          "warningLines": 4
+        },
+        {
+          "name": "Orc",
+          "accepted": true,
+          "importedItems": 3,
+          "warningLines": 5
+        },
+        {
+          "name": "Poacher",
+          "accepted": true,
+          "importedItems": 8,
+          "warningLines": 5
+        },
+        {
+          "name": "Stirge",
+          "accepted": true,
+          "importedItems": 0,
+          "warningLines": 5
+        },
+        {
+          "name": "Street Magician",
+          "accepted": true,
+          "importedItems": 13,
+          "warningLines": 6
+        },
+        {
+          "name": "Wasp Swarm",
+          "accepted": true,
+          "importedItems": 0,
+          "warningLines": 5
+        },
+        {
+          "name": "Wolf",
+          "accepted": true,
+          "importedItems": 0,
+          "warningLines": 5
+        }
+      ]
+    },
+    {
+      "id": "pf1-content",
+      "version": "0.3.4",
+      "commit": "baf5232c5dc16af99d49ae1bf57ead6473b46bbb",
+      "upstream": "https://gitlab.com/foundryvtt_pathfinder1e/pf1-content",
+      "mirror": "https://github.com/baileymh/pf1e-content",
+      "archiveSha256": "838b4b003da5d93b9f46f365f4b7d336cac24a1b42d7075120bb533671e0c21a",
+      "declaredPackCount": 36,
+      "scripts": [],
+      "packs": [
+        {
+          "name": "pf-35-content",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 68,
+          "documentTypes": {
+            "feat": 68
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-artifacts",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 409,
+          "documentTypes": {
+            "equipment": 408,
+            "weapon": 1
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-buffs",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 220,
+          "documentTypes": {
+            "buff": 219,
+            "attack": 1
+          },
+          "topLevelScriptCallDocuments": 13,
+          "itemChanges": {
+            "documents": 142,
+            "entries": 278,
+            "acceptedMods": 68,
+            "refusedEntries": 210,
+            "notes": 0,
+            "refusalReasons": {
+              "`set` overwrites a path — the app's mechanic is typed mods (D-112), so this is not applied": 15,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 34,
+              "no mapping for this path (see the item sheet's changes list)": 160,
+              "no target path": 1
+            },
+            "operators": {
+              "set": 15,
+              "add": 247,
+              "+": 16
+            }
+          }
+        },
+        {
+          "name": "pf-class-abilities",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 4727,
+          "documentTypes": {
+            "feat": 4727
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-companions",
+          "documentKind": "Actor",
+          "storage": "json-lines-db",
+          "documents": 209,
+          "documentTypes": {
+            "character": 206,
+            "npc": 3
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-companion-features",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 12,
+          "documentTypes": {
+            "feat": 11,
+            "class": 1
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 2,
+            "entries": 3,
+            "acceptedMods": 0,
+            "refusedEntries": 3,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 2,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 1
+            },
+            "operators": {
+              "add": 3
+            }
+          }
+        },
+        {
+          "name": "pf-deities",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 464,
+          "documentTypes": {
+            "JournalEntry": 464
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-eidolon-forms",
+          "documentKind": "Actor",
+          "storage": "json-lines-db",
+          "documents": 12,
+          "documentTypes": {
+            "character": 12
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-eidolon-evolutions",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 109,
+          "documentTypes": {
+            "feat": 98,
+            "attack": 10,
+            "class": 1
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 12,
+            "entries": 16,
+            "acceptedMods": 8,
+            "refusedEntries": 8,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 5,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 3
+            },
+            "operators": {
+              "add": 16
+            }
+          }
+        },
+        {
+          "name": "pf-encounter-tables",
+          "documentKind": "RollTable",
+          "storage": "json-lines-db",
+          "documents": 51,
+          "documentTypes": {
+            "RollTable": 51
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-elephant",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 36,
+          "documentTypes": {
+            "feat": 35,
+            "buff": 1
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 11,
+            "entries": 14,
+            "acceptedMods": 4,
+            "refusedEntries": 10,
+            "notes": 0,
+            "refusalReasons": {
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 4,
+              "no mapping for this path (see the item sheet's changes list)": 6
+            },
+            "operators": {
+              "add": 14
+            }
+          }
+        },
+        {
+          "name": "pf-familiars",
+          "documentKind": "Actor",
+          "storage": "json-lines-db",
+          "documents": 175,
+          "documentTypes": {
+            "npc": 175
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-feats",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 3541,
+          "documentTypes": {
+            "feat": 3541
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 65,
+            "entries": 76,
+            "acceptedMods": 3,
+            "refusedEntries": 73,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 25,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 48
+            },
+            "operators": {
+              "add": 76
+            }
+          }
+        },
+        {
+          "name": "gm-quick-reference",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 25,
+          "documentTypes": {
+            "JournalEntry": 25
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-goods-services",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 531,
+          "documentTypes": {
+            "loot": 447,
+            "consumable": 84
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "harrow-deck",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 73,
+          "documentTypes": {
+            "JournalEntry": 73
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-items",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 1474,
+          "documentTypes": {
+            "container": 125,
+            "loot": 603,
+            "consumable": 646,
+            "equipment": 100
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 1,
+            "entries": 1,
+            "acceptedMods": 1,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {
+              "add": 1
+            }
+          }
+        },
+        {
+          "name": "pf-magicitems",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 790,
+          "documentTypes": {
+            "weapon": 403,
+            "equipment": 235,
+            "consumable": 114,
+            "loot": 38
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-maladies",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 101,
+          "documentTypes": {
+            "feat": 101
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-merchants",
+          "documentKind": "Actor",
+          "storage": "json-lines-db",
+          "documents": 18,
+          "documentTypes": {
+            "npc": 18
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-magic-tables",
+          "documentKind": "RollTable",
+          "storage": "json-lines-db",
+          "documents": 314,
+          "documentTypes": {
+            "RollTable": 314
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-occult-rituals",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 77,
+          "documentTypes": {
+            "spell": 77
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-racial-traits",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 1214,
+          "documentTypes": {
+            "feat": 1214
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 7,
+            "entries": 9,
+            "acceptedMods": 1,
+            "refusedEntries": 8,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 8
+            },
+            "operators": {
+              "add": 9
+            }
+          }
+        },
+        {
+          "name": "pf-rules",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 895,
+          "documentTypes": {
+            "JournalEntry": 895
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-special-qualities",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 334,
+          "documentTypes": {
+            "feat": 333,
+            "attack": 1
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-tables",
+          "documentKind": "RollTable",
+          "storage": "json-lines-db",
+          "documents": 28,
+          "documentTypes": {
+            "RollTable": 28
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-tech",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 260,
+          "documentTypes": {
+            "weapon": 43,
+            "equipment": 169,
+            "consumable": 32,
+            "loot": 16
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-traits",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 1915,
+          "documentTypes": {
+            "feat": 1915
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 13,
+            "entries": 17,
+            "acceptedMods": 7,
+            "refusedEntries": 10,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 9,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 1
+            },
+            "operators": {
+              "add": 17
+            }
+          }
+        },
+        {
+          "name": "pf-traps-and-haunts",
+          "documentKind": "Actor",
+          "storage": "json-lines-db",
+          "documents": 88,
+          "documentTypes": {
+            "npc": 88
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-universal-monster-rules",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 147,
+          "documentTypes": {
+            "feat": 147
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-wondrous",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 3008,
+          "documentTypes": {
+            "equipment": 3006,
+            "container": 2
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 22,
+            "entries": 37,
+            "acceptedMods": 22,
+            "refusedEntries": 15,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 9,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 6
+            },
+            "operators": {
+              "add": 37
+            }
+          }
+        },
+        {
+          "name": "kingdom-building-gm",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 77,
+          "documentTypes": {
+            "JournalEntry": 77
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "kingdom-building-player",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 20,
+          "documentTypes": {
+            "JournalEntry": 20
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "kingdom-building-scenes",
+          "documentKind": "Scene",
+          "storage": "json-lines-db",
+          "documents": 2,
+          "documentTypes": {
+            "Scene": 2
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "kingdom-building-buildings",
+          "documentKind": "Actor",
+          "storage": "json-lines-db",
+          "documents": 95,
+          "documentTypes": {
+            "npc": 93,
+            "character": 2
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "kingdom-building-tables",
+          "documentKind": "RollTable",
+          "storage": "json-lines-db",
+          "documents": 5,
+          "documentTypes": {
+            "RollTable": 5
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": "pf1e-archetypes",
+      "version": "0.2.7",
+      "commit": "3da8c10b5c36939568ed0e627a429697e7adfe3b",
+      "upstream": "https://gitlab.com/Tryss_Farron/pf1e-archetypes",
+      "mirror": "https://github.com/baileymh/pf1e-archetypes",
+      "archiveSha256": "a8e50ca46b38deed5f7d5385b26871a2362c769a12e3081027489ae521192c02",
+      "declaredPackCount": 4,
+      "scripts": [],
+      "packs": [
+        {
+          "name": "pf-archetypes",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 1268,
+          "documentTypes": {
+            "class": 1268
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-arch-features",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 4589,
+          "documentTypes": {
+            "feat": 4589
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 6,
+            "entries": 9,
+            "acceptedMods": 0,
+            "refusedEntries": 9,
+            "notes": 0,
+            "refusalReasons": {
+              "no mapping for this path (see the item sheet's changes list)": 5,
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 4
+            },
+            "operators": {
+              "add": 9
+            }
+          }
+        },
+        {
+          "name": "pf-prestige-classes",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 119,
+          "documentTypes": {
+            "class": 119
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "pf-prestige-features",
+          "documentKind": "Item",
+          "storage": "json-lines-db",
+          "documents": 1309,
+          "documentTypes": {
+            "feat": 1308,
+            "class": 1
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 1,
+            "entries": 3,
+            "acceptedMods": 0,
+            "refusedEntries": 3,
+            "notes": 0,
+            "refusalReasons": {
+              "formula is not a plain number (a reference or expression this mapper does not evaluate)": 3
+            },
+            "operators": {
+              "add": 3
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "statblock-library",
+      "version": "0.2.9",
+      "commit": "877283f251d6e53418b8a20573b2b075c93bf954",
+      "upstream": "https://gitlab.com/foundryvtt_pathfinder1e/pf1-statblock-library",
+      "mirror": "https://github.com/baileymh/statblock-library",
+      "archiveSha256": "4459ad4a8a98b657c08c24424e0982031f365c4e76030a9e09aadbb7a295e918",
+      "declaredPackCount": 44,
+      "scripts": [
+        "scripts/welcome-screen.js"
+      ],
+      "packs": [
+        {
+          "name": "sb-bestiaries1-3",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 960,
+          "documentTypes": {
+            "JournalEntry": 960
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-bestiaries4-6",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 793,
+          "documentTypes": {
+            "JournalEntry": 793
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-campaign-settings",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 416,
+          "documentTypes": {
+            "JournalEntry": 416
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-academy-of-secrets",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 6,
+          "documentTypes": {
+            "JournalEntry": 6
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-clash-of-the-kingslayers",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 5,
+          "documentTypes": {
+            "JournalEntry": 5
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-crucible-of-chaos",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 8,
+          "documentTypes": {
+            "JournalEntry": 8
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-dragons-demand",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 15,
+          "documentTypes": {
+            "JournalEntry": 15
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-emerald-spire",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 48,
+          "documentTypes": {
+            "JournalEntry": 48
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-monsters-dragons",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 464,
+          "documentTypes": {
+            "JournalEntry": 464
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-mythic-monsters",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 57,
+          "documentTypes": {
+            "JournalEntry": 57
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-npcs-and-villians",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 828,
+          "documentTypes": {
+            "JournalEntry": 828
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-occult-bestiary",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 40,
+          "documentTypes": {
+            "JournalEntry": 40
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-pfs",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 1726,
+          "documentTypes": {
+            "JournalEntry": 1726
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-house-on-hook-street",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 17,
+          "documentTypes": {
+            "JournalEntry": 17
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-plunder-and-peril",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 12,
+          "documentTypes": {
+            "JournalEntry": 12
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-rappan-athuk",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 494,
+          "documentTypes": {
+            "JournalEntry": 494
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-sword-of-air",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 236,
+          "documentTypes": {
+            "JournalEntry": 236
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-tome-of-horrors",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 1007,
+          "documentTypes": {
+            "JournalEntry": 1007
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-lost-city-barakus",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 142,
+          "documentTypes": {
+            "JournalEntry": 142
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-we-be-goblins",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 33,
+          "documentTypes": {
+            "JournalEntry": 33
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-carrion-crown",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 127,
+          "documentTypes": {
+            "JournalEntry": 127
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-council-of-thieves",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 110,
+          "documentTypes": {
+            "JournalEntry": 110
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-curse-crimson-throne",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 116,
+          "documentTypes": {
+            "JournalEntry": 116
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-giantslayer",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 132,
+          "documentTypes": {
+            "JournalEntry": 132
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-hells-rebels",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 140,
+          "documentTypes": {
+            "JournalEntry": 140
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-hells-vengeance",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 149,
+          "documentTypes": {
+            "JournalEntry": 149
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-iron-gods",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 129,
+          "documentTypes": {
+            "JournalEntry": 129
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-ironfang-invasion",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 161,
+          "documentTypes": {
+            "JournalEntry": 161
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-jade-regent",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 124,
+          "documentTypes": {
+            "JournalEntry": 124
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-kingmaker",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 129,
+          "documentTypes": {
+            "JournalEntry": 129
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-mummys-mask",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 138,
+          "documentTypes": {
+            "JournalEntry": 138
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-puzzle-box",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 15,
+          "documentTypes": {
+            "JournalEntry": 15
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-rise-of-runelords",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 100,
+          "documentTypes": {
+            "JournalEntry": 100
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-serpents-skull",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 177,
+          "documentTypes": {
+            "JournalEntry": 177
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-skull-shackles",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 187,
+          "documentTypes": {
+            "JournalEntry": 187
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-shattered-star",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 101,
+          "documentTypes": {
+            "JournalEntry": 101
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-reign-of-winter",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 140,
+          "documentTypes": {
+            "JournalEntry": 140
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-return-of-runelords",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 131,
+          "documentTypes": {
+            "JournalEntry": 131
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-ruins-of-azlant",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 136,
+          "documentTypes": {
+            "JournalEntry": 136
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-strange-aeons",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 138,
+          "documentTypes": {
+            "JournalEntry": 138
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-tomb-of-the-iron-medusa",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 6,
+          "documentTypes": {
+            "JournalEntry": 6
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-tyrants-grasp",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 140,
+          "documentTypes": {
+            "JournalEntry": 140
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-war-for-the-crown",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 121,
+          "documentTypes": {
+            "JournalEntry": 121
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        },
+        {
+          "name": "sb-wrath-righteous",
+          "documentKind": "JournalEntry",
+          "storage": "json-lines-db",
+          "documents": 117,
+          "documentTypes": {
+            "JournalEntry": 117
+          },
+          "topLevelScriptCallDocuments": 0,
+          "itemChanges": {
+            "documents": 0,
+            "entries": 0,
+            "acceptedMods": 0,
+            "refusedEntries": 0,
+            "notes": 0,
+            "refusalReasons": {},
+            "operators": {}
+          }
+        }
+      ]
+    },
+    {
+      "id": "statblock-converter",
+      "version": "4.0.3",
+      "commit": "77af8755831d1f19983fe604e427c74f795300c3",
+      "upstream": "https://gitlab.com/foundryvtt_pathfinder1e/pf1-statblock-converter",
+      "mirror": "https://github.com/Lavaeolous/PF1-StatBlock-Converter-Module",
+      "archiveSha256": "b79f9b904d4d5e8b2709537143de0086cdbf08eac35228a273e08e132cb69441",
+      "declaredPackCount": 0,
+      "scripts": [
+        "./scripts/sbc.js"
+      ],
+      "packs": []
+    }
+  ],
+  "native": {
+    "bestiary": {
+      "entries": 40,
+      "automation": {
+        "not-declared": 40
+      },
+      "automatedIds": []
+    },
+    "classes": {
+      "entries": 6,
+      "automation": {
+        "not-declared": 6
+      },
+      "automatedIds": []
+    },
+    "equipment": {
+      "entries": 8,
+      "automation": {
+        "not-declared": 8
+      },
+      "automatedIds": []
+    },
+    "feats": {
+      "entries": 33,
+      "automation": {
+        "automated": 18,
+        "descriptive": 15
+      },
+      "automatedIds": [
+        "power-attack",
+        "deadly-aim",
+        "combat-expertise",
+        "two-weapon-fighting",
+        "improved-two-weapon-fighting",
+        "greater-two-weapon-fighting",
+        "improved-unarmed-strike",
+        "precise-shot",
+        "point-blank-shot",
+        "rapid-shot",
+        "manyshot",
+        "improved-critical",
+        "weapon-focus",
+        "weapon-finesse",
+        "combat-reflexes",
+        "spirited-charge",
+        "evasion",
+        "improved-evasion"
+      ]
+    },
+    "poisons": {
+      "entries": 4,
+      "automation": {
+        "not-declared": 4
+      },
+      "automatedIds": []
+    },
+    "spells": {
+      "entries": 75,
+      "automation": {
+        "automated": 4,
+        "descriptive": 71
+      },
+      "automatedIds": [
+        "fireball",
+        "burning-hands",
+        "cone-of-cold",
+        "lightning-bolt"
+      ]
+    },
+    "tacticalConditionSpellProfiles": [
+      "entangle"
+    ],
+    "builderCatalogues": {
+      "PF1E_CORE_RACES": 7,
+      "PF1E_CORE_CLASSES": 11
+    }
+  }
+}

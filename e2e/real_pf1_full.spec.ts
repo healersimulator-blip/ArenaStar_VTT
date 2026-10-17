@@ -1,108 +1,365 @@
 import { test, expect } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
-import { entry, waitForSurface } from "./lib";
+import { openRealPf1World, realPf1Modules } from "./realPf1";
 
-const worldPath = fileURLToPath(new URL("../dist/worlds/real-pf1-full-1.0.0.zip", import.meta.url));
-
-async function approve(page, id) {
-  const row = page.locator(`[data-pkg-row][data-pkg-id="${id}"]`);
-  if (await row.locator("[data-ais-enable]").count()) await row.locator("[data-ais-enable]").click();
-  const review = page.locator(`[data-ais-module-review="${id}"]`);
-  for (const cb of await review.locator('fieldset input[type="checkbox"]').all()) await cb.check();
-  await review.locator("[data-ais-approve]").click();
-  await expect(review.locator(".ais-source-preview pre")).toBeVisible({ timeout: 60000 });
-  await review.locator("[data-ais-approve]").click();
-  await expect(review.locator("[data-ais-approved]")).toBeVisible({ timeout: 60000 });
-}
-
-test("Real pf1 full with content modules boot", async ({ page }) => {
-  test.setTimeout(400_000);
-  if (!existsSync(worldPath)) throw new Error("world missing " + worldPath);
-  const logs = [];
-  page.on("console", m => logs.push(`${m.type()}: ${m.text()}`));
-  page.on("pageerror", e => console.log("pageerror", e.message));
-
-  await page.goto(entry);
-  await page.locator("#role-import").setInputFiles(worldPath);
-  await page.locator("[data-open-copy]").click();
-  await expect(page.locator("#status")).toContainText("Real PF1 Full", { timeout: 60000 });
-  await page.goto(entry + "?e2e=1");
-  await waitForSurface(page, "app");
-  await page.locator("#gm-settings").click();
-  await approve(page, "ais-foundry-v13");
-  await approve(page, "pf1");
-  await approve(page, "pf-content");
-  await approve(page, "pf1e-archetypes");
-  await approve(page, "statblock-library");
-  await Promise.all([page.waitForEvent("load"), page.locator("[data-ais-reload]").click()]);
-  await waitForSurface(page, "app");
-  await page.locator("#gm-settings").click();
-  // Wait for all runtimes ready
-  const ids = ["ais-foundry-v13", "pf1", "pf-content", "pf1e-archetypes", "statblock-library"];
-  for (const id of ids) {
-    const runtime = page.locator(`[data-ais-module-review="${id}"] [data-ais-runtime]`);
-    await expect(runtime).toBeVisible({ timeout: 60000 });
-    let state = await runtime.getAttribute("data-ais-runtime");
-    for (let i=0; i<120; i++) {
-      state = await runtime.getAttribute("data-ais-runtime");
-      if (state === "ready" || state === "failed" || state === "blocked" || state === "available") break;
-      await page.waitForTimeout(1000);
-    }
-    const text = await runtime.innerText();
-    const health = await page.locator(`[data-ais-health="${id}"]`).innerText().catch(()=> "no health");
-    console.log(`runtime ${id} state ${state} text ${text.slice(0,2000)} health ${health.slice(0,5000)}`);
-    if (id !== "ais-foundry-v13") expect(state).toBe("ready");
+const worldPath = fileURLToPath(
+  new URL("../dist/worlds/real-pf1-full-1.0.0.zip", import.meta.url),
+);
+test("Real PF1 content runtimes boot and expose their own pack indexes", async ({
+  page,
+}) => {
+  test.setTimeout(400000);
+  test.skip(
+    !existsSync(worldPath),
+    "Build the external real-PF1 fixture first",
+  );
+  await openRealPf1World(page, worldPath, "Real PF1 Full", realPf1Modules);
+  for (const id of realPf1Modules) {
+    const packs = await page
+      .frameLocator(`iframe[title="AIS module:${id}"]`)
+      .locator("body")
+      .evaluate(async (_body, packageId) => {
+        const game = (
+          globalThis as unknown as {
+            game: {
+              packs: Map<
+                string,
+                {
+                  index: Map<string, unknown>;
+                  getIndex(): Promise<Array<{ name: string }>>;
+                }
+              >;
+            };
+          }
+        ).game;
+        const summaries = [];
+        for (const [key, pack] of game.packs.entries()) {
+          if (!key.startsWith(packageId + ".")) continue;
+          const entries = await pack.getIndex();
+          summaries.push({
+            key,
+            count: entries.length,
+            indexSize: pack.index.size,
+            fireball: entries.some((e) => e.name === "Fireball"),
+            ogre: entries.some((e) =>
+              /^Ogre(?: \(CR [0-9/]+\))?$/.test(e.name),
+            ),
+          });
+        }
+        return summaries;
+      }, id);
+    const diagnostics = await page
+      .frameLocator(`iframe[title="AIS module:${id}"]`)
+      .locator("body")
+      .evaluate(() =>
+        (
+          globalThis as unknown as { FoundryAdapter: { info(): unknown } }
+        ).FoundryAdapter.info(),
+      );
+    expect(
+      packs.length,
+      `${id}: ${JSON.stringify(diagnostics)}`,
+    ).toBeGreaterThan(0);
+    expect(
+      packs.every((pack) => pack.count > 0 && pack.indexSize === pack.count),
+    ).toBe(true);
+    if (id === "pf1") expect(packs.some((pack) => pack.fireball)).toBe(true);
+    if (id === "statblock-library")
+      expect(packs.some((pack) => pack.ogre)).toBe(true);
   }
-  console.log("logs tail", logs.slice(-200).join("\n"));
+});
 
-  // Try compendium access via macro for pf1 and content modules
+/** Content is data-only: PF1 must discover and resolve it through the shared AIS catalogue. */
+test("PF1 Content item is hydrated and imported by the real PF1 system", async ({
+  page,
+}) => {
+  test.setTimeout(400000);
+  expect(existsSync(worldPath), "Build the real full fixture first").toBe(true);
+  await openRealPf1World(page, worldPath, "Real PF1 Full", [
+    "pf1",
+    "pf-content",
+  ]);
+  const { createRealPf1Caster } = await import("./realPf1");
+  await createRealPf1Caster(page);
+  const source = await page
+    .frameLocator('iframe[title="AIS module:pf-content"]')
+    .locator("body")
+    .evaluate(async () => {
+      type Item = { toObject(): Record<string, unknown> };
+      const realm = globalThis as unknown as {
+        game: {
+          packs: Map<
+            string,
+            {
+              getIndex(): Promise<Array<{ _id: string; name: string }>>;
+              getDocument(id: string): Promise<Item>;
+            }
+          >;
+        };
+      };
+      const pack = realm.game.packs.get("pf-content.pf-feats");
+      if (!pack) throw new Error("PF1 Content feats pack missing");
+      const index = await pack.getIndex();
+      const row = index.find((i) => i.name === "Acrobatic");
+      if (!row) throw new Error("Real Acrobatic feat missing");
+      return {
+        count: index.length,
+        document: (await pack.getDocument(row._id)).toObject(),
+      };
+    });
+  expect(source.count).toBeGreaterThan(0);
+  const report = await page
+    .frameLocator('iframe[title="AIS module:pf1"]')
+    .locator("body")
+    .evaluate(async () => {
+      type Item = {
+        name: string;
+        uuid: string;
+        system: {
+          description: { value: string };
+          constructor: { name: string };
+        };
+        toObject(): Record<string, unknown>;
+      };
+      const realm = globalThis as unknown as {
+        game: {
+          packs: Map<
+            string,
+            {
+              getIndex(): Promise<Array<{ _id: string; name: string }>>;
+              getDocument(id: string): Promise<Item>;
+            }
+          >;
+          actors: {
+            get(id: string): {
+              system: { skills: Record<string, unknown> };
+              createEmbeddedDocuments(
+                type: string,
+                data: unknown[],
+              ): Promise<Item[]>;
+              sheet: { render(options: object): Promise<unknown> };
+            };
+          };
+        };
+        fromUuid(uuid: string): Promise<Item | null>;
+        fromUuidSync(uuid: string): Item | null;
+        FoundryAdapter: { info(): unknown };
+        AIS: {
+          documents: {
+            get(ref: object): Promise<{
+              items: Array<{
+                name: string;
+                system: { description: { value: string } };
+              }>;
+            }>;
+          };
+        };
+      };
+      const pack = realm.game.packs.get("pf-content.pf-feats");
+      if (!pack) throw new Error("Shared content pack not visible to PF1");
+      const row = (await pack.getIndex()).find((i) => i.name === "Acrobatic");
+      if (!row) throw new Error("Shared Acrobatic index entry missing");
+      const uuid = `Compendium.pf-content.pf-feats.Item.${row._id}`;
+      const resolved = await realm.fromUuid(uuid);
+      if (!resolved) throw new Error("Cross-module UUID did not resolve");
+      const cachedUUID = realm.fromUuidSync(uuid) === resolved;
+      const data = resolved.toObject();
+      const actor = realm.game.actors.get("journey-imported-mage");
+      const [created] = await actor.createEmbeddedDocuments("Item", [data]);
+      if (!created) throw new Error("Content import produced no item");
+      const stored = await realm.AIS.documents.get({
+        collection: "actors",
+        id: "journey-imported-mage",
+      });
+      await actor.sheet.render({ force: true });
+      return {
+        uuid,
+        resolvedUUID: resolved.uuid,
+        cachedUUID,
+        systemCanSeeContentPacks: [...realm.game.packs.keys()].filter((id) =>
+          id.startsWith("pf-content."),
+        ),
+        name: created.name,
+        model: created.system.constructor.name,
+        description: created.system.description.value,
+        storedDescription: stored.items.find((i) => i.name === "Acrobatic")
+          ?.system.description.value,
+        storedChanges: (
+          stored.items.find((i) => i.name === "Acrobatic")
+            ?.system as unknown as Record<string, unknown>
+        )?.changes,
+        diagnostics: realm.FoundryAdapter.info(),
+      };
+    });
+  console.log("PF1 Content conjunction:", JSON.stringify(report));
+  await test.info().attach("pf1-content-conjunction", {
+    body: JSON.stringify(report, null, 2),
+    contentType: "application/json",
+  });
+  expect(report.systemCanSeeContentPacks).toContain("pf-content.pf-feats");
+  expect(report.cachedUUID).toBe(true);
+  expect(report.resolvedUUID).toBe(report.uuid);
+  expect(report.name).toBe("Acrobatic");
+  expect(report.model).toBe("FeatModel");
+  expect(report.storedDescription).toBe(report.description);
+  const expectedSystem = source.document.system as {
+    description: { value: string };
+    changes: unknown;
+  };
+  expect(report.description).toBe(expectedSystem.description.value);
+  expect(report.storedChanges).toEqual(expectedSystem.changes);
+  expect(report.description).toContain("Acrobatics");
+  const sheet = page
+    .frameLocator('iframe[title="AIS module:pf1"]')
+    .locator(".application")
+    .filter({ hasText: "Journey Battle Mage" });
+  await expect(sheet).toBeVisible();
+  await expect(sheet).toContainText("Acrobatic");
+});
+
+test("fresh player catalogue follows shared provider consent and removal", async ({
+  browser,
+}) => {
+  test.setTimeout(400000);
+  expect(existsSync(worldPath)).toBe(true);
+  const { freshTable, joinFromInvite } = await import("./realUsers");
+  const table = await freshTable(browser, false);
+  const { gm, player } = table;
   try {
-    const settingsClose = page.locator('[data-window="settings"] [data-window-close]');
-    if (await settingsClose.count()) await settingsClose.click();
-    await page.locator("#gm-macros").click();
-    await page.locator("[data-macro-script-tab]").click();
-    const panel = page.locator("[data-script-wizard]");
-    await panel.locator("[data-script-name]").fill("pf1 compendium full");
-    await panel.locator("[data-script-source]").fill(`
-const out = {};
-out.pf1 = await api.ais.invoke("pf1", "foundry.api", { path: "__aisTestCompendium", args: [] });
-try { out.pfContent = await api.ais.invoke("pf-content", "foundry.api", { path: "__aisTestCompendium", args: [] }); } catch(e) { out.pfContent = { error: String(e) }; }
-try { out.archetypes = await api.ais.invoke("pf1e-archetypes", "foundry.api", { path: "__aisTestCompendium", args: [] }); } catch(e) { out.archetypes = { error: String(e) }; }
-try { out.statblock = await api.ais.invoke("statblock-library", "foundry.api", { path: "__aisTestCompendium", args: [] }); } catch(e) { out.statblock = { error: String(e) }; }
-// Find ogre anywhere
-let ogre = out.pf1?.ogre || out.pf1?.ogreBasic;
-if (!ogre) {
-  for (const mod of [out.pfContent, out.archetypes, out.statblock]) {
-    if (mod?.ogre) { ogre = mod.ogre; break; }
-  }
-}
-out.ogreFound = ogre;
-out.fireball = out.pf1?.fireball;
-return out;
-`);
-    await panel.locator(".grants label").filter({ hasText: "ais.invoke" }).locator("input").check();
-    await panel.getByLabel("I reviewed this exact revision and its host grants").check();
-    await panel.locator("[data-script-save]").click();
-    await expect(panel.getByRole("status")).toContainText("Script revision published");
-    await panel.locator("[data-script-run]").click();
-    await expect(panel.getByRole("status")).toContainText("Script completed", { timeout: 60000 });
-    const parsed = JSON.parse(await panel.locator("details pre").innerText());
-    console.log("compendium check full", JSON.stringify(parsed, null, 2).slice(0,30000));
-    // Fireball should be found in pf1 spells
-    expect(parsed.fireball).toBe("Fireball");
-    // Ogre may be in statblock bestiaries or pf1 basic (but basic only has 15, no ogre)
-    // For now, accept either ogre found or at least fireball, and check packs are accessible
-    // If ogre not found, check that statblock pack has many entries (bestiaries)
-    if (!parsed.ogreFound) {
-      console.log("ogre not found, checking statblock pack counts");
-      // At least check that statblock has packs
-      expect(parsed.statblock?.packs?.length ?? 0).toBeGreaterThan(0);
-    } else {
-      expect(parsed.ogreFound.toLowerCase()).toContain("ogre");
-    }
-  } catch (e) {
-    console.log("compendium macro failed", e);
-    throw e;
+    await openRealPf1World(gm, worldPath, "Real PF1 Full", [
+      "pf1",
+      "pf-content",
+    ]);
+    await gm
+      .locator('[data-ais-module-review="pf-content"] [data-ais-share-players]')
+      .uncheck();
+    await gm.locator('[data-window="settings"] [data-window-close]').click();
+    await joinFromInvite(gm, player);
+    const frame = player.frameLocator('iframe[title="AIS module:pf1"]');
+    await expect(player.locator('[data-ais-consent="pf1"]')).toBeVisible({
+      timeout: 60000,
+    });
+    await player
+      .locator('[data-ais-consent="pf1"] [data-ais-consent-allow]')
+      .click();
+    await expect
+      .poll(
+        () =>
+          frame
+            .locator("body")
+            .evaluate(
+              () =>
+                (
+                  globalThis as unknown as {
+                    FoundryAdapter?: { info(): { ready: boolean } };
+                  }
+                ).FoundryAdapter?.info().ready,
+            ),
+        { timeout: 120000 },
+      )
+      .toBe(true);
+    const catalogueIds = () =>
+      frame
+        .locator("body")
+        .evaluate(() =>
+          [
+            ...(
+              globalThis as unknown as { game: { packs: Map<string, unknown> } }
+            ).game.packs.keys(),
+          ].filter((id) => id.startsWith("pf-content.")),
+        );
+    expect(await catalogueIds()).toEqual([]);
+    const sessionClose = gm.getByRole("button", {
+      name: "Close session panel",
+      exact: true,
+    });
+    if (await sessionClose.isVisible()) await sessionClose.click();
+    await gm.locator("#gm-settings").click();
+    await expect(
+      gm.locator(
+        '[data-ais-module-review="pf-content"] [data-ais-share-players]',
+      ),
+    ).toBeVisible({ timeout: 60000 });
+    await gm
+      .locator('[data-ais-module-review="pf-content"] [data-ais-share-players]')
+      .check();
+    await expect(player.locator('[data-ais-consent="pf-content"]')).toBeVisible(
+      { timeout: 60000 },
+    );
+    expect(await catalogueIds()).toEqual([]);
+    await player
+      .locator('[data-ais-consent="pf-content"] [data-ais-consent-allow]')
+      .click();
+    await expect
+      .poll(catalogueIds, { timeout: 60000 })
+      .toContain("pf-content.pf-feats");
+    const resolved = await frame.locator("body").evaluate(async () => {
+      const realm = globalThis as unknown as {
+        game: {
+          packs: Map<
+            string,
+            { getIndex(): Promise<Array<{ _id: string; name: string }>> }
+          >;
+        };
+        fromUuid(
+          uuid: string,
+        ): Promise<{ name: string; system: { constructor: { name: string } } }>;
+      };
+      const pack = realm.game.packs.get("pf-content.pf-feats");
+      if (!pack) throw new Error("Shared feats pack missing");
+      const row = (await pack.getIndex()).find(i => i.name === "Acrobatic");
+      if (!row) throw new Error("Acrobatic entry missing");
+      const doc = await realm.fromUuid(
+        `Compendium.pf-content.pf-feats.Item.${row._id}`,
+      );
+      return {
+        id: row._id,
+        name: doc.name,
+        model: doc.system.constructor.name,
+      };
+    });
+    expect(resolved.name).toBe("Acrobatic");
+    expect(resolved.model).toBe("FeatModel");
+    await gm
+      .locator('[data-ais-module-review="pf-content"] [data-ais-share-players]')
+      .uncheck();
+    await expect.poll(catalogueIds, { timeout: 60000 }).toEqual([]);
+    const denied = await frame
+      .locator("body")
+      .evaluate(async (_body, entryId) => {
+        const realm = globalThis as unknown as {
+          AIS: {
+            compendium: {
+              get(packId: string, entryId: string): Promise<unknown>;
+            };
+          };
+        };
+        try {
+          await realm.AIS.compendium.get(
+            "pf-content/packs/pf-feats.db",
+            entryId,
+          );
+          return false;
+        } catch (error) {
+          return String(error).includes("Unknown compendium pack");
+        }
+      }, resolved.id);
+    expect(denied).toBe(true);
+    expect(table.errors).toEqual([]);
+  } catch (error) {
+    console.error(
+      "Catalogue GM diagnostics:",
+      await gm.locator("body").innerText(),
+    );
+    console.error(
+      "Catalogue player diagnostics:",
+      await player.locator("body").innerText(),
+      table.errors,
+      table.warnings,
+    );
+    throw error;
+  } finally {
+    await table.close();
   }
 });

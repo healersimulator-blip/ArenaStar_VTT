@@ -297,6 +297,14 @@ describe("foundry.data.fields / DataModel (D-484, no DOM)", () => {
     expect(layer.validation).toHaveProperty("DataModelValidationError");
   });
 
+  test("SetField cleans elements before deduplicating and preserves strict choices", () => {
+    const numbers = new F.SetField(new F.NumberField({ integer: true }));
+    expect(numbers.clean(["2", 2, "3"])).toEqual(new Set([2, 3]));
+    const choices = new F.SetField(new F.StringField({ choices: ["allowed"] }));
+    expect(choices.validate(choices.clean(["forbidden"]))).toBeTruthy();
+    expect(choices.validate(choices.clean(["allowed"]))).toBeFalsy();
+  });
+
   test("schema: initial values, casting, cleaning and validation follow the field options", () => {
     const schema = Prefs.schema;
     expect(Object.keys(schema.fields)).toEqual(["mode", "radius", "enabled", "tags", "picks", "color", "nested", "notes", "id", "angle", "alpha", "raw", "any", "json", "file"]);
@@ -350,6 +358,10 @@ describe("foundry.data.fields / DataModel (D-484, no DOM)", () => {
   test("migrateData runs before cleaning and embedded models nest", () => {
     class Inner extends DataModel {
       static override defineSchema(): Record<string, DataFieldLike> { return { n: new F.NumberField({ initial: 1 }) }; }
+      static override migrateData(source: Record<string, unknown>): Record<string, unknown> {
+        if ("oldN" in source) { source.n = source.oldN; Reflect.deleteProperty(source, "oldN"); }
+        return source;
+      }
     }
     class Outer extends DataModel {
       static override defineSchema(): Record<string, DataFieldLike> {
@@ -360,8 +372,10 @@ describe("foundry.data.fields / DataModel (D-484, no DOM)", () => {
         return source;
       }
     }
-    const outer = new Outer({ legacy: 9, list: [{ n: 2 }, {}] });
+    const outer = new Outer({ legacy: 9, list: [{ oldN: 2 }, {}] });
     expect(outer.inner).toBeInstanceOf(Inner);
+    expect((outer.inner as DataModelInstance).parent).toBe(outer);
+    expect((outer.list as DataModelInstance[])[0]?.parent).toBe(outer);
     expect((outer.inner as DataModelInstance).n).toBe(9);
     expect((outer.list as DataModelInstance[]).map((row) => row.n)).toEqual([2, 1]);
     expect(outer.toObject()).toEqual({ inner: { n: 9 }, list: [{ n: 2 }, { n: 1 }] });

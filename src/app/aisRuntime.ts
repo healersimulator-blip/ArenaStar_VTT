@@ -1,3 +1,6 @@
+import { createFoundryCatalogue } from "../packages/aisFoundryCatalogue";
+import { aisActionDescriptor } from "../core/aisAction";
+import { createAisAssetSource } from "../packages/aisAssetSource";
 import type { TokenModuleAction } from "../ui/combat/tokenContextMenu";
 import { createAisPanelHost, type AisPanelEntry, type AisPanelHost } from "../packages/aisPanel";
 import { UI_THEME_CAPABILITIES, UI_THEME_COMMAND } from "../core/uiTheme";
@@ -117,6 +120,7 @@ export class AisRuntime {
   private readonly options: AisRuntimeOptions;
   private providers: HostApp["automationBoot"]["resolution"]["providers"];
   private disposed = false;
+  private readonly foundryCatalogue = createFoundryCatalogue();
   private readonly definitions = new Map<string, HostAutomationModuleBoot>();
   /** D-482: declarations a module added at runtime through `settings.register` (per boot, not persisted). */
   private readonly runtimeDeclarations = new Map<string, AisSettingDeclaration[]>();
@@ -136,6 +140,7 @@ export class AisRuntime {
     const { app } = options;
     this.panels = options.panelHost ?? (options.panelLayer ? createAisPanelHost(options.panelLayer) : null);
     this.providers = app.automationBoot.resolution.providers;
+    for (const module of app.automationBoot.modules) this.definitions.set(module.packageId, module);
     for (const module of app.automationBoot.modules) this.start(module);
     // D-468: players receive the shared module set once the GM-device consent has been read.
     app.host.setAisProfileProvider(() => this.playerProfileBody);
@@ -268,18 +273,19 @@ export class AisRuntime {
           mutate: this.mutate,
           ...(module.resources ? { resources: module.resources } : {}),
           sequence: () => app.store.seq,
-          updateSceneTags: (input) => app.host.applyAisSceneTags({
-            ...input,
-            _packageId: module.packageId,
-            _method: "scene.tags.update",
-          }),
+          updateSceneTags: (input) => app.host.applyAisSceneTags(input,
+            aisActionDescriptor(module.packageId, "scene.tags.update")),
           fx: {
             play: (input) => {
               pruneFx();
               if (fxRuns.size >= 16) throw new Error("AIS module may own at most 16 active FX runs");
               const scene = this.scene();
               if (!scene) throw new Error("No active AIS scene");
-              const run = app.host.playAisFx(scene._id, input);
+              const caller = app.gm.client.user;
+              if (!caller) throw new Error("AIS FX caller is unavailable");
+              const run = Object.hasOwn(input, "macroId")
+                ? app.host.playAisMacroFx(scene._id, input, caller)
+                : app.host.playAisFx(scene._id, input);
               fxRuns.set(run.runId, run);
               return run;
             },
@@ -313,32 +319,16 @@ export class AisRuntime {
             register: (declaration) => this.registerRuntimeSetting(module.packageId, declaration),
           },
           // D-477: the GM device holds every imported pack (memoized per package record in HostPackages).
-          compendia: () => app.packages.compendia(),
-          // D-489: asset library (R-07) — GM device manifest filtered by entitlement.
-          assets: async () => {
-            const manifest = app.store.world.assetManifest ?? {};
-            // For GM, all assets are readable; for players, filtered via canFetchAsset would apply
-            const out: Record<string, { name: string; mime: string; size: number }> = {};
-            for (const [hash, entry] of Object.entries(manifest)) {
-              out[hash] = { name: entry.name, mime: entry.mime, size: entry.size ?? 0 };
+          compendia: async () => {
+            const entries: Awaited<ReturnType<import("../packages/aisModuleHandlers").AisCompendiumSource>>[number][] = await app.packages.compendia();
+            for (const provider of this.definitions.values()) {
+              if (provider.blockedReason || provider.runtimeProvider || provider.appearance) continue;
+              try { assertAisModuleConsent(app.persister.world, provider); } catch { continue; }
+              entries.push(...this.foundryCatalogue(provider, { isGM: true }));
             }
-            return out;
+            return entries;
           },
-          assetBytes: async (hash: string) => {
-            const { getAsset } = await import("../storage/idb");
-            const record = await getAsset(app.db, app.worldId, hash as any);
-            if (!record) return null;
-            let bytes: Uint8Array | undefined = record.bytes;
-            if (!bytes) {
-              // Fallback: try OPFS via AssetServer? For now return null
-              return null;
-            }
-            let binary = "";
-            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i] ?? 0);
-            const base64 = btoa(binary);
-            const entry = app.store.world.assetManifest?.[hash];
-            return { base64, mime: entry?.mime ?? record.mime ?? "application/octet-stream" };
-          },
+          ...createAisAssetSource(() => app.store.world.assetManifest ?? {}, (hash) => app.assets.get(hash)),
           // D-478: directory + kernel-routed invocation with GM authority.
           modules: {
             requires: module.requires ?? [],
@@ -558,6 +548,11 @@ export class AisRuntime {
   private scene(): SceneDocument | null {
     const id = this.options.activeSceneId();
     return id ? this.options.app.store.get("scenes", id) as SceneDocument | undefined ?? null : null;
+  }
+
+  /** Shell request routed to registered sheets inside approved, consented runtimes. */
+  openDocumentSheet(collection: "actors" | "items", id: string): void {
+    this.emit("documents.sheet.open", { collection, id });
   }
 
   private emit<K extends AisEventName>(event: K, payload: AisEventPayloads[K]): void {

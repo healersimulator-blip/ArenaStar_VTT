@@ -1,3 +1,5 @@
+import type { ActionDescriptor } from "../core/actionRevert";
+import { aisActionDescriptor } from "../core/aisAction";
 import { aisTagProposal, parseAisTagUpdate } from "../core/aisScene";
 import { LEVEL_PLAY_FEATURE, STAIRS_V2_FEATURE, STAIR_OFFER_TTL_MS, levelCreationOps, stairChoiceOps, stairChoicesHere, stairMovementPlan, type StairPrompt } from "../core/levelPlay";
 import { isScopedCollection } from "../core/levelMembership";
@@ -1011,16 +1013,9 @@ export class HostSync {
 
   /** GM-local AIS domain service. Consent is checked by the instance broker; the host
    * independently validates the proposal and its revision in the same synchronous commit. */
-  applyAisSceneTags(input: Record<string, unknown>): { seq: number; tags: string[] } {
+  applyAisSceneTags(input: Record<string, unknown>, attribution: ActionDescriptor = aisActionDescriptor(undefined, "scene.tags.update")): { seq: number; tags: string[] } {
     if (this.disposed) throw new Error("Host is closed");
-    // AIS tag RPC may carry optional _packageId/_method for durable revert attribution;
-    // strip them before the narrow parser so the existing validation stays intact.
-    const packageId = typeof input._packageId === "string" ? input._packageId : undefined;
-    const method = typeof input._method === "string" ? input._method : "scene.tags.update";
-    const requestInput = { ...input } as Record<string, unknown>;
-    delete requestInput._packageId;
-    delete requestInput._method;
-    const request = parseAisTagUpdate(requestInput);
+    const request = parseAisTagUpdate(input);
     const ops = aisTagProposal(this.store.get("scenes", request.sceneId), this.store.seq, request);
     const user: SessionUser = { id: this.systemUserId, name: "AIS", role: "GM" };
     const normalized = this.normalizeOps(user.id, ops);
@@ -1029,13 +1024,7 @@ export class HostSync {
     if (!checked.ok) throw new Error(checked.error);
     const compatibility = this.draftCompatibilityError(normalized.ops);
     if (compatibility) throw new Error(compatibility);
-    const audit: ActionAudit = {
-      id: randomId(),
-      label: (packageId ? `AIS ${packageId}: ${method}` : `AIS: ${method}`).slice(0, 160),
-      system: { aisModule: true as unknown as import("../core/documents").Json,
-        ...(packageId ? { packageId: packageId as unknown as import("../core/documents").Json } : {}),
-        method: method as unknown as import("../core/documents").Json },
-    };
+    const audit: ActionAudit = { ...attribution, id: randomId() };
     const committed = this.commitOps([...normalized.ops, ...normalized.hostOps, ...checked.hostOps],
       user.id, `ais-tags-${randomId()}`, true, audit);
     if (!committed.ok) throw new Error(committed.error);
@@ -1070,8 +1059,32 @@ export class HostSync {
       endsAtHostTime: this.fxEndsAt(prepared.cue) };
   }
 
+  /** Run a saved native Wizard timeline with the actual AIS device user's rights.
+   * Unlike inline feasibility sequences this preserves persistent instance semantics.
+   */
+  playAisMacroFx(sceneId: string, input: Record<string, unknown>, caller: SessionUser):
+    { runId: string; atHostTime: number; endsAtHostTime: number; persistent: boolean } {
+    if (this.disposed) throw new Error("Host is closed");
+    if (Object.keys(input).some(key => !["macroId", "sourceTokenId", "targetTokenId"].includes(key)) ||
+        typeof input.macroId !== "string" ||
+        (input.sourceTokenId !== undefined && typeof input.sourceTokenId !== "string") ||
+        (input.targetTokenId !== undefined && typeof input.targetTokenId !== "string")) throw new Error("Invalid AIS native FX request");
+    const prepared = this.prepareFx(caller, { macroId: input.macroId, sceneId,
+      ...(typeof input.sourceTokenId === "string" ? { sourceTokenId: input.sourceTokenId } : {}),
+      ...(typeof input.targetTokenId === "string" ? { targetTokenId: input.targetTokenId } : {}),
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    if (!this.emitPreparedFx(prepared)) throw new Error("AIS native FX could not be started");
+    return { runId: prepared.cue.runId, atHostTime: prepared.cue.atHostTime,
+      endsAtHostTime: prepared.cue.persistent ? Number.MAX_SAFE_INTEGER : this.fxEndsAt(prepared.cue),
+      persistent: prepared.cue.persistent === true };
+  }
+
   /** Only the AIS instance broker holding the owned handle calls this host-local service. */
   stopAisFx(runId: string): boolean {
+    if (this.store.get("fxInstances", runId)) return this.commitSystem([
+      { kind: "delete", ref: { coll: "fxInstances", id: runId } },
+    ], true).ok;
     return this.cancelTransientFx(runId, { id: this.systemUserId, name: "AIS", role: "GM" });
   }
 
@@ -1929,7 +1942,7 @@ export class HostSync {
     txId: TxId,
     ops: Op[],
     wallEdit?: WallEditGuard,
-    action?: { label: string; system?: Record<string, import("../core/documents").Json> },
+    action?: ActionDescriptor,
   ): void {
     if (!session.user) {
       this.reject(session, txId, "forbidden", "not authenticated");

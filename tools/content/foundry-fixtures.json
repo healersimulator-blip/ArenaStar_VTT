@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "note": "Pinned reachable source mirrors, not a claim of identity with current GitLab HEAD or built release artifacts. SBC mirror is historical. Original upstream URLs retained for provenance.",
+  "sources": [
+    {
+      "id": "pf1-system",
+      "upstream": "https://gitlab.com/foundryvtt_pathfinder1e/foundryvtt-pathfinder1",
+      "mirror": "https://github.com/gabrieldosprazeres/foundryvtt-pathfinder1",
+      "commit": "fc067cd7c3ff0fd79548a149d82ed3d5be9fda1a",
+      "archive": "https://codeload.github.com/gabrieldosprazeres/foundryvtt-pathfinder1/zip/fc067cd7c3ff0fd79548a149d82ed3d5be9fda1a",
+      "note": "PF1 11.11, last upstream revision before NPC base-change override regression; preserves Foundry v13 support. No local runtime patches."
+    },
+    {
+      "id": "pf1-content",
+      "upstream": "https://gitlab.com/foundryvtt_pathfinder1e/pf1-content",
+      "mirror": "https://github.com/baileymh/pf1e-content",
+      "commit": "baf5232c5dc16af99d49ae1bf57ead6473b46bbb",
+      "archive": "https://codeload.github.com/baileymh/pf1e-content/zip/baf5232c5dc16af99d49ae1bf57ead6473b46bbb"
+    },
+    {
+      "id": "pf1e-archetypes",
+      "upstream": "https://gitlab.com/Tryss_Farron/pf1e-archetypes",
+      "mirror": "https://github.com/baileymh/pf1e-archetypes",
+      "commit": "3da8c10b5c36939568ed0e627a429697e7adfe3b",
+      "archive": "https://codeload.github.com/baileymh/pf1e-archetypes/zip/3da8c10b5c36939568ed0e627a429697e7adfe3b"
+    },
+    {
+      "id": "statblock-library",
+      "upstream": "https://gitlab.com/foundryvtt_pathfinder1e/pf1-statblock-library",
+      "mirror": "https://github.com/baileymh/statblock-library",
+      "commit": "877283f251d6e53418b8a20573b2b075c93bf954",
+      "archive": "https://codeload.github.com/baileymh/statblock-library/zip/877283f251d6e53418b8a20573b2b075c93bf954"
+    },
+    {
+      "id": "statblock-converter",
+      "upstream": "https://gitlab.com/foundryvtt_pathfinder1e/pf1-statblock-converter",
+      "mirror": "https://github.com/Lavaeolous/PF1-StatBlock-Converter-Module",
+      "commit": "77af8755831d1f19983fe604e427c74f795300c3",
+      "archive": "https://codeload.github.com/Lavaeolous/PF1-StatBlock-Converter-Module/zip/77af8755831d1f19983fe604e427c74f795300c3"
+    }
+  ]
+}

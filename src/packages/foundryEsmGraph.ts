@@ -15,6 +15,7 @@ export interface FoundryUnresolvedImport { file: string; specifier: string }
 
 export interface FoundryDistribution {
   foundryId: string;
+  kind: "module" | "system";
   packageId: string;
   title: string;
   version: string;
@@ -32,9 +33,9 @@ export interface FoundryDistribution {
 
 const dirname = (path: string): string => (path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "");
 
-const BARE_SHIMS: Record<string, string> = {
+const BARE_SHIMS = {
   fuzzysort: "__ais_shims/fuzzysort.js",
-};
+} as const;
 const EMPTY_SHIM = "__ais_shims/empty.js";
 
 export interface TsconfigAlias {
@@ -160,7 +161,7 @@ export function resolveFoundrySpecifier(
   }
 
   if (!spec.startsWith(".") && !spec.startsWith("/") && !spec.includes(":")) {
-    const shimPath = BARE_SHIMS[spec];
+    const shimPath = Object.hasOwn(BARE_SHIMS, spec) ? BARE_SHIMS[spec as keyof typeof BARE_SHIMS] : undefined;
     if (shimPath && has(shimPath)) return shimPath;
   }
 
@@ -202,12 +203,6 @@ export function rewriteFoundryModuleSource(
   has: (path: string) => boolean,
   aliases: readonly TsconfigAlias[] = [],
 ): RewrittenFoundrySource {
-  // PF1 system uses Vite-specific `import.meta.env.DEV` which is undefined in plain browser ESM — replace with false
-  const viteEnvRe = /import\.meta\.env/g;
-  if (viteEnvRe.test(text)) {
-    text = text.replace(/import\.meta\.env/g, "({ DEV: false, PROD: true })");
-  }
-
   const unresolved: string[] = [];
   const mapped = (specifier: string): string => {
     const resolved = resolveFoundrySpecifier(specifier, file, foundryId, has, aliases);
@@ -308,6 +303,13 @@ export function rewriteFoundryModuleSource(
       inBT = true;
       out += ch;
       i++;
+      continue;
+    }
+
+    // Emulate the Vite flags only in executable code.
+    if (text.startsWith("import.meta.env", i) && !isIdent(text[i - 1] ?? "") && !isIdent(text[i + 15] ?? "")) {
+      out += "({ DEV: false, PROD: true })";
+      i += "import.meta.env".length;
       continue;
     }
 
@@ -417,6 +419,7 @@ export function prepareFoundryDistribution(
   }
   const distribution: FoundryDistribution = {
     foundryId: foundry.id,
+    kind: binding.configuration === "system.json" || binding.configuration.endsWith("/system.json") ? "system" : "module",
     packageId: manifest.id,
     title: foundry.title,
     version: foundry.version,

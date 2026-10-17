@@ -96,3 +96,37 @@ describe("ais-foundry-v13 runtime/hbs.js — Handlebars compatibility", () => {
     expect(() => H.compile("{{> loop}}")({})).toThrow();
   });
 });
+
+describe("inline partials used by PF1 sheets", () => {
+  test("hoists definitions, renders context/hash, and escapes HTML", () => {
+    expect(engine().compile('{{> row value="<x>"}}{{#*inline "row"}}<b>{{value}}</b>{{/inline}}')({})).toBe("<b>&lt;x&gt;</b>");
+  });
+  test("scopes shadowing to a program without mutating global or later render state", () => {
+    const h = engine();
+    h.registerPartial("row", "global");
+    const render = h.compile('{{#*inline "row"}}outer{{/inline}}{{> row}}{{#with inner}}{{#*inline "row"}}inner{{/inline}}{{> row}}{{/with}}{{> row}}');
+    expect(render({ inner: {} })).toBe("outerinnerouter");
+    expect(render({ inner: {} })).toBe("outerinnerouter");
+    expect(h.compile("{{> row}}")({})).toBe("global");
+  });
+  test("passes inline definitions through registered partials and each contexts", () => {
+    const h = engine();
+    h.registerPartial("layout", "{{#each rows}}{{> row}}{{/each}}");
+    expect(h.compile('{{#*inline "row"}}{{name}}{{/inline}}{{> layout}}')({ rows: [{ name: "A" }, { name: "B" }] })).toBe("AB");
+  });
+  test("supports layout partial blocks and block-local inline overrides", () => {
+    const h = engine();
+    h.registerPartial("layout", "<main>{{> title}}:{{> @partial-block}}</main>");
+    expect(h.compile('{{#> layout}}{{#*inline "title"}}{{name}}{{/inline}}body{{/layout}}')({ name: "T" })).toBe("<main>T:body</main>");
+  });
+  test("strips standalone declaration lines", () => {
+    expect(engine().compile('A\n{{#*inline "row"}}\n{{name}}\n{{/inline}}\n{{> row}}')({ name: "B" })).toBe("A\nB\n");
+  });
+  test("rejects invalid decorators/names and bounds recursive inline partials", () => {
+    for (const source of ['{{#*other "x"}}{{/other}}', '{{#*inline name}}{{/inline}}', '{{#*inline "x"}}{{/other}}'])
+      expect(() => engine().compile(source)).toThrow();
+    const h = engine();
+    expect(() => h.compile('{{#*inline "loop"}}{{> loop}}{{/inline}}{{> loop}}')({})).toThrow(/recursion limit/);
+    expect(h.compile("OK")({})).toBe("OK");
+  });
+});

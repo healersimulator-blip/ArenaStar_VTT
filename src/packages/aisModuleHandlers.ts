@@ -1,3 +1,6 @@
+import { AIS_EVENTS } from "../core/automationInterconnect";
+import { aisActionDescriptor } from "../core/aisAction";
+import type { ActionDescriptor } from "../core/actionRevert";
 import { aisTagSnapshot, parseAisTagUpdate } from "../core/aisScene";
 import type { IDBPDatabase } from "idb";
 import type {
@@ -46,21 +49,9 @@ const MAX_STORAGE_KEYS = 256;
 const MAX_STORAGE_VALUE_BYTES = 16 * 1024;
 const STORAGE_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const EVENT_NAMES = new Set<AisEventName>([
-  "world.snapshot",
-  "world.ops.committed",
-  "scene.token.light.changed",
-  "turn.phase.changed",
-  "turn.report.committed",
-  "ui.token.action",
-  "module.event",
-  "module.settings.changed",
-  "ui.panel.closed",
-  "documents.changed",
-  "bus.message",
-]);
-/** D-477: one compendium entry payload must fit the RPC frame with room for the envelope. */
-const MAX_COMPENDIUM_ENTRY_BYTES = 48 * 1024;
+const EVENT_NAMES = new Set<AisEventName>(AIS_EVENTS);
+/** Document-valued catalogue reads use the same bounded chunk stream as document reads. */
+const MAX_COMPENDIUM_ENTRY_BYTES = 1024 * 1024;
 const MAX_COMPENDIUM_HITS = 100;
 const COMPENDIUM_PACK_ID_RE = /^[a-z0-9][a-z0-9-]{1,63}\/[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 
@@ -96,8 +87,8 @@ export interface AisModuleSettingsContext {
   register?: (declaration: AisSettingDeclaration) => string | null;
 }
 
-/** D-477: read-only compendium access (host device only; packs are not replicated to players). */
-export type AisCompendiumSource = () => Promise<ReadonlyArray<{ packageId: string; packFile: string; pack: CompendiumPack }>>;
+/** Read-only catalogue access: native host packs plus approved distribution data; players get consented public snapshots only. */
+export type AisCompendiumSource = () => Promise<ReadonlyArray<{ packageId: string; packFile: string; pack: CompendiumPack; collectionId?: string; packageType?: "module" | "system" }>>;
 
 /** D-478: what one module may learn about, and ask of, the other modules on this device. */
 export interface AisModuleDirectoryEntry {
@@ -146,7 +137,7 @@ export interface AisModuleHandlerContext {
   /** Opens a host-rendered, text-only choice dialog; null means the user cancelled. */
   select: (request: AisModuleSelectRequest) => Promise<string | null>;
   /** Resolve only after a host commit; a rejected transaction must reject the RPC. */
-  submit: (ops: Op[], action?: { label: string; system?: Record<string, Json> }) => string | Promise<string>;
+  submit: (ops: Op[], action?: ActionDescriptor) => string | Promise<string>;
   /** Shared by this world's module hosts so inventory read/modify/commit is serialized. */
   mutate?: AisMutationQueue;
   sequence?: () => number;
@@ -204,8 +195,8 @@ function byteLength(value: unknown): number | null {
   }
 }
 
-function boundedJson(value: unknown, depth = 0, seen = new Set<object>()): value is Json {
-  if (depth > 12) return false;
+function boundedJson(value: unknown, depth = 0, seen = new Set<object>(), maxDepth = 12): value is Json {
+  if (depth > maxDepth) return false;
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
   if (typeof value !== "object") return false;
@@ -213,13 +204,13 @@ function boundedJson(value: unknown, depth = 0, seen = new Set<object>()): value
   seen.add(value);
   let valid: boolean;
   if (Array.isArray(value)) {
-    valid = value.length <= 1024 && value.every((item) => boundedJson(item, depth + 1, seen));
+    valid = value.length <= 1024 && value.every((item) => boundedJson(item, depth + 1, seen, maxDepth));
   } else {
     if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
     const record = value as Record<string, unknown>;
     const keys = Object.keys(record);
     valid = keys.length <= 1024 && keys.every((key) =>
-      key !== "__proto__" && key !== "constructor" && boundedJson(record[key], depth + 1, seen),
+      key !== "__proto__" && key !== "constructor" && boundedJson(record[key], depth + 1, seen, maxDepth),
     );
   }
   seen.delete(value);
@@ -264,17 +255,6 @@ function storageKey(value: unknown): string {
   if (typeof value !== "string" || !STORAGE_KEY_RE.test(value))
     throw new Error("module storage key must be 1–64 safe characters");
   return value;
-}
-
-function aisAction(packageId: string, method: string): { label: string; system: Record<string, Json> } {
-  return {
-    label: `AIS ${packageId}: ${method}`.slice(0, 160),
-    system: {
-      aisModule: true as unknown as Json,
-      packageId: packageId as unknown as Json,
-      method: method as unknown as Json,
-    },
-  };
 }
 
 function safeId(value: unknown, label: string): string {
@@ -437,10 +417,12 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       const text = ctx.resources[args.path] ?? "";
       const offset = Number(args.offset);
       if (offset > text.length) throw new Error("Invalid resource offset");
-      // D-482: pf1 system has 495 files; larger chunks reduce RPCs (was 8192, too chatty for 5s boot)
-      // 32k keeps response safely under 64KiB even with JSON envelope and UTF-8 expansion
-      const next = offset + 32000;
-      return { text: text.slice(offset, next), next: next < text.length ? next : null };
+      // Budget the JSON-encoded text, not UTF-16 code units: escaped control
+      // characters and translations can expand far beyond an ASCII chunk.
+      let end = Math.min(offset + 32000, text.length);
+      while ((byteLength({ text: text.slice(offset, end), next: end }) ?? Infinity) > 60 * 1024)
+        end = offset + Math.floor((end - offset) / 2);
+      return { text: text.slice(offset, end), next: end < text.length ? end : null };
     },
     "scene.tags.snapshot": async (_args, lifetime) => {
       await ctx.assertCapability("scene.tags.read");
@@ -631,7 +613,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         },
       });
       assertCommandActive(commandContext);
-      const txId = await ctx.submit(ops, aisAction(ctx.packageId, "scene.token.light.apply"));
+      const txId = await ctx.submit(ops, aisActionDescriptor(ctx.packageId, "scene.token.light.apply"));
       assertCommandActive(commandContext);
       return { ok: true, txId, active: args.active, sourceName: args.sourceName, stateIndex: Number(args.stateIndex) };
     }),
@@ -686,7 +668,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       };
       assertCommandActive(commandContext);
       const txId = await ctx.submit([{ kind: "create", coll: "messages", data: doc }],
-        aisAction(ctx.packageId, "chat.post"));
+        aisActionDescriptor(ctx.packageId, "chat.post"));
       assertCommandActive(commandContext);
       return { id, txId };
     },
@@ -716,17 +698,27 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
     // ── D-476: module settings ─────────────────────────────────────────────────────────────
     "settings.list": async (args, commandContext) => {
       assertCommandActive(commandContext);
-      if (Object.keys(args).length) throw new Error("settings.list takes no arguments");
+      if (Object.keys(args).some((key) => !["offset", "compact"].includes(key))) throw new Error("settings.list accepts offset and compact");
+      const offset = args.offset ?? 0;
+      if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid settings offset");
+      if (args.compact !== undefined && typeof args.compact !== "boolean") throw new Error("Invalid settings compact option");
       const declarations = ctx.settings?.declarations ?? [];
+      if (offset > declarations.length) throw new Error("Invalid settings offset");
       const values = await effectiveSettingValues(ctx, declarations);
-      // Return only key+value to stay under 64 KiB even with 100+ settings (pf1 has many large defaults).
-      // The adapter only needs key/value for sync; label/hint/default are not needed at runtime.
-      return {
-        settings: declarations.map((declaration) => ({
-          key: declaration.key,
-          value: values[declaration.key] ?? declaration.default,
-        })),
-      };
+      const rows: Array<Record<string, Json>> = [];
+      let next = offset;
+      let bytes = 0;
+      for (const declaration of declarations.slice(offset)) {
+        const row = { ...(args.compact ? { key: declaration.key } : cloneAisSettingDeclaration(declaration)),
+          value: values[declaration.key] ?? declaration.default };
+        const size = byteLength(row) ?? Infinity;
+        if (size > 60 * 1024) throw new Error(`Setting ${declaration.key} exceeds the RPC budget`);
+        if (bytes + size > 60 * 1024) break;
+        rows.push(row as Record<string, Json>);
+        bytes += size + 1;
+        next++;
+      }
+      return { settings: rows, ...(next < declarations.length ? { next } : {}) };
     },
     // D-482: code-time declarations (the Foundry adapter's `game.settings.register`); same schema
     // and limits as the manifest, same documents for the values, visible in the same forms.
@@ -767,7 +759,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         const ops = aisWorldSettingOps(settings.worldDoc(), ctx.packageId, settings.packageName, declaration.key, coerced.value);
         await ctx.assertCapability("module.settings.write");
         assertCommandActive(commandContext);
-        if (ops.length > 0) await ctx.submit(ops, aisAction(ctx.packageId, `settings.set:${declaration.key}`));
+        if (ops.length > 0) await ctx.submit(ops, aisActionDescriptor(ctx.packageId, `settings.set:${declaration.key}`));
       } else {
         await putSetting(ctx.db, { scope: aisDeviceSettingsScope(ctx.worldId, ctx.packageId), key: declaration.key, value: coerced.value });
         settings.onDeviceChange?.(declaration.key, coerced.value);
@@ -784,22 +776,37 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         packs: packs.map((entry) => ({
           id: compendiumPackId(entry), name: entry.pack.name, type: entry.pack.type,
           packageId: entry.packageId, entries: entry.pack.entries.length,
+          ...(entry.collectionId ? { collectionId: entry.collectionId, packageType: entry.packageType ?? "module" } : {}),
         })),
       };
     },
     "compendium.search": async (args, commandContext) => {
       await ctx.assertCapability("compendium.read");
       assertCommandActive(commandContext);
-      if (Object.keys(args).some((key) => !["query", "packId", "limit"].includes(key)))
-        throw new Error("compendium.search accepts query, packId and limit");
-      if (typeof args.query !== "string" || args.query.trim().length === 0 || args.query.length > 120)
+      if (Object.keys(args).some((key) => !["query", "packId", "limit", "browse", "offset"].includes(key)))
+        throw new Error("compendium.search accepts query, packId, limit, browse and offset");
+      const browse = args.browse === true;
+      if (args.browse !== undefined && typeof args.browse !== "boolean") throw new Error("Invalid compendium browse option");
+      if (typeof args.query !== "string" || (!browse && args.query.trim().length === 0) || args.query.length > 120)
         throw new Error("compendium.search query must be 1–120 characters");
+      if (browse && (args.query !== "" || args.packId === undefined)) throw new Error("Compendium browse requires one packId and an empty query");
+      const offset = args.offset ?? 0;
+      if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 || (!browse && offset !== 0))
+        throw new Error("Invalid compendium browse offset");
       const limit = args.limit === undefined ? 25 : args.limit;
       if (!Number.isInteger(limit) || Number(limit) < 1 || Number(limit) > MAX_COMPENDIUM_HITS)
         throw new Error(`compendium.search limit must be an integer 1–${MAX_COMPENDIUM_HITS}`);
       const packs = await compendiumPacks(ctx);
       const selected = args.packId === undefined ? packs : packs.filter((entry) => compendiumPackId(entry) === compendiumPackIdArg(args.packId));
       if (args.packId !== undefined && selected.length === 0) throw new Error("Unknown compendium pack");
+      if (browse) {
+        const entry = selected[0];
+        if (!entry || offset > entry.pack.entries.length) throw new Error("Invalid compendium browse offset");
+        const rows = entry.pack.entries.slice(offset, offset + Number(limit));
+        const next = offset + rows.length;
+        return { hits: rows.map((row) => ({ packId: compendiumPackId(entry), entryId: row.id,
+          name: row.name, type: row.data.type })), next: next < entry.pack.entries.length ? next : null };
+      }
       const hits = searchCompendia(selected.map((entry) => entry.pack), args.query, Number(limit));
       return {
         hits: hits.map((hit) => {
@@ -953,13 +960,15 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       const normalized = normalizeAisDocumentMutations(args.ops, {
         userId: ctx.user().id,
         newId: () => ctx.newId("doc-"),
-        boundedJson,
+        // Embedded items/actions add legitimate depth beyond the small generic RPC
+        // envelope. Byte/op/key/array limits and the host's validation still apply.
+        boundedJson: (value) => boundedJson(value, 0, new Set(), 32),
       });
       if (!normalized.ok) throw new Error(normalized.error);
       const run = async () => {
         await ctx.assertCapability("documents.write");
         assertCommandActive(commandContext);
-        const txId = await ctx.submit(normalized.value.ops, aisAction(ctx.packageId, "documents.mutate"));
+        const txId = await ctx.submit(normalized.value.ops, aisActionDescriptor(ctx.packageId, "documents.mutate"));
         return { txId, created: normalized.value.created, seq: ctx.sequence?.() ?? null };
       };
       return ctx.mutate ? ctx.mutate(run) : run();

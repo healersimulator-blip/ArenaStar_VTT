@@ -12231,3 +12231,37 @@ test("isolated floor activation refuses legacy players before data and blocks in
   expect(reconnect.frames.map((m) => m.kind)).toEqual(["kick"]);
   expect(JSON.stringify(reconnect.frames)).not.toContain("Private floor");
 });
+
+// PR51 integration: handler attribution → real client intent → host receipt → GM Revert.
+test("AIS documents.mutate receipt preserves attribution and reverts only through the GM", async () => {
+  const { createAisModuleHandlers } = await import("../../src/packages/aisModuleHandlers");
+  const h = await setup();
+  const { client: player, bus } = await h.addPlayer(PLAYER_ID, "Rex");
+  const rejected: ClientEvents["rejected"][] = [];
+  bus.on("rejected", (event) => rejected.push(event));
+  const handlers = createAisModuleHandlers({
+    worldId: "w1", packageId: "pf1", emittedEvents: [],
+    // This RPC never touches IDB: reject a future accidental dependency loudly.
+    db: new Proxy({} as import("idb").IDBPDatabase, { get() { throw new Error("Unexpected IDB access"); } }),
+    user: () => ({ id: GM_ID, name: "GM" }), activeScene: () => h.hostStore.get("scenes", "s1") ?? null,
+    actorById: (id) => h.hostStore.get("actors", id),
+    documents: { getAll: (collection) => h.hostStore.getAll(collection), get: (collection, id) => h.hostStore.get(collection, id) },
+    select: async () => null, notify: () => undefined, emitModuleEvent: () => undefined, busEmit: () => undefined,
+    newId: () => "ais-test-actor", assertCapability: async () => undefined,
+    submit: (ops, action) => h.gm.submitAndWait(ops, 1000, undefined, action),
+  });
+  await handlers["documents.mutate"]({ ops: [{ kind: "create", collection: "actors",
+    data: { name: "AIS target", system: { hp: 20 } } }] });
+  const receipt = h.hostStore.getAll("actionReceipts").find((row) => row.name === "AIS pf1: documents.mutate");
+  if (!receipt) throw new Error("Missing AIS receipt");
+  expect(receipt.system).toMatchObject({ aisModule: true, packageId: "pf1", method: "documents.mutate" });
+  expect(h.hostStore.get("actors", "ais-test-actor")?.name).toBe("AIS target");
+  player.actionRevert(receipt._id);
+  await flushMicrotasks();
+  expect(rejected.at(-1)?.reason).toBe("forbidden");
+  expect(h.hostStore.get("actors", "ais-test-actor")).toBeDefined();
+  h.gm.actionRevert(receipt._id);
+  await flushMicrotasks();
+  expect(h.hostStore.get("actors", "ais-test-actor")).toBeUndefined();
+  expect(h.hostStore.get("actionReceipts", receipt._id)?.status).toBe("reverted");
+});

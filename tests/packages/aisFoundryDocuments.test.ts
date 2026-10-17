@@ -160,6 +160,16 @@ describe("ais-foundry-v13 documents layer", () => {
   let t: ReturnType<typeof installLayer>;
   beforeEach(async () => { t = installLayer(freshWorld()); await t.layer.hydrate(); });
 
+  test("compendium identities remain read-only and never alias world document writes", async () => {
+    const Item = t.layer.classes.Item;
+    if (!Item) throw new Error("Item class missing");
+    const doc = new Item({ _id: "source-id", name: "Source", type: "feat" }, { pack: "content.feats" });
+    expect(doc.uuid).toBe("Compendium.content.feats.Item.source-id");
+    expect(doc.toObject()).not.toHaveProperty("pack");
+    await expect(doc.update({ name: "Changed" })).rejects.toThrow("read-only");
+    await expect(doc.delete()).rejects.toThrow("read-only");
+    expect(t.layer.describe().writes).toBe(0);
+  });
   test("hydrates every exposed collection, resolves the device user and derives Foundry subtypes", () => {
     expect(t.layer.collections.actors?.size).toBe(2);
     expect(t.layer.collections.users?.size).toBe(2);
@@ -203,6 +213,38 @@ describe("ais-foundry-v13 documents layer", () => {
     expect(actor.getFlag("mod", "k")).toBeUndefined();
     expect(t.world.actors.find((row) => row._id === "a-npc")?.flags).toEqual({ mod: {} });
     expect(t.calls.filter((call) => call.name === "preUpdateActor")).toHaveLength(2);
+  });
+
+  test("Foundry token cells convert to native pixels using the parent scene grid", () => {
+    const Scene = cls(t.layer, "Scene"), Token = cls(t.layer, "Token");
+    const scene = new Scene({ _id: "grid-scene", grid: { size: 80 } });
+    const token = new Token({ _id: "sized", x: 20, y: 30, width: 2, height: 1 }, { parent: scene }) as unknown as { width: number; height: number; center: { x: number; y: number }; _source: Row };
+    expect(token._source.width).toBe(160);
+    expect(token._source.height).toBe(80);
+    expect(token.width).toBe(2);
+    expect(token.height).toBe(1);
+    expect(token.center).toEqual({ x: 100, y: 70 });
+  });
+
+  test("missing update containers are materialized without losing sibling writes", async () => {
+    const actor = t.layer.collections.actors?.get("a-npc") as unknown as DocLike;
+    await actor.update({ "system.attributes.hp.value": 9, "system.attributes.hp.temp": 2 });
+    expect(actor.system.attributes).toEqual({ hp: { value: 9, temp: 2 } });
+    expect(t.calls.find((call) => call.name === "updateActor")?.args[1]).toEqual({ system: { attributes: { hp: { value: 9, temp: 2 } } } });
+    await expect(actor.update({ "system.__proto__.polluted": true })).rejects.toThrow("Unsafe document update path");
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  test("dependent tokens resolve linked world actors and respect the requested scenes", async () => {
+    const actor = t.layer.collections.actors?.get("a-npc") as unknown as DocLike & { getDependentTokens(options?: object): Array<DocLike & { actor: DocLike; isLinked: boolean }> };
+    const Scene = t.layer.classes.Scene;
+    if (!Scene) throw new Error("Scene class missing");
+    const scene = new Scene({ _id: "test-scene", tokens: [{ _id: "test-token", actorId: actor.id, actorLink: true }] });
+    const tokens = actor.getDependentTokens({ scenes: [scene] });
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]?.actor).toBe(actor);
+    expect(tokens[0]?.isLinked).toBe(true);
+    expect(actor.getDependentTokens({ scenes: [] })).toEqual([]);
   });
 
   test("pre-hooks cancel writes; rejected transactions throw Foundry-style", async () => {

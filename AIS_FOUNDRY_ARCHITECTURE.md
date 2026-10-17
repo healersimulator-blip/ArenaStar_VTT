@@ -7,6 +7,12 @@ slices were added. Companion documents: [`DECISIONS.md`](DECISIONS.md) (D-468…
 [`AIS_MODULE_GUIDE.md`](AIS_MODULE_GUIDE.md) (the generic module API), the adapter's own
 [`README`](modules/ais-foundry-v13/README.md).*
 
+> **Implementation caveat after PR51 refactoring (2026-10-17):** generic shims are not
+> a claim that every Foundry system is supported. Raw LevelDB archives require a consistent
+> JSON/NDJSON export; no byte-scanned recovery is performed. Roll evaluation is CSP-safe, and
+> unsupported templates fail explicitly. External PF1 casting/damage/Revert acceptance is
+> unverified. See [REFACTOR_PR51.md](REFACTOR_PR51.md) for tested behavior.
+
 ## 1. Goal and the two rules everything follows
 
 **IMPORTANT: AIS is NOT a 1:1 carbon copy of Foundry.** It does **not** vendor Foundry code, does **not** re-implement Foundry's entire core, and does **not** try to be Foundry. Instead, AIS provides a **generic kernel** (L1) with capabilities (documents, settings, compendium, bus, assets, etc) and the **adapter** (`ais-foundry-v13` L2) **EMULATES** the Foundry contract that a module needs to work: `game`, `Hooks`, `CONFIG`, `CONST`, `foundry.*`, `ui.*`, `Document` classes, `Roll`, `FilePicker`, `CompendiumCollection`, `fromUuid`, etc. The adapter is a compatibility shim — it provides what the module touches, not the whole Foundry engine. Canvas/PIXI, for example, is out of scope by design: ArenaStar's renderer is own, placeable *documents* are the surface.
@@ -18,7 +24,7 @@ documents, chat, sockets, files, packs. The **pf1 system** (`foundryvtt-pathfind
 **Rule 1 — emulate the contract, never copy the implementation.** ArenaStar provides its own
 implementation of what Foundry's *host* provides to a module (APIs, core templates, language keys,
 base CSS, data fields, documents). Nothing from Foundry's code or files is vendored. A module must
-not be asked to ship what Foundry would have given it (D-484). **This is emulation**: e.g. `Roll` is own parser/evaluator (interpolation `@abilities.str.mod`, `NdM`, `kh/kl/dh/dl`, `d%`, safe eval), `FilePicker` is own UI over `AIS.assets` (list/pick/resolve by hash, never raw URLs), `CompendiumCollection` maps to `compendium.*` RPCs, `ChatMessage.create` → `AIS.chat.post` (host stamps author), `CONFIG.PF1`/`CONFIG.DND5E`/`CONFIG[SYSTEM]` are mutable shims, `globalThis.pf1`/`dnd5e`/any system is minimal registry so content modules don't throw. We don't copy Foundry's Roll, FilePicker, or pf1 system — we emulate the surface they need.
+not be asked to ship what Foundry would have given it (D-484). **This is emulation**: e.g. `Roll` is own parser/evaluator (interpolation `@abilities.str.mod`, `NdM`, `kh/kl/dh/dl`, `d%`, CSP-safe arithmetic grammar), `FilePicker` is own UI over `AIS.assets` (list/pick/resolve by hash, never raw URLs), `CompendiumCollection` maps to `compendium.*` RPCs, `ChatMessage.create` → `AIS.chat.post` (host stamps author), `CONFIG.PF1`/`CONFIG.DND5E`/`CONFIG[SYSTEM]` are mutable shims, `globalThis.pf1`/`dnd5e`/any system is minimal registry so content modules don't throw. We don't copy Foundry's Roll, FilePicker, or pf1 system — we emulate the surface they need.
 
 **Rule 2 — the kernel stays generic; Foundry lives in the adapter.** Every capability added for
 Foundry compatibility is an ordinary AIS service that any ArenaStar module can use (settings,

@@ -96,10 +96,10 @@ describe("world-packaged UI assets and inert preload", () => {
     const api = createAisModuleHandlers({ db, worldId: "resource-unit", packageId: "theme", emittedEvents: [],
       user: () => ({ id: "gm", name: "GM" }), activeScene: () => null, actorById: () => undefined,
       select: async () => null, submit: () => "unused", notify: vi.fn(), emitModuleEvent: vi.fn(), busEmit: vi.fn(), newId: () => "unused",
-      resources: { "style.css": "x".repeat(12_000) }, assertCapability: async () => { if (!allowed) throw new Error("revoked"); } });
+      resources: { "style.css": "x".repeat(40_000) }, assertCapability: async () => { if (!allowed) throw new Error("revoked"); } });
     try {
-      expect(await api["package.resource.read"]({ path: "style.css", offset: 0 })).toMatchObject({ next: 8192 });
-      expect(await api["package.resource.read"]({ path: "style.css", offset: 8192 })).toEqual({ text: "x".repeat(3808), next: null });
+      expect(await api["package.resource.read"]({ path: "style.css", offset: 0 })).toMatchObject({ next: 32000 });
+      expect(await api["package.resource.read"]({ path: "style.css", offset: 32000 })).toEqual({ text: "x".repeat(8000), next: null });
       await expect(api["package.resource.read"]({ path: "../private", offset: 0 })).rejects.toThrow("Undeclared");
       await expect(api["package.resource.read"]({ path: "constructor", offset: 0 })).rejects.toThrow("Undeclared");
       await expect(api["package.resource.read"]({ path: "style.css", offset: 99999 })).rejects.toThrow("offset");

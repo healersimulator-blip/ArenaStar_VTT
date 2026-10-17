@@ -32,6 +32,9 @@ export interface ActionAudit {
   pathChecks?: readonly { ref: DocRef; paths: readonly string[] }[];
 }
 
+/** Client-supplied label/metadata only; the host always generates the receipt ID. */
+export type ActionDescriptor = Pick<ActionAudit, "label" | "system">;
+
 export function actionOpRef(op: Op): DocRef {
   return op.kind === "create"
     ? { coll: op.coll, id: op.data._id, ...(op.parent ? { parent: op.parent } : {}) }

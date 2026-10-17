@@ -89,7 +89,7 @@ test.describe("PF1e 4-players simultaneous scene", () => {
 
       // Verify all players see same scene and token count and world name
       for (let i = 0; i < playerConns.length; i++) {
-        const p = playerConns[i].page;
+        const p = playerConns[i]!.page;
         const pTokenCount = await playerCall<number>(p, "tokenCount");
         const pWorldName = await playerCall<string>(p, "worldName");
         const pWorldId = await playerCall<string>(p, "worldId");
@@ -100,7 +100,7 @@ test.describe("PF1e 4-players simultaneous scene", () => {
 
       // Verify compendium derived: codexReplicaSummary shows 9 actors, 4 ogres with PF1 Content
       for (let i = 0; i < playerConns.length; i++) {
-        const p = playerConns[i].page;
+        const p = playerConns[i]!.page;
         const summary = await p.evaluate(() => {
           const player = (globalThis as any).__vttE2E?.player;
           return player?.codexReplicaSummary ? player.codexReplicaSummary() : null;
@@ -127,7 +127,7 @@ test.describe("PF1e 4-players simultaneous scene", () => {
 
       // Verify players can move tokens: each player moves their wizard, host sees new pos
       for (let i = 0; i < playerConns.length; i++) {
-        const p = playerConns[i].page;
+        const p = playerConns[i]!.page;
         const wizardId = `wizard${i + 1}`;
         const newX = 200 + i * 80;
         const newY = 200 + i * 80;
@@ -189,7 +189,7 @@ test.describe("PF1e 4-players simultaneous scene", () => {
 
       // Verify all players see moved tokens
       for (let i = 0; i < playerConns.length; i++) {
-        const p = playerConns[i].page;
+        const p = playerConns[i]!.page;
         const pTokenCount = await playerCall<number>(p, "tokenCount");
         expect(pTokenCount).toBe(9);
       }
@@ -224,33 +224,15 @@ test.describe("PF1e 4-players simultaneous scene", () => {
         return (actor?.system as any)?.pf1e?.hp ?? null;
       });
       console.log("Host Ogre HP after Fireball", hostOgreHp);
+      expect(typeof hostOgreHp).toBe("number");
       expect(hostOgreHp).toBeLessThan(30);
 
-      for (let i = 0; i < playerConns.length; i++) {
-        const p = playerConns[i].page;
-        const pOgreHp = await p.evaluate(() => {
-          const app = (globalThis as any).__vttE2E?.player;
-          const client = app?.client;
-          // Try get
-          let actor: any = null;
-          try { actor = client?.store?.get("actors", "actor-ogre1"); } catch {}
-          if (actor) return (actor.system as any)?.pf1e?.hp ?? null;
-          // Fallback via codexReplicaSummary doesn't have hp, so try to get via player surface? 
-          return null;
-        });
-        console.log(`Player ${i + 1} Ogre HP after Fireball (direct)`, pOgreHp);
-        // If direct get fails, at least verify via host that players should see same via projection (we already verified tokenCount)
-        // For robustness, check that player chat contains Fireball if they have chat
-        try {
-          const chatTexts = await p.evaluate(() => {
-            const player = (globalThis as any).__vttE2E?.player;
-            return player?.aisChatTexts ? player.aisChatTexts() : [];
-          });
-          console.log(`Player ${i + 1} chat texts`, chatTexts.slice(-3));
-          // Chat may contain Fireball if projection works
-        } catch {}
-        // Host HP is ground truth, players receive rights via projection - we already proved they see same scene
-        expect(hostOgreHp).toBeLessThan(30);
+      // Assert data actually present on each replica rather than reasserting
+      // host HP while swallowing missing player APIs. Player HP projection is
+      // outside this smoke test's surface; chat replication is observable.
+      for (const conn of playerConns) {
+        await expect.poll(() => playerCall<string[]>(conn.page, "aisChatTexts").then((rows) => rows.join("\n")),
+          { timeout: 15000 }).toContain("casts Fireball");
       }
 
       // Verify each wizard actor has Fireball prepared (charsheet ability)
@@ -272,7 +254,7 @@ test.describe("PF1e 4-players simultaneous scene", () => {
       // Screenshots
       await host.screenshot({ path: "test-results/4players-01-host-scene.png", fullPage: true });
       for (let i = 0; i < playerConns.length; i++) {
-        await playerConns[i].page.screenshot({ path: `test-results/4players-0${i + 2}-player${i + 1}-scene.png`, fullPage: true });
+        await playerConns[i]!.page.screenshot({ path: `test-results/4players-0${i + 2}-player${i + 1}-scene.png`, fullPage: true });
       }
 
       expect(hostErrors).toEqual([]);
