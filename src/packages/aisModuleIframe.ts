@@ -12,7 +12,7 @@ import { aisModuleRuntimeSource } from "./aisModuleRuntimeSource";
 
 export const AIS_RPC_TAG = 1 as const;
 export const AIS_MAX_RPC_BYTES = 64 * 1024;
-const MAX_REQUESTS_PER_SECOND = 600;
+const MAX_REQUESTS_PER_SECOND = 5000;
 const MAX_COMMANDS_PER_SECOND = 30;
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_COMMAND_MS = 8_000;

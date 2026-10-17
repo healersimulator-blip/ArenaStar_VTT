@@ -177,6 +177,12 @@
       this._index = null;
     }
     get documentClass() { return documentClasses[this.documentName] ?? Document; }
+    get index() {
+      // PF1 expects pack.index to be a Collection with size, values(), etc.
+      const coll = new Collection(this._index.map(e => [e._id, e]));
+      // Also provide size via Map's size, and make it iterable as values
+      return coll;
+    }
     async getIndex({ fields } = {}) {
       // fields: array of dot-paths or object map; support for PF1e modules that request system fields
       const wantsFields = fields ? (Array.isArray(fields) ? fields : typeof fields === "object" ? Object.keys(fields) : []) : [];
@@ -324,6 +330,12 @@
       for (const e of rawEntries) this._cache.set(e._id, e);
     }
     get documentClass() { return documentClasses[this.documentName] ?? Document; }
+    get index() {
+      // PF1 expects pack.index to be a Collection with size, values(), etc.
+      const coll = new Collection(this._index.map(e => [e._id, e]));
+      // Also provide size via Map's size, and make it iterable as values
+      return coll;
+    }
     async getIndex({ fields } = {}) {
       if (!fields) return this._index;
       const wants = Array.isArray(fields) ? fields : typeof fields === "object" ? Object.keys(fields) : [];
@@ -830,13 +842,16 @@
       }
       // For object/array initials from DataField, fall through to JSON handling using fieldInitial as fallback
     }
-    // Object / Array / DataModel / unspecified → JSON text in a hidden string setting.
+    // Object / Array / DataModel / SetField / unspecified → JSON text in a hidden string setting.
     let fallback = data.default;
     if (fallback === undefined && fieldInitial !== undefined) fallback = fieldInitial;
+    if (fallback instanceof Set) fallback = [...fallback];
     if (fallback && typeof fallback.toObject === "function") fallback = fallback.toObject();
     else if (typeof fallback === "function") { try { fallback = new fallback(); } catch { fallback = {}; } }
+    if (fallback instanceof Set) fallback = [...fallback];
     if (fallback === undefined && isDataModelClass(type)) { try { fallback = new type({}, { strict: false }).toObject(); } catch { fallback = {}; } }
     if (fallback === undefined) fallback = type === Array ? [] : {};
+    if (fallback instanceof Set) fallback = [...fallback];
     let text;
     try { text = JSON.stringify(fallback); } catch { text = "{}"; }
     if (typeof text !== "string") text = "null";
@@ -850,6 +865,19 @@
     let value;
     try { value = JSON.parse(raw); } catch { value = clone(row.data.default) ?? {}; }
     if (isDataModelClass(row.data.type)) { try { return new row.data.type(value && typeof value === "object" ? value : {}, { strict: false }); } catch { return value; } }
+    // PF1 SetField (e.g. hiddenCompendiums) is stored as JSON array but used as Set with .has()
+    try {
+      const t = row.data.type;
+      const isSetField = t && typeof t === "object" && (t.constructor?.name === "SetField" || (typeof t._cast === "function" && t._cast([]) instanceof Set) || (t.element && typeof t.toObject === "function"));
+      if (isSetField && Array.isArray(value)) return new Set(value);
+      // Also detect when fieldInitial was Set (hiddenCompendiums etc)
+      if (Array.isArray(value) && row.data && typeof row.data.type === "object") {
+        // Heuristic: if setting key suggests Set (hiddenCompendiums, sources) and value is array of strings, return Set
+        if ((row.key && (row.key.includes("Compendium") || row.key === "sources")) || (t && t.constructor?.name?.includes("Set"))) {
+          if (value.every(v => typeof v === "string")) return new Set(value);
+        }
+      }
+    } catch {}
     return value;
   };
   const encodeSetting = (row, value) => {

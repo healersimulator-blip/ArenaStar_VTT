@@ -77,12 +77,32 @@ async function main() {
     }
   }
   // Actually keep all module/ files (551)
+  const essentialPacks = new Set([
+    "basic-monsters", "spells"
+  ]);
   const moduleOnly = {};
   for (const [p, txt] of Object.entries(rooted)) {
-    if (p.startsWith("module/") || p === "public/system.json" || p === "pf1.js" || p === "module/tsconfig.json" || p.startsWith("templates/") || p.startsWith("public/templates/") || p.startsWith("lang/")) {
+    const isPack = p.startsWith("packs/") || p.startsWith("public/packs/");
+    let includePack = false;
+    if (isPack) {
+      const parts = p.split("/");
+      const packName = parts[1] || parts[2] || "";
+      // packs are like packs/<packName>/... or packs/<packName>.yaml
+      // Check if packName or first part matches essential list
+      for (const ep of essentialPacks) {
+        if (p.includes(`/${ep}/`) || p.includes(`/${ep}.`) || p.startsWith(`packs/${ep}`) || p.startsWith(`public/packs/${ep}`)) {
+          includePack = true;
+          break;
+        }
+      }
+    }
+    if (p.startsWith("module/") || p === "public/system.json" || p === "pf1.js" || p === "module/tsconfig.json" || p.startsWith("templates/") || p.startsWith("public/templates/") || p.startsWith("lang/") || includePack) {
       moduleOnly[p] = txt;
-      // Also provide templates under both public/templates/ and templates/ for compatibility
       if (p.startsWith("public/templates/")) {
+        const alt = p.replace(/^public\//, "");
+        if (!moduleOnly[alt]) moduleOnly[alt] = txt;
+      }
+      if (p.startsWith("public/packs/")) {
         const alt = p.replace(/^public\//, "");
         if (!moduleOnly[alt]) moduleOnly[alt] = txt;
       }
