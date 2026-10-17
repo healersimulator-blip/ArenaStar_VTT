@@ -128,6 +128,10 @@ export interface AisModuleHandlerContext {
   settings?: AisModuleSettingsContext;
   /** D-477: absent on devices without compendia (players), where the RPCs explain so. */
   compendia?: AisCompendiumSource;
+  /** D-489: world asset manifest (hash → entry), filtered by entitlement; absent on players without manifest. */
+  assets?: () => Promise<Readonly<Record<string, { name: string; mime: string; size: number }>>>;
+  /** D-489: fetch one asset's bytes as base64 (chunked via offset), when entitled. */
+  assetBytes?: (hash: string) => Promise<{ base64: string; mime: string } | null>;
   /** D-478: module directory + kernel-routed invocation. */
   modules?: AisModuleBusContext;
   /**
@@ -142,7 +146,7 @@ export interface AisModuleHandlerContext {
   /** Opens a host-rendered, text-only choice dialog; null means the user cancelled. */
   select: (request: AisModuleSelectRequest) => Promise<string | null>;
   /** Resolve only after a host commit; a rejected transaction must reject the RPC. */
-  submit: (ops: Op[]) => string | Promise<string>;
+  submit: (ops: Op[], action?: { label: string; system?: Record<string, Json> }) => string | Promise<string>;
   /** Shared by this world's module hosts so inventory read/modify/commit is serialized. */
   mutate?: AisMutationQueue;
   sequence?: () => number;
@@ -260,6 +264,17 @@ function storageKey(value: unknown): string {
   if (typeof value !== "string" || !STORAGE_KEY_RE.test(value))
     throw new Error("module storage key must be 1–64 safe characters");
   return value;
+}
+
+function aisAction(packageId: string, method: string): { label: string; system: Record<string, Json> } {
+  return {
+    label: `AIS ${packageId}: ${method}`.slice(0, 160),
+    system: {
+      aisModule: true as unknown as Json,
+      packageId: packageId as unknown as Json,
+      method: method as unknown as Json,
+    },
+  };
 }
 
 function safeId(value: unknown, label: string): string {
@@ -422,7 +437,9 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       const text = ctx.resources[args.path] ?? "";
       const offset = Number(args.offset);
       if (offset > text.length) throw new Error("Invalid resource offset");
-      const next = offset + 8192;
+      // D-482: pf1 system has 495 files; larger chunks reduce RPCs (was 8192, too chatty for 5s boot)
+      // 32k keeps response safely under 64KiB even with JSON envelope and UTF-8 expansion
+      const next = offset + 32000;
       return { text: text.slice(offset, next), next: next < text.length ? next : null };
     },
     "scene.tags.snapshot": async (_args, lifetime) => {
@@ -614,7 +631,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         },
       });
       assertCommandActive(commandContext);
-      const txId = await ctx.submit(ops);
+      const txId = await ctx.submit(ops, aisAction(ctx.packageId, "scene.token.light.apply"));
       assertCommandActive(commandContext);
       return { ok: true, txId, active: args.active, sourceName: args.sourceName, stateIndex: Number(args.stateIndex) };
     }),
@@ -668,7 +685,8 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         flavor: `AIS module ${ctx.packageId}`,
       };
       assertCommandActive(commandContext);
-      const txId = await ctx.submit([{ kind: "create", coll: "messages", data: doc }]);
+      const txId = await ctx.submit([{ kind: "create", coll: "messages", data: doc }],
+        aisAction(ctx.packageId, "chat.post"));
       assertCommandActive(commandContext);
       return { id, txId };
     },
@@ -701,13 +719,11 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       if (Object.keys(args).length) throw new Error("settings.list takes no arguments");
       const declarations = ctx.settings?.declarations ?? [];
       const values = await effectiveSettingValues(ctx, declarations);
+      // Return only key+value to stay under 64 KiB even with 100+ settings (pf1 has many large defaults).
+      // The adapter only needs key/value for sync; label/hint/default are not needed at runtime.
       return {
         settings: declarations.map((declaration) => ({
-          key: declaration.key, scope: declaration.scope, type: declaration.type, label: declaration.label,
-          ...(declaration.hint === undefined ? {} : { hint: declaration.hint }),
-          default: declaration.default,
-          ...(declaration.choices ? { choices: declaration.choices.map((choice) => ({ ...choice })) } : {}),
-          ...(declaration.hidden ? { hidden: true } : {}),
+          key: declaration.key,
           value: values[declaration.key] ?? declaration.default,
         })),
       };
@@ -751,7 +767,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
         const ops = aisWorldSettingOps(settings.worldDoc(), ctx.packageId, settings.packageName, declaration.key, coerced.value);
         await ctx.assertCapability("module.settings.write");
         assertCommandActive(commandContext);
-        if (ops.length > 0) await ctx.submit(ops);
+        if (ops.length > 0) await ctx.submit(ops, aisAction(ctx.packageId, `settings.set:${declaration.key}`));
       } else {
         await putSetting(ctx.db, { scope: aisDeviceSettingsScope(ctx.worldId, ctx.packageId), key: declaration.key, value: coerced.value });
         settings.onDeviceChange?.(declaration.key, coerced.value);
@@ -816,6 +832,43 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       if (size === null || size > MAX_COMPENDIUM_ENTRY_BYTES)
         throw new Error(`Compendium entry ${entryId} exceeds the ${MAX_COMPENDIUM_ENTRY_BYTES}-byte RPC budget`);
       return payload;
+    },
+    // ── D-489: asset library (R-07) ───────────────────────────────────────────────────────
+    "assets.list": async (args, commandContext) => {
+      await ctx.assertCapability("assets.read");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).length) throw new Error("assets.list takes no arguments");
+      if (!ctx.assets) throw new Error("Asset library is unavailable on this device");
+      const manifest = await ctx.assets();
+      const assets = Object.entries(manifest).map(([hash, entry]) => ({
+        hash, name: entry.name, mime: entry.mime, size: entry.size,
+      }));
+      // Cap at 500 entries, 256 KiB budget
+      const capped = assets.slice(0, 500);
+      const payload = { assets: capped };
+      if ((byteLength(payload) ?? Infinity) > 64 * 1024) throw new Error("Asset list exceeds RPC budget; narrow via manifest");
+      return payload;
+    },
+    "assets.get": async (args, commandContext) => {
+      await ctx.assertCapability("assets.read");
+      assertCommandActive(commandContext);
+      if (Object.keys(args).some((key) => !["hash", "offset"].includes(key)))
+        throw new Error("assets.get accepts hash and offset");
+      const hash = typeof args.hash === "string" && /^[a-f0-9]{64}$/.test(args.hash) ? args.hash : "";
+      if (!hash) throw new Error("assets.get hash must be a 64-char hex");
+      const rawOffset = args.offset;
+      const offset = rawOffset === undefined ? 0 : rawOffset;
+      if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) throw new Error("assets.get offset must be a non-negative integer");
+      if (!ctx.assets || !ctx.assetBytes) throw new Error("Asset library is unavailable on this device");
+      const manifest = await ctx.assets();
+      if (!Object.hasOwn(manifest, hash)) throw new Error("Unknown or inaccessible asset");
+      const data = await ctx.assetBytes(hash);
+      if (!data) throw new Error("Asset data unavailable");
+      const base64 = data.base64;
+      if (offset > base64.length) throw new Error("Invalid asset offset");
+      const nextOffset = offset + 8192;
+      const chunk = base64.slice(offset, nextOffset);
+      return { mime: data.mime, base64: chunk, next: nextOffset < base64.length ? nextOffset : null, size: base64.length };
     },
     // ── D-478: module-to-module bus ───────────────────────────────────────────────────────
     "modules.list": async (args, commandContext) => {
@@ -906,7 +959,7 @@ export function createAisModuleHandlers(ctx: AisModuleHandlerContext): AisModule
       const run = async () => {
         await ctx.assertCapability("documents.write");
         assertCommandActive(commandContext);
-        const txId = await ctx.submit(normalized.value.ops);
+        const txId = await ctx.submit(normalized.value.ops, aisAction(ctx.packageId, "documents.mutate"));
         return { txId, created: normalized.value.created, seq: ctx.sequence?.() ?? null };
       };
       return ctx.mutate ? ctx.mutate(run) : run();

@@ -65,11 +65,14 @@ export function aisRuntimePackage(pkg: AisPackageSource, packages: readonly AisP
 function rawRuntimeResources(pkg: AisPackageSource): Record<string, string> {
   const resources: Record<string, string> = Object.create(null) as Record<string, string>;
   let total = 0;
+  const isFoundry = pkg.manifest.interconnect?.runtime?.profile === "foundry-module";
+  const perFileLimit = isFoundry ? 50 * 1024 * 1024 : 2 * 1024 * 1024;
+  const totalLimit = isFoundry ? 300 * 1024 * 1024 : 8 * 1024 * 1024;
   for (const path of pkg.manifest.interconnect?.runtime?.resources ?? []) {
     const text = pkg.files[path];
     if (text === undefined) throw new Error(`Missing runtime resource: ${path}`);
     const size = new TextEncoder().encode(text).length;
-    if (size > 2 * 1024 * 1024 || (total += size) > 8 * 1024 * 1024) throw new Error("Runtime resource budget exceeded");
+    if (size > perFileLimit || (total += size) > totalLimit) throw new Error("Runtime resource budget exceeded");
     resources[path] = text;
   }
   return resources;

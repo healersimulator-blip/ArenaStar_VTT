@@ -264,11 +264,15 @@ export class AisRuntime {
           activeScene: () => this.scene(),
           actorById: (id) => app.store.get("actors", id) as ActorDocument | undefined,
           select: (request) => options.select(module.packageId, request),
-          submit: (ops) => app.gm.client.submitAndWait(ops),
+          submit: (ops, action) => app.gm.client.submitAndWait(ops, 30_000, undefined, action),
           mutate: this.mutate,
           ...(module.resources ? { resources: module.resources } : {}),
           sequence: () => app.store.seq,
-          updateSceneTags: (input) => app.host.applyAisSceneTags(input),
+          updateSceneTags: (input) => app.host.applyAisSceneTags({
+            ...input,
+            _packageId: module.packageId,
+            _method: "scene.tags.update",
+          }),
           fx: {
             play: (input) => {
               pruneFx();
@@ -310,6 +314,31 @@ export class AisRuntime {
           },
           // D-477: the GM device holds every imported pack (memoized per package record in HostPackages).
           compendia: () => app.packages.compendia(),
+          // D-489: asset library (R-07) — GM device manifest filtered by entitlement.
+          assets: async () => {
+            const manifest = app.store.world.assetManifest ?? {};
+            // For GM, all assets are readable; for players, filtered via canFetchAsset would apply
+            const out: Record<string, { name: string; mime: string; size: number }> = {};
+            for (const [hash, entry] of Object.entries(manifest)) {
+              out[hash] = { name: entry.name, mime: entry.mime, size: entry.size ?? 0 };
+            }
+            return out;
+          },
+          assetBytes: async (hash: string) => {
+            const { getAsset } = await import("../storage/idb");
+            const record = await getAsset(app.db, app.worldId, hash as any);
+            if (!record) return null;
+            let bytes: Uint8Array | undefined = record.bytes;
+            if (!bytes) {
+              // Fallback: try OPFS via AssetServer? For now return null
+              return null;
+            }
+            let binary = "";
+            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i] ?? 0);
+            const base64 = btoa(binary);
+            const entry = app.store.world.assetManifest?.[hash];
+            return { base64, mime: entry?.mime ?? record.mime ?? "application/octet-stream" };
+          },
           // D-478: directory + kernel-routed invocation with GM authority.
           modules: {
             requires: module.requires ?? [],

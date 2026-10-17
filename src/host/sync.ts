@@ -1013,7 +1013,14 @@ export class HostSync {
    * independently validates the proposal and its revision in the same synchronous commit. */
   applyAisSceneTags(input: Record<string, unknown>): { seq: number; tags: string[] } {
     if (this.disposed) throw new Error("Host is closed");
-    const request = parseAisTagUpdate(input);
+    // AIS tag RPC may carry optional _packageId/_method for durable revert attribution;
+    // strip them before the narrow parser so the existing validation stays intact.
+    const packageId = typeof input._packageId === "string" ? input._packageId : undefined;
+    const method = typeof input._method === "string" ? input._method : "scene.tags.update";
+    const requestInput = { ...input } as Record<string, unknown>;
+    delete requestInput._packageId;
+    delete requestInput._method;
+    const request = parseAisTagUpdate(requestInput);
     const ops = aisTagProposal(this.store.get("scenes", request.sceneId), this.store.seq, request);
     const user: SessionUser = { id: this.systemUserId, name: "AIS", role: "GM" };
     const normalized = this.normalizeOps(user.id, ops);
@@ -1022,8 +1029,15 @@ export class HostSync {
     if (!checked.ok) throw new Error(checked.error);
     const compatibility = this.draftCompatibilityError(normalized.ops);
     if (compatibility) throw new Error(compatibility);
+    const audit: ActionAudit = {
+      id: randomId(),
+      label: (packageId ? `AIS ${packageId}: ${method}` : `AIS: ${method}`).slice(0, 160),
+      system: { aisModule: true as unknown as import("../core/documents").Json,
+        ...(packageId ? { packageId: packageId as unknown as import("../core/documents").Json } : {}),
+        method: method as unknown as import("../core/documents").Json },
+    };
     const committed = this.commitOps([...normalized.ops, ...normalized.hostOps, ...checked.hostOps],
-      user.id, `ais-tags-${randomId()}`, true);
+      user.id, `ais-tags-${randomId()}`, true, audit);
     if (!committed.ok) throw new Error(committed.error);
     return { seq: committed.seq, tags: request.tags };
   }
@@ -1278,7 +1292,7 @@ export class HostSync {
         void this.saveWork.run(() => this.handleHello(session, msg));
         return;
       case "intent":
-        this.handleIntent(session, msg.txId, msg.ops, msg.wallEdit);
+        this.handleIntent(session, msg.txId, msg.ops, msg.wallEdit, msg.action);
         return;
       case "roll":
         this.handleRoll(session, msg);
@@ -1782,6 +1796,7 @@ export class HostSync {
         role,
         character: null,
         color: "#9a9ab0",
+        nameSetByGm: false,
       };
       const committed = this.commitOps(
         [{ kind: "create", coll: "users", data: user }],
@@ -1794,6 +1809,14 @@ export class HostSync {
         this.removeSession(session.peerId, "join commit failed");
         return;
       }
+    } else if (!user.nameSetByGm && hello.displayName && hello.displayName !== user.name) {
+      this.commitOps(
+        [{ kind: "update", ref: { coll: "users", id: user._id }, diff: { name: hello.displayName } }],
+        this.systemUserId,
+        `join-name-${randomId()}`,
+        false,
+      );
+      user.name = hello.displayName;
     }
     session.user = { id: user._id, role: user.role, name: user.name };
     session.pendingHello = null;
@@ -1901,7 +1924,13 @@ export class HostSync {
     });
   }
 
-  private handleIntent(session: Session, txId: TxId, ops: Op[], wallEdit?: WallEditGuard): void {
+  private handleIntent(
+    session: Session,
+    txId: TxId,
+    ops: Op[],
+    wallEdit?: WallEditGuard,
+    action?: { label: string; system?: Record<string, import("../core/documents").Json> },
+  ): void {
     if (!session.user) {
       this.reject(session, txId, "forbidden", "not authenticated");
       return;
@@ -1919,6 +1948,32 @@ export class HostSync {
       }
       const error = guardedWallEditError(wallEdit, this.store.get("scenes", wallEdit.sceneId), ops);
       if (error) { this.reject(session, txId, "invariant", error); return; }
+    }
+    // AIS and generic intents may carry an optional durable-action label. The host generates
+    // the ID (never trusted from the client). Any authenticated user may request a receipt;
+    // the Revert operation itself remains GM-only, so a player-affecting action stays revertable
+    // no matter its source (Foundry module via AIS, native roll, or player intent).
+    let audit: ActionAudit | undefined;
+    if (action !== undefined) {
+      if (typeof action !== "object" || action === null || typeof action.label !== "string" ||
+          action.label.trim().length === 0 || action.label.length > 160) {
+        this.reject(session, txId, "invalid_schema", "Invalid action audit label."); return;
+      }
+      if (action.system !== undefined) {
+        if (typeof action.system !== "object" || action.system === null || Array.isArray(action.system)) {
+          this.reject(session, txId, "invalid_schema", "Invalid action audit system."); return;
+        }
+        try {
+          const serialized = JSON.stringify(action.system);
+          if (serialized.length > 4096) {
+            this.reject(session, txId, "invalid_schema", "Action audit system too large."); return;
+          }
+        } catch {
+          this.reject(session, txId, "invalid_schema", "Invalid action audit system."); return;
+        }
+      }
+      audit = { id: randomId(), label: action.label.slice(0, 160),
+        ...(action.system ? { system: action.system } : {}) };
     }
     // FX instances are host-owned runtime state, not GM-authored document ops.
     if (Array.isArray(ops) && ops.some((op) => op && typeof op === "object" &&
@@ -1956,7 +2011,7 @@ export class HostSync {
     // Only the final validation's host ops are committed: the first pass exists to reject before
     // movement preflight, and appending both would double-post the condition audit line.
     const commitOps = [...userOps, ...normalized.hostOps, ...finalValidation.hostOps];
-    const committed = this.commitOps(commitOps, session.user.id, txId, true, undefined, undefined,
+    const committed = this.commitOps(commitOps, session.user.id, txId, true, audit, undefined,
       false, prepared.paths, prepared.triggers, prepared.at);
     if (!committed.ok) this.reject(session, txId, "invariant", committed.error);
   }

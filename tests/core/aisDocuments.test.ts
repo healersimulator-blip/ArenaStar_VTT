@@ -22,8 +22,8 @@ const input = { userId: "u-player", newId: () => "doc-new", boundedJson };
 
 describe("AIS document service: refs and collections", () => {
   test("exposes world collections, never host-only ones", () => {
-    expect(AIS_DOCUMENT_COLLECTION_NAMES).toEqual(["actors", "items", "journals", "rollTables", "macros", "folders", "playlists", "combats", "users", "messages"]);
-    for (const hidden of ["settings", "automations", "actionReceipts", "fxInstances", "compendia", "scenes", "prefabs"])
+    expect(AIS_DOCUMENT_COLLECTION_NAMES).toEqual(["scenes", "actors", "items", "journals", "rollTables", "macros", "folders", "playlists", "combats", "users", "messages"]);
+    for (const hidden of ["settings", "automations", "actionReceipts", "fxInstances", "compendia", "prefabs"])
       expect(resolveAisDocumentRef(hidden, undefined)).toMatchObject({ ok: false });
   });
 
@@ -119,9 +119,10 @@ describe("AIS document service: change feed and paging", () => {
     expect(aisDocumentChanges(7, "gm", ops, byteLength)).toEqual({ seq: 7, by: "gm", truncated: false, changes: [
       { kind: "create", collection: "actors", id: "a1" },
       { kind: "update", collection: "items", id: "i1", parent: { collection: "actors", id: "a1" }, diff: { "system.q": 2 } },
+      { kind: "delete", collection: "tokens", id: "t1", parent: { collection: "scenes", id: "s1" } },
       { kind: "update", collection: "journals", id: "j1" },
     ] });
-    expect(aisDocumentChanges(8, "gm", [{ kind: "update", ref: { coll: "scenes", id: "s1" }, diff: { name: "x" } }], byteLength)).toBeNull();
+    expect(aisDocumentChanges(8, "gm", [{ kind: "update", ref: { coll: "scenes", id: "s1" }, diff: { name: "x" } }], byteLength)).toEqual({ seq: 8, by: "gm", truncated: false, changes: [{ kind: "update", collection: "scenes", id: "s1", diff: { name: "x" } }] });
   });
 
   test("pages by count and bytes with a stable next offset", () => {

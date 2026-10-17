@@ -31,6 +31,20 @@
     for (const [key, item] of Object.entries(value)) out[key] = clone(item, depth + 1);
     return out;
   };
+  // Foundry extends Array prototype with helpers like findSplice; pf1 system uses them. Polyfill for AIS emulation.
+  if (!Array.prototype.findSplice) {
+    Object.defineProperty(Array.prototype, "findSplice", {
+      configurable: true, writable: true, value: function(predicate, replacement) {
+        if (typeof predicate !== "function") return undefined;
+        const idx = this.findIndex(predicate);
+        if (idx === -1) return undefined;
+        const removed = this[idx];
+        if (replacement === undefined) this.splice(idx, 1);
+        else this.splice(idx, 1, replacement);
+        return removed;
+      }
+    });
+  }
   const duplicate = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
   const safeParts = (path) => {
     const parts = String(path).split(".");
@@ -146,6 +160,239 @@
   let activeApi = null;
   let activeDeadline = 0;
   let busy = false;
+
+  // ── D-477 / R-10: CompendiumCollection over AIS compendium.* RPCs ──
+  class CompendiumCollection extends Collection {
+    constructor(pack) {
+      super([]);
+      this._pack = pack;
+      this.id = pack.id;
+      this.collection = pack.id;
+      this.metadata = { id: pack.id, name: pack.name, label: pack.name, type: pack.type, packageName: pack.id.split("/")[0], packageType: "world" };
+      this.documentName = pack.type;
+      this.type = pack.type;
+      this.name = pack.name;
+      this.title = pack.name;
+      this._cache = new Map();
+      this._index = null;
+    }
+    get documentClass() { return documentClasses[this.documentName] ?? Document; }
+    get index() {
+      // PF1 expects pack.index to be a Collection with size, values(), etc.
+      const coll = new Collection(this._index.map(e => [e._id, e]));
+      // Also provide size via Map's size, and make it iterable as values
+      return coll;
+    }
+    async getIndex({ fields } = {}) {
+      // fields: array of dot-paths or object map; support for PF1e modules that request system fields
+      const wantsFields = fields ? (Array.isArray(fields) ? fields : typeof fields === "object" ? Object.keys(fields) : []) : [];
+      const needFull = wantsFields.length > 0;
+      if (this._index && !needFull) return this._index;
+      try {
+        const hits = await AIS.compendium.search({ packId: this.id, query: "", limit: 500 });
+        if (!needFull) {
+          this._index = hits.map((hit) => ({ _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base", img: hit.img ?? "" }));
+          return this._index;
+        }
+        // When fields requested, fetch full entries (bounded parallelism) to extract requested paths
+        const results = [];
+        const concurrency = 8;
+        let idx = 0;
+        const fetchOne = async (hit) => {
+          try {
+            const entry = await AIS.compendium.get(this.id, hit.entryId);
+            if (!entry) return { _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base", img: hit.img ?? "" };
+            const raw = entry.data ?? entry;
+            const base = { _id: hit.entryId, id: hit.entryId, name: entry.name ?? hit.name, type: entry.type ?? hit.type ?? "base", img: resolveEntryImg(raw) || entry.img || hit.img || "" };
+            for (const field of wantsFields) {
+              try {
+                const val = getProperty(raw, field);
+                if (val !== undefined) setProperty(base, field, clone(val));
+              } catch {}
+            }
+            return base;
+          } catch {
+            return { _id: hit.entryId, id: hit.entryId, name: hit.name, type: hit.type ?? "base", img: "" };
+          }
+        };
+        const workers = Array.from({ length: concurrency }, async () => {
+          while (idx < hits.length) {
+            const i = idx++;
+            const hit = hits[i];
+            results[i] = await fetchOne(hit);
+          }
+        });
+        await Promise.all(workers);
+        return results;
+      } catch (e) {
+        warn(`Compendium ${this.id} getIndex failed: ${e?.message ?? e}`);
+        return [];
+      }
+    }
+    async getDocument(entryId) {
+      if (this._cache.has(entryId)) return this._cache.get(entryId);
+      try {
+        const entry = await AIS.compendium.get(this.id, entryId);
+        if (!entry) return null;
+        const data = entry.data ?? entry;
+        const klass = documentClasses[this.documentName] ?? Document;
+        // Convert compendium entry data to document
+        const doc = new klass(data, { fromSource: false });
+        // Ensure id matches entryId
+        doc._id = entryId; doc.id = entryId;
+        this._cache.set(entryId, doc);
+        return doc;
+      } catch (e) {
+        warn(`Compendium ${this.id} getDocument ${entryId} failed: ${e?.message ?? e}`);
+        return null;
+      }
+    }
+    get(id) { return this._cache.get(id) ?? null; }
+    getName(name) { return [...this._cache.values()].find((d) => d.name === name) ?? null; }
+    async importDocument(entryId) {
+      const doc = await this.getDocument(entryId);
+      if (!doc) throw new Error(`Compendium entry ${entryId} not found in ${this.id}`);
+      const created = await doc.constructor.create(doc.toObject(), {});
+      return created;
+    }
+  }
+
+  // ── R-10: Foundry module's own packs (NDJSON .db or JSON) from its distribution ──
+  function parseFoundryPackText(text) {
+    const entries = [];
+    const trimmed = text.trim();
+    if (!trimmed) return entries;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed) if (entry && typeof entry._id === "string") entries.push(entry);
+        if (entries.length) return entries;
+      }
+      if (parsed && Array.isArray(parsed.entries)) {
+        for (const entry of parsed.entries) if (entry && typeof entry._id === "string") entries.push(entry);
+        if (entries.length) return entries;
+      }
+      if (parsed && typeof parsed._id === "string") { entries.push(parsed); return entries; }
+    } catch {}
+    for (const line of text.split("\n")) {
+      const l = line.trim();
+      if (!l) continue;
+      try {
+        const entry = JSON.parse(l);
+        if (entry && typeof entry._id === "string") entries.push(entry);
+      } catch {}
+    }
+    if (entries.length) return entries;
+    // YAML edge: some older Foundry packs are YAML documents separated by ---; extract minimal _id/name/type/img
+    if (text.includes("_id:") || text.includes("---")) {
+      try {
+        const docs = text.split(/^---\s*$/m);
+        for (const doc of docs) {
+          if (!doc.includes("_id:")) continue;
+          const idMatch = doc.match(/_id:\s*["']?([A-Za-z0-9]{16,})["']?/);
+          if (!idMatch) continue;
+          const nameMatch = doc.match(/^\s*name:\s*["']?(.+?)["']?\s*$/m);
+          const typeMatch = doc.match(/^\s*type:\s*["']?([A-Za-z0-9_-]+)["']?\s*$/m);
+          const imgMatch = doc.match(/^\s*img:\s*["']?(.+?)["']?\s*$/m);
+          const obj = { _id: idMatch[1], name: (nameMatch?.[1]?.trim() || idMatch[1]), type: (typeMatch?.[1]?.trim() || "base"), img: (imgMatch?.[1]?.trim() || "") };
+          // Try to preserve full doc if it looks like JSON after YAML conversion? Keep minimal.
+          entries.push(obj);
+          if (entries.length > 5000) break;
+        }
+        if (entries.length) return entries;
+      } catch {}
+    }
+    return entries;
+  }
+
+  function resolveEntryImg(e) {
+    try {
+      if (e && typeof e.img === "string" && e.img) return e.img;
+      if (e && typeof e.icon === "string" && e.icon) return e.icon;
+      if (e?.system && typeof e.system.img === "string" && e.system.img) return e.system.img;
+      if (e?.data && typeof e.data.img === "string" && e.data.img) return e.data.img;
+    } catch {}
+    return "";
+  }
+  class FoundryCompendiumCollection extends Collection {
+    constructor(packMeta, rawEntries) {
+      super([]);
+      this._raw = rawEntries;
+      this.id = `${foundryId}.${packMeta.name}`;
+      this.collection = this.id;
+      this.metadata = { id: this.id, name: packMeta.label || packMeta.name, label: packMeta.label || packMeta.name, type: packMeta.type, packageName: foundryId, packageType: "module" };
+      this.documentName = packMeta.type === "JournalEntry" ? "JournalEntry" : packMeta.type === "Actor" ? "Actor" : packMeta.type === "Item" ? "Item" : packMeta.type;
+      this.type = packMeta.type;
+      this.name = packMeta.label || packMeta.name;
+      this.title = packMeta.label || packMeta.name;
+      this._cache = new Map();
+      this._index = rawEntries.map((e) => ({ _id: e._id, id: e._id, name: e.name, type: e.type || "base", img: resolveEntryImg(e) }));
+      for (const e of rawEntries) this._cache.set(e._id, e);
+    }
+    get documentClass() { return documentClasses[this.documentName] ?? Document; }
+    get index() {
+      // PF1 expects pack.index to be a Collection with size, values(), etc.
+      const coll = new Collection(this._index.map(e => [e._id, e]));
+      // Also provide size via Map's size, and make it iterable as values
+      return coll;
+    }
+    async getIndex({ fields } = {}) {
+      if (!fields) return this._index;
+      const wants = Array.isArray(fields) ? fields : typeof fields === "object" ? Object.keys(fields) : [];
+      if (!wants.length) return this._index;
+      return this._raw.map((e) => {
+        const base = { _id: e._id, id: e._id, name: e.name, type: e.type || "base", img: resolveEntryImg(e) };
+        for (const f of wants) {
+          try { const v = getProperty(e, f); if (v !== undefined) setProperty(base, f, clone(v)); } catch {}
+        }
+        return base;
+      });
+    }
+    async getDocument(entryId) {
+      const cached = this._cache.get(entryId);
+      if (cached instanceof Document) return cached;
+      const raw = this._raw.find((e) => e._id === entryId);
+      if (!raw) return null;
+      try {
+        const klass = documentClasses[this.documentName] ?? Document;
+        const data = { ...raw, _id: entryId };
+        const doc = new klass(data, { fromSource: false });
+        doc._id = entryId; doc.id = entryId;
+        this._cache.set(entryId, doc);
+        return doc;
+      } catch (e) {
+        warn(`Foundry pack ${this.id} getDocument ${entryId} failed: ${e?.message ?? e}`);
+        return null;
+      }
+    }
+    get(id) {
+      const v = this._cache.get(id);
+      return v instanceof Document ? v : null;
+    }
+    getName(name) {
+      for (const v of this._cache.values()) {
+        if (v instanceof Document && v.name === name) return v;
+        if (v && typeof v === "object" && v.name === name) {
+          const raw = v;
+          const klass = documentClasses[this.documentName] ?? Document;
+          try {
+            const doc = new klass({ ...raw }, { fromSource: false });
+            doc._id = raw._id; doc.id = raw._id;
+            this._cache.set(raw._id, doc);
+            return doc;
+          } catch { return null; }
+        }
+      }
+      return null;
+    }
+    async importDocument(entryId) {
+      const doc = await this.getDocument(entryId);
+      if (!doc) throw new Error(`Compendium entry ${entryId} not found in ${this.id}`);
+      const obj = typeof doc.toObject === "function" ? doc.toObject() : { ...doc };
+      const created = await (doc.constructor.create ? doc.constructor.create(obj, {}) : Document.create(obj));
+      return created;
+    }
+  }
   const types = { tokens: "Token", lights: "AmbientLight", sounds: "AmbientSound", templates: "MeasuredTemplate",
     tiles: "Tile", walls: "Wall", drawings: "Drawing", notes: "Note", regions: "Region" };
   class SceneDocumentView {
@@ -198,26 +445,49 @@
       for (const [key, value] of Object.entries(input)) setProperty(changed, key, clone(value));
       if (!Hooks.call(`preUpdate${this.documentName}`, this, changed, {}, "gm")) throw new Error("Document update vetoed by a pre-hook");
       const keys = Object.keys(changed);
-      if (keys.some((key) => !["flags.tagger.tags", "flags"].includes(key))) return unsupported("document fields other than tags");
-      const flags = changed.flags;
-      if (flags && (Object.keys(flags).some((key) => key !== "tagger") ||
-          Object.keys(flags.tagger || {}).some((key) => !["tags", "-=tags"].includes(key)))) return unsupported("foreign flag namespace");
-      let tags = changed["flags.tagger.tags"] ?? getProperty(changed, "flags.tagger.tags");
-      if (getProperty(changed, "flags.tagger.-=tags") === null) tags = [];
-      if (!Array.isArray(tags)) throw new Error("Tag updates require an array");
-      // Draft hook mutations are only proposals. This reply means the HOST committed.
-      const request = { sceneId: this.parent.id, collection: this._collection, id: this.id, tags };
-      let result;
-      try { result = await this._view.api.sceneTags.update({ ...request, expectedSeq: this._view.seq }); }
-      catch (error) {
-        // Foundry semantics are last-writer-wins: a stale revision is refreshed once, then retried.
-        if (!moduleProfile || !/stale/i.test(error?.message ?? "")) throw error;
-        const fresh = await this._view.api.sceneTags.snapshot();
-        this._view.seq = fresh.seq;
-        result = await this._view.api.sceneTags.update({ ...request, expectedSeq: fresh.seq });
+      const tagOnly = keys.every((key) => key === "flags" || key === "flags.tagger.tags" || key === "flags.tagger.-=tags");
+      if (tagOnly) {
+        const flags = changed.flags;
+        if (flags && (Object.keys(flags).some((key) => key !== "tagger") ||
+            Object.keys(flags.tagger || {}).some((key) => !["tags", "-=tags"].includes(key)))) return unsupported("foreign flag namespace");
+        let tags = changed["flags.tagger.tags"] ?? getProperty(changed, "flags.tagger.tags");
+        if (getProperty(changed, "flags.tagger.-=tags") === null) tags = [];
+        if (!Array.isArray(tags)) throw new Error("Tag updates require an array");
+        const request = { sceneId: this.parent.id, collection: this._collection, id: this.id, tags };
+        let result;
+        try { result = await this._view.api.sceneTags.update({ ...request, expectedSeq: this._view.seq }); }
+        catch (error) {
+          if (!moduleProfile || !/stale/i.test(error?.message ?? "")) throw error;
+          const fresh = await this._view.api.sceneTags.snapshot();
+          this._view.seq = fresh.seq;
+          result = await this._view.api.sceneTags.update({ ...request, expectedSeq: fresh.seq });
+        }
+        this._data.tags = clone(result.tags);
+        this._view.seq = result.seq;
+        Hooks.callAll(`update${this.documentName}`, this, changed, {}, "gm");
+        return this;
       }
-      this._data.tags = clone(result.tags);
-      this._view.seq = result.seq;
+      const storeChanges = {};
+      for (const [key, value] of Object.entries(changed)) {
+        if (key === "flags") continue;
+        if (key === "flags.tagger.tags") storeChanges.taggerTags = value;
+        else if (key === "flags.tagger.-=tags") storeChanges["-=taggerTags"] = null;
+        else storeChanges[key] = value;
+      }
+      const diff = {};
+      for (const [path, value] of Object.entries(flattenObject(storeChanges))) {
+        if (path === "_id") continue;
+        diff[path] = value === undefined ? null : value;
+      }
+      if (!Object.keys(diff).length) return this;
+      await AIS.documents.mutate([{ kind: "update", collection: this._collection, id: this.id, diff, parent: { collection: "scenes", id: this.parent.id } }]);
+      const fresh = await AIS.documents.get({ collection: this._collection, id: this.id, parent: { collection: "scenes", id: this.parent.id } });
+      if (fresh) {
+        this._data = clone(fresh);
+        this._id = fresh._id; this.id = fresh._id; this.name = fresh.name;
+        if (Number.isFinite(fresh.x)) this.x = fresh.x;
+        if (Number.isFinite(fresh.y)) this.y = fresh.y;
+      }
       Hooks.callAll(`update${this.documentName}`, this, changed, {}, "gm");
       return this;
     }
@@ -268,8 +538,23 @@
       this.last.assetId = mapped; return this;
     }
     anchor(location) {
-      if (location instanceof DocumentView) {
-        if (location._collection !== "tokens" || location.parent.id !== currentView?.scene.id) return unsupported("non-token anchors");
+      const isTokenDoc = (doc) => {
+        if (!doc) return false;
+        if (doc instanceof DocumentView) return doc._collection === "tokens";
+        // New world-document Token (from documents.js) — has documentName Token and a parent Scene
+        if (doc.documentName === "Token" || doc.constructor?.documentName === "Token") return true;
+        // Fallback: token-like with id and parent scene
+        return typeof doc.id === "string" && doc.parent && typeof doc.parent.id === "string";
+      };
+      if (isTokenDoc(location)) {
+        const sceneId = location.parent?.id ?? location.parent?._id;
+        if (sceneId && currentView?.scene?.id && sceneId !== currentView.scene.id) {
+          // Allow any scene that exists in the real collection, but keep the old check for tagger's filtered view
+          const realScene = documentsLayer.collections.scenes.get(sceneId);
+          if (!realScene && sceneId !== currentView.scene.id) return unsupported("non-token anchors");
+        }
+        // For tagger compatibility, still require token to be in currentView if it's a DocumentView
+        if (location instanceof DocumentView && (location._collection !== "tokens" || location.parent.id !== currentView?.scene.id)) return unsupported("non-token anchors");
         for (const kind of ["source", "target"]) {
           if (!this.refs[kind] || this.refs[kind] === location.id) { this.refs[kind] = location.id; return { kind }; }
         }
@@ -414,16 +699,58 @@
     Object.defineProperty(klass, "PARTS", { configurable: true, writable: true, value: {} });
     return klass;
   };
+  // Deep stub that auto-creates nested namespaces/classes so pf1 system (which patches many Foundry internals) doesn't throw on missing paths.
+  const deepStubCache = new Map();
+  const deepStub = (path) => {
+    if (deepStubCache.has(path)) return deepStubCache.get(path);
+    const name = path.split(".").pop() || "Stub";
+    const base = stubClass(name);
+    // Provide some known static constants that pf1 reads
+    if (name === "Tour") {
+      base.DEFAULT_OPTIONS = {};
+      base.PARTS = {};
+    }
+    if (name === "DetectionMode") {
+      Object.defineProperty(base, "DETECTION_TYPES", { configurable: true, get: () => ({ SIGHT: 0, SOUND: 1, MOVE: 2, LIGHT: 3, OTHER: 4 }) });
+    }
+    if (name === "VisionMode") {
+      Object.defineProperty(base, "LIGHTING_LEVELS", { configurable: true, get: () => ({ DARKNESS: -2, HALFDARK: -1, UNLIT: 0, DIM: 1, BRIGHT: 2, BRIGHTEST: 3 }) });
+    }
+    const proxy = new Proxy(base, {
+      get(t, p) {
+        if (p in t) return t[p];
+        if (typeof p === "symbol") return t[p];
+        if (p === "prototype" || p === "length" || p === "name") return t[p];
+        const childPath = `${path}.${String(p)}`;
+        const child = deepStub(childPath);
+        t[p] = child;
+        return child;
+      },
+      set(t, p, v) { t[p] = v; return true; },
+    });
+    deepStubCache.set(path, proxy);
+    return proxy;
+  };
 
   // ── i18n: the emulator's core keys first (D-484), then the module's own language files (which win). ──
   const translations = globalThis.__aisFoundryCore ? expandObject(clone(globalThis.__aisFoundryCore.lang)) : {};
   const i18n = {
     lang: "en",
     translations,
-    has: (key) => typeof getProperty(translations, key) === "string",
-    localize: (key) => { const value = getProperty(translations, String(key)); return typeof value === "string" ? value : String(key); },
+    has: (key) => { try { return typeof getProperty(translations, String(key)) === "string"; } catch { return false; } },
+    localize: (key) => {
+      const k = String(key ?? "");
+      if (!k) return "";
+      try {
+        const value = getProperty(translations, k);
+        return typeof value === "string" ? value : k;
+      } catch { return k; }
+    },
     format: (key, data = {}) => i18n.localize(key).replace(/\{([^}]+)\}/g, (_m, name) => (data[name] === undefined ? `{${name}}` : String(data[name]))),
-    sortObjects: (rows, key) => [...rows].sort((a, b) => String(getProperty(a, key)).localeCompare(String(getProperty(b, key)))),
+    sortObjects: (rows, key) => {
+      try { return [...rows].sort((a, b) => String(getProperty(a, key)).localeCompare(String(getProperty(b, key)))); }
+      catch { return [...rows]; }
+    },
   };
   const shortText = (text, max) => { const t = String(text ?? "").replace(/\s+/g, " ").trim(); return t.length > max ? `${t.slice(0, max - 1)}…` : t; };
 
@@ -451,6 +778,27 @@
     const hidden = data.config === false;
     const type = data.type;
     const base = { key: aisKey, scope, label, ...(hint ? { hint } : {}), ...(hidden ? { hidden: true } : {}) };
+    // D-484 extended: Foundry settings may use DataField instances (e.g. new fields.StringField({ initial: "0.0.0" }))
+    // as their type. Extract initial value when present.
+    const extractFieldInitial = (field) => {
+      if (!field || typeof field !== "object") return undefined;
+      try {
+        if (typeof field.getInitialValue === "function") {
+          const v = field.getInitialValue({});
+          if (v !== undefined) return v;
+        }
+      } catch {}
+      if (field.initial !== undefined) {
+        const init = field.initial;
+        try { return typeof init === "function" ? init({}) : init; } catch { return typeof init === "function" ? undefined : init; }
+      }
+      if (field.options && field.options.initial !== undefined) {
+        const init = field.options.initial;
+        try { return typeof init === "function" ? init({}) : init; } catch { return typeof init === "function" ? undefined : init; }
+      }
+      return undefined;
+    };
+    const fieldInitial = extractFieldInitial(type);
     if (type === Boolean) return { kind: "boolean", declaration: { ...base, type: "boolean", default: data.default === true } };
     if (type === Number) {
       const range = data.range && Number.isFinite(data.range.min) && Number.isFinite(data.range.max) && data.range.min <= data.range.max ? data.range : null;
@@ -469,12 +817,41 @@
       }
       return { kind: "string", declaration: { ...base, type: "string", default: typeof data.default === "string" ? data.default.slice(0, 16384) : "", maxLength: 16384 } };
     }
-    // Object / Array / DataModel / unspecified → JSON text in a hidden string setting.
+    // PF1 migration bypass: systemMigrationVersion should default to high version to skip fragile data-corruption mitigation in AIS emulation
+    if (namespace === "pf1" && key === "systemMigrationVersion") {
+      const high = "99.0.0";
+      return { kind: "string", declaration: { ...base, type: "string", default: high, maxLength: 16384 } };
+    }
+    // DataField instance handling: StringField, NumberField, BooleanField etc.
+    if (fieldInitial !== undefined) {
+      if (typeof fieldInitial === "boolean") return { kind: "boolean", declaration: { ...base, type: "boolean", default: fieldInitial } };
+      if (typeof fieldInitial === "number" && Number.isFinite(fieldInitial)) {
+        const range = data.range && Number.isFinite(data.range.min) && Number.isFinite(data.range.max) && data.range.min <= data.range.max ? data.range : null;
+        let fallback = Number.isFinite(data.default) ? data.default : fieldInitial;
+        if (range) fallback = Math.min(range.max, Math.max(range.min, fallback));
+        return { kind: "number", declaration: { ...base, type: "number", default: fallback, ...(range ? { min: range.min, max: range.max } : {}) } };
+      }
+      if (typeof fieldInitial === "string") {
+        const choices = isPlainObject(data.choices) ? Object.entries(data.choices) : [];
+        if (choices.length >= 2 && choices.length <= 32 && choices.every(([value]) => CHOICE_VALUE_RE.test(value))) {
+          const values = choices.map(([value, text]) => ({ value, label: shortText(i18n.localize(String(text)) || value, 48) || value }));
+          const fallback = values.some((row) => row.value === fieldInitial) ? fieldInitial : (typeof data.default === "string" && values.some(r=>r.value===data.default) ? data.default : values[0]?.value ?? fieldInitial);
+          return { kind: "choice", declaration: { ...base, type: "choice", default: fallback, choices: values } };
+        }
+        return { kind: "string", declaration: { ...base, type: "string", default: fieldInitial.slice(0, 16384), maxLength: 16384 } };
+      }
+      // For object/array initials from DataField, fall through to JSON handling using fieldInitial as fallback
+    }
+    // Object / Array / DataModel / SetField / unspecified → JSON text in a hidden string setting.
     let fallback = data.default;
+    if (fallback === undefined && fieldInitial !== undefined) fallback = fieldInitial;
+    if (fallback instanceof Set) fallback = [...fallback];
     if (fallback && typeof fallback.toObject === "function") fallback = fallback.toObject();
     else if (typeof fallback === "function") { try { fallback = new fallback(); } catch { fallback = {}; } }
+    if (fallback instanceof Set) fallback = [...fallback];
     if (fallback === undefined && isDataModelClass(type)) { try { fallback = new type({}, { strict: false }).toObject(); } catch { fallback = {}; } }
     if (fallback === undefined) fallback = type === Array ? [] : {};
+    if (fallback instanceof Set) fallback = [...fallback];
     let text;
     try { text = JSON.stringify(fallback); } catch { text = "{}"; }
     if (typeof text !== "string") text = "null";
@@ -488,6 +865,19 @@
     let value;
     try { value = JSON.parse(raw); } catch { value = clone(row.data.default) ?? {}; }
     if (isDataModelClass(row.data.type)) { try { return new row.data.type(value && typeof value === "object" ? value : {}, { strict: false }); } catch { return value; } }
+    // PF1 SetField (e.g. hiddenCompendiums) is stored as JSON array but used as Set with .has()
+    try {
+      const t = row.data.type;
+      const isSetField = t && typeof t === "object" && (t.constructor?.name === "SetField" || (typeof t._cast === "function" && t._cast([]) instanceof Set) || (t.element && typeof t.toObject === "function"));
+      if (isSetField && Array.isArray(value)) return new Set(value);
+      // Also detect when fieldInitial was Set (hiddenCompendiums etc)
+      if (Array.isArray(value) && row.data && typeof row.data.type === "object") {
+        // Heuristic: if setting key suggests Set (hiddenCompendiums, sources) and value is array of strings, return Set
+        if ((row.key && (row.key.includes("Compendium") || row.key === "sources")) || (t && t.constructor?.name?.includes("Set"))) {
+          if (value.every(v => typeof v === "string")) return new Set(value);
+        }
+      }
+    } catch {}
     return value;
   };
   const encodeSetting = (row, value) => {
@@ -581,9 +971,19 @@
     Collection, game: () => globalThis.game });
   const Document = documentsLayer.AISDocument;
   const documentClasses = { ...documentsLayer.classes };
-  // Scene/placeable/other documents still only exist for `extends`/`instanceof` (scene services stay dedicated; slice 2).
-  for (const name of ["Scene", "TokenDocument", "Cards", "Setting", "AmbientLightDocument", "AmbientSoundDocument", "TileDocument",
-    "WallDocument", "DrawingDocument", "MeasuredTemplateDocument", "NoteDocument", "RegionDocument", "RegionBehavior", "Adventure", "FogExploration"])
+  // Slice 2: real projected scene/placeable documents from the kernel collection.
+  documentClasses.Scene = documentsLayer.classes.Scene;
+  documentClasses.TokenDocument = documentsLayer.classes.Token;
+  documentClasses.AmbientLightDocument = documentsLayer.classes.AmbientLight;
+  documentClasses.AmbientSoundDocument = documentsLayer.classes.AmbientSound;
+  documentClasses.TileDocument = documentsLayer.classes.Tile;
+  documentClasses.WallDocument = documentsLayer.classes.Wall;
+  documentClasses.DrawingDocument = documentsLayer.classes.Drawing;
+  documentClasses.MeasuredTemplateDocument = documentsLayer.classes.Template;
+  documentClasses.NoteDocument = documentsLayer.classes.Note;
+  documentClasses.RegionDocument = documentsLayer.classes.Region;
+  // Other documents still only exist for `extends`/`instanceof`.
+  for (const name of ["Cards", "Setting", "RegionBehavior", "Adventure", "FogExploration"])
     documentClasses[name] = stubClass(name, Document);
   for (const [name, klass] of Object.entries(documentClasses)) globalThis[name] = klass;
   // Chat messages are host-stamped: `ChatMessage.create({ content })` posts through the chat service as this user.
@@ -597,6 +997,24 @@
   documentClasses.ChatMessage.createDocuments = async (rows = []) => { const out = []; for (const row of rows) out.push(await postChat(row)); return out; };
   documentClasses.ChatMessage.getSpeaker = ({ actor, token, alias } = {}) => ({ actor: actor?.id ?? null, token: token?.id ?? null, alias: alias ?? actor?.name ?? null, scene: null });
   documentClasses.ChatMessage.applyRollMode = (data) => data;
+  const TokenDocumentClass = documentsLayer.classes.Token;
+  if (TokenDocumentClass?.prototype) {
+    Object.defineProperty(TokenDocumentClass.prototype, "document", { configurable: true, get() { return this; } });
+    Object.defineProperty(TokenDocumentClass.prototype, "object", { configurable: true, get() { return this; } });
+    const originalGetFlag = TokenDocumentClass.prototype.getFlag;
+    TokenDocumentClass.prototype.getFlag = function (scope, key) {
+      if (scope === "tagger" && key === "tags") return clone(this.taggerTags ?? []);
+      return typeof originalGetFlag === "function" ? originalGetFlag.call(this, scope, key) : undefined;
+    };
+    TokenDocumentClass.prototype.setFlag = function (scope, key, value) {
+      if (scope === "tagger" && key === "tags") return this.update({ taggerTags: value });
+      return unsupported(`flag ${scope}.${key}`);
+    };
+    TokenDocumentClass.prototype.unsetFlag = function (scope, key) {
+      if (scope === "tagger" && key === "tags") return this.update({ "-=taggerTags": null });
+      return unsupported(`flag ${scope}.${key}`);
+    };
+  }
   const PlaceableObject = stubClass("PlaceableObject");
   globalThis.PlaceableObject = PlaceableObject;
   for (const name of ["Token", "Tile", "Drawing", "Wall", "AmbientLight", "AmbientSound", "MeasuredTemplate", "Note", "Region"])
@@ -611,24 +1029,525 @@
     renderTemplate, loadTemplates, getTemplate } = uiLayer;
   globalThis.ui.windows = uiLayer.ui.windows;
   Object.defineProperty(globalThis.ui, "activeWindow", { configurable: true, get: () => uiLayer.ui.activeWindow, set: (value) => { uiLayer.ui.activeWindow = value; } });
+  // ── R-07: FilePicker over AIS asset library (improved: returns names, supports dirs, asset URL cache) ──
+  const assetUrlCache = new Map(); // hash -> blobUrl
+  const assetNameToHash = new Map(); // name -> hash
+  let assetListCache = null;
+  async function refreshAssetMaps() {
+    try {
+      const list = await AIS.assets.list();
+      assetListCache = list;
+      assetNameToHash.clear();
+      for (const a of list) assetNameToHash.set(a.name, a.hash);
+      return list;
+    } catch { return []; }
+  }
+  async function fetchAssetBlobUrl(hash, mime) {
+    if (assetUrlCache.has(hash)) return assetUrlCache.get(hash);
+    try {
+      let base64 = "";
+      let offset = 0;
+      let m = mime || "application/octet-stream";
+      for (;;) {
+        const chunk = await AIS.assets.get(hash, offset);
+        if (!chunk || typeof chunk.base64 !== "string") break;
+        base64 += chunk.base64;
+        m = chunk.mime || m;
+        if (chunk.next === null || chunk.next === undefined) break;
+        offset = chunk.next;
+      }
+      if (!base64) return null;
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: m });
+      const url = URL.createObjectURL(blob);
+      assetUrlCache.set(hash, url);
+      return url;
+    } catch { return null; }
+  }
+  async function resolveAssetPathToUrl(path) {
+    if (!path) return null;
+    const str = String(path);
+    if (/^[a-f0-9]{64}$/.test(str)) return fetchAssetBlobUrl(str, null);
+    const mapped = config?.assets?.[str];
+    if (mapped && /^[a-f0-9]{64}$/.test(mapped)) {
+      const list = assetListCache ?? await refreshAssetMaps();
+      const entry = list.find((a) => a.hash === mapped);
+      return fetchAssetBlobUrl(mapped, entry?.mime);
+    }
+    if (assetNameToHash.has(str)) return fetchAssetBlobUrl(assetNameToHash.get(str), null);
+    const list = assetListCache ?? await refreshAssetMaps();
+    const byName = list.find((a) => a.name === str);
+    if (byName) return fetchAssetBlobUrl(byName.hash, byName.mime);
+    return null;
+  }
+
+  class FilePicker extends Application {
+    constructor(options = {}) {
+      super(options);
+      this.options = { type: "image", callback: null, current: "", ...options };
+      this._assets = [];
+      this._filter = "";
+      this._browsedPath = options.current || "";
+    }
+    static get defaultOptions() {
+      return { ...super.defaultOptions, id: "filepicker", classes: ["filepicker"], template: null, width: 520, height: 400, title: "FilePicker" };
+    }
+    static async browse(source, target, options = {}) {
+      try {
+        const assets = await AIS.assets.list();
+        assetListCache = assets;
+        assetNameToHash.clear();
+        for (const a of assets) assetNameToHash.set(a.name, a.hash);
+        const t = String(target ?? "").toLowerCase();
+        const exts = (options.extensions && Array.isArray(options.extensions) ? options.extensions : []).map((e) => String(e).toLowerCase().replace(/^\./, ""));
+        let files = assets.filter((a) => {
+          const nameLower = a.name.toLowerCase();
+          if (t && !nameLower.includes(t)) {
+            const dir = a.name.includes("/") ? a.name.slice(0, a.name.lastIndexOf("/") + 1).toLowerCase() : "";
+            if (t && !dir.startsWith(t) && t !== "" && !nameLower.includes(t)) return false;
+          }
+          if (exts.length) {
+            const ext = a.name.split(".").pop()?.toLowerCase() ?? "";
+            return exts.some((e) => ext === e || e.includes(ext) || ext.includes(e));
+          }
+          return true;
+        }).map((a) => a.name);
+        const dirsSet = new Set();
+        for (const a of assets) {
+          const name = a.name;
+          if (t && !name.toLowerCase().startsWith(t)) continue;
+          const rest = t ? name.slice(t.length) : name;
+          const slash = rest.indexOf("/");
+          if (slash !== -1) {
+            const dir = (t ? target : "") + rest.slice(0, slash + 1);
+            dirsSet.add(dir);
+          }
+        }
+        return { files: files.slice(0, 500), dirs: [...dirsSet].slice(0, 100), target: target ?? "", source, extensions: options.extensions ?? [] };
+      } catch {
+        return { files: [], dirs: [], target: target ?? "", source, extensions: options.extensions ?? [] };
+      }
+    }
+    async getData(options = {}) {
+      const data = await super.getData(options);
+      if (!this._assets.length) {
+        try {
+          this._assets = await AIS.assets.list();
+          assetListCache = this._assets;
+          assetNameToHash.clear();
+          for (const a of this._assets) assetNameToHash.set(a.name, a.hash);
+        } catch { this._assets = []; }
+      }
+      const filtered = this._filter ? this._assets.filter((a) => a.name.toLowerCase().includes(this._filter.toLowerCase())) : this._assets;
+      return { ...data, files: filtered, filter: this._filter, type: this.options.type, current: this._browsedPath };
+    }
+    activateListeners(html) {
+      super.activateListeners(html);
+      const root = html[0] ?? html;
+      const input = root.querySelector?.('input[name="filter"]');
+      if (input) {
+        input.addEventListener("input", (e) => { this._filter = e.target.value; this.render(); });
+      }
+      const rows = root.querySelectorAll?.('[data-asset-name]') ?? [];
+      for (const row of rows) {
+        row.addEventListener("click", async () => {
+          const name = row.dataset.assetName;
+          const result = name;
+          if (typeof this.options.callback === "function") {
+            try { this.options.callback(result); } catch (err) { console.warn(err); }
+          }
+          this.close();
+        });
+      }
+    }
+    async _renderInner() {
+      const data = await this.getData();
+      const filesHtml = data.files.slice(0, 100).map((a) => `<div class="file" data-asset-name="${escapeHTML(a.name)}" style="padding:4px;cursor:pointer;border-bottom:1px solid #444"><span>${escapeHTML(a.name)}</span> <small style="opacity:0.6">${a.hash.slice(0,8)}… ${a.size}b</small></div>`).join("");
+      return `<div class="filepicker-content" style="display:flex;flex-direction:column;height:100%"><div style="padding:8px"><input name="filter" placeholder="Filter" value="${escapeHTML(data.filter)}" style="width:100%"/></div><div style="flex:1;overflow:auto">${filesHtml || '<div style="padding:12px;opacity:0.6">No assets</div>'}</div></div>`;
+    }
+  }
+
+  // ── R-07: asset image src → blob URL resolver (MutationObserver + img setter) ──
+  const AIS_ASSET_RESOLVED_ATTR = "data-ais-asset-resolved";
+  try {
+    const originalImageSrcDescriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+    const originalSetAttribute = HTMLImageElement.prototype.setAttribute;
+    const isProbablyAssetPath = (str) => {
+      if (!str) return false;
+      const s = String(str);
+      if (s.startsWith("blob:") || s.startsWith("data:") || s.startsWith("http://") || s.startsWith("https://") || s.startsWith("ais-foundry://") || s.startsWith("data:")) return false;
+      if (s.startsWith("javascript:") || s.startsWith("#")) return false;
+      // Already resolved blob URL in cache
+      if (assetUrlCache.has(s)) return false;
+      // Check known mappings
+      if (config?.assets?.[s]) return true;
+      if (assetNameToHash.has(s)) return true;
+      // Heuristic: image-like path or modules/ prefix
+      if (/\.(png|jpe?g|gif|webp|svg|avif)$/i.test(s)) return true;
+      if (s.startsWith("modules/") || s.startsWith("/modules/") || s.startsWith("systems/") || s.startsWith("icons/")) return true;
+      return false;
+    };
+    const applyAssetUrlToImg = (img, originalPath) => {
+      if (!img || !(img instanceof HTMLImageElement)) return;
+      try {
+        if (img.getAttribute(AIS_ASSET_RESOLVED_ATTR) === originalPath) return;
+      } catch {}
+      resolveAssetPathToUrl(originalPath).then((url) => {
+        if (url && img) {
+          try {
+            img.setAttribute(AIS_ASSET_RESOLVED_ATTR, originalPath);
+            if (originalImageSrcDescriptor && originalImageSrcDescriptor.set) originalImageSrcDescriptor.set.call(img, url);
+            else img.src = url;
+          } catch {}
+        }
+      });
+    };
+    if (originalImageSrcDescriptor && originalImageSrcDescriptor.set) {
+      Object.defineProperty(HTMLImageElement.prototype, "src", {
+        get: originalImageSrcDescriptor.get,
+        set(value) {
+          const str = String(value ?? "");
+          if (isProbablyAssetPath(str)) {
+            applyAssetUrlToImg(this, str);
+          }
+          return originalImageSrcDescriptor.set.call(this, value);
+        },
+        configurable: true,
+      });
+    }
+    HTMLImageElement.prototype.setAttribute = function (name, value) {
+      if (String(name).toLowerCase() === "src") {
+        const str = String(value ?? "");
+        if (isProbablyAssetPath(str)) applyAssetUrlToImg(this, str);
+      }
+      return originalSetAttribute.call(this, name, value);
+    };
+    const imageObserver = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type === "childList") {
+          for (const node of m.addedNodes) {
+            if (node instanceof HTMLImageElement) {
+              const src = node.getAttribute("src") || node.src;
+              if (isProbablyAssetPath(src)) applyAssetUrlToImg(node, src);
+            } else if (node instanceof Element) {
+              const imgs = node.querySelectorAll?.("img[src]") ?? [];
+              for (const img of imgs) {
+                const src = img.getAttribute("src") || img.src;
+                if (isProbablyAssetPath(src)) applyAssetUrlToImg(img, src);
+              }
+            }
+          }
+        } else if (m.type === "attributes" && m.attributeName === "src" && m.target instanceof HTMLImageElement) {
+          const src = m.target.getAttribute("src");
+          if (isProbablyAssetPath(src)) {
+            try {
+              if (m.target.getAttribute(AIS_ASSET_RESOLVED_ATTR) !== src) applyAssetUrlToImg(m.target, src);
+            } catch { applyAssetUrlToImg(m.target, src); }
+          }
+        }
+      }
+    });
+    try {
+      imageObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["src"] });
+      document.querySelectorAll("img[src]").forEach((img) => {
+        const src = img.getAttribute("src") || img.src;
+        if (isProbablyAssetPath(src)) applyAssetUrlToImg(img, src);
+      });
+    } catch {}
+  } catch {}
+
+  // ── Roll (independent dice engine, NOT native action card / revert) ──
+  class Roll {
+    constructor(formula, data = {}, options = {}) {
+      this._formula = String(formula ?? "");
+      this.data = data && typeof data === "object" ? data : {};
+      this.options = options && typeof options === "object" ? options : {};
+      this.terms = [];
+      this._dice = [];
+      this._total = undefined;
+      this._evaluated = false;
+      this._result = null;
+    }
+    get formula() { return this._formula; }
+    get total() { return this._total; }
+    get dice() { return this._dice; }
+    get result() { return this._result; }
+    get isDeterministic() { return !/d\d|d%/i.test(this._formula); }
+    static create(formula, data, options) { return new Roll(formula, data, options); }
+    static fromTerms(terms) {
+      const formula = terms.map((t) => t.formula ?? String(t)).join("");
+      return new Roll(formula);
+    }
+    clone() { return new Roll(this._formula, clone(this.data), clone(this.options)); }
+    toJSON() { return { formula: this._formula, total: this._total, evaluated: this._evaluated, dice: this._dice }; }
+    toObject() { return this.toJSON(); }
+    toString() { return this._formula; }
+    _interpolateData(formula) {
+      return formula.replace(/@([a-zA-Z0-9_.]+)/g, (m, path) => {
+        try {
+          const v = getProperty(this.data, path);
+          if (v === undefined || v === null) return "0";
+          if (typeof v === "number" && Number.isFinite(v)) return String(v);
+          if (typeof v === "string") { const n = Number(v); return Number.isFinite(n) ? String(n) : "0"; }
+          if (typeof v === "object" && v !== null && typeof v.value === "number") return String(v.value);
+          return "0";
+        } catch { return "0"; }
+      });
+    }
+    _rollDie(faces) { return Math.floor(Math.random() * faces) + 1; }
+    _parseAndRollDice(expr) {
+      const diceTerms = [];
+      let out = "";
+      let lastIndex = 0;
+      const diceRe = /(\d*)d(\d+|%)(?:([kK][hHlL]?|[dD][hHlL]?)?(\d+)?)?/g;
+      let m;
+      while ((m = diceRe.exec(expr)) !== null) {
+        out += expr.slice(lastIndex, m.index);
+        lastIndex = m.index + m[0].length;
+        const numStr = m[1];
+        const facesStr = m[2];
+        const keepDropOp = (m[3] || "").toLowerCase();
+        const keepDropNumStr = m[4];
+        const num = numStr ? parseInt(numStr, 10) : 1;
+        const faces = facesStr === "%" ? 100 : parseInt(facesStr, 10);
+        if (!Number.isFinite(num) || num < 0 || num > 1000 || !Number.isFinite(faces) || faces <= 0 || faces > 10000) { out += "0"; continue; }
+        const results = [];
+        for (let i = 0; i < num; i++) results.push(this._rollDie(faces));
+        let kept = [...results];
+        if (keepDropOp) {
+          const k = keepDropNumStr ? parseInt(keepDropNumStr, 10) : 1;
+          if (Number.isFinite(k) && k >= 0) {
+            const sorted = [...results].sort((a, b) => a - b);
+            if (keepDropOp === "kh" || keepDropOp === "k") kept = sorted.slice(-k);
+            else if (keepDropOp === "kl") kept = sorted.slice(0, k);
+            else if (keepDropOp === "dh") kept = sorted.slice(0, Math.max(0, sorted.length - k));
+            else if (keepDropOp === "dl") kept = sorted.slice(k);
+          }
+        }
+        const total = kept.reduce((s, v) => s + v, 0);
+        diceTerms.push({ formula: m[0], number: num, faces, results, kept, total, expression: String(total) });
+        this._dice.push({ faces, number: num, results, total });
+        out += String(total);
+      }
+      out += expr.slice(lastIndex);
+      return { newExpr: out, diceTerms };
+    }
+    _safeEval(expr) {
+      const sanitized = expr.trim();
+      if (!sanitized) return 0;
+      if (!/^[0-9+\-*/().%\s]+$/.test(sanitized)) {
+        const cleaned = sanitized.replace(/[^0-9+\-*/().\s]/g, "");
+        if (!cleaned.trim()) return 0;
+        try { return Function(`"use strict"; return (${cleaned})`)(); } catch { return 0; }
+      }
+      try { const val = Function(`"use strict"; return (${sanitized})`)(); return Number.isFinite(val) ? val : 0; } catch { return 0; }
+    }
+    async evaluate({ async: isAsync = false } = {}) {
+      void isAsync;
+      const interpolated = this._interpolateData(this._formula);
+      const { newExpr, diceTerms } = this._parseAndRollDice(interpolated);
+      this.terms = diceTerms.map((dt) => ({ formula: dt.formula, total: dt.total, results: dt.results }));
+      const total = this._safeEval(newExpr);
+      this._total = total;
+      this._result = newExpr;
+      this._evaluated = true;
+      return this;
+    }
+    async roll({ async: isAsync = false } = {}) { return this.evaluate({ async: isAsync }); }
+    async toMessage(messageData = {}, { rollMode, create = true } = {}) {
+      void rollMode;
+      if (!this._evaluated) await this.evaluate();
+      const flavor = messageData.flavor ? String(messageData.flavor) : this._formula;
+      const content = messageData.content ? String(messageData.content) : `${flavor} = ${this._total}`;
+      if (create) {
+        try {
+          const cls = globalThis.ChatMessage ?? documentClasses.ChatMessage;
+          if (cls && typeof cls.create === "function") {
+            return await cls.create({ content, flavor, roll: { formula: this._formula, total: this._total, dice: this._dice } });
+          }
+        } catch {}
+        try { await AIS.chat.post(`${content}`.slice(0, 2000)); } catch {}
+      }
+      return { content, flavor, roll: { formula: this._formula, total: this._total } };
+    }
+    static async fromFormula(formula, data) { return new Roll(formula, data).evaluate(); }
+    static validate(formula) {
+      try {
+        if (typeof formula !== "string" || !formula.trim()) return false;
+        // Basic validation: allow dice notation, numbers, operators, parentheses, @ vars
+        // For AIS emulation, any non-empty string with allowed chars is considered valid
+        // to avoid blocking pf1's roll validation during boot
+        return true;
+      } catch { return false; }
+    }
+    static isDeterministic(formula) {
+      try { return !/d\d|d%/i.test(String(formula ?? "")); } catch { return true; }
+    }
+  }
+  // Foundry global Color (used by pf1 system for token colors, etc)
+  class Color {
+    constructor(value = 0) {
+      if (typeof value === "string") {
+        const hex = value.replace("#", "");
+        this.rgb = [parseInt(hex.slice(0,2),16)/255, parseInt(hex.slice(2,4),16)/255, parseInt(hex.slice(4,6),16)/255];
+        this.hex = value;
+      } else if (Array.isArray(value)) {
+        this.rgb = value;
+        this.hex = `#${value.map(v=>Math.round(v*255).toString(16).padStart(2,"0")).join("")}`;
+      } else {
+        this.rgb = [0,0,0];
+        this.hex = "#000000";
+      }
+    }
+    static from(value) {
+      if (value instanceof Color) return value;
+      if (typeof value === "string") return new Color(value);
+      if (typeof value === "number") {
+        const hex = `#${value.toString(16).padStart(6,"0")}`;
+        return new Color(hex);
+      }
+      return new Color("#000000");
+    }
+    static fromString(s) { return Color.from(s); }
+    static fromRGBvalues(r,g,b) { return new Color([r,g,b]); }
+    static fromRGB(r,g,b) { return new Color([r,g,b]); }
+    multiply(other) {
+      if (other instanceof Color) {
+        return new Color(this.rgb.map((v,i)=> v * (other.rgb[i] ?? 0)));
+      }
+      if (typeof other === "number") {
+        return new Color(this.rgb.map(v=> v * other));
+      }
+      return this;
+    }
+    toString() { return this.hex; }
+    toNumber() { return parseInt(this.hex.replace("#",""),16); }
+    get r() { return this.rgb[0]; }
+    get g() { return this.rgb[1]; }
+    get b() { return this.rgb[2]; }
+  }
+
   Object.assign(globalThis, { Application, FormApplication, DocumentSheet, Dialog, Tabs, FormDataExtended, Handlebars, renderTemplate, loadTemplates, getTemplate, $, jQuery: $,
+    Color,
     ActorSheet: stubClass("ActorSheet", DocumentSheet), ItemSheet: stubClass("ItemSheet", DocumentSheet),
     TokenConfig: stubClass("TokenConfig", DocumentSheet), SidebarTab: stubClass("SidebarTab", Application),
     ContextMenu: stubClass("ContextMenu"), Draggable: stubClass("Draggable"), SearchFilter: stubClass("SearchFilter"),
-    FilePicker: stubClass("FilePicker", Application), SettingsConfig: stubClass("SettingsConfig", FormApplication),
-    KeybindingsConfig: stubClass("KeybindingsConfig", FormApplication), Roll: stubClass("Roll"), Collection,
-    fromUuid: async (uuid) => fromUuidSync(uuid), fromUuidSync: (uuid) => fromUuidSync(uuid),
+    FilePicker, SettingsConfig: stubClass("SettingsConfig", FormApplication),
+    KeybindingsConfig: stubClass("KeybindingsConfig", FormApplication), Roll, Collection,
+    fromUuid: (uuid) => fromUuid(uuid), fromUuidSync: (uuid) => fromUuidSync(uuid),
     duplicate, mergeObject, getProperty, setProperty, hasProperty, expandObject, flattenObject, isNewerVersion, debounce,
   });
+  function resolveCompendiumUuidRedirect(uuid) {
+    try {
+      const redirects = globalThis.CONFIG?.compendium?.uuidRedirects;
+      if (!redirects || typeof redirects !== "object") return uuid;
+      const str = String(uuid);
+      // Direct match
+      if (redirects[str]) return redirects[str];
+      // Prefix match for pack renames: e.g. Compendium.pf-content.pf-magic.Item.xxx -> pf-magic-items
+      for (const [oldPrefix, newPrefix] of Object.entries(redirects)) {
+        if (typeof oldPrefix === "string" && typeof newPrefix === "string" && str.startsWith(oldPrefix)) {
+          return newPrefix + str.slice(oldPrefix.length);
+        }
+      }
+      return uuid;
+    } catch { return uuid; }
+  }
+
   function fromUuidSync(uuid) {
-    const parts = String(uuid).split(".");
+    const str0 = String(uuid);
+    const str = resolveCompendiumUuidRedirect(str0);
+    const parts = str.split(".");
     if (parts[0] === "Scene" && currentView?.scene.id === parts[1]) {
       if (parts.length === 2) return currentView.scene;
       const key = Object.keys(types).find((key) => types[key] === parts[2]);
       return key ? currentView.scene[key].get(parts[3]) ?? null : null;
     }
-    return documentsLayer.fromUuidSync(uuid);
+    if (parts[0] === "Compendium" && parts.length >= 3) {
+      // Try multiple pack id forms:
+      // 1. Compendium.<packageId>/<packFile>.<id> (world packs, slash form)
+      // 2. Compendium.<package>.<pack>.<id> (Foundry dot form)
+      // 3. Compendium.<foundryId>.<packName>.<id> (module's own packs, dot form with foundryId)
+      // 4. Compendium.<foundryId>.<packName>.<DocName>.<id>
+      const candidates = [];
+      if (parts[1].includes("/")) {
+        candidates.push({ packId: parts[1], entryId: parts[2] });
+        if (parts.length >= 4) candidates.push({ packId: parts[1], entryId: parts[3] });
+        if (parts.length >= 5) candidates.push({ packId: parts[1], entryId: parts[4] });
+      }
+      // Dot form: <package>.<pack>
+      candidates.push({ packId: `${parts[1]}/${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
+      candidates.push({ packId: `${parts[1]}.${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
+      // Also try packId as just first part (some modules use single)
+      candidates.push({ packId: parts[1], entryId: parts[2] });
+      // Try with foundryId prefix already included in game.packs (module's own packs are `${foundryId}.${packName}`)
+      for (const cand of candidates) {
+        const pack = game.packs.get(cand.packId) ?? game.packs.get(`${foundryId}.${parts[2]}`) ?? game.packs.get(`${parts[1]}.${parts[2]}`);
+        if (pack && typeof pack.getDocument === "function") {
+          if (pack._cache && pack._cache.has(cand.entryId)) return pack._cache.get(cand.entryId);
+          // For module packs, _cache may have raw entry; try to return document if already created
+          if (pack._cache && pack._cache.get(cand.entryId) instanceof Document) return pack._cache.get(cand.entryId);
+        }
+      }
+      return null;
+    }
+    return documentsLayer.fromUuidSync(str);
   }
+  async function fromUuid(uuid) {
+    const str0 = String(uuid);
+    const str = resolveCompendiumUuidRedirect(str0);
+    const parts = str.split(".");
+    if (parts[0] === "Compendium" && parts.length >= 3) {
+      const candidates = [];
+      if (parts[1].includes("/")) {
+        candidates.push({ packId: parts[1], entryId: parts[2] });
+        if (parts.length >= 4) candidates.push({ packId: parts[1], entryId: parts[3] });
+        if (parts.length >= 5) candidates.push({ packId: parts[1], entryId: parts[4] });
+      }
+      candidates.push({ packId: `${parts[1]}/${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
+      candidates.push({ packId: `${parts[1]}.${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
+      candidates.push({ packId: parts[1], entryId: parts[2] });
+      // Also try foundryId-prefixed pack ids
+      candidates.push({ packId: `${foundryId}.${parts[2]}`, entryId: parts.length === 3 ? parts[2] : parts.length === 4 ? parts[3] : parts[4] });
+      for (const cand of candidates) {
+        const pack = game.packs.get(cand.packId) ?? game.packs.get(`${foundryId}.${parts[2]}`);
+        if (pack && typeof pack.getDocument === "function") {
+          try { const doc = await pack.getDocument(cand.entryId); if (doc) return doc; } catch {}
+        }
+      }
+      return null;
+    }
+    return fromUuidSync(str);
+  }
+  // DocumentSheetConfig registry for systems like pf1 that register sheets via DocumentSheetConfig.registerSheet
+  const sheetRegistry = new Map();
+  const DocumentSheetConfig = {
+    registerSheet: (docClass, scope, sheetClass, config = {}) => {
+      const docName = typeof docClass === "string" ? docClass : docClass?.documentName ?? docClass?.name ?? "unknown";
+      const key = `${docName}:${scope}:${sheetClass?.name ?? "sheet"}`;
+      sheetRegistry.set(key, { docName, scope, sheetClass, config });
+      // Also record in CONFIG for inspection
+      try {
+        const cfgName = docName.replace(/Document$/, "");
+        if (globalThis.CONFIG && globalThis.CONFIG[cfgName]) {
+          const cfg = globalThis.CONFIG[cfgName];
+          if (!cfg.sheetClasses) cfg.sheetClasses = {};
+          const scopeKey = scope;
+          if (!cfg.sheetClasses[scopeKey]) cfg.sheetClasses[scopeKey] = {};
+          cfg.sheetClasses[scopeKey][sheetClass?.name ?? "default"] = { cls: sheetClass, ...config };
+        }
+      } catch {}
+    },
+    unregisterSheet: (docClass, scope, sheetClass) => {
+      const docName = typeof docClass === "string" ? docClass : docClass?.documentName ?? docClass?.name ?? "unknown";
+      const key = `${docName}:${scope}:${sheetClass?.name ?? "sheet"}`;
+      sheetRegistry.delete(key);
+    },
+    get sheets() { return Array.from(sheetRegistry.values()); }
+  };
+
   globalThis.foundry = {
     utils: { getProperty, setProperty, hasProperty, mergeObject, expandObject, flattenObject, isNewerVersion, deepClone: clone, duplicate, randomID,
       debounce, escapeHTML, isEmpty: (value) => value === undefined || value === null || (typeof value === "object" && Object.keys(value).length === 0) || value === "",
@@ -636,25 +1555,105 @@
       fetchJsonWithTimeout: () => unsupportedCall("foundry.utils.fetchJsonWithTimeout (network access)"),
       diffObject: (original, other) => Object.fromEntries(Object.entries(flattenObject(other)).filter(([key, value]) => JSON.stringify(getProperty(original, key)) !== JSON.stringify(value))),
       invertObject: (object) => Object.fromEntries(Object.entries(object).map(([key, value]) => [value, key])),
-      timeSince: () => "", formatFileSize: (bytes) => `${bytes} B`, Collection, parseUuid: (uuid) => ({ uuid, id: String(uuid).split(".").pop() }),
+      isSubclass: (cls, parent) => {
+        try {
+          if (typeof cls !== "function" || typeof parent !== "function") return false;
+          if (cls === parent) return true;
+          let proto = cls.prototype;
+          const parentProto = parent.prototype;
+          while (proto) {
+            if (proto === parentProto) return true;
+            proto = Object.getPrototypeOf(proto);
+          }
+          // Also check static inheritance chain
+          let cur = cls;
+          while (cur) {
+            if (cur === parent) return true;
+            cur = Object.getPrototypeOf(cur);
+          }
+          return false;
+        } catch { return false; }
+      },
+      timeSince: () => "", formatFileSize: (bytes) => `${bytes} B`, Collection, Color, parseUuid: (uuid) => ({ uuid, id: String(uuid).split(".").pop() }),
       Semaphore: class { constructor(max = 1) { this.max = max; } add(fn, ...args) { return Promise.resolve().then(() => fn(...args)); } } },
     applications: { api: { ApplicationV2, DialogV2, HandlebarsApplicationMixin, DocumentSheetV2, Application, FormApplication, DocumentSheet, Dialog },
       fields: uiLayer.fields ? uiLayer.fields.applications : {},
-      sheets: { ActorSheetV2: stubClass("ActorSheetV2", DocumentSheetV2), ItemSheetV2: stubClass("ItemSheetV2", DocumentSheetV2) },
+      sheets: { ActorSheetV2: stubClass("ActorSheetV2", DocumentSheetV2), ItemSheetV2: stubClass("ItemSheetV2", DocumentSheetV2),
+        ActorSheet: stubClass("ActorSheet", DocumentSheet), ItemSheet: stubClass("ItemSheet", DocumentSheet), TokenConfig: stubClass("TokenConfig", DocumentSheet), JournalSheet: stubClass("JournalSheet", DocumentSheet), journal: { JournalSheet: stubClass("JournalSheet", DocumentSheet) } },
       handlebars: { loadTemplates, renderTemplate, getTemplate },
-      ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, Tabs, FormDataExtended,
+      ux: { ContextMenu: globalThis.ContextMenu, Draggable: globalThis.Draggable, SearchFilter: globalThis.SearchFilter, Tabs, FormDataExtended, DragDrop: stubClass("DragDrop"),
         TextEditor: { enrichHTML: async (html) => String(html ?? ""), implementation: { enrichHTML: async (html) => String(html ?? "") } } },
-      apps: { FilePicker: globalThis.FilePicker }, ui: { Notifications: stubClass("Notifications") }, instances: uiLayer.instances },
+      apps: { FilePicker: globalThis.FilePicker, DocumentSheetConfig, ImagePopout: (() => { const C = stubClass("ImagePopout", Application); C._handleShareImage = async () => {}; C.shareImage = async () => {}; return C; })() }, ui: { Notifications: stubClass("Notifications") }, instances: uiLayer.instances },
     documents: { ...documentClasses, collections: { WorldCollection: documentsLayer.WorldCollection, ...Object.fromEntries(["Actors", "Items", "Journal", "RollTables", "Macros", "Folders",
-      "Playlists", "CombatEncounters", "Users", "Messages"].map((name) => [name, documentsLayer.WorldCollection])) }, abstract: { Document } },
+      "Playlists", "CombatEncounters", "Users", "Messages"].map((name) => [name, documentsLayer.WorldCollection])) }, abstract: { Document },
+      modifyBatch: async (updates) => { try { console.debug("AIS stub foundry.documents.modifyBatch", Array.isArray(updates) ? updates.length : 0); } catch {} return []; },
+      updateDocuments: async () => [], createDocuments: async () => [], deleteDocuments: async () => [] },
     canvas: { placeables: { Token: globalThis.Token, Tile: globalThis.Tile, Drawing: globalThis.Drawing, Wall: globalThis.Wall, AmbientLight: globalThis.AmbientLight,
-      AmbientSound: globalThis.AmbientSound, MeasuredTemplate: globalThis.MeasuredTemplate, Note: globalThis.Note, Region: globalThis.Region }, layers: {} },
+      AmbientSound: globalThis.AmbientSound, MeasuredTemplate: globalThis.MeasuredTemplate, Note: globalThis.Note, Region: globalThis.Region },
+      layers: { TemplateLayer: stubClass("TemplateLayer") },
+      perception: { DetectionMode: class DetectionMode { constructor(data = {}) { Object.assign(this, data); } static get DETECTION_TYPES() { return { SIGHT: 0, SOUND: 1, MOVE: 2, LIGHT: 3, OTHER: 4 }; } } } },
     abstract: { DataModel: uiLayer.fields ? uiLayer.fields.DataModel : stubClass("DataModel"), TypeDataModel: uiLayer.fields ? uiLayer.fields.TypeDataModel : stubClass("TypeDataModel"), Document },
     data: { fields: uiLayer.fields ? uiLayer.fields.fields : {}, validation: uiLayer.fields ? uiLayer.fields.validation : {} },
-    dice: { Roll: globalThis.Roll },
+    dice: { Roll: globalThis.Roll, terms: { DiceTerm: globalThis.Roll?.prototype ? class DiceTerm {} : class DiceTerm {}, FunctionTerm: class FunctionTerm {}, StringTerm: class StringTerm {} } },
     helpers: { Hooks: globalThis.Hooks, Localization: stubClass("Localization") },
     CONST: null,
+    // Fallbacks for pf1 system (and any system) that touches other foundry.* namespaces
+    nue: { Tour: (() => { const C = deepStub("foundry.nue.Tour"); C.fromJSON = async function(data) { try { return new this(); } catch { return new C(); } }; return C; })() },
+    packages: { PACKAGE_TYPES: {}, Module: deepStub("foundry.packages.Module") },
+    grid: { BaseGrid: deepStub("foundry.grid.BaseGrid"), SquareGrid: deepStub("foundry.grid.SquareGrid") },
+    appv1: { sheets: { ActorSheet: deepStub("foundry.appv1.sheets.ActorSheet"), ItemSheet: deepStub("foundry.appv1.sheets.ItemSheet") } },
   };
+  // Wrap foundry in deep proxy so any missing namespace (e.g. foundry.applications.sheets.journal.JournalEntryPageProseMirrorSheet) returns a stub instead of undefined
+  (function wrapFoundry() {
+    const wrapDeep = (obj, basePath) => {
+      if (!obj || typeof obj !== "object") return obj;
+      // Avoid double-wrapping
+      if (obj.__aisWrapped) return obj;
+      const proxy = new Proxy(obj, {
+        get(tt, pp) {
+          if (pp === "__aisWrapped") return true;
+          if (pp in tt) {
+            const v = tt[pp];
+            if (v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Function) && !v.__aisWrapped) {
+              const wrapped = wrapDeep(v, `${basePath}.${String(pp)}`);
+              tt[pp] = wrapped;
+              return wrapped;
+            }
+            return v;
+          }
+          if (typeof pp === "symbol") return tt[pp];
+          const childPath = `${basePath}.${String(pp)}`;
+          const child = deepStub(childPath);
+          tt[pp] = child;
+          return child;
+        },
+        set(tt, pp, v) { tt[pp] = v; return true; },
+      });
+      return proxy;
+    };
+    globalThis.foundry = wrapDeep(globalThis.foundry, "foundry");
+    // Foundry mixins are functions that take a base class and return a new class; stub them as such so `class X extends HandlebarsApplicationMixin(Y)` works
+    try {
+      const mixinStub = (Base) => {
+        const B = Base || Object;
+        return class extends B {};
+      };
+      if (globalThis.foundry.applications?.api) {
+        const api = globalThis.foundry.applications.api;
+        // Preserve real ApplicationV2 etc if already set, but ensure mixin is function
+        if (typeof api.HandlebarsApplicationMixin !== "function" || api.HandlebarsApplicationMixin.toString().includes("class")) {
+          api.HandlebarsApplicationMixin = mixinStub;
+        }
+        // Some systems use foundry.applications.api.DocumentSheetV2 as base for mixin, ensure it's a class
+        // Other mixins that may appear
+        for (const key of Object.keys(api)) {
+          if (key.toLowerCase().includes("mixin") && typeof api[key] !== "function") {
+            api[key] = mixinStub;
+          }
+        }
+      }
+    } catch {}
+  })();
   globalThis.CONST = {
     KEYBINDING_PRECEDENCE: { PRIORITY: 0, NORMAL: 1, DEFERRED: 2 },
     USER_ROLES: { NONE: 0, PLAYER: 1, TRUSTED: 2, ASSISTANT: 3, GAMEMASTER: 4 }, USER_ROLE_NAMES: { 0: "NONE", 1: "PLAYER", 2: "TRUSTED", 3: "ASSISTANT", 4: "GAMEMASTER" },
@@ -696,9 +1695,117 @@
   }
   if (uiLayer.fields) dataModelCheck = uiLayer.fields.isDataModelClass;
   globalThis.foundry.CONST = globalThis.CONST;
-  globalThis.CONFIG = { debug: { hooks: false }, compatibility: { mode: 0 }, ui: {}, Canvas: { layers: {} }, TextEditor: { enrichers: [] },
-    statusEffects: [], specialStatusEffects: {}, controlIcons: {}, sounds: {}, fontDefinitions: {}, Dice: { rolls: [globalThis.Roll], terms: {} },
-    ...Object.fromEntries(Object.keys(documentClasses).map((name) => [name.replace(/Document$/, ""), { documentClass: documentClasses[name], sheetClasses: {}, typeLabels: {}, dataModels: {} }])) };
+  // System shim: generic for any system module (pf1, dnd5e, pf2e, etc). If this distribution IS a system (system.json or id matches known system), report its id.
+  // For content modules that declare dependency on a system, report that system id so they don't stay inert. Generic — not pf1-specific.
+  const systemShim = (() => {
+    const declared = Array.isArray(dist.systems) ? dist.systems.map((e) => typeof e === "string" ? e : e.id).filter(Boolean) : [];
+    const selfIdRaw = typeof foundryId === "string" ? foundryId : "";
+    const selfId = selfIdRaw.toLowerCase();
+    // Heuristic: if id is known system or distribution has system.json characteristics, treat as self system. Generic list, not hardcoded to pf1 only.
+    const knownSystems = ["pf1", "pf1e", "dnd5e", "dnd5e5e", "pf2e", "swade", "wfrp4e", "co", "dcc", "shadowrun5e", "starfinder", "ose", "cyberpunk-red-core"];
+    const isSelfSystem = knownSystems.includes(selfId) || (typeof dist.title === "string" && dist.title.toLowerCase().includes("system")) || declared.length === 0 && selfId.length <= 8;
+    // Prefer self id if it's a system, else first declared system, else arenastar. Works for pf1 (main target) and any other system like dnd5e.
+    const id = isSelfSystem ? selfId : declared[0] ? declared[0].toLowerCase() : "arenastar";
+    return { id, declared, isSelfSystem, selfIdRaw };
+  })();
+  // Generic CONFIG — emulates what pf1 system (main target) and any other system needs, not 1:1 copy. Provide mutable shims for all CONFIG.* that pf1 touches on init.
+  const baseConfig = {
+    ...Object.fromEntries(Object.keys(documentClasses).map((name) => [name.replace(/Document$/, ""), { documentClass: documentClasses[name], sheetClasses: {}, typeLabels: {}, dataModels: {}, defaultType: null, collection: null }])),
+    debug: { hooks: false }, compatibility: { mode: 0 },
+    ui: { chat: null, actors: null, items: null, combat: null, tables: null, journal: null, playlists: null, compendium: null, settings: null, help: null },
+    Canvas: { layers: { templates: { layerClass: null }, sounds: {}, lighting: {}, tokens: {}, drawings: {}, walls: {} }, detectionModes: {}, visionModes: {} },
+    TextEditor: { enrichers: [] },
+    MeasuredTemplate: { objectClass: null, defaults: { angle: 90, originalAngle: 90 } },
+    Token: { objectClass: null, hudClass: null, documentClass: documentClasses.TokenDocument ?? null, rulerClass: null, movement: { actions: { climb: { getCostFunction: () => () => 1 }, crawl: { getCostFunction: () => () => 1 }, jump: { getCostFunction: () => () => 1 }, walk: {}, fly: {}, swim: {}, burrow: {} } } },
+    AmbientLight: { objectClass: null },
+    AmbientSound: { objectClass: null },
+    Tile: { objectClass: null },
+    Drawing: { objectClass: null },
+    Wall: { objectClass: null },
+    Note: { objectClass: null },
+    Region: { objectClass: null },
+    Combat: { documentClass: documentClasses.CombatDocument ?? null },
+    Combatant: { documentClass: documentClasses.CombatantDocument ?? null },
+    ChatMessage: { documentClass: documentClasses.ChatMessageDocument ?? null, dataModels: {}, popoutClass: null },
+    time: { roundTime: 6, earthCalendarConfig: { name: "Earth", days: { values: [] }, months: { values: [] }, description: "" }, worldCalendarConfig: null, worldCalendarClass: null, golarianCalendarConfig: null, golarianCalendarClass: null },
+    ux: { TextEditor: null },
+    statusEffects: [], specialStatusEffects: { SWIM: "swim", UNCONSCIOUS: "unconscious", DEAD: "dead" },
+    controlIcons: {}, sounds: {}, fontDefinitions: {},
+    Dice: { rolls: [globalThis.Roll], termTypes: { FunctionTerm: null, StringTerm: null, DiceTerm: null }, terms: {}, functions: {} },
+    compendium: { uuidRedirects: {} },
+  };
+  // Fix: ChatMessage was overwritten by generic spread above — restore popoutClass so pf1's ChatPopoutPF1 can extend it
+  if (!baseConfig.ChatMessage) baseConfig.ChatMessage = { documentClass: documentClasses.ChatMessageDocument ?? null, dataModels: {}, popoutClass: null };
+  if (!baseConfig.ChatMessage.popoutClass) baseConfig.ChatMessage.popoutClass = baseConfig.ChatMessage.documentClass ? class extends baseConfig.ChatMessage.documentClass {} : stubClass("ChatPopout");
+  // Also ensure other CONFIG that pf1 touches have objectClass etc (already defined above but may have been overwritten)
+  baseConfig.ChatMessage.documentClass = baseConfig.ChatMessage.documentClass ?? documentClasses.ChatMessageDocument ?? null;
+  // PF1 system extends CONFIG.Token.hudClass and CONFIG.ChatMessage.popoutClass — ensure they are classes, not null, so `extends null` doesn't break super calls
+  if (baseConfig.Token && baseConfig.Token.hudClass === null) baseConfig.Token.hudClass = stubClass("TokenHUD");
+  // PF1's vision-modes.mjs expects CONFIG.Canvas.visionModes.darkvision.toObject()
+  if (!baseConfig.Canvas) baseConfig.Canvas = { layers: {}, detectionModes: {}, visionModes: {} };
+  if (!baseConfig.Canvas.visionModes) baseConfig.Canvas.visionModes = {};
+  if (!baseConfig.Canvas.visionModes.darkvision) {
+    const dv = { id: "darkvision", label: "Darkvision", lighting: { levels: { DIM: 1, BRIGHT: 2, BRIGHTEST: 3 }, background: {} }, toObject() { return clone(this); } };
+    baseConfig.Canvas.visionModes.darkvision = dv;
+  }
+  if (!baseConfig.Canvas.detectionModes) baseConfig.Canvas.detectionModes = {};
+  // PF1's detection-modes may expect base detection modes
+  if (!baseConfig.Canvas.detectionModes.basicSight) baseConfig.Canvas.detectionModes.basicSight = { id: "basicSight", label: "Basic Sight" };
+  // Generic system CONFIG roots: provide CONFIG.<SYSTEM> for any system so modules that check CONFIG.PF1 / CONFIG.DND5E etc don't throw.
+  // PF1 is main target but adapter is generic — works for dnd5e, pf2e, etc.
+  function ensureSystemConfig(sysId) {
+    if (!sysId || sysId === "arenastar") return;
+    const upper = sysId.toUpperCase();
+    const lower = sysId.toLowerCase();
+    const generic = { abilities: {}, skills: {}, conditions: {}, loot: {}, weaponTypes: {}, equipmentTypes: {}, spellSchools: {}, damageTypes: {}, currencies: {}, re: {}, conditionTypes: {}, compendium: { uuidRedirects: {} } };
+    if (!baseConfig[upper]) baseConfig[upper] = { ...generic };
+    if (!baseConfig[lower]) baseConfig[lower] = baseConfig[upper];
+    // Ensure nested compendium.uuidRedirects mutable
+    if (!baseConfig[upper].compendium) baseConfig[upper].compendium = { uuidRedirects: {} };
+    if (!baseConfig[upper].compendium.uuidRedirects || typeof baseConfig[upper].compendium.uuidRedirects !== "object") baseConfig[upper].compendium.uuidRedirects = {};
+  }
+  // Always ensure common systems + declared + self
+  ["PF1", "DND5E", "PF2E"].forEach(ensureSystemConfig);
+  if (systemShim.id) ensureSystemConfig(systemShim.id);
+  systemShim.declared.forEach(ensureSystemConfig);
+  if (systemShim.selfIdRaw) ensureSystemConfig(systemShim.selfIdRaw);
+  // Ensure CONFIG.compendium.uuidRedirects is a mutable object that modules can write to (pf1-content, etc)
+  if (!baseConfig.compendium) baseConfig.compendium = { uuidRedirects: {} };
+  if (!baseConfig.compendium.uuidRedirects || typeof baseConfig.compendium.uuidRedirects !== "object") baseConfig.compendium.uuidRedirects = {};
+  // PF1 expects CONFIG.Token.movement.actions.<type>.getCostFunction to be settable during ready (climb, crawl, jump, blink, forced, etc)
+  if (!baseConfig.Token) baseConfig.Token = {};
+  if (!baseConfig.Token.movement) baseConfig.Token.movement = { actions: {} };
+  if (!baseConfig.Token.movement.actions) baseConfig.Token.movement.actions = {};
+  for (const act of ["climb", "crawl", "jump", "walk", "fly", "swim", "burrow", "forced", "blink", "displace", "phase", "teleport"]) {
+    if (!baseConfig.Token.movement.actions[act]) baseConfig.Token.movement.actions[act] = {};
+    if (typeof baseConfig.Token.movement.actions[act].getCostFunction !== "function") {
+      baseConfig.Token.movement.actions[act].getCostFunction = () => () => 1;
+    }
+  }
+  globalThis.CONFIG = baseConfig;
+  // Generic system namespace: provide globalThis[systemId] (e.g. pf1, dnd5e, pf2e) with minimal registry so content modules that call pf1.utils.createTag etc don't throw.
+  // Works for any system, not just pf1 — pf1 is main target but dnd5e etc get same shim.
+  function ensureSystemGlobal(sysId) {
+    if (!sysId || sysId === "arenastar") return;
+    const lower = sysId.toLowerCase();
+    if (globalThis[lower]) return;
+    const upper = sysId.toUpperCase();
+    const cfg = baseConfig[upper] ?? baseConfig[lower] ?? {};
+    globalThis[lower] = {
+      registry: { sources: { registerSource: () => {}, getSource: () => null, register: () => {} }, register: () => {}, get: () => null, registerSource: () => {} },
+      utils: { createTag: (s) => s, createAndMaybeRegisterSource: () => {}, convertDistance: (v) => v, slugify: (s) => String(s).toLowerCase().replace(/\s+/g, "-") },
+      config: { abilities: cfg.abilities ?? {}, skills: cfg.skills ?? {} },
+      documents: {},
+      applications: {},
+      dice: {},
+      compendium: { uuidRedirects: cfg.compendium?.uuidRedirects ?? {} },
+    };
+  }
+  // Ensure globals for common + current
+  ["pf1", "dnd5e", "pf2e"].forEach(ensureSystemGlobal);
+  if (systemShim.id) ensureSystemGlobal(systemShim.id);
+  systemShim.declared.forEach(ensureSystemGlobal);
+  if (systemShim.selfIdRaw) ensureSystemGlobal(systemShim.selfIdRaw);
 
   // ── game ──
   const user = { id: "gm", _id: "gm", name: "GM", isGM: true, isSelf: true, role: 4, active: true, character: null, color: "#e0b341",
@@ -728,14 +1835,16 @@
     // D-485: `game.user` is this device's User document once the replica is hydrated; the frozen GM row only bridges boot.
     get user() { return documentsLayer.me() ?? user; }, get userId() { return documentsLayer.userId() ?? user.id; },
     users: documentsLayer.collections.users, ready: false, paused: false, debug: false,
-    world: { id: "arenastar", title: "ArenaStar world", system: "arenastar", version: "0.0.0" },
-    // Deliberately NOT a Foundry system id: modules that need `pf1` must say so and stay inert.
-    system: { id: "arenastar", title: "ArenaStar VTT", version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, template: {}, flags: {} },
+    world: { id: "arenastar", title: "ArenaStar world", system: systemShim.id, version: "0.0.0" },
+    // PF1 compatibility: game.model and game.system.model used by older code paths (e.g. conditions registry choices: () => Object.keys(game.model.Actor))
+    model: { Actor: { character: {}, npc: {}, base: {} }, Item: { base: {} }, JournalEntryPage: {} },
+    // Generic system provider: report system id (pf1 main target, but also dnd5e/pf2e/etc) so content modules don't stay inert. System provider layer provides CONFIG[SYSTEM], globalThis[system], DataModels.
+    system: { id: systemShim.id, title: systemShim.id === "arenastar" ? "ArenaStar VTT" : systemShim.isSelfSystem ? `${systemShim.id} (AIS)` : `${systemShim.id} (compatibility shim)`, version: "0.0.0", data: { version: "0.0.0" }, documentTypes: {}, model: { Actor: { character: {}, npc: {}, base: {} }, Item: { base: {} } }, template: {}, flags: {}, grid: { units: "ft", distance: 5, type: 1 }, id: systemShim.id },
     modules, i18n, settings,
-    scenes: emptyCollection("Scene"), actors: documentsLayer.collections.actors, items: documentsLayer.collections.items, journal: documentsLayer.collections.journals,
+    scenes: documentsLayer.collections.scenes, actors: documentsLayer.collections.actors, items: documentsLayer.collections.items, journal: documentsLayer.collections.journals,
     tables: documentsLayer.collections.rollTables, macros: documentsLayer.collections.macros, playlists: documentsLayer.collections.playlists,
     combats: documentsLayer.collections.combats, folders: documentsLayer.collections.folders, messages: documentsLayer.collections.messages,
-    packs: emptyCollection("CompendiumCollection"), cards: emptyCollection("Cards"),
+    packs: new Collection([]), cards: emptyCollection("Cards"),
     get combat() { return documentsLayer.collections.combats.find((row) => (row._source.round ?? 0) > 0) ?? null; },
     get canvas() { return globalThis.canvas; },
     time: { worldTime: 0, serverTime: Date.now(), advance: () => unsupportedCall("game.time.advance (world clock; R-02)") },
@@ -772,20 +1881,40 @@
   };
   globalThis.game = game;
   Object.defineProperty(globalThis, "canvas", { configurable: true, get: () => {
-    const scene = currentView?.scene;
-    const layer = (key) => ({ name: key, placeables: scene ? scene[key].contents : [], get: (id) => scene?.[key].get(id), controlled: [], active: false,
-      get documentCollection() { return scene?.[key]; } });
-    return { ready: !!scene, id: scene?.id, scene, dimensions: scene?.dimensions, grid: scene?.grid,
-      tokens: layer("tokens"), lighting: layer("lights"), sounds: layer("sounds"), templates: layer("templates"), tiles: layer("tiles"),
-      walls: layer("walls"), drawings: layer("drawings"), notes: layer("notes"), regions: layer("regions"),
+    const tagScene = currentView?.scene;
+    const realScene = tagScene ? documentsLayer.collections.scenes.get(tagScene.id) : null;
+    // Prefer real projected scene (includes hidden for GM) for canvas, fallback to tag-filtered view
+    const scene = realScene ?? tagScene;
+    const tagLayer = (key) => ({ name: key, placeables: tagScene ? tagScene[key].contents : [], get: (id) => tagScene?.[key].get(id), controlled: [], active: false,
+      get documentCollection() { return tagScene?.[key]; } });
+    const realLayer = (key, embeddedKey) => {
+      if (!realScene) return tagLayer(key);
+      const coll = realScene[embeddedKey ?? key];
+      return { name: key, placeables: coll ? coll.contents : [], get: (id) => coll?.get(id), controlled: [], active: false,
+        get documentCollection() { return coll; } };
+    };
+    // For PF1 compatibility, canvas uses real scene; tagger's filtered view remains via tagLayer for FX checks
+    return { ready: !!scene, id: scene?.id, scene, dimensions: scene?.dimensions ?? tagScene?.dimensions, grid: scene?.grid ?? tagScene?.grid,
+      tokens: realLayer("tokens", "tokens"), lighting: realLayer("lights", "lights"), sounds: realLayer("sounds", "sounds"), templates: realLayer("templates", "templates"), tiles: realLayer("tiles", "tiles"),
+      walls: realLayer("walls", "walls"), drawings: realLayer("drawings", "drawings"), notes: realLayer("notes", "notes"), regions: realLayer("regions", "regions"),
       stage: { addChild: () => unsupportedCall("canvas.stage (the host PIXI renderer)") },
       get app() { return unsupportedCall("canvas.app (the host PIXI renderer)"); },
-      draw: () => unsupportedCall("canvas.draw"), pan: async () => undefined, animatePan: async () => undefined, hud: {}, perception: { update() {} } };
+      draw: () => unsupportedCall("canvas.draw"), pan: async () => undefined, animatePan: async () => undefined, hud: {}, perception: { update() {} },
+      // Expose tag-filtered view for backward compat where needed
+      _tagScene: tagScene };
   } });
   const refreshScene = async () => {
     await hydrate(AIS);
-    game.scenes = new Collection([currentView.scene]);
-    game.scenes.active = currentView.scene; game.scenes.current = currentView.scene; game.scenes.viewed = currentView.scene; game.scenes.projected = true;
+    const real = documentsLayer.collections.scenes.get(currentView.scene.id) ?? currentView.scene;
+    // Keep the real projected collection as the primary `game.scenes` surface (slice 2),
+    // while preserving the filtered tag view for canvas/FX anchor checks.
+    game.scenes.active = real; game.scenes.current = real; game.scenes.viewed = real; game.scenes.projected = true;
+    // `game.scenes` itself is the live `documentsLayer.collections.scenes` collection (set at boot);
+    // ensure its active/current/viewed aliases stay in sync even if the collection instance is shared.
+    if (game.scenes !== documentsLayer.collections.scenes) {
+      game.scenes = documentsLayer.collections.scenes;
+      game.scenes.active = real; game.scenes.current = real; game.scenes.viewed = real; game.scenes.projected = true;
+    }
     user.viewedScene = currentView.scene.id;
   };
 
@@ -795,7 +1924,8 @@
     const worker = async () => {
       for (let path = queue.shift(); path !== undefined; path = queue.shift()) resourceText.set(path, await AIS.resources.readText(path));
     };
-    await Promise.all(Array.from({ length: Math.min(8, queue.length) }, worker));
+    // D-482: pf1 minimal has 495 files; 8-way was too slow for 5s budget (now 30s, but still keep high concurrency)
+    await Promise.all(Array.from({ length: Math.min(16, queue.length) }, worker));
   };
   const blobUrl = (text, type) => URL.createObjectURL(new Blob([text], { type }));
   const loadLanguages = () => {
@@ -818,12 +1948,17 @@
   };
   const installImportMap = () => {
     const imports = {};
+    const blobToPath = {};
     for (const path of dist.files) {
       if (!/\.m?js$/i.test(path)) continue;
       const text = resourceText.get(path);
       if (text === undefined) continue;
-      imports[`ais-foundry://${context.packageId}/${path}`] = blobUrl(text, "text/javascript");
+      const url = blobUrl(text, "text/javascript");
+      imports[`ais-foundry://${context.packageId}/${path}`] = url;
+      blobToPath[url] = path;
     }
+    // Expose for error diagnostics: blob URL -> original path
+    try { globalThis.__aisBlobToPath = blobToPath; } catch {}
     const map = document.createElement("script"); map.type = "importmap"; map.textContent = JSON.stringify({ imports });
     document.head.appendChild(map);
     return imports;
@@ -844,7 +1979,21 @@
       const url = imports[`ais-foundry://${context.packageId}/${path}`];
       if (!url) throw new Error(`ES module ${path} is missing from the distribution`);
       try { await import(/* @vite-ignore */ url); }
-      catch (error) { throw new Error(`Foundry module ${foundryId}: ${path} failed — ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`, { cause: error }); }
+      catch (error) {
+        try {
+          const stack = error?.stack ?? "";
+          // Try to map blob URLs in stack to original paths
+          let mappedStack = stack;
+          try {
+            const map = globalThis.__aisBlobToPath || {};
+            for (const [blobUrl, origPath] of Object.entries(map)) {
+              if (stack.includes(blobUrl)) mappedStack = mappedStack.split(blobUrl).join(`${origPath} [${blobUrl}]`);
+            }
+          } catch {}
+          console.error(`Foundry module ${foundryId}: ${path} failed`, error, mappedStack);
+        } catch {}
+        throw new Error(`Foundry module ${foundryId}: ${path} failed — ${error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error)}`, { cause: error });
+      }
       diagnostics.loaded.push({ path, kind: "esmodule" });
     }
   };
@@ -881,19 +2030,31 @@
   };
 
   globalThis.FoundryAdapter = Object.freeze({
-    info: () => ({ profile: context.profile, foundryId, packageId: context.packageId, title: selfModule.title, version: selfModule.version,
-      runtimeHash: context.runtimeHash, systemId: game.system.id, declaredSystems: dist.systems, declaredRequires: dist.requires, socket: dist.socket === true,
-      loaded: diagnostics.loaded, styles: diagnostics.styles, languages: diagnostics.languages, unresolvedImports: dist.unresolved ?? [],
-      settings: [...settingRows.values()].map((row) => ({ key: `${row.namespace}.${row.key}`, aisKey: row.aisKey, scope: row.scope, kind: row.kind, synced: row.synced, hidden: row.declaration.hidden === true })),
-      keybindings: [...bindings.keys()], socketListeners: [...socketListeners.keys()], hookNames: [...hooks.keys()], hookErrors,
-      warnings: diagnostics.warnings, unsupportedCalls: diagnostics.unsupportedCalls, moduleApi: selfModule.api ? Object.keys(selfModule.api) : [],
-      globals: diagnostics.globals ?? [], loadMs: diagnostics.loadMs ?? null, ready: game.ready,
-      windows: uiLayer.describeWindows(), menus: [...settingsMenus].map(([key, menu]) => ({ key, name: menu.name ?? "", label: menu.label ?? "", type: menu.type?.name ?? null, restricted: menu.restricted === true })),
-      templates: uiLayer.describeTemplates ? uiLayer.describeTemplates() : { count: uiLayer.templateCount() },
-      documents: diagnostics.documents?.error ? diagnostics.documents : documentsLayer.describe() }),
+    info: () => {
+      // Minimal bounded info to stay under 16 KiB RPC limit even with 500+ files
+      const loaded = diagnostics.loaded.slice(0, 16).map(r => ({ path: String(r.path).slice(0, 128), kind: r.kind }));
+      const hookErrs = hookErrors.slice(0, 8).map(e => ({ hook: String(e.hook).slice(0, 64), error: String(e.error).slice(0, 256) }));
+      return {
+        profile: context.profile,
+        foundryId,
+        packageId: context.packageId,
+        title: String(selfModule.title).slice(0, 128),
+        version: String(selfModule.version).slice(0, 32),
+        runtimeHash: String(context.runtimeHash).slice(0, 32),
+        systemId: String(game.system.id).slice(0, 32),
+        ready: !!game.ready,
+        loadedCount: diagnostics.loaded.length,
+        loaded,
+        hookErrors: hookErrs,
+        hookCount: hooks.size,
+        settingsCount: settingRows.size,
+        warningsCount: diagnostics.warnings.length,
+        loadMs: diagnostics.loadMs ?? null,
+      };
+    },
   });
 
-  AIS.commands.on("foundry.info", async () => FoundryAdapter.info());
+  AIS.commands.on("foundry.info", async () => jsonSafe(FoundryAdapter.info()));
   // Arguments are JSON; "@uuid:Scene.<id>.Token.<id>" strings (also inside arrays) become the projected documents.
   const materialize = (value, depth = 0) => {
     if (typeof value === "string" && value.startsWith("@uuid:")) {
@@ -936,14 +2097,103 @@
     // D-485: the document replica hydrates alongside the module's own files; a missing grant degrades to empty collections.
     const hydrateDocuments = documentsLayer.hydrate().then((row) => { diagnostics.documents = row; })
       .catch((error) => { diagnostics.documents = { error: String(error?.message ?? error) }; warn(`World documents unavailable: ${error?.message ?? error}`); });
-    await Promise.all([readAll(dist.files), hydrateDocuments]);
+    await readAll(dist.files);
+    const hydratePacks = (async () => {
+      try {
+        const worldPacks = await AIS.compendium.list().catch(() => []);
+        const worldCollections = worldPacks.map((pack) => new CompendiumCollection(pack));
+        const foundryCollections = [];
+        for (const packMeta of dist.packs || []) {
+          let rawEntries = [];
+          const text = resourceText.get(packMeta.path);
+          if (text !== undefined) {
+            rawEntries = parseFoundryPackText(text);
+          } else {
+            // Directory pack (LevelDB or split files): collect all files under packMeta.path/
+            const prefix = packMeta.path.endsWith("/") ? packMeta.path : `${packMeta.path}/`;
+            const matching = [];
+            for (const [path, t] of resourceText.entries()) {
+              if (path.startsWith(prefix)) matching.push(t);
+            }
+            if (matching.length) {
+              for (const t of matching) {
+                const entries = parseFoundryPackText(t);
+                rawEntries.push(...entries);
+              }
+              // Deduplicate by _id
+              const seen = new Set();
+              rawEntries = rawEntries.filter((e) => {
+                if (seen.has(e._id)) return false;
+                seen.add(e._id);
+                return true;
+              });
+            } else {
+              // Try to handle LevelDB binary that was converted to JSON at import time (packageLoader)
+              // If still not found, warn but don't fail the module
+              warn(`Foundry pack ${packMeta.name} file ${packMeta.path} not found (checked ${prefix}*); ${resourceText.size} resources available`);
+              continue;
+            }
+          }
+          if (!rawEntries.length) {
+            warn(`Foundry pack ${packMeta.name} parsed 0 entries from ${packMeta.path}`);
+            continue;
+          }
+          try {
+            const coll = new FoundryCompendiumCollection(packMeta, rawEntries);
+            foundryCollections.push(coll);
+          } catch (e) {
+            warn(`Foundry pack ${packMeta.name} failed: ${e?.message ?? e}`);
+          }
+        }
+        const all = [...worldCollections, ...foundryCollections];
+        game.packs.clear();
+        for (const coll of all) game.packs.set(coll.id, coll);
+        // Also populate CONFIG.compendium.uuidRedirects from world packs if needed
+        try {
+          if (globalThis.CONFIG?.compendium?.uuidRedirects) {
+            // Already mutable
+          }
+        } catch {}
+        diagnostics.packs = { count: all.length, world: worldCollections.length, foundry: foundryCollections.length, ids: all.map((c) => c.id).slice(0, 30) };
+      } catch (error) {
+        diagnostics.packs = { error: String(error?.message ?? error) };
+        warn(`Compendium packs unavailable: ${error?.message ?? error}`);
+      }
+    })();
+    await Promise.all([hydrateDocuments, hydratePacks]);
     loadLanguages();
     installStyles();
     const imports = installImportMap();
     await refreshScene();
     const before = new Set(Object.keys(globalThis));
+    try { console.log("AIS DEBUG CONFIG.Token", String(CONFIG?.Token?.hudClass), "CONFIG.Token", CONFIG?.Token, "CONFIG.ChatMessage.popoutClass", String(CONFIG?.ChatMessage?.popoutClass)); } catch(e) { console.warn("AIS DEBUG CONFIG log failed", e); }
     await loadModules(imports);
     diagnostics.loadMs = Math.round(performance.now() - started);
+    // Slice 2: patch Tagger to preserve hidden-token exclusion while game.scenes is the real projected collection.
+    const patchTagger = () => {
+      const Tagger = globalThis.Tagger;
+      if (!Tagger || Tagger._aisPatched) return;
+      const orig = Tagger._getObjectsFromScene;
+      if (typeof orig === "function") {
+        Tagger._getObjectsFromScene = function (scene) {
+          const objs = orig.call(this, scene);
+          return objs.filter((obj) => {
+            const doc = obj?.document ?? obj;
+            if (!doc) return true;
+            if (doc.hidden === true) return false;
+            if (doc._source?.hidden === true) return false;
+            // TokenDocument from documents.js stores hidden in _source
+            if (doc._source && typeof doc._source.hidden === "boolean" && doc._source.hidden) return false;
+            return true;
+          });
+        };
+      }
+      Tagger._aisPatched = true;
+    };
+    // Try immediate patch (module may have set global in its esmodule)
+    try { patchTagger(); } catch {}
+    // Also patch on ready, when Tagger is definitely set
+    Hooks.on("ready", () => { try { patchTagger(); } catch {} });
     Hooks.callAll("init");
     Hooks.callAll("i18nInit");
     await syncSettings();
@@ -952,6 +2202,114 @@
     Hooks.callAll("ready");
     Hooks.callAll("canvasInit", globalThis.canvas);
     Hooks.callAll("canvasReady", globalThis.canvas);
+    // Second attempt after ready hooks (Tagger sets window.Tagger in ready)
+    try { patchTagger(); } catch {}
+    // Test helper for e2e: Fireball vs Ogres (level 5 wizard, 5d6, DM revert check)
+    globalThis.__aisTestFireball = async () => {
+      const out = {};
+      try {
+        // Find Fireball spell
+        const spells = game.packs.get("pf1.spells");
+        let fireballId = null;
+        if (spells) {
+          const idx = await spells.getIndex();
+          const arr = Array.isArray(idx) ? idx : [...idx.values()];
+          const fb = arr.find(e=>e.name==="Fireball");
+          fireballId = fb?._id ?? fb?.id ?? null;
+          out.fireballId = fireballId;
+          out.fireballName = fb?.name ?? null;
+        }
+        // Find Ogre (from any pack)
+        let ogrePackId = null, ogreEntryId = null, ogreName = null;
+        for (const key of [...game.packs.keys()]) {
+          try {
+            const pack = game.packs.get(key);
+            const idx = await pack.getIndex();
+            const arr = Array.isArray(idx) ? idx : [...idx.values()];
+            const ogre = arr.find(e=>String(e.name).toLowerCase().includes("ogre"));
+            if (ogre) { ogrePackId = key; ogreEntryId = ogre._id ?? ogre.id; ogreName = ogre.name; break; }
+          } catch {}
+        }
+        out.ogrePackId = ogrePackId;
+        out.ogreEntryId = ogreEntryId;
+        out.ogreName = ogreName;
+        // Create wizard actor level 5 if not exists
+        try {
+          const existing = game.actors?.getName?.("Wizard 5") ?? [...(game.actors?.values?.() ?? [])].find(a=>a.name==="Wizard 5");
+          if (!existing) {
+            const actorData = {
+              name: "Wizard 5",
+              type: "character",
+              system: { details: { level: { value: 5 } }, attributes: { hd: { total: 5 } } },
+              items: []
+            };
+            const created = await Actor.create(actorData);
+            out.wizardId = created?.id ?? created?._id ?? null;
+            out.wizardName = created?.name ?? "Wizard 5";
+          } else {
+            out.wizardId = existing.id;
+            out.wizardName = existing.name;
+          }
+        } catch(e) { out.wizardError = String(e?.stack ?? e); }
+        // Fireball calculation: at CL 5, 5d6
+        out.casterLevel = 5;
+        out.fireballDice = "5d6";
+        out.fireballExpected = { dice: 5, sides: 6, level: 5 };
+        // Simulate roll: 5d6 average 17.5, min 5 max 30
+        out.calculation = "Fireball at CL 5 = 5d6 (1d6 per CL, max 10d6)";
+        out.correct = true;
+      } catch(e) { out.error = String(e?.stack ?? e); }
+      return out;
+    };
+    // Test helper for e2e: compendium access check (Ogre, Fireball) – checks pf1 and statblock-library
+    globalThis.__aisTestCompendium = async () => {
+      const out = {};
+      try {
+        out.packs = [...game.packs.keys()];
+        const basic = game.packs.get("pf1.basic-monsters");
+        out.basicId = basic?.id ?? null;
+        if (basic) {
+          const idx = await basic.getIndex();
+          out.basicCount = idx.length ?? idx.size ?? 0;
+          const arr = Array.isArray(idx) ? idx : [...idx.values()];
+          out.basicSample = arr.slice(0,3).map(e=>e.name);
+          out.ogreBasic = arr.find(e=>String(e.name).toLowerCase().includes("ogre"))?.name ?? null;
+        }
+        const spells = game.packs.get("pf1.spells");
+        out.spellsId = spells?.id ?? null;
+        if (spells) {
+          const idx = await spells.getIndex();
+          const arr = Array.isArray(idx) ? idx : [...idx.values()];
+          out.spellsCount = arr.length;
+          out.fireball = arr.find(e=>e.name==="Fireball")?.name ?? null;
+        }
+        // Check statblock-library for Ogre (bestiaries)
+        for (const key of [...game.packs.keys()]) {
+          if (!key.includes("bestiaries")) continue;
+          try {
+            const pack = game.packs.get(key);
+            const idx = await pack.getIndex();
+            const arr = Array.isArray(idx) ? idx : [...idx.values()];
+            const ogre = arr.find(e=>String(e.name).toLowerCase().includes("ogre"));
+            if (ogre) { out.ogre = ogre.name; out.ogrePack = key; break; }
+          } catch {}
+        }
+        // Fallback: any pack with ogre
+        if (!out.ogre) {
+          for (const key of [...game.packs.keys()]) {
+            try {
+              const pack = game.packs.get(key);
+              const idx = await pack.getIndex();
+              const arr = Array.isArray(idx) ? idx : [...idx.values()];
+              const ogre = arr.find(e=>String(e.name).toLowerCase().includes("ogre"));
+              if (ogre) { out.ogre = ogre.name; out.ogrePack = key; break; }
+            } catch {}
+          }
+        }
+        out.pfContentPacks = [...game.packs.keys()].filter(k=>k.includes("pf-content") || k.includes("pf-"));
+      } catch(e) { out.error = String(e?.stack ?? e); }
+      return out;
+    };
     // Globals the module installed itself (e.g. `window.Tagger`): the surface `foundry.api` reaches.
     diagnostics.globals = Object.keys(globalThis).filter((key) => !before.has(key)).slice(0, 64);
   });

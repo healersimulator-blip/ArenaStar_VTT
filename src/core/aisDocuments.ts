@@ -16,8 +16,9 @@
 import type { AnyCollectionName, BaseDocument, CollectionName, DocRef, Json } from "./documents";
 import type { FlatDiff, Op } from "./ops";
 
-/** Collections an AIS module may address. Scenes/placeables keep their dedicated scene services (slice 2). */
+/** Collections an AIS module may address. Scenes/placeables are exposed as top-level `scenes` with their placeables as embedded chains (slice 2). */
 export const AIS_DOCUMENT_COLLECTIONS = {
+  scenes: { writable: true, embedded: { tokens: "token", walls: "wall", lights: "light", sounds: "sound", tiles: "tile", regions: "region", levels: "level", drawings: "drawing", templates: "template", notes: "note", cells: "cell" } },
   actors: { writable: true, embedded: { items: "item", effects: "effect" } },
   items: { writable: true, embedded: { effects: "effect" } },
   journals: { writable: true, embedded: { pages: "page" } },
@@ -37,7 +38,7 @@ export const AIS_DOCUMENT_COLLECTION_NAMES = Object.keys(AIS_DOCUMENT_COLLECTION
 
 /** Kind marker (`BaseDocument.type`) the store expects per top-level collection. */
 const KIND_BY_COLLECTION: Record<AisDocumentCollection, string> = {
-  actors: "actor", items: "item", journals: "journal", rollTables: "rollTable", macros: "macro",
+  scenes: "scene", actors: "actor", items: "item", journals: "journal", rollTables: "rollTable", macros: "macro",
   folders: "folder", playlists: "playlist", combats: "combat", users: "user", messages: "message",
 };
 
@@ -54,6 +55,18 @@ const DEFAULTS_BY_KIND: Record<string, Record<string, Json>> = {
   playlist: { mode: "sequential", sounds: [] },
   combat: { round: 0, turn: 0, combatants: [] },
   combatant: { tokenId: null, actorId: null, initiative: null, hidden: false, defeated: false },
+  scene: { tokens: [], walls: [], lights: [], sounds: [], tiles: [], drawings: [], templates: [], notes: [] },
+  token: { x: 0, y: 0, rotation: 0, width: 1, height: 1, img: "", hidden: false, disposition: "neutral", vision: true, light: { radius: 0, color: "#ffffff", alpha: 0.5 } },
+  wall: { c: [0, 0, 0, 0], door: 0, oneWay: false, move: 0, sight: 0 },
+  light: { x: 0, y: 0, radius: 0, color: "#ffffff", alpha: 0.5 },
+  sound: { x: 0, y: 0, src: null, volume: 1, radius: null },
+  tile: { x: 0, y: 0, width: 100, height: 100, img: null, hidden: false },
+  region: { points: [], color: "#ffffff", alpha: 0.5 },
+  level: { bottom: null, top: null, floorZ: 0, sort: 0, visibleLevelIds: [] },
+  drawing: { type: "rect", points: [], color: "#ffffff", alpha: 0.5 },
+  template: { x: 0, y: 0, shape: "rect", color: "#ffffff", alpha: 0.5 },
+  note: { x: 0, y: 0, text: "" },
+  cell: { key: "", terrain: null },
 };
 
 export const AIS_DOCUMENTS_LIMITS = Object.freeze({
@@ -167,6 +180,7 @@ export function resolveAisDocumentRef(
 
 function embeddedTable(kind: string): Record<string, string> | null {
   switch (kind) {
+    case "scene": return AIS_DOCUMENT_COLLECTIONS.scenes.embedded;
     case "actor": return AIS_DOCUMENT_COLLECTIONS.actors.embedded;
     case "item": return AIS_DOCUMENT_COLLECTIONS.items.embedded;
     case "journal": return AIS_DOCUMENT_COLLECTIONS.journals.embedded;

@@ -153,7 +153,7 @@ const freshWorld = (): World => ({
   actors: [baseRow("a-npc", "actor", { ownership: { default: 0, "u-gm": 3 }, items: [baseRow("i-sword", "item", { effects: [] })], effects: [] }),
     baseRow("a-pc", "actor", { name: "Valeros", ownership: { default: 0, "u-player": 3 }, items: [], effects: [] })],
   items: [], journals: [baseRow("j1", "journal", { pages: [baseRow("p1", "page", { text: "<p>hi</p>", src: null })] })], rollTables: [], macros: [], folders: [], playlists: [], combats: [],
-  users: [baseRow("u-gm", "user", { name: "Game Master", role: "GM" }), baseRow("u-player", "user", { name: "Pat", role: "PLAYER" })], messages: [],
+  users: [baseRow("u-gm", "user", { name: "Game Master", role: "GM" }), baseRow("u-player", "user", { name: "Pat", role: "PLAYER" })], messages: [], scenes: [],
 });
 
 describe("ais-foundry-v13 documents layer", () => {

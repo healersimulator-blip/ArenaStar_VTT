@@ -1,8 +1,14 @@
 # AIS Foundry v13 adapter (0.6.0)
 
-ArenaStar-authored code, loaded inside the separately approved guest's opaque AIS iframe.
-The adapter is a runtime provider, not an in-page module and not Foundry core (which is
-proprietary — every API here is a re-implementation of the surface, never copied code).
+**IMPORTANT: This adapter is NOT a 1:1 carbon copy of Foundry — it EMULATES what a module/system needs to work.** ArenaStar-authored code, loaded inside the separately approved guest's opaque AIS iframe. The adapter is a runtime provider, not an in-page module and not Foundry core (which is proprietary — every API here is a re-implementation of the surface, never copied code). It provides generic emulation for any system (pf1 main target, but also dnd5e, pf2e, swade, etc) via `ensureSystemConfig` + `ensureSystemGlobal`.
+
+## Emulation principle (not duplication)
+
+AIS does not try to be Foundry. Instead:
+- **Kernel (L1)** is generic: `documents.*`, `settings.*`, `compendium.*`, `bus.*`, `assets.*`, `ui.panel`, etc — any AIS module can use them.
+- **Adapter (L2)** emulates Foundry contract that real modules actually call: `game`, `Hooks`, `CONFIG`, `CONST`, `foundry.*`, `ui.*`, `Document` classes, `Roll` (own parser: interpolation `@abilities.str.mod`, `NdM`, `kh/kl/dh/dl`, `d%`, safe eval), `FilePicker` (own UI over `AIS.assets` list/pick/resolve by hash, never raw URLs, blob URL cache paging 8192), `CompendiumCollection` (over `compendium.*` RPCs, fields concurrency 8, img fallback), `ChatMessage.create→AIS.chat.post` (host stamps author), `fromUuid` with `CONFIG.compendium.uuidRedirects` mutable, `CONFIG[SYSTEM]` + `globalThis[system]` shims for any system id, `Actor.create` with inline items, `game.socket` via `bus.transmit`.
+- Canvas/PIXI is out of scope by design: ArenaStar's renderer is own, placeable documents are the surface.
+- pf1 is **main target** base module (provides `CONFIG.PF1`, `pf1` registry, hooks), but adapter is **generic** — same path works for dnd5e (`CONFIG.DND5E`, `globalThis.dnd5e`), pf2e, swade, custom systems via `ensureSystemConfig(sysId)` + `ensureSystemGlobal(sysId)`.
 
 ## Profile `foundry-module` (D-482) — unmodified Foundry distributions
 
@@ -25,7 +31,8 @@ Foundry core APIs mapped onto AIS services:
 | `game.settings.register/get/set/registerMenu` | kernel `settings.register/list/get/set` (D-476/D-482); `Boolean`/`Number(range)`/`String(choices)` become typed declarations, everything else hidden JSON text; `config: false` → hidden; `get` is synchronous from a cache kept current by `module.settings.changed`, so a GM form edit reaches the module's `onChange` |
 | `game.i18n.localize/format/has` | the module's own `lang/*.json` (en first) |
 | `game.modules.get(id)` | mutable `Collection` with the module's own entry (`.api` assignable) + a `sequencer` substitute row |
-| `game.user/users/world/system` | GM device user; `game.system.id === "arenastar"` — deliberately never `pf1` |
+| `game.user/users/world/system` | GM device user; `game.system.id` is generic — `pf1` when self is pf1 system (main target), `dnd5e` when self is dnd5e, etc, else first declared dependency or `arenastar`. **Emulation**: adapter reports system id so content modules don't stay inert, but rules remain ArenaStar's unless system provider layer implements them. |
+| `CONFIG.PF1`/`CONFIG.DND5E`/`CONFIG[SYSTEM]` + `globalThis.pf1`/`dnd5e`/any | **Generic**: `ensureSystemConfig(sysId)` creates `CONFIG[UPPER]` + `CONFIG[lower]` with abilities/skills/conditions/etc + mutable `compendium.uuidRedirects`; `ensureSystemGlobal(sysId)` creates `globalThis[sysId]` with `registry.sources.registerSource`, `utils.createTag`, `config`, etc. pf1 main target but dnd5e/pf2e/swade same. |
 | `game.scenes`, `canvas.<layer>.placeables`, `fromUuid` | the projected active scene (visible placeables), tag flags read/write through `scene.tags.*`, stale revisions refreshed once |
 | `game.keybindings.register` | recorded (reported in `foundry.info`), not dispatched |
 | `game.socket.emit/on/off` | **0.6.0 (D-487):** the kernel's bounded cross-device channel (`AIS.bus`) — every running instance of this module on every device hears the frame, sender included; the listener receives the payload; sender identity host-stamped; no cross-package delivery |

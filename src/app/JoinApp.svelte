@@ -16,6 +16,9 @@
   import { elevationCues, elevationViewer, lowerTokenLabels, tokenElevationModeOf, tokenElevationScaleOf } from "../core/elevationCues";
   import { onDestroy, onMount } from "svelte";
   import { bootPlayerApp, type PlayerApp } from "./joinBoot";
+  import { openVttDb } from "../storage/idb";
+  import { loadRecentGames, saveRecentGame, type RecentGame } from "./recentGames";
+  import { getSetting, putSetting } from "../storage/idb";
   import { parseInvite } from "./hostShare";
   import { createStage, type Stage } from "../canvas/stage";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
@@ -136,6 +139,9 @@
 
   let app = $state<PlayerApp | null>(null);
   let phase = $state<"invite" | "exchange" | "live" | "dead">("invite");
+  let db = $state<Awaited<ReturnType<typeof openVttDb>> | null>(null);
+  let recentGames = $state<RecentGame[]>([]);
+  let globalPlayerName = $state("");
   let joinError = $state<string | null>(null);
   let inviteText = $state("");
   let answerText = $state("");
@@ -607,9 +613,10 @@
       joinError = "invite must look like #room=<id>&k=<secret>";
       return;
     }
+    const chosenName = playerName.trim() || globalPlayerName.trim() || undefined;
     phase = "exchange";
     try {
-      const playerApp = await bootPlayerApp({ invite });
+      const playerApp = await bootPlayerApp({ invite, ...(chosenName ? { displayName: chosenName } : {}) });
       app = playerApp;
       playerName = playerApp.displayName;
       playerApp.onDisconnected = (reason) => {
@@ -625,6 +632,22 @@
         mountCanvas();
         startPlayerAis(playerApp);
         startPlayerRules(playerApp);
+        const worldName = playerApp.client?.world?.name ?? "—";
+        if (db) {
+          void saveRecentGame(db, {
+            roomId: invite.roomId,
+            inviteLink: inviteRaw,
+            hostWorldName: worldName,
+            lastPlayedAt: Date.now(),
+            hostPubkey: invite.hostPubkey,
+            playerName: chosenName ?? playerApp.displayName,
+          });
+          if (chosenName) {
+            globalPlayerName = chosenName;
+            void putSetting(db, { scope: "client", key: "playerDisplayName", value: chosenName as never });
+          }
+          void loadRecentGames(db).then((games) => (recentGames = games));
+        }
       });
       if (new URLSearchParams(globalThis.location.search).has("e2e")) {
         void import("./e2eHook").then((m) => m.installPlayerE2e(playerApp));
@@ -1931,6 +1954,26 @@
 
   onMount(() => {
     const offWm = wm.onChange(() => wmVersion++);
+    void (async () => {
+      try {
+        const handle = await openVttDb();
+        db = handle;
+        recentGames = await loadRecentGames(handle);
+        const pref = await getSetting(handle, "client", "playerDisplayName");
+        if (typeof pref?.value === "string") globalPlayerName = pref.value;
+        if (!playerName.trim() && globalPlayerName.trim()) playerName = globalPlayerName;
+        const hash = globalThis.location.hash;
+        if (!(hash.length > 1 && hash.includes("room="))) {
+          const latest = recentGames[0];
+          if (latest?.hostPubkey && latest.inviteLink) {
+            inviteText = latest.inviteLink;
+            void connect(latest.inviteLink);
+          }
+        }
+      } catch (err) {
+        console.warn("vtt: recent games load failed", err);
+      }
+    })();
     // auto-join from an invite fragment (?…#room=<id>&k=<secret>)
     const hash = globalThis.location.hash;
     if (hash.length > 1 && hash.includes("room=")) {
@@ -2018,6 +2061,25 @@
           from the host.
         </p>
       </div>
+      <label for="player-name">Your player name</label>
+      <input
+        id="player-name"
+        type="text"
+        data-player-name
+        bind:value={playerName}
+        placeholder="Player name for this game"
+        autocomplete="off"
+      />
+      <label for="global-player-name">Default player name (all games)</label>
+      <input
+        id="global-player-name"
+        type="text"
+        data-global-player-name
+        bind:value={globalPlayerName}
+        onblur={() => { if (db && globalPlayerName.trim()) void putSetting(db, { scope: "client", key: "playerDisplayName", value: globalPlayerName.trim() as never }); }}
+        placeholder="Default name"
+        autocomplete="off"
+      />
       <label for="invite-input">Invite link or room fragment</label>
       <textarea
         id="invite-input"
@@ -2034,6 +2096,29 @@
       >
         Connect to game
       </button>
+
+      <section class="recent-games" data-games-you-played aria-label="Games you played">
+        <h3>Games you played</h3>
+        {#if recentGames.length === 0}
+          <p class="hint">No previous games on this device.</p>
+        {:else}
+          <ul>
+            {#each recentGames as game (game.roomId)}
+              <li data-recent-game data-host-world-name={game.hostWorldName}>
+                <span class="recent-name">{game.hostWorldName}</span>
+                <span class="recent-link" data-invite-link>{game.inviteLink}</span>
+                <button
+                  type="button"
+                  data-reconnect-game
+                  onclick={() => { inviteText = game.inviteLink; if (game.playerName) playerName = game.playerName; void connect(game.inviteLink); }}
+                >
+                  Reconnect to game world
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
     </section>
   {:else if phase === "exchange" || phase === "dead"}
     <section class="join-panel exchange-panel" class:reconnect={phase === "dead"} aria-label="Signaling exchange">

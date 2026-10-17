@@ -52,6 +52,10 @@ function playwrightChromium() {
   let file = null;
   try { file = require.resolve("playwright-core/browsers.json"); } catch { /* pnpm isolated layout */ }
   if (!file) {
+    const direct = join(repoRoot, "node_modules", "playwright-core", "browsers.json");
+    if (existsSync(direct)) file = direct;
+  }
+  if (!file) {
     const pnpm = join(repoRoot, "node_modules", ".pnpm");
     if (existsSync(pnpm)) {
       for (const entry of readdirSync(pnpm)) {

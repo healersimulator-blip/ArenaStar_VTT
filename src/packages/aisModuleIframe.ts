@@ -12,11 +12,11 @@ import { aisModuleRuntimeSource } from "./aisModuleRuntimeSource";
 
 export const AIS_RPC_TAG = 1 as const;
 export const AIS_MAX_RPC_BYTES = 64 * 1024;
-const MAX_REQUESTS_PER_SECOND = 120;
+const MAX_REQUESTS_PER_SECOND = 20000;
 const MAX_COMMANDS_PER_SECOND = 30;
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_COMMAND_MS = 8_000;
-const MAX_STARTUP_MS = 5_000;
+const MAX_STARTUP_MS = 120_000;
 const COMMAND_ID_RE = /^cmd-[0-9]{1,16}$/;
 const COMMAND_NAME_RE = /^[a-z0-9][a-z0-9._:-]{1,127}$/;
 
@@ -53,6 +53,8 @@ export const AIS_MODULE_METHODS = [
   "documents.list",
   "documents.get",
   "documents.mutate",
+  "assets.list",
+  "assets.get",
 ] as const;
 export type AisModuleMethod = (typeof AIS_MODULE_METHODS)[number];
 
@@ -94,6 +96,8 @@ export const AIS_METHOD_CAPABILITY: Record<AisModuleMethod, AisCapability | null
   "documents.list": "documents.read",
   "documents.get": "documents.read",
   "documents.mutate": "documents.write",
+  "assets.list": "assets.read",
+  "assets.get": "assets.read",
 };
 
 export interface AisModuleRequest {
@@ -314,8 +318,10 @@ export function createAisModuleDispatcher(
           const result = await handlers[request.method](args, callContext);
           callContext?.assertActive();
           response = { vttAisRpc: AIS_RPC_TAG, kind: "response", id: request.id, ok: true, result };
-          if (!boundedJson(result) || (jsonByteLength(response) ?? Infinity) > AIS_MAX_RPC_BYTES)
-            throw new Error("AIS RPC result exceeds the size limit or is not bounded JSON");
+          if (!boundedJson(result) || (jsonByteLength(response) ?? Infinity) > AIS_MAX_RPC_BYTES) {
+            const sz = jsonByteLength(response) ?? -1;
+            throw new Error(`AIS RPC result exceeds the size limit or is not bounded JSON (${request.method} ${sz} bytes)`);
+          }
           // A dynamic grant check may refuse an otherwise well-formed subscription.
           // Register only after that check has succeeded, never on a rejected request.
           if (request.method === "events.subscribe") onSubscribe(args.event as AisEventName);

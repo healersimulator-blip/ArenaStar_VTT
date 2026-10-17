@@ -161,6 +161,8 @@ export interface IntentMsg {
   ops: Op[];
   /** GM wall-editor precondition, checked only by the host; never part of committed Ops. */
   wallEdit?: WallEditGuard;
+  /** Optional durable action audit — host generates the ID, client supplies label+system. */
+  action?: { label: string; system?: Record<string, Json> };
 }
 
 /** §11: rolls are executed on the host from `roll` intents. */

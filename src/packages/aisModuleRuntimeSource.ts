@@ -22,7 +22,20 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   function fail(error) {
     if (failed) return;
     failed = true;
-    post({ vttAisRpc: 1, kind: "error", error: String(error && error.message || error).slice(0, 500) });
+    var rawMsg = error && error.stack ? String(error.stack) : String(error && error.message || error);
+    var msg = rawMsg;
+    try {
+      var map = globalThis.__aisBlobToPath;
+      if (map && typeof map === "object") {
+        for (var blobUrl in map) {
+          if (msg.indexOf(blobUrl) !== -1) {
+            msg = msg.split(blobUrl).join(map[blobUrl] + " [" + blobUrl + "]");
+          }
+        }
+      }
+    } catch {}
+    try { console.error("AIS module failed", msg, error); } catch {}
+    post({ vttAisRpc: 1, kind: "error", error: String(msg).slice(0, 4000) });
   }
   window.addEventListener("error", function (event) { fail(event.error || event.message); });
   window.addEventListener("unhandledrejection", function (event) { fail(event.reason); });
@@ -30,7 +43,7 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
   function rpc(method, args, commandId) {
     return new Promise(function (resolve, reject) {
       if (failed) { reject(new Error("AIS module has stopped")); return; }
-      if (pending.size >= 32) { reject(new Error("AIS RPC concurrency limit exceeded")); return; }
+      if (pending.size >= 128) { reject(new Error("AIS RPC concurrency limit exceeded")); return; }
       var id = nextId++;
       var frame = { vttAisRpc: 1, kind: "request", id: id, method: method,
         args: args === undefined ? {} : args,
@@ -38,8 +51,9 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
       if (!boundedJson(frame, 0, new Set()) || byteLength(frame) > 64 * 1024) {
         reject(new Error("AIS RPC request must be bounded JSON no larger than 64 KiB")); return;
       }
-      // A host-rendered selection can wait for a human. Other calls stay short and bounded.
-      var timeout = method === "ui.select" ? 5 * 60 * 1000 : 10000;
+      // A host-rendered selection can wait for a human. Resource reads can be large (multi-MB packs)
+      // and may need longer than 10s when many concurrent reads contend on IndexedDB.
+      var timeout = method === "ui.select" ? 5 * 60 * 1000 : method === "package.resource.read" ? 60000 : 30000;
       var timer = setTimeout(function () {
         if (pending.has(id)) {
           pending.delete(id);
@@ -102,7 +116,7 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
       resources: Object.freeze({
         readText: async function (path) {
           var text = "", offset = 0;
-          for (var page = 0; page < 256; page++) {
+          for (var page = 0; page < 1024; page++) {
             var chunk = await call("package.resource.read", { path: path, offset: offset });
             text += chunk.text;
             if (chunk.next === null) return text;
@@ -177,6 +191,26 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
         },
         get: function (ref) { return call("documents.get", ref).then(function (row) { return row.document; }); },
         mutate: function (ops) { return call("documents.mutate", { ops: ops }); }
+      }),
+      // D-489: asset library (R-07) — list/resolve by content hash, filtered by entitlement.
+      assets: Object.freeze({
+        list: function () { return call("assets.list", {}).then(function (row) { return row.assets; }); },
+        get: function (hash, offset) {
+          var req = { hash: hash };
+          if (offset !== undefined) req.offset = offset;
+          return call("assets.get", req);
+        },
+        // Helper to fetch full asset as base64 by paging
+        fetch: function (hash) {
+          var fetchChunk = function (offset, acc) {
+            return call("assets.get", { hash: hash, offset: offset }).then(function (row) {
+              var nextAcc = acc + row.base64;
+              if (row.next === null || row.next === undefined) return { mime: row.mime, base64: nextAcc };
+              return fetchChunk(row.next, nextAcc);
+            });
+          };
+          return fetchChunk(0, "");
+        }
       }),
       chat: Object.freeze({ post: function (content) { return call("chat.post", { content: content }); } }),
       ui: Object.freeze({
