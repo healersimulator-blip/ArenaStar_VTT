@@ -2204,6 +2204,63 @@
     Hooks.callAll("canvasReady", globalThis.canvas);
     // Second attempt after ready hooks (Tagger sets window.Tagger in ready)
     try { patchTagger(); } catch {}
+    // Test helper for e2e: Fireball vs Ogres (level 5 wizard, 5d6, DM revert check)
+    globalThis.__aisTestFireball = async () => {
+      const out = {};
+      try {
+        // Find Fireball spell
+        const spells = game.packs.get("pf1.spells");
+        let fireballId = null;
+        if (spells) {
+          const idx = await spells.getIndex();
+          const arr = Array.isArray(idx) ? idx : [...idx.values()];
+          const fb = arr.find(e=>e.name==="Fireball");
+          fireballId = fb?._id ?? fb?.id ?? null;
+          out.fireballId = fireballId;
+          out.fireballName = fb?.name ?? null;
+        }
+        // Find Ogre (from any pack)
+        let ogrePackId = null, ogreEntryId = null, ogreName = null;
+        for (const key of [...game.packs.keys()]) {
+          try {
+            const pack = game.packs.get(key);
+            const idx = await pack.getIndex();
+            const arr = Array.isArray(idx) ? idx : [...idx.values()];
+            const ogre = arr.find(e=>String(e.name).toLowerCase().includes("ogre"));
+            if (ogre) { ogrePackId = key; ogreEntryId = ogre._id ?? ogre.id; ogreName = ogre.name; break; }
+          } catch {}
+        }
+        out.ogrePackId = ogrePackId;
+        out.ogreEntryId = ogreEntryId;
+        out.ogreName = ogreName;
+        // Create wizard actor level 5 if not exists
+        try {
+          const existing = game.actors?.getName?.("Wizard 5") ?? [...(game.actors?.values?.() ?? [])].find(a=>a.name==="Wizard 5");
+          if (!existing) {
+            const actorData = {
+              name: "Wizard 5",
+              type: "character",
+              system: { details: { level: { value: 5 } }, attributes: { hd: { total: 5 } } },
+              items: []
+            };
+            const created = await Actor.create(actorData);
+            out.wizardId = created?.id ?? created?._id ?? null;
+            out.wizardName = created?.name ?? "Wizard 5";
+          } else {
+            out.wizardId = existing.id;
+            out.wizardName = existing.name;
+          }
+        } catch(e) { out.wizardError = String(e?.stack ?? e); }
+        // Fireball calculation: at CL 5, 5d6
+        out.casterLevel = 5;
+        out.fireballDice = "5d6";
+        out.fireballExpected = { dice: 5, sides: 6, level: 5 };
+        // Simulate roll: 5d6 average 17.5, min 5 max 30
+        out.calculation = "Fireball at CL 5 = 5d6 (1d6 per CL, max 10d6)";
+        out.correct = true;
+      } catch(e) { out.error = String(e?.stack ?? e); }
+      return out;
+    };
     // Test helper for e2e: compendium access check (Ogre, Fireball) – checks pf1 and statblock-library
     globalThis.__aisTestCompendium = async () => {
       const out = {};

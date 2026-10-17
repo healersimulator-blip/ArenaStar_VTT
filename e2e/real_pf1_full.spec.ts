@@ -39,20 +39,20 @@ test("Real pf1 full with content modules boot", async ({ page }) => {
   await waitForSurface(page, "app");
   await page.locator("#gm-settings").click();
   // Wait for all runtimes ready
-  const ids = ["pf1", "pf-content", "pf1e-archetypes", "statblock-library"];
+  const ids = ["ais-foundry-v13", "pf1", "pf-content", "pf1e-archetypes", "statblock-library"];
   for (const id of ids) {
     const runtime = page.locator(`[data-ais-module-review="${id}"] [data-ais-runtime]`);
     await expect(runtime).toBeVisible({ timeout: 60000 });
     let state = await runtime.getAttribute("data-ais-runtime");
     for (let i=0; i<120; i++) {
       state = await runtime.getAttribute("data-ais-runtime");
-      if (state === "ready" || state === "failed") break;
+      if (state === "ready" || state === "failed" || state === "blocked" || state === "available") break;
       await page.waitForTimeout(1000);
     }
     const text = await runtime.innerText();
     const health = await page.locator(`[data-ais-health="${id}"]`).innerText().catch(()=> "no health");
     console.log(`runtime ${id} state ${state} text ${text.slice(0,2000)} health ${health.slice(0,5000)}`);
-    if (id === "pf1") expect(state).toBe("ready");
+    if (id !== "ais-foundry-v13") expect(state).toBe("ready");
   }
   console.log("logs tail", logs.slice(-200).join("\n"));
 
