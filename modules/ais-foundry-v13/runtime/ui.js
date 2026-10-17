@@ -41,6 +41,15 @@
       const key = normalizeTemplatePath(path);
       if (resources.has(key)) return { key, source: resources.get(key), origin: "module" };
       if (resources.has(path)) return { key: path, source: resources.get(path), origin: "module" };
+      // PF1 system stores templates under public/templates/ but requests templates/; check both forms
+      if (key.startsWith("templates/")) {
+        const pub = `public/${key}`;
+        if (resources.has(pub)) return { key: pub, source: resources.get(pub), origin: "module" };
+      }
+      if (key.startsWith("public/templates/")) {
+        const bare = key.replace(/^public\//, "");
+        if (resources.has(bare)) return { key: bare, source: resources.get(bare), origin: "module" };
+      }
       // Resolution order: the module's own files, then the emulator's core library (every Foundry
       // generation's name for a template resolves to the same entry) — modules never ship core files.
       const canonical = core?.resolveTemplate(key);

@@ -51,8 +51,9 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
       if (!boundedJson(frame, 0, new Set()) || byteLength(frame) > 64 * 1024) {
         reject(new Error("AIS RPC request must be bounded JSON no larger than 64 KiB")); return;
       }
-      // A host-rendered selection can wait for a human. Other calls stay short and bounded.
-      var timeout = method === "ui.select" ? 5 * 60 * 1000 : 10000;
+      // A host-rendered selection can wait for a human. Resource reads can be large (multi-MB packs)
+      // and may need longer than 10s when many concurrent reads contend on IndexedDB.
+      var timeout = method === "ui.select" ? 5 * 60 * 1000 : method === "package.resource.read" ? 60000 : 30000;
       var timer = setTimeout(function () {
         if (pending.has(id)) {
           pending.delete(id);
@@ -115,7 +116,7 @@ export function aisModuleRuntimeSource(bootId: string, runtimeContext: Json = nu
       resources: Object.freeze({
         readText: async function (path) {
           var text = "", offset = 0;
-          for (var page = 0; page < 256; page++) {
+          for (var page = 0; page < 1024; page++) {
             var chunk = await call("package.resource.read", { path: path, offset: offset });
             text += chunk.text;
             if (chunk.next === null) return text;

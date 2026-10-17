@@ -12,11 +12,11 @@ import { aisModuleRuntimeSource } from "./aisModuleRuntimeSource";
 
 export const AIS_RPC_TAG = 1 as const;
 export const AIS_MAX_RPC_BYTES = 64 * 1024;
-const MAX_REQUESTS_PER_SECOND = 5000;
+const MAX_REQUESTS_PER_SECOND = 20000;
 const MAX_COMMANDS_PER_SECOND = 30;
 const MAX_COMMAND_BYTES = 16 * 1024;
 const MAX_COMMAND_MS = 8_000;
-const MAX_STARTUP_MS = 30_000;
+const MAX_STARTUP_MS = 120_000;
 const COMMAND_ID_RE = /^cmd-[0-9]{1,16}$/;
 const COMMAND_NAME_RE = /^[a-z0-9][a-z0-9._:-]{1,127}$/;
 

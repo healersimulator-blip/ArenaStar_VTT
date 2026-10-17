@@ -2204,6 +2204,55 @@
     Hooks.callAll("canvasReady", globalThis.canvas);
     // Second attempt after ready hooks (Tagger sets window.Tagger in ready)
     try { patchTagger(); } catch {}
+    // Test helper for e2e: compendium access check (Ogre, Fireball) – checks pf1 and statblock-library
+    globalThis.__aisTestCompendium = async () => {
+      const out = {};
+      try {
+        out.packs = [...game.packs.keys()];
+        const basic = game.packs.get("pf1.basic-monsters");
+        out.basicId = basic?.id ?? null;
+        if (basic) {
+          const idx = await basic.getIndex();
+          out.basicCount = idx.length ?? idx.size ?? 0;
+          const arr = Array.isArray(idx) ? idx : [...idx.values()];
+          out.basicSample = arr.slice(0,3).map(e=>e.name);
+          out.ogreBasic = arr.find(e=>String(e.name).toLowerCase().includes("ogre"))?.name ?? null;
+        }
+        const spells = game.packs.get("pf1.spells");
+        out.spellsId = spells?.id ?? null;
+        if (spells) {
+          const idx = await spells.getIndex();
+          const arr = Array.isArray(idx) ? idx : [...idx.values()];
+          out.spellsCount = arr.length;
+          out.fireball = arr.find(e=>e.name==="Fireball")?.name ?? null;
+        }
+        // Check statblock-library for Ogre (bestiaries)
+        for (const key of [...game.packs.keys()]) {
+          if (!key.includes("bestiaries")) continue;
+          try {
+            const pack = game.packs.get(key);
+            const idx = await pack.getIndex();
+            const arr = Array.isArray(idx) ? idx : [...idx.values()];
+            const ogre = arr.find(e=>String(e.name).toLowerCase().includes("ogre"));
+            if (ogre) { out.ogre = ogre.name; out.ogrePack = key; break; }
+          } catch {}
+        }
+        // Fallback: any pack with ogre
+        if (!out.ogre) {
+          for (const key of [...game.packs.keys()]) {
+            try {
+              const pack = game.packs.get(key);
+              const idx = await pack.getIndex();
+              const arr = Array.isArray(idx) ? idx : [...idx.values()];
+              const ogre = arr.find(e=>String(e.name).toLowerCase().includes("ogre"));
+              if (ogre) { out.ogre = ogre.name; out.ogrePack = key; break; }
+            } catch {}
+          }
+        }
+        out.pfContentPacks = [...game.packs.keys()].filter(k=>k.includes("pf-content") || k.includes("pf-"));
+      } catch(e) { out.error = String(e?.stack ?? e); }
+      return out;
+    };
     // Globals the module installed itself (e.g. `window.Tagger`): the surface `foundry.api` reaches.
     diagnostics.globals = Object.keys(globalThis).filter((key) => !before.has(key)).slice(0, 64);
   });
