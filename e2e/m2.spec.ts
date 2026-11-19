@@ -105,7 +105,7 @@ test.describe("M2 acceptance (§19)", () => {
     const playerName = ((await playerRow.locator("td").first().textContent()) ?? "").trim();
     expect(playerName).not.toBe("");
     await perms
-      .locator(`.overrides select[aria-label="Ownership for ${playerName}"]`)
+      .locator(`.overrides select[data-perm-owner="${playerUserId}"]`)
       .selectOption("2"); // OBSERVER → §5A strategic frames for this faction
 
     // the override op must land in the store before the campaign runs
@@ -149,6 +149,18 @@ test.describe("M2 acceptance (§19)", () => {
       .toBeGreaterThanOrEqual(1);
 
     // ── advance: resolve 10k models + per-faction projection (budget 15s) ─
+    // Record the brief live status even if it changes between Playwright polls.
+    const watchProgress = (page: Page) => page.evaluate(() => {
+      const status = document.querySelector("[data-turn-progress]");
+      if (!status) throw new Error("Missing board status");
+      const seen: string[] = [];
+      new MutationObserver((changes) => {
+        for (const change of changes) if (change.oldValue) seen.push(change.oldValue);
+        seen.push(status.getAttribute("data-turn-progress") ?? "");
+      }).observe(status, { attributeFilter: ["data-turn-progress"], attributeOldValue: true });
+      (window as Window & { turnProgressStages?: string[] }).turnProgressStages = seen;
+    });
+    await Promise.all([watchProgress(host), watchProgress(player)]);
     const t1 = Date.now();
     await host.click("[data-campaign-advance]");
     await expect.poll(() => gmCall<string>(host, "turnPhase"), { timeout: 30_000 }).toBe("report");
@@ -168,6 +180,12 @@ test.describe("M2 acceptance (§19)", () => {
     await expect
       .poll(() => playerCall<string>(player, "turnPhase"), { timeout: 10_000 })
       .toBe("report");
+
+    for (const page of [host, player]) {
+      expect(await page.evaluate(() => (window as Window & { turnProgressStages?: string[] }).turnProgressStages))
+        .toEqual(expect.arrayContaining(["resolving", "applying"]));
+      await expect(page.locator('[data-turn-progress="idle"]')).toBeEmpty();
+    }
 
     // ── next: both sides reopen orders for turn 2 ──────────────────────────
     await host.click("[data-campaign-next]");

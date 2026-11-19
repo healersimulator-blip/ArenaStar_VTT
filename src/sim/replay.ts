@@ -3,7 +3,7 @@
  * Reconstructs ModelPool snapshots and steps through historical turn checkpoints/reports.
  */
 import type { ModelPool } from "../core/strategic";
-import type { TurnReport } from "../core/sim";
+import type { SimCodecVersion, TurnReport } from "../core/sim";
 import type { CheckpointRecord } from "../storage/strategicStore";
 import type { SysSchema } from "./pool";
 import { decodeSimSnapshot, poolFromSnapshot } from "./codec";
@@ -34,12 +34,14 @@ export class ReplayEngine {
   private stepIntervalMs = 1200; // ms per turn step at 1x
   private onStateChange?: ((state: ReplayState) => void) | undefined;
 
-  constructor(sys: SysSchema, onStateChange?: ((state: ReplayState) => void) | undefined) {
+  constructor(sys: SysSchema, onStateChange?: ((state: ReplayState) => void) | undefined,
+    private readonly codecVersion: SimCodecVersion = 1) {
     this.sys = sys;
     this.onStateChange = onStateChange;
   }
 
   public load(checkpoints: CheckpointRecord[], reports: TurnReport[] = []): void {
+    if (checkpoints.some((c) => (c.codecVersion ?? 1) !== this.codecVersion)) throw new Error("Replay checkpoint codec mismatch");
     this.pause();
     this.checkpoints = [...checkpoints].sort((a, b) => a.slot - b.slot);
     this.reportsByTurn.clear();
@@ -71,8 +73,9 @@ export class ReplayEngine {
     }
     const rec = this.checkpoints[idx];
     if (!rec) return null;
-    const snap = decodeSimSnapshot(rec.pool).snapshot;
-    const pool = poolFromSnapshot(snap, rec.maxHpMax, this.sys, Math.max(rec.pool.length, 64));
+    if ((rec.codecVersion ?? 1) !== this.codecVersion) throw new Error("Replay checkpoint codec mismatch");
+    const snap = decodeSimSnapshot(rec.pool, this.codecVersion).snapshot;
+    const pool = poolFromSnapshot(snap, rec.maxHpMax, this.sys);
     const report = this.reportsByTurn.get(rec.turnNumber) ?? null;
 
     return {

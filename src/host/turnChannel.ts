@@ -1,3 +1,4 @@
+import { unitViewFor } from "../sim/turnPlan";
 import { SaveWork } from "../storage/saveCoordinator";
 /**
  * §5A turn/sim channel (host): drives the TurnEngine state machine and the
@@ -12,6 +13,7 @@ import type {
   ReportDetailMsg,
   SimControlMsg,
   SimSnapshotGetMsg,
+  TurnPhaseMsg,
   TurnReadyMsg,
 } from "../core/messages";
 import { OWNERSHIP_LEVELS } from "../core/documents";
@@ -84,6 +86,9 @@ export interface TurnChannelOptions {
   /** Campaign seed; per-turn seeds derive from it (§5A). */
   seed: number;
   now?: () => number;
+  /** Browser host may yield a frame before local compute/projection without delaying a headless resolver. */
+  beforeTurnWork?: () => Promise<void>;
+  onError?: (message: string) => void;
   /** §5A realtime pump driver (tests inject a manual clock). */
   rtDriver?: RealtimeDriver;
 }
@@ -150,6 +155,8 @@ export class TurnChannel {
   private readonly sys: SysSchema;
   private readonly seed: number;
   private readonly now: () => number;
+  private readonly beforeTurnWork: (() => Promise<void>) | undefined;
+  private readonly onError: ((message: string) => void) | undefined;
 
   private engine: TurnEngineState;
   private lastTurnDocId: DocId | null = null;
@@ -191,6 +198,8 @@ export class TurnChannel {
     this.sys = options.sys;
     this.seed = options.seed;
     this.now = options.now ?? (() => Date.now());
+    this.beforeTurnWork = options.beforeTurnWork;
+    this.onError = options.onError;
     this.rtDriver = options.rtDriver ?? defaultRtDriver;
     this.engine = { phase: "idle", sceneId: options.sceneId };
     this.host.attachSim(this);
@@ -220,34 +229,7 @@ export class TurnChannel {
 
   /** Stable UnitView list (unitIdx in the runner = position here). */
   unitViews(): UnitView[] {
-    const out: UnitView[] = [];
-    for (const army of this.armies()) {
-      for (const unit of army.units) {
-        out.push({
-          id: unit._id,
-          armyId: army._id,
-          factionId: army.factionId,
-          type: unit.type,
-          name: unit.name,
-          profile: unit.profile,
-          stats: { ...unit.stats },
-          orders: unit.orders,
-          formation: unit.formation,
-          sceneId: unit.sceneId ?? null,
-          modelRange: unit.modelRange,
-          leaderTokenId: unit.leaderTokenId ?? null,
-          squadId: (unit as unknown as { squadId?: string | null }).squadId ?? null,
-          doctrine: unit.doctrine ?? null,
-          envelop: unit.envelop ?? null,
-          armyInitiative:
-            typeof army.initiative === "number" &&
-            Number.isFinite(army.initiative)
-              ? army.initiative
-              : null,
-        });
-      }
-    }
-    return out;
+    return this.armies().flatMap((army) => army.units.map((unit) => unitViewFor(army, unit)));
   }
 
   /** §12 RulesContext from the current store (scene grid + walls + docs). */
@@ -333,7 +315,7 @@ export class TurnChannel {
     // the units' strength into pool models deterministically.
     let init = initial;
     let deployRanges: Array<[string, [number, number] | null]> | null = null;
-    if (!init) {
+    if (!init && !await this.bridge.latestCheckpoint()) {
       // P01: formations deploy one model per scene square, so the per-model rules the
       // sim applies on top (threat, flanking at the scene's scale) read a layout the
       // grid actually describes. A scene with no usable grid distance falls back to the
@@ -418,7 +400,7 @@ export class TurnChannel {
               )
                 ? "simultaneous"
                 : "stepwise"),
-          );
+          ).catch((e: unknown) => this.turnError(e));
         return;
       case "advance":
         void this.advance();
@@ -513,7 +495,10 @@ export class TurnChannel {
     this.engine = step.state; // "resolution": order ops now rejected phase_locked
     this.broadcastPhase();
     this.resolving = true;
+    this.lastError = null;
+    let delivery: { version: number; users: Set<string> } | undefined;
     try {
+      if (this.beforeTurnWork) await this.beforeTurnWork();
       const ctx = this.rulesCtx();
       // M07 — hero-authored stats are the authoritative combat inputs (G §4.12). Units
       // with a bound leader actor fight from the tactical derivation, not the legion
@@ -548,7 +533,10 @@ export class TurnChannel {
         { type: "sim.resolved" },
         this.now(),
       ).state;
-      await this.broadcastSimTurn(result, units);
+      this.broadcastPhase("applying");
+      if (this.beforeTurnWork) await this.beforeTurnWork();
+      delivery = { version: result.toVersion, users: new Set() };
+      await this.broadcastSimTurn(result, units, delivery.users);
     } catch (e) {
       // §5A/§12: resolution failed (e.g. CPU limit) — the bridge already
       // restored its checkpoint; reopen orders with the same turn so the GM
@@ -564,11 +552,11 @@ export class TurnChannel {
           seed: this.engine.seed,
         };
       }
-      this.lastError = e instanceof Error ? e.message : String(e);
+      this.turnError(e);
     } finally {
       this.resolving = false;
     }
-    this.broadcastPhase(); // "report" (or "orders" again after a failure)
+    this.broadcastPhase(undefined, delivery); // "report" (or "orders" again after a failure)
   }
 
   /**
@@ -1081,6 +1069,7 @@ export class TurnChannel {
   private async broadcastSimTurn(
     result: SimResolveResult,
     units: UnitView[],
+    recipients: Set<string>,
   ): Promise<void> {
     const { userBitmap } = await this.visibilityMaps(units);
     const factions = this.factions();
@@ -1104,6 +1093,7 @@ export class TurnChannel {
           },
           (u) => u.id === user.id,
         );
+        recipients.add(user.id);
         this.host.broadcastSim(
           {
             kind: "turn.report",
@@ -1135,6 +1125,7 @@ export class TurnChannel {
         },
         (u) => u.id === user.id,
       );
+      recipients.add(user.id);
       let report = projectedReports.get(key);
       if (!report) {
         const unitVisible = (unitId: DocId): boolean => {
@@ -1335,7 +1326,15 @@ export class TurnChannel {
     );
   }
 
-  private broadcastPhase(): void {
+  private turnError(error: unknown) {
+    this.lastError = error instanceof Error ? error.message : String(error);
+    this.onError?.(this.lastError);
+  }
+
+  private broadcastPhase(
+    progress?: "applying",
+    delivery?: { version: number; users: ReadonlySet<string> },
+  ): void {
     if (this.engine.phase === "idle") return;
     if (this.engine.phase === "orders") this.lastTurnDocId = this.engine.turnId;
     const paused = this.engine.phase === "paused";
@@ -1344,17 +1343,23 @@ export class TurnChannel {
       (this.engine.phase === "orders" && this.engine.mode === "realtime");
     const phase: TurnPhase =
       this.engine.phase === "paused" ? "orders" : this.engine.phase;
-    this.host.broadcastSim({
+    const message: TurnPhaseMsg = {
       kind: "turn.phase",
       turnId: this.engine.turnId,
-      phase,
+      phase: progress === "applying" ? "resolution" : phase,
+      ...(progress ? { progress } : {}),
       deadlineMs: this.engine.phase === "orders" ? this.engine.deadline : null,
       readyUsers:
         this.engine.phase === "orders" ? [...this.engine.readyUsers] : [],
       ...(realtime
         ? { mode: "realtime" as const, paused, simHz: this.rtConfig().simHz }
         : {}),
-    });
+    };
+    if (phase === "report" && !progress && delivery?.users.size) {
+      const result = { sceneId: this.sceneId, version: delivery.version };
+      this.host.broadcastSim({ ...message, result }, (u) => delivery.users.has(u.id));
+      this.host.broadcastSim(message, (u) => !delivery.users.has(u.id));
+    } else this.host.broadcastSim(message);
   }
 }
 

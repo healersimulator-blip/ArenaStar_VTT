@@ -5,7 +5,7 @@
 import "fake-indexeddb/auto";
 import { describe, expect, test } from "vitest";
 import { HostSync, gmSessionUser, type HostEvents } from "../../src/host/sync";
-import type { SceneDocument } from "../../src/core/documents";
+import type { SceneDocument, TokenDocument } from "../../src/core/documents";
 import { AssetServer, wireManifestToStore } from "../../src/host/assets";
 import { ClientSync, type ClientEvents } from "../../src/client/sync";
 import { AssetCache, AssetFetcher, type AssetCacheBackend } from "../../src/client/assets";
@@ -125,11 +125,117 @@ describe("assets over the wire (§7)", () => {
     expect(await cache.has(hash)).toBe(true);
 
     const second = await h.addPeer("joiner-b", cache);
-    const sentBefore = second.pair.b.stats.channels.ops.sentMessages; // hello only
+    const sentBefore = second.pair.b.stats.channels.assets.sentMessages;
     const bytes = await second.fetcher.request(hash); // must come from cache
     expect(bytes.length).toBe(800);
-    expect(second.pair.b.stats.channels.ops.sentMessages).toBe(sentBefore); // no asset.get
+    expect(second.pair.b.stats.channels.assets.sentMessages).toBe(sentBefore); // no asset.get
   });
+
+  test("5,000 token references stream once per unique hash, even beyond the host's initial burst", async () => {
+    const h = await setup("w-loop-token-scale");
+    const ids = await Promise.all(
+      Array.from(
+        { length: 26 },
+        async (_, index) =>
+          (
+            await h.server.import(
+              new Uint8Array([index, 0x89, 0x50, 0x4e, 0x47]),
+              `portrait-${index}.png`,
+              "image/png",
+            )
+          ).hash,
+      ),
+    );
+    const tokens = Array.from({ length: 5_000 }, (_, index): TokenDocument => ({
+      _id: `token-${index}`,
+      type: "token",
+      name: "Trooper",
+      ownership: { default: 2 },
+      flags: {},
+      system: {},
+      x: (index % 100) * 25,
+      y: Math.floor(index / 100) * 25,
+      width: 25,
+      height: 25,
+      rotation: 0,
+      img: ids[index % ids.length] ?? "",
+      hidden: false,
+      disposition: "neutral",
+      vision: false,
+      light: { radius: 0, color: "#fff", alpha: 0 },
+    }));
+    const scene: SceneDocument = {
+      _id: "portrait-scale",
+      type: "scene",
+      name: "Portrait scale",
+      ownership: { default: 2 },
+      flags: {},
+      system: {},
+      active: true,
+      img: null,
+      width: 2_500,
+      height: 1_250,
+      darkness: 0,
+      grid: {
+        type: "square",
+        size: 25,
+        distance: 5,
+        units: "ft",
+        diagonals: "555",
+        hexLayout: "oddQ",
+      },
+      tokens,
+      walls: [],
+      lights: [],
+      sounds: [],
+      tiles: [],
+      drawings: [],
+      templates: [],
+      notes: [],
+    };
+    expect(
+      h.host.commitSystem([{ kind: "create", coll: "scenes", data: scene }]).ok,
+    ).toBe(true);
+
+    for (const cold of [true, false]) {
+      const cache = await AssetCache.open(); // new IDB handle and a completely new in-memory fetcher
+      const name = cold ? "cold" : "warm";
+      const peer = await h.addPeer(name, cache);
+      try {
+        const visible =
+          peer.client.store.get("scenes", scene._id)?.tokens ?? [];
+        expect(visible).toHaveLength(5_000);
+        const chunks: Array<[string, number]> = [];
+        peer.bus.on("asset", (msg) =>
+          chunks.push([msg.assetId, msg.bytes.length]),
+        );
+        const before = peer.pair.b.stats.channels.assets.sentMessages;
+        const art = await Promise.all(
+          visible.map((token) => peer.fetcher.request(token.img, "scene")),
+        );
+        expect(art.every((bytes) => bytes.length === 5)).toBe(true);
+        expect(peer.pair.b.stats.channels.assets.sentMessages - before).toBe(
+          cold ? ids.length : 0,
+        );
+        expect(chunks.sort()).toEqual(
+          cold ? ids.map((id) => [id, 5]).sort() : [],
+        );
+        if (cold)
+          await expect
+            .poll(async () =>
+              (await Promise.all(ids.map((id) => cache.has(id)))).every(
+                Boolean,
+              ),
+            )
+            .toBe(true);
+      } finally {
+        peer.fetcher.close();
+        cache.close();
+        peer.client.close();
+        h.host.removeSession(`peer-${name}`);
+      }
+    }
+  }, 20_000);
 
   test("wire resume: asset.get with a non-zero offset restarts there", async () => {
     const h = await setup("w-loop-c");

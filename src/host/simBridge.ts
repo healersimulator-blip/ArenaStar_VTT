@@ -5,6 +5,7 @@
  * and implements host-restart resume (§8A: load latest checkpoint, re-run a
  * turn that was mid-resolution — determinism makes the re-run identical).
  */
+import { SimPositionRangeError } from "../core/sim";
 import type { IDBPDatabase } from "idb";
 import type { RulesContext, UnitView } from "../core/rules";
 import type { OrderQueue } from "../core/strategic";
@@ -121,6 +122,7 @@ export class SimBridge {
         this.opts.cpuLimitMs,
       );
     } catch (e) {
+      if (e instanceof SimPositionRangeError) throw e; // The runner kept its last pool/version.
       // restore-from-checkpoint best effort: the runner may be terminated
       try {
         await this.start(ctx, units);

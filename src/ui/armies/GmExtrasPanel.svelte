@@ -42,6 +42,8 @@
   let adjustDelta = $state(-2);
   // campaign (§5A turn controls via sim.control)
   let phase = $state("idle");
+  let progress = $state<import("../../core/turnProgress").TurnProgressStage | null>(null);
+  let turnError = $state("");
   // §5A realtime clock state (from turn.phase frames)
   let rtMode = $state(false);
   let rtPaused = $state(false);
@@ -179,6 +181,9 @@
   onMount(() => {
     const offSnapshot = bus.on("snapshot", refresh);
     const offOps = bus.on("ops", refresh);
+    progress = client.turnProgress;
+    const offProgress = bus.on("turnProgress", (p) => { progress = p; });
+    const offError = bus.on("turnError", (message) => { turnError = message; });
     const offPhase = bus.on("turnPhase", (m) => {
       phase = m.phase;
       rtMode = m.mode === "realtime";
@@ -190,6 +195,8 @@
       offSnapshot();
       offOps();
       offPhase();
+      offProgress();
+      offError();
     };
   });
 </script>
@@ -201,7 +208,7 @@
       id="campaign-start"
       type="button"
       disabled={phase !== "idle"}
-      onclick={() => client.simControl("start", { mode: "stepwise" })}
+      onclick={() => { turnError = ""; client.simControl("start", { mode: "stepwise" }); }}
     >
       Start (stepwise)
     </button>
@@ -209,7 +216,7 @@
       id="campaign-start-rt"
       type="button"
       disabled={phase !== "idle"}
-      onclick={() => client.simControl("start", { mode: "realtime" })}
+      onclick={() => { turnError = ""; client.simControl("start", { mode: "realtime" }); }}
     >
       Start (realtime)
     </button>
@@ -247,10 +254,10 @@
     <button
       data-campaign-advance
       type="button"
-      disabled={phase !== "orders"}
-      onclick={() => client.simControl("advance")}
+      disabled={phase !== "orders" || progress !== null}
+      onclick={() => { turnError = ""; client.simControl("advance"); }}
     >
-      Advance turn
+      {progress === "closing" ? "Closing orders…" : "Advance turn"}
     </button>
     <button
       data-campaign-next
@@ -264,6 +271,8 @@
       phase: {phase}{rtMode ? (rtPaused ? " (paused)" : ` (realtime ${rtHz} Hz)`) : ""}
     </span>
   </div>
+
+  {#if turnError}<p role="alert" class="turn-error">{turnError}</p>{/if}
 
   <h4>View</h4>
   <label class="row">
@@ -402,6 +411,7 @@
 
 
 <style>
+  .turn-error { color: #ffb8a3; font-size: .85rem; overflow-wrap: anywhere; }
   .gmextras {
     display: flex;
     flex-direction: column;

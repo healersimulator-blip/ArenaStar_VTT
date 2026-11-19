@@ -1,6 +1,10 @@
 import "fake-indexeddb/auto";
-import { describe, expect, test } from "vitest";
-import { AssetCache, AssetFetcher, type AssetCacheBackend } from "../../src/client/assets";
+import { describe, expect, test, vi } from "vitest";
+import {
+  AssetCache,
+  AssetFetcher,
+  type AssetCacheBackend,
+} from "../../src/client/assets";
 import type { AssetChunkMsg } from "../../src/core/messages";
 
 /** In-memory backend (Cache API/IDB logic is covered by the real impls). */
@@ -47,6 +51,29 @@ describe("AssetCache (§7 client cache)", () => {
     expect(hit?.mime).toBe("image/png");
     expect(await a.get("unknown")).toBeUndefined();
     expect(await a.has("unknown")).toBe(false);
+    a.close();
+    b.close();
+  });
+
+  test("client boot and fetch still work when both persistent backends are blocked", async () => {
+    vi.stubGlobal("caches", {
+      open: async () => {
+        throw new Error("Cache Storage blocked");
+      },
+    });
+    vi.stubGlobal("indexedDB", undefined);
+    try {
+      const cache = await AssetCache.open();
+      const fetcher = new AssetFetcher({
+        cache,
+        request: (id) => fetcher.onChunk(chunk(id, 0, 1, 1, true)),
+      });
+      expect(await fetcher.request("no-storage")).toHaveLength(1);
+      expect(await cache.has("no-storage")).toBe(false);
+      fetcher.close();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -156,5 +183,159 @@ describe("AssetFetcher (§7 lazy fetch, dedup, resume)", () => {
     expect(requests).toEqual(["d"]);
     fetcher.onChunk(chunk("d", 0, 2, 2, true));
     expect(await p1).toEqual(await p2);
+  });
+
+  test("a cache read/quota failure still plays, with in-session reuse", async () => {
+    const requests: string[] = [];
+    const cache = AssetCache.withBackend({
+      async get() {
+        throw new Error("Storage unavailable");
+      },
+      async put() {
+        throw new DOMException(
+          "No room for more portraits",
+          "QuotaExceededError",
+        );
+      },
+      async has() {
+        throw new Error("Storage unavailable");
+      },
+    });
+    const fetcher = new AssetFetcher({
+      cache,
+      request: (id) => {
+        requests.push(id);
+        fetcher.onChunk(chunk(id, 0, 4, 4, true));
+      },
+    });
+    const art = await fetcher.request("portrait");
+    expect(art).toHaveLength(4);
+    await settle(); // put really rejected; an unhandled rejection would fail this test run
+    expect(await fetcher.request("portrait")).toBe(art);
+    expect(requests).toEqual(["portrait"]);
+    expect(await cache.has("portrait")).toBe(false);
+    fetcher.close();
+  });
+
+  test("evicts compressed hot bytes by byte budget without evicting disk data", async () => {
+    const backend = new MemBackend();
+    for (const id of ["first", "second", "third"])
+      await backend.put(id, new Uint8Array(6 * 1024 * 1024), "image/png");
+    const get = vi.spyOn(backend, "get");
+    const request = vi.fn();
+    const fetcher = new AssetFetcher({
+      cache: AssetCache.withBackend(backend),
+      request,
+    });
+    await fetcher.request("first");
+    await fetcher.request("second");
+    await fetcher.request("first"); // make first the newest, so second is evicted
+    await fetcher.request("third");
+    await fetcher.request("first");
+    await fetcher.request("second");
+    expect(get.mock.calls.map(([id]) => id)).toEqual([
+      "first",
+      "second",
+      "third",
+      "second",
+    ]);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  test("one outstanding persistence write still shares the answer after hot eviction", async () => {
+    const backend = new MemBackend();
+    for (let i = 0; i < 128; i++)
+      await backend.put(`hot-${i}`, new Uint8Array([1]), "image/png");
+    let finishWrite!: () => void;
+    const write = new Promise<void>((done) => {
+      finishWrite = done;
+    });
+    const put = vi
+      .spyOn(backend, "put")
+      .mockImplementationOnce(async (id, bytes, mime) => {
+        await write;
+        backend.map.set(id, { bytes, mime });
+      });
+    const request = vi.fn((id: string) =>
+      fetcher.onChunk(chunk(id, 0, 4, 4, true)),
+    );
+    const fetcher = new AssetFetcher({
+      cache: AssetCache.withBackend(backend),
+      request,
+    });
+    const first = await fetcher.request("write-pending"); // doesn't wait for disk
+    expect(put).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 128; i++) await fetcher.request(`hot-${i}`);
+    expect(await fetcher.request("write-pending")).toBe(first);
+    expect(request).toHaveBeenCalledTimes(1);
+    finishWrite();
+    await settle();
+    expect(await backend.has("write-pending")).toBe(true);
+  });
+
+  test("a paused transport queues new work and resumes partial bytes after authentication", async () => {
+    const requests: Array<[string, number]> = [];
+    const fetcher = new AssetFetcher({
+      cache: AssetCache.withBackend(new MemBackend()),
+      request: (id, _priority, offset) => requests.push([id, offset]),
+    });
+    const partial = fetcher.request("partial");
+    await settle();
+    fetcher.onChunk(chunk("partial", 0, 2, 1, false));
+    fetcher.pause();
+    const queued = fetcher.request("queued");
+    await settle();
+    expect(requests).toEqual([["partial", 0]]);
+    fetcher.resume();
+    expect(requests).toEqual([
+      ["partial", 0],
+      ["queued", 0],
+      ["partial", 1],
+    ]);
+    fetcher.onChunk(chunk("partial", 1, 2, 1, true));
+    fetcher.onChunk(chunk("queued", 0, 1, 1, true));
+    expect(await partial).toEqual(new Uint8Array([0, 1]));
+    expect(await queued).toHaveLength(1);
+    fetcher.close();
+  });
+
+  test("does not persist a short final chunk as a complete hash", async () => {
+    const cache = AssetCache.withBackend(new MemBackend());
+    const fetcher = new AssetFetcher({
+      cache,
+      request: (id) => fetcher.onChunk(chunk(id, 0, 10, 5, true)),
+    });
+    await expect(fetcher.request("short")).rejects.toThrow("incomplete asset");
+    expect(await cache.has("short")).toBe(false);
+  });
+
+  test("paced cold requests let urgent scene media move ahead of queued preloads", async () => {
+    vi.useFakeTimers();
+    const sent: string[] = [];
+    const fetcher = new AssetFetcher({
+      cache: AssetCache.withBackend(new MemBackend()),
+      request: (id) => {
+        sent.push(id);
+        fetcher.onChunk(chunk(id, 0, 1, 1, true));
+      },
+    });
+    try {
+      const low = Array.from({ length: 22 }, (_, i) =>
+        fetcher.request(`preload-${i}`, "preload"),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sent).toHaveLength(16);
+      const urgent = fetcher.request("preload-21", "scene");
+      expect(urgent).toBe(low[21]); // already queued; promote, don't send another request
+      await vi.advanceTimersByTimeAsync(125);
+      expect(sent[16]).toBe("preload-21");
+      await vi.advanceTimersByTimeAsync(1_000);
+      await Promise.all(low);
+      expect(sent).toHaveLength(22);
+      expect(new Set(sent).size).toBe(22);
+    } finally {
+      fetcher.close();
+      vi.useRealTimers();
+    }
   });
 });

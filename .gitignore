@@ -1,6 +1,7 @@
 node_modules/
 dist/
 test-results/
+/.local/strategic-pg/
 .pw-browsers/
 
 # §12 generated system-package artifacts (build step: pnpm build:systems)

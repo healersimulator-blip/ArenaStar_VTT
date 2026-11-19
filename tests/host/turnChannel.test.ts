@@ -15,6 +15,7 @@ import { allocModel, createModelPool } from "../../src/sim/pool";
 import { encodeSimSnapshot, snapshotFromPool } from "../../src/sim/codec";
 import type { ArmyDocument, FactionDocument, UnitDocument } from "../../src/core/strategic";
 import type { SceneDocument, UserDocument } from "../../src/core/documents";
+import type { Transport } from "../../src/core/net";
 import type { TurnPhaseMsg, TurnReportMsg } from "../../src/core/messages";
 
 // Unique world per setup(): §8A checkpoints live in the shared test IDB and a
@@ -186,6 +187,7 @@ async function setup(gridDistance = 5): Promise<{
   gm: ClientSync;
   gmBus: EventBus<ClientEvents>;
   player: ClientSync;
+  playerTransport: Transport;
   playerBus: EventBus<ClientEvents>;
   playerPhases: TurnPhaseMsg[];
   playerReports: TurnReportMsg[];
@@ -298,7 +300,7 @@ async function setup(gridDistance = 5): Promise<{
   const gmPhases: TurnPhaseMsg[] = [];
   gmBus.on("turnPhase", (m) => gmPhases.push(m));
 
-  return { host, channel, gm, gmBus, player, playerBus, playerPhases, playerReports, gmPhases };
+  return { host, channel, gm, gmBus, player, playerTransport: plT, playerBus, playerPhases, playerReports, gmPhases };
 }
 
 describe("turn channel (§5A steps 1–5, host⇄client e2e in Node)", () => {
@@ -427,17 +429,31 @@ describe("turn channel (§5A steps 1–5, host⇄client e2e in Node)", () => {
 
   test("GM advance: resolve → one ops envelope + per-faction delta/report + phases", async () => {
     const ctx = await setup();
-    const { channel, gm, player, playerPhases, playerReports } = ctx;
+    const { channel, gm, player, playerPhases, playerReports, playerTransport } = ctx;
     await channel.start("stepwise", initialPoolBytes());
     await flush();
 
+    player.requestSimSnapshot();
+    await expect.poll(() => player.simReplicaVersion).toBe(0);
+    // Reliable delivery on the sim lane can lag the independent ops lane.
+    const deliver = playerTransport.onMessage;
+    const delayedSim: Uint8Array[] = [];
+    playerTransport.onMessage = (lane, bytes) => {
+      if (lane === "sim") delayedSim.push(bytes);
+      else deliver?.(lane, bytes);
+    };
     gm.simControl("advance");
-    await expect.poll(() => channel.phase, { timeout: 5000 }).toBe("report");
-    await flush();
+    await expect.poll(() => playerPhases.at(-1)?.phase, { timeout: 5000 }).toBe("report");
+    expect(player.simReplicaVersion).toBe(0);
+    expect(player.turnProgress).toBe("applying");
+    playerTransport.onMessage = deliver;
+    for (const bytes of delayedSim) deliver?.("sim", bytes);
 
-    // phases seen by the player: orders → resolution → report
-    const phases = playerPhases.map((p) => p.phase);
-    expect(phases).toEqual(["orders", "resolution", "report"]);
+    // Applying is a nonblocking presentation step within resolution, not a new phase.
+    const phases = playerPhases.map((p) => p.progress ?? p.phase);
+    expect(phases).toEqual(["orders", "resolution", "applying", "report"]);
+    expect(player.turnProgress).toBeNull();
+    expect(gm.turnProgress).toBeNull();
 
     // ── ops envelope: blue suffered attrition (strength 10→9), turn doc → report
     const gmArmy = gm.store.get("armies", "army-blue");

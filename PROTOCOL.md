@@ -845,7 +845,13 @@ interface EphemeralMsg {
 
 Lazy fetch by sha256 with resume; priority queue order scene > ui > audio > preload (§7).
 Requires an authenticated session; per-session rate bucket burst 20 @ 10/s (§16, D-041).
-Per-peer bandwidth cap and 32 KB default chunks (D-040).
+Per-peer bandwidth cap and 32 KB default chunks (D-040), including one-chunk assets.
+
+Player clients coalesce loads by hash across tokens, scenery and FX. They consult browser
+storage before queueing a miss and pace misses/resumes below the host's rate limit; the
+manifest does not instruct clients to prefetch its contents. The GM's own imported assets
+are read from the local world store. Byte reuse does not grant permission to display an
+asset or to download it from the host.
 
 ```ts
 type AssetPriority = "scene" | "ui" | "audio" | "preload";
@@ -1352,7 +1358,12 @@ interface SimSnapshotMsg {
 Phase announcements with deadline and ready list (§5A, §13). Realtime
 campaigns add the optional clock fields: `mode:"realtime"` marks the campaign,
 `paused:true` rides the orders-phase frame sent on pause (the phase itself
-stays `"orders"`), and `simHz` reports the current tick rate.
+stays `"orders"`), and `simHz` reports the current tick rate. In a stepwise or
+simultaneous turn, the optional `progress: "applying"` is a presentation hint
+within `resolution`, not a new authoritative phase. The final `report` announces
+`result` only to recipients of the corresponding simulation update; the ops
+lane may overtake the sim lane, so those clients wait for that version before
+clearing the progress indicator. Older readers use the phase as usual.
 
 ```ts
 interface TurnPhaseMsg {
@@ -1361,6 +1372,8 @@ interface TurnPhaseMsg {
   phase: "orders" | "resolution" | "report";
   deadlineMs: number | null;
   readyUsers: UserId[];
+  progress?: "applying";
+  result?: { sceneId: DocId; version: number };
   mode?: "stepwise" | "realtime";
   paused?: boolean;
   simHz?: number;
@@ -1760,3 +1773,51 @@ There are no new messages and no capability gate:
 - Clients that predate D-438 draw `radial` and `vision` as `roof` and ignore the other fields.
 - Roof state is computed per client from its own replica and live sight, and is never replicated.
 - Roofs never write explored fog.
+
+
+## Hosted Strategic Room (opt-in)
+
+This is **not** the peer protocol above. The independent [room service](services/strategic-room/README.md)
+uses JSON on a single WebSocket at `/api/strategic/socket`, with the exact subprotocol
+`arenastar.strategic.v1.pos2` and a configured origin. HTTPS carries all bulk views. [`protocol.ts`](src/core/strategicRoom/protocol.ts)
+defines the wire fields and strict command allowlist. Browser-hosted games always continue to use the legacy
+snapshot/delta format and their existing boot and join paths.
+
+| Lane | Message or endpoint | Contract |
+|---|---|---|
+| WS | `challenge` → `auth` → `welcome` | Sign the JSON array `[subprotocol, room, origin, nonce]` with the browser identity. Previously bound keys resume; first use needs a one-time, 30-minute invite for a fixed slot. Welcome supplies a short-lived bearer and a fresh random view epoch. The bearer is only for the same-origin HTTPS endpoints and is invalid when that socket closes, expires, is superseded or is revoked. |
+| WS | `head` | Authoritative `turnId`, phase, deadline and published `version`, with a per-socket `seq` and epoch. No private order traffic is inferred from sequence gaps. Loss of continuity forces rejoin. A phase-only head doesn't require a battlefield reload. |
+| WS | `orders.submit` → private `receipt` | Up to 10 distinct unit edits, with `null` meaning clear. `expectedRevision` starts at 0 per commander per turn. An accepted transaction advances it once and returns the private durable receipt. After authorization, retry identity is checked before phase/revision. The same key with different content is rejected; a transient `busy` or `unavailable` can be retried with the identical command. |
+| WS | `turn.close`, `turn.next`, `turn.retry`, `member.revoke` | GM only. Manual close is a barrier on the same lane as submissions. A timed order must reach the server before the deadline; receipt may follow it. Retry uses the same frozen inputs. No generic intent, script, asset or direct model mutation routes. |
+| HTTPS | `GET /api/strategic/view` | Bearer, current membership and authority generation. A complete baseline includes the epoch/version, scoped unit markers, assigned units and private orders. Report publication is durable before notice; clients retain the previous map while applying a newer authorized baseline. |
+| HTTPS | `GET /api/strategic/region?x=&y=&version=&cursor=` | User-selected 120-ft tile, not a permission grant. Returns up to 1,200 authorized live models as a full tile (`fromCursor: null`) or `enter/update/leave` against that session's matching tile and cursor. Client checks epoch, battle version and cursor; a mismatch requires a new baseline. Stable model IDs are opaque, not global pool slots. |
+| HTTPS | `GET /api/strategic/report?version=&page=` | Zero-based pages of at most 40 private, typed unit outcome rows. The commander gets only own rows for that publication; the GM gets all. Rechecked against current membership. Raw dice, report events and archive bytes aren't player HTTP endpoints. |
+
+**View format (D-489).** With `Accept: application/vnd.arenastar.strategic-view.v1`, a browser that can
+inflate gzip receives `u32be` private-metadata length, `u32be` marker-table length, the private UTF-8
+metadata JSON, then one gzip member of the visible marker cohort. The inflated member starts with a
+`u32be` count, then that many back-to-back big-endian `f64` x/y pairs (16 bytes each), then a JSON
+`[ids, names, factionIndexes]` label table of equal length; faction indexes select `factions` from the
+metadata. The members are projected once per publication from already-authorized GM or faction cohorts,
+so the table holds no private orders, units, tokens, fog or report data. Responses are
+`Cache-Control: no-store, no-transform`, `Vary: Accept`, and bounded to 64 KiB of metadata and 4 MiB of
+wire or inflated body. A plain `GET` without that `Accept` still returns the complete JSON baseline for
+older clients. A client may send a marker-table length of zero only to reuse an exactly matching
+epoch/version/role/faction baseline it still holds, and must refetch in full otherwise. Missing or
+malformed frames, a mismatched count/label length or an unknown faction index are a fatal decode
+error, not a partial view.
+
+Frames received by the room are capped at 16 KiB with bounded paths (12 waypoints), a 1,024-command
+lane, and per-session command and byte limits. The room can shed blocked receivers and cap authorized
+HTTP concurrency; `409` is a changed view and `429` is retryable view pressure. A fresh epoch discards
+old delivery cursors. `no-store` applies to private HTTP data. A lost WebSocket receipt is recoverable by
+retry on resume, not by replaying a world operation log.
+
+**Position formats:** Legacy checkpoints and sim frames use tags `1` (delta) / `2` (snapshot) and signed
+16-bit positions, −2,048 through 2,047.9375. Codec 2 uses tags `3` / `4`, a `wide` field instead of
+`cols`, and signed 32-bit position codes at the same 1/16 precision (Float32-safe −524,288 through
+524,287.9375). The hosted scenario limits each axis's span to 4,096 ft. Codec 2 is explicit in the
+hosted subprotocol and stored checkpoint export and must be selected by any wide reader; no wide
+pool bytes are sent to the hosted browser's battlefield replica or to the legacy browser wire. Invalid
+coordinates are refused rather than clipped. Previously clipped checkpoint geometry can't be recovered
+by changing its tag.

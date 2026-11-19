@@ -8,7 +8,10 @@ import {
   diffPools,
   encodeSimDelta,
   encodeSimSnapshot,
+  mergeSimDeltas,
   poolFromSnapshot,
+  projectSimDelta,
+  projectSimSnapshot,
   snapshotFromPool,
 } from "../../src/sim/codec";
 import { allocModel, clonePool, createModelPool, hashPool } from "../../src/sim/pool";
@@ -221,4 +224,61 @@ describe("SimDelta codec (§5A)", () => {
     expect(live.sys["ref"]?.[0]).toBe(-3);
     expect(live.sys["fort"]?.[1]).toBe(-128);
   });
+});
+
+describe("wide position codec", () => {
+  test("wide positions keep both signs and precision, including in projected and incremental frames", () => {
+    const pool = createModelPool(3, SYS);
+    allocModel(pool, { id: 1, unitIdx: 0, x: -4100.0625, y: 5000.125, hp: 10 });
+    allocModel(pool, { id: 2, unitIdx: 0, x: 524287.9375, y: -524288, hp: 20 });
+    const bytes = encodeSimSnapshot(snapshotFromPool(pool, SCENE, 0, SYS, 2), 20);
+    expect(() => decodeSimSnapshot(bytes)).toThrow(/codec mismatch/);
+    const { snapshot, maxHpMax: hp } = decodeSimSnapshot(bytes, 2);
+    const replica = poolFromSnapshot(snapshot, hp, SYS);
+    expect([...replica.x]).toEqual([-4100.0625, 524287.9375]);
+    expect([...replica.y]).toEqual([5000.125, -524288]);
+    const masked = poolFromSnapshot(projectSimSnapshot(snapshot, (i) => i === 0, SYS), hp, SYS);
+    expect([...masked.x]).toEqual([-4100.0625, 0]);
+    expect(masked.status[1]).toBe(ModelStatus.hidden);
+    const next = clonePool(pool);
+    next.y[0] = -6250;
+    const deltaBytes = encodeSimDelta(diffPools(pool, next, SCENE, SYS, 2), 20);
+    expect(() => decodeSimDelta(deltaBytes)).toThrow(/codec mismatch/);
+    const { delta } = decodeSimDelta(deltaBytes, 2);
+    applySimDelta(replica, projectSimDelta(delta, (i) => i === 0, SYS), 20, SYS);
+    expect([...replica.y]).toEqual([-6250, -524288]);
+  });
+
+  test("fails explicitly for unrepresentable positions or an incompatible snapshot", () => {
+    const pool = createModelPool(2);
+    allocModel(pool, { id: 1, unitIdx: 0, x: -2048, y: 2047.9375 });
+    const legacy = encodeSimSnapshot(snapshotFromPool(pool, SCENE, 0, {}), 1);
+    expect(decodeSimSnapshot(legacy).snapshot.codecVersion).toBeUndefined();
+    expect(() => decodeSimSnapshot(legacy, 2)).toThrow(/codec mismatch/);
+    pool.x[0] = -2048.0625;
+    expect(() => snapshotFromPool(pool, SCENE, 0, {})).toThrow(/map range/);
+    pool.x[0] = 524288;
+    expect(() => snapshotFromPool(pool, SCENE, 0, {}, 2)).toThrow(/map range/);
+    pool.x[0] = NaN;
+    expect(() => snapshotFromPool(pool, SCENE, 0, {}, 2)).toThrow(/map range/);
+  });
+});
+
+
+test("coalesces wide changes without misreading overlapping legacy codes", () => {
+  const a = filledPool(2), b = clonePool(a), c = clonePool(b);
+  b.x[0] = -4200.125;
+  c.x[0] = -4200.125;
+  c.y[0] = 3500.0625;
+  const d0 = { ...diffPools(a, b, SCENE, SYS, 2), fromVersion: 0, toVersion: 1 };
+  const d1 = { ...diffPools(b, c, SCENE, SYS, 2), fromVersion: 1, toVersion: 2 };
+  const merged = mergeSimDeltas([d0, d1], SYS);
+  expect(merged?.codecVersion).toBe(2);
+  if (!merged) throw new Error("Expected coalesced delta");
+  applySimDelta(a, decodeSimDelta(encodeSimDelta(merged, 4), 2).delta, 4, SYS);
+  expect(a.x[0]).toBe(-4200.125);
+  expect(a.y[0]).toBe(3500.0625);
+  const legacyPool = filledPool(2);
+  const legacy = { ...diffPools(legacyPool, legacyPool, SCENE, SYS), fromVersion: 2, toVersion: 3 };
+  expect(mergeSimDeltas([d0, d1, legacy], SYS)).toBeNull();
 });

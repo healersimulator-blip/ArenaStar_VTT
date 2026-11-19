@@ -20,6 +20,8 @@ export interface CheckpointRecord {
   turnNumber: number;
   tick: number | null;
   pool: Uint8Array;
+  /** Legacy worlds omit this. Wide replay readers must be explicitly selected. */
+  codecVersion?: 2;
   maxHpMax: number;
   version: number;
   unitStats: Record<string, Json>;

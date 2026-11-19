@@ -112,6 +112,8 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { DEFAULT_UI_PREFERENCES, uiThemeVariables } from "../core/uiTheme";
   import AppearancePanel from "../ui/settings/AppearancePanel.svelte";
   import WorkspacePicker from "../ui/workspace/WorkspacePicker.svelte";
+  import TurnProgress from "../ui/sim/TurnProgress.svelte";
+  import type { TurnProgressStage } from "../core/turnProgress";
   import WorkspaceChrome from "../ui/workspace/WorkspaceChrome.svelte";
   import WorkspaceTabs from "../ui/workspace/WorkspaceTabs.svelte";
   import WorkspaceDirectory, { type DirectoryItem } from "../ui/workspace/WorkspaceDirectory.svelte";
@@ -374,6 +376,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   const rows: Array<[string, boolean]> = Object.entries(caps);
   const ready = rows.filter(([, ok]) => ok).length;
 
+  let turnProgress = $state<TurnProgressStage | null>(null);
   let canvasHost = $state<HTMLDivElement | null>(null);
   /** T01 token context menu: opened by a right-CLICK on a token (right-drag pans). */
   let tokenMenu = $state<{ x: number; y: number; tokenId: string } | null>(
@@ -1208,8 +1211,8 @@ const WALL_PICK_RADIUS = 12;
   const tileImages = new TileImageCache(async (hash) => {
     const owner = app;
     if (!owner) throw new Error("world closed");
-    return { bytes: await owner.gm.fetcher.request(hash, "scene"),
-      mime: owner.gm.client.store.world.assetManifest[hash]?.mime ?? "image/png" };
+    const mime = owner.gm.client.store.world.assetManifest[hash]?.mime ?? "image/png";
+    return { bytes: await owner.gm.fetcher.request(hash, "scene", mime), mime };
   });
   /** G-21 (D-444): floor tracing reads tile art alpha through the shared texture cache. */
   async function floorArtMask(image: string): Promise<RoofArtMask | null> {
@@ -4153,8 +4156,7 @@ const WALL_PICK_RADIUS = 12;
           // Live FX are imminent current-scene work; do not leave their lead window behind
           // lower-priority UI/background transfers. Draft preview keeps its separate UI lane.
           fetchAsset: (hash) => current.gm.fetcher.request(hash, "scene"),
-          // The GM is the server in this serverless VTT: manifest assets originate in this
-          // tab's own store even though its player path deliberately fetches over loopback.
+          // The GM already owns imported media; local disk reads aren't an audience delivery.
           isAssetLocal: (hash) => current.gm.client.store.world.assetManifest[hash] !== undefined,
           sceneId: () => viewAsPlayer === null ? (activeScene()?._id ?? null) : null,
           onError: (message) => console.warn(message),
@@ -5043,6 +5045,8 @@ const WALL_PICK_RADIUS = 12;
               );
           }
         });
+        turnProgress = current.gm.client.turnProgress;
+        current.gm.bus.on("turnProgress", (stage) => { turnProgress = stage; });
         current.gm.bus.on("turnPhase", (m) => {
           lastTurnPhase = m.phase;
         });
@@ -5852,6 +5856,7 @@ const WALL_PICK_RADIUS = 12;
             sessionOpen = false;
           }}
         >
+          <TurnProgress stage={turnProgress} board />
           {#if travelPanel && (travelPanel.rows.length > 0 || travelPanel.committed)}
             {@const routeScene = activeScene()}
             {@const routePts = routeScene

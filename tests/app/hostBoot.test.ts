@@ -130,7 +130,7 @@ describe("GM-tab boot (§2/§8/§14)", () => {
     await second.close();
   });
 
-  test("map import → manifest + scene.img; bytes stream back over the loopback (§7)", async () => {
+  test("GM reads local imported artwork on a cold boot and a reopen without self-streaming", async () => {
     const app = await boot();
     await settle();
     const mapBytes = pngHeaderForTest(2000, 1500, [1, 2, 3, 4]);
@@ -142,10 +142,20 @@ describe("GM-tab boot (§2/§8/§14)", () => {
     await settle();
     expect(app.gm.client.store.get("scenes", DEFAULT_SCENE_ID)?.img).toBe(hash);
 
-    const bytes = await app.gm.fetcher.request(hash, "scene"); // loopback fetch
-    expect([...bytes]).toEqual([...mapBytes]);
-    await app.persister.drain();
+    const root = app.root;
+    let chunks = 0;
+    app.gm.bus.on("asset", () => { chunks++; });
+    expect(await app.gm.fetcher.request(hash, "scene")).toEqual(mapBytes);
+    expect(await app.gm.cache.has(hash)).toBe(false); // no second persistent copy of the GM's source
+    expect(chunks).toBe(0);
     await app.close();
+
+    const reopened = await bootHostApp({ worldId: app.worldId, root, db: app.db, codec: new FakeCodec() });
+    try {
+      reopened.gm.bus.on("asset", () => { chunks++; });
+      expect(await reopened.gm.fetcher.request(hash, "scene")).toEqual(mapBytes);
+      expect(chunks).toBe(0);
+    } finally { await reopened.close(); }
   });
 });
 

@@ -15510,3 +15510,46 @@ over fake DataChannels (logical `sentMessages` vs wire envelopes, `sentBytes` ac
 that grows either deflates under the cap or rides the chunked asset pipeline, never one big frame.
 Two-device acceptances are now required for player-affecting slices, which is how both D-487 and
 this slice found their defects.
+
+## D-489 — Hosted strategic view: private JSON prefix + one gzip marker member (2026-11-18)
+
+**Decision.** `GET /api/strategic/view` keeps the exact JSON `Baseline` as its default body and adds
+an opt-in representation for browsers that can inflate gzip: `Accept:
+application/vnd.arenastar.strategic-view.v1`, answered with `u32be` metadata length, `u32be` marker
+length, private UTF-8 metadata JSON, then one gzip member. The member inflates to a `u32be` marker
+count, that many big-endian `f64` x/y pairs, and a JSON `[ids, names, factionIndexes]` label table.
+`Vary: Accept`, `Cache-Control: no-store, no-transform`, 64 KiB metadata and 4 MiB wire/inflated
+limits.
+
+**Why.** With 5,000 visible markers the complete JSON baseline was ~418 KiB and the driver of the
+500-commander apply budget; publishing the marker cohort once per publication as a compact table cut
+the default body to ~41–50 KiB p95 in loopback runs. gzip of the marker array as objects measured
+slower to apply than columns (4.0 s vs 2.9 s at 50 k models in earlier runs), and JSON numbers cost
+both bytes and parse time, so positions travel as raw doubles: the projected centroids stay
+bit-identical and no formatting/parsing path can round them. The private metadata (own units, orders,
+report scope) never goes inside the marker member, so no cache or reuse path can expose another
+faction's or commander's data.
+
+**Reuse and fences.** A zero marker length is only a hint that an exactly matching
+epoch/version/role/faction baseline is still held; the decoder otherwise retries without the hint. A
+new publication or reconnect always fetches the full table. Superseded fetches and stale receipts
+stay fenced by the same authority generation and publication head checks. Clients without
+`DecompressionStream` keep the JSON body. Unknown faction indexes, count/label mismatches and
+oversized frames are fatal, never partial views.
+
+**Honest limits.** Harness apply is publication notice to parsed view, not browser paint, and loopback
+runs on a shared 2-vCPU sandbox are diagnostics, not capacity qualification. The local p95 improved
+from 3.93/3.87 s (JSON, 10 units/commander, 362–428 KiB bodies) to 1.91/1.55 s with 41–47 KiB bodies
+and 3.43/2.69 s close-to-notice, with zero failed views; 5 units/commander with 50 reconnects reached
+1.22 s. Two later 50-turn runs on a fresh database, both shapes, held every turn under 0.72 s
+notice-to-parse with no refusals or failed views — but each decoded only 10 sampled clients, because
+500 clients decoding inside one process on two CPUs spend about 1.8 s of wall time on a codec that
+costs ~3 ms per client. That sampling is honest bookkeeping for a generator artifact, not evidence that
+a browser paints in budget; no browser has been measured, and TLS/WAN, slow clients and real soak
+remain open gates. The hosted Chromium case now also samples frame intervals while it drags, zooms and
+pans the 50k field: pan/zoom and post-apply redraw are 16.7 ms p95 (60 Hz), while the apply window
+itself shows a 77–123 ms long task that a CPU profile attributes to Chromium's accessibility-tree
+walk, not to app code. That window is reported as `diagnostic-non-qualifying`; the ≤33 ms frame gate
+is asserted only with `STRATEGIC_FRAME_PROFILE=reference`. `tests/strategicRoom/viewWire.test.ts`,
+`tsc`, the full Vitest suite (6,049 passed / 13 skipped), the two Chromium hosted cases and scoped
+ESLint pass on this change.

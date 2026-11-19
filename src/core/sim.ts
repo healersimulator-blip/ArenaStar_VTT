@@ -62,8 +62,22 @@ export interface Checkpoint {
 
 // ─── SimDelta / SimSnapshot (§5A) ─────────────────────────────────────────────
 
-/** Quantization: positions int16 in grid units / 16. */
+/** Position precision is 1/16 world unit in both the legacy and wide codecs. */
 export const SIM_POS_QUANTUM = 16;
+export type SimCodecVersion = 1 | 2;
+/** A refused coordinate write, distinct from a crashed or terminated worker. */
+export class SimPositionRangeError extends RangeError {}
+
+/** The wide limit preserves the full position quantum in the Float32 simulation pool. */
+export const SIM_POSITION_LIMITS: Readonly<Record<SimCodecVersion, readonly [number, number]>> = {
+  1: [-2048, 2048 - 1 / SIM_POS_QUANTUM],
+  2: [-524288, 524288 - 1 / SIM_POS_QUANTUM],
+};
+
+export function simPositionFits(value: number, codecVersion: SimCodecVersion): boolean {
+  const [min, max] = SIM_POSITION_LIMITS[codecVersion];
+  return Number.isFinite(value) && value >= min && value <= max;
+}
 /** Quantization: hp uint16 in permille of hpMax. */
 export const SIM_HP_PERMILLE = 1000;
 /** Full column resend threshold (§5A). */
@@ -81,6 +95,8 @@ export interface SimColumnDelta {
 
 /** Decoded incremental frame; clients apply strictly sequentially, requesting sim.snapshot on a gap (§5A). */
 export interface SimDelta {
+  /** Omitted on legacy frames; wide must be negotiated before decode. */
+  codecVersion?: 2;
   sceneId: DocId;
   fromVersion: number;
   toVersion: number;
@@ -91,6 +107,8 @@ export interface SimDelta {
 
 /** Decoded full-state frame: all columns (§5A). */
 export interface SimSnapshot {
+  /** Omitted on legacy frames; wide must be negotiated before decode. */
+  codecVersion?: 2;
   sceneId: DocId;
   version: number;
   count: number;

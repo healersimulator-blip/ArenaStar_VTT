@@ -96,6 +96,8 @@
     type PF1eQuickbarEntry, type PF1eQuickbarRunResult } from "../ui/quickbar";
   import { MacroHotbar, macroResultText, macroSelectionOf, macroSlots, runMacroSlot } from "../ui/macros";
   import WorkspacePicker from "../ui/workspace/WorkspacePicker.svelte";
+  import TurnProgress from "../ui/sim/TurnProgress.svelte";
+  import type { TurnProgressStage } from "../core/turnProgress";
   import WorkspaceChrome from "../ui/workspace/WorkspaceChrome.svelte";
   import WorkspaceTabs from "../ui/workspace/WorkspaceTabs.svelte";
   import WorkspaceDirectory from "../ui/workspace/WorkspaceDirectory.svelte";
@@ -385,6 +387,7 @@
     );
   }
 
+  let turnProgress = $state<TurnProgressStage | null>(null);
   let canvasHost = $state<HTMLDivElement | null>(null);
   let canvasError = $state<string | null>(null);
   /** §2.2 item 3 (G-20/D-261): the tokens this player has selected — an apply verb's target. */
@@ -564,8 +567,10 @@
   const tileImages = new TileImageCache(async (hash) => {
     const owner = app;
     if (!owner?.fetcher || !owner.client) throw new Error("session unavailable");
-    return { bytes: await owner.fetcher.request(hash, "scene"),
-      mime: owner.client.store.world.assetManifest[hash]?.mime ?? "image/png" };
+    const manifest = owner.client.store.world.assetManifest;
+    if (!Object.hasOwn(manifest, hash)) throw new Error("art not available to this viewer");
+    const mime = manifest[hash]?.mime ?? "image/png";
+    return { bytes: await owner.fetcher.request(hash, "scene", mime), mime };
   });
   /** `$state.raw`: the stage is a Pixi object graph — assignment must re-run the
    *  effects that read it, but it must never be deep-proxied. */
@@ -1409,6 +1414,14 @@
     // default `"gm"`, every bar it was handed under `"all"`/`"hover"` (the stage hides a
     // `"hover"` bar until the pointer arrives).
     const tokens = scene?.tokens ?? [];
+    // A local cache hit is not a grant. Only draw imported art in the latest projected
+    // manifest. The ops and manifest can arrive separately when a token is revealed.
+    const manifest = client.store.world.assetManifest;
+    const artFor = <T extends { img: string }>(doc: T): T =>
+      !doc.img || /^(https?:|data:|blob:)/.test(doc.img) || Object.hasOwn(manifest, doc.img)
+        ? doc : { ...doc, img: "" };
+    const canvasTokens = tokens.map(artFor);
+    const tiles = (scene?.tiles ?? []).map(artFor);
     const hpBarMode = tokenHpBarsOf(worldSettingsFrom(client.store.getAll("settings")));
     view.setTokenHpBarMode(hpBarMode === "hover" ? "hover" : "all");
     view.setTokenImageLoader(tileImages.load);
@@ -1418,7 +1431,7 @@
     view.setStairMarkers(markers);
     onStairs = standingOnStairs(scene, markers);
     view.syncTokens(
-      tokens,
+      canvasTokens,
       undefined,
       tokenHpBarsMap(tokens, {
         actors: client.store.getAll("actors") as ActorDocument[],
@@ -1454,21 +1467,26 @@
     // D-438: roofs open for this player's own vision tokens (the selection narrows them).
     // G-19 (D-443): floors seen beneath this one show through its art, dimmed by depth (art only).
     // G-20 (D-445): tokens down there that the host says this player's tokens see through the openings.
-    const replicaTokens = scene ? (client.store.get("scenes", scene._id) as SceneDocument | undefined)?.tokens ?? [] : [];
-    const belowDocs = (presentation?.belowTokens ?? []).flatMap(({ id }) => replicaTokens.filter((x) => x._id === id));
+    const below = presentation?.belowTokens ?? [];
+    const replicaTokens = scene && below.length ? client.store.get("scenes", scene._id)?.tokens ?? [] : [];
+    const replicaById = new Map(replicaTokens.map((t) => [t._id, t]));
+    const belowDocs = below.flatMap(({ id }) => {
+      const token = replicaById.get(id);
+      return token ? [token] : [];
+    });
     // D-452: labelled like the tokens on this floor, from this player's own token.
     const belowLabels = scene ? lowerTokenLabels(scene, belowDocs, cueOptions) : new Map<string, string>();
-    const lowerTokens = (presentation?.belowTokens ?? []).flatMap(({ id, depth }) => {
-      const t = replicaTokens.find((x) => x._id === id);
-      return t ? [{ id, img: t.img, x: t.x, y: t.y, width: t.width, height: t.height, rotation: t.rotation ?? 0, depth, label: belowLabels.get(id) ?? null }] : [];
+    const lowerTokens = below.flatMap(({ id, depth }) => {
+      const t = replicaById.get(id);
+      return t ? [{ id, img: artFor(t).img, x: t.x, y: t.y, width: t.width, height: t.height, rotation: t.rotation ?? 0, depth, label: belowLabels.get(id) ?? null }] : [];
     });
     view.setLowerFloors(lowerFloorDepths(presentation), backgroundDepth(presentation) || null, lowerTokens);
-    view.getTilesLayer({ loadTexture: tileImages.load }).sync(scene?.tiles ?? [],
+    view.getTilesLayer({ loadTexture: tileImages.load }).sync(tiles,
       scene ? roofViewerTokens(scene, client.user, client.store.getAll("actors") as readonly ActorDocument[], selection).map(tokenRect) : [],
       scene?.regions ?? [], scene ? { gridSize: scene.grid.size } : {});
-    tileImages.retain([...(scene?.tiles ?? []).map((tile) => tile.img), ...(scene?.tokens ?? []).map((token) => token.img), ...lowerTokens.map((t) => t.img)]);
+    tileImages.retain([...tiles.map((tile) => tile.img), ...canvasTokens.map((token) => token.img), ...lowerTokens.map((t) => t.img)]);
     const fetcher = current.fetcher;
-    if (fetcher) sceneBackground.sync(scene?.img ?? null, client.store.world.assetManifest,
+    if (fetcher) sceneBackground.sync(scene?.img ?? null, manifest,
       (hash, priority) => fetcher.request(hash, priority), view, scene);
     // D-465: players see the scene's grid as the GM configured it — hex grids too, the scene's
     // line colour/opacity, and no stale lines after a switch to a gridless scene.
@@ -1513,7 +1531,7 @@
             // An imminent cue is current-scene work, not background/UI prefetch. Giving it
             // the scene lane prevents a newly joined viewer's remaining asset queue from
             // spending the whole FX lead window before this request is even served.
-            fetchAsset: (hash) => fetcher.request(hash, "scene"),
+            fetchAsset: (hash) => fetcher.request(hash, "scene", client.store.world.assetManifest[hash]?.mime),
             sceneId: () => activeScene()?._id ?? null,
             onError: (message) => console.warn(message),
             // A player whose device could not show a cue on time is told so here;
@@ -1920,9 +1938,12 @@
           if (changedFloor || (visible && selection.some((id) => !visible.has(id)))) { controller?.clearSelection(); selection = []; }
           refresh();
         });
+        turnProgress = client.turnProgress;
+        client.bus.on("turnProgress", (stage) => { turnProgress = stage; });
         client.bus.on("welcome", refresh);
         client.bus.on("snapshot", refresh);
         client.bus.on("ops", refresh);
+        client.bus.on("assetManifest", refresh);
         client.bus.on("ephemeral", (message) => {
           if (message.t !== "image" || message.from === client.user?.id) return;
           const assetId = message.data.assetId;
@@ -2236,6 +2257,7 @@
           tabindex="-1"
           onpointerdown={() => { closeHexMenu(); closeTokenMenu(); }}
         >
+          <TurnProgress stage={phase === "live" ? turnProgress : null} board />
           {#if measurePreview}
             {@const pts = measurePreview.points.map(measurePoint)}
             {@const tail = pts.at(-1) ?? null}

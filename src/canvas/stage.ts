@@ -599,7 +599,9 @@ export async function createStage(options: StageOptions): Promise<Stage> {
   // G-05 (D-429): Canvas2D has no inverse stencil masks; the layer then hides whole tokens.
   const rendererName = String((app.renderer as { name?: unknown }).name ?? "unknown");
   const overhead = new FauxOverheadLayer(tokenLayer, rendererName !== "canvas");
-  const tokenArtwork = new Map<string, { image: string | null; revision: number; sprite: Sprite | null }>();
+  const tokenArtwork = new Map<string, {
+    image: string | null; revision: number; sprite: Sprite | null; loading: boolean;
+  }>();
   /** G-32 (D-440), D-452: label text and artwork scale per token (sparse). */
   let elevationCueMap: ReadonlyMap<string, ElevationCue> = new Map();
   const applyElevationCue = (id: string, view: Container, width: number, height: number): void => {
@@ -1026,7 +1028,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           view.addChild(body, label);
           tokenLayer.addChild(view);
           tokenViews.set(token._id, view);
-          tokenArtwork.set(token._id, { image: null, revision: 0, sprite: null });
+          tokenArtwork.set(token._id, { image: null, revision: 0, sprite: null, loading: false });
         }
         const artwork = tokenArtwork.get(token._id);
         if (artwork && artwork.image !== token.img) {
@@ -1034,23 +1036,25 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           artwork.sprite?.destroy({ texture: false, textureSource: false });
           artwork.sprite = null;
           artwork.image = token.img;
+          artwork.loading = false;
         }
-        if (artwork && token.img && tokenImageLoader && !artwork.sprite) {
-          const image = token.img;
-          const revision = ++artwork.revision;
-          void tokenImageLoader(image).then((texture) => {
-            const current = tokenArtwork.get(token._id);
-            const currentView = tokenViews.get(token._id);
-            if (!texture || !current || current.revision !== revision || current.image !== image || !currentView) return;
+        if (artwork && token.img && tokenImageLoader && !artwork.sprite && !artwork.loading) {
+          const id = token._id, revision = ++artwork.revision;
+          artwork.loading = true;
+          void tokenImageLoader(token.img).then((texture) => {
+            const currentView = tokenViews.get(id), bounds = tokenRects.get(id);
+            if (!texture || tokenArtwork.get(id) !== artwork || artwork.revision !== revision || !currentView || !bounds) return;
             const sprite = new Sprite(texture);
             sprite.label = "tokenArtwork";
             sprite.anchor.set(0.5);
-            current.sprite = sprite;
+            artwork.sprite = sprite;
             currentView.addChildAt(sprite, Math.min(1, currentView.children.length));
-            sprite.position.set(token.width / 2, token.height / 2);
-            sprite.width = token.width; sprite.height = token.height;
-            applyElevationCue(token._id, currentView, token.width, token.height);
-          }).catch(() => undefined);
+            sprite.position.set(bounds.width / 2, bounds.height / 2);
+            sprite.rotation = (tokenRotation.get(id)?.sample(performance.now()) ?? 0) * Math.PI / 180;
+            applyElevationCue(id, currentView, bounds.width, bounds.height);
+          }).catch(() => undefined).finally(() => {
+            if (artwork.revision === revision) artwork.loading = false;
+          });
         }
         let animation = tokenMovement.get(token._id);
         if (!animation) { animation = new MovementAnimation(); tokenMovement.set(token._id, animation); }
@@ -1079,8 +1083,7 @@ export async function createStage(options: StageOptions): Promise<Stage> {
             .rect(0, 0, rect.width, rect.height)
             .fill({ color: 0x2b3138, alpha: 0.9 })
             .stroke({ width: 2, color: dispositionColor(token.disposition) });
-          // Native tokens have no artwork renderer yet: a facing marker makes rotation
-          // visible. Only the body turns; labels, selection, badges and HP stay upright.
+          // The placeholder has a facing marker; labels, selection, badges and HP stay upright.
           const cx = rect.width / 2, cy = rect.height / 2;
           const marker = Math.min(8, rect.width / 6, rect.height / 6);
           body.moveTo(cx, 2).lineTo(cx + marker, 2 + marker * 1.5)
@@ -1122,8 +1125,6 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           tokenTargets.delete(id);
           tokenMovement.delete(id);
           tokenRotation.delete(id);
-          const artwork = tokenArtwork.get(id);
-          artwork?.sprite?.destroy({ texture: false, textureSource: false });
           tokenArtwork.delete(id);
           tokenRects.delete(id);
           badgeChips.delete(id);

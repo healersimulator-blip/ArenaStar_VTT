@@ -114,6 +114,13 @@ async function tryVerify(
   }
 }
 
+/** Verify a signature over an application-specific, domain-separated challenge. */
+export async function verifyText(publicKeyHex: string, sigHex: string, text: string): Promise<boolean> {
+  const data = new TextEncoder().encode(text);
+  if (publicKeyHex.length === 64) return tryVerify("Ed25519", publicKeyHex, sigHex, data);
+  return tryVerify("ECDSA_P256", publicKeyHex, sigHex, data);
+}
+
 /** Verify a hello's signature against its claimed pubkey (both algorithms). */
 export async function verifyHello(hello: HelloMsg, roomId: string): Promise<boolean> {
   if (!/^[0-9a-f]+$/i.test(hello.pubkey) || hello.pubkey.length < 32) return false;
