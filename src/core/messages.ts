@@ -1006,6 +1006,10 @@ export interface TurnPhaseMsg {
   phase: TurnPhase;
   deadlineMs: number | null;
   readyUsers: UserId[];
+  /** Still delivering the committed turn; older readers see the resolution phase. */
+  progress?: "applying";
+  /** Report phase only, scoped to a recipient of this sim result. The sim lane can lag ops. */
+  result?: { sceneId: DocId; version: number };
   /** §5A realtime: present when the campaign runs in realtime mode. */
   mode?: TurnMode;
   /** §5A realtime: true while paused (phase reports "orders"). */

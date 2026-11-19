@@ -146,3 +146,26 @@ describe("AssetTransfer (§7 chunked transfer)", () => {
     expect(t.queued).toBe(0);
   });
 });
+
+test("one-chunk portraits still consume bandwidth, and idle peers cannot stall the queue", async () => {
+  const { sent, transfer } = makeSource({ a: 1_000, b: 1_000, c: 1_000 });
+  let now = 0;
+  const delays: number[] = [];
+  const t = transfer({
+    chunkSize: 1_000,
+    bytesPerSecond: 1_000,
+    now: () => now,
+    sleep: async (ms) => {
+      delays.push(ms);
+      now += ms;
+    },
+  });
+  t.request("idle-peer", "a", 0, "scene");
+  await settle();
+  now = 2_000; // the idle peer's old rate gate is in the past
+  t.request("active-peer", "b", 0, "scene");
+  t.request("active-peer", "c", 0, "scene");
+  await settle();
+  expect(sent.map(({ chunk }) => chunk.assetId)).toEqual(["a", "b", "c"]);
+  expect(delays).toEqual([1_000]);
+});

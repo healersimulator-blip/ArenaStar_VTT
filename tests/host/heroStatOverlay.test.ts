@@ -206,6 +206,7 @@ describe("advance/write-back (M07/D-229)", () => {
       worldId: "w1",
       db: {} as unknown,
       started: true,
+      latestCheckpoint: async () => null,
       start: async () => 0,
       refresh: (_ctx: unknown, units: Array<{ id: string; stats: Record<string, number> }>) => {
         refreshedUnits = units;
@@ -423,6 +424,7 @@ describe("movement-during-turn reconciliation (M08/D-229)", () => {
       worldId: "w1",
       db: {} as unknown,
       started: true,
+      latestCheckpoint: async () => null,
       start: async () => 0,
       refresh: () => {},
       resolveTurn: () =>

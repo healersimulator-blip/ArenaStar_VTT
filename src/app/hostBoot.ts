@@ -21,6 +21,19 @@ import { packageContentHash } from "../packages/packageHash";
 import { CloudBackupController } from "../storage/cloud/cloudBackup";
 import { acquireWorldLock } from "../storage/worldLock";
 import { SaveCoordinator, SaveWork } from "../storage/saveCoordinator";
+/** Let the local loopback phase render before an inline resolver or projection runs. */
+function allowProgressPaint(): Promise<void> {
+  if (typeof requestAnimationFrame !== "function" || document.visibilityState === "hidden") return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let frame = 0;
+    // A tab can become hidden between callbacks. Never wait for an inactive renderer.
+    const timer = setTimeout(() => { cancelAnimationFrame(frame); resolve(); }, 80);
+    frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => { clearTimeout(timer); resolve(); });
+    });
+  });
+}
+
 /**
  * §2/§14 GM-tab composition root — boots Host Core + Client Core in one
  * browser tab over the InMemoryTransport loopback.
@@ -1054,7 +1067,10 @@ async function bootHostAppLocked(
   });
   let campaignSeed = 0;
   for (const ch of meta.worldId) campaignSeed = (campaignSeed * 31 + ch.charCodeAt(0)) >>> 0;
+  const gmBus = createEventBus<ClientEvents>();
   const channel = new TurnChannel({
+    onError: (message) => gmBus.emit("turnError", message),
+    beforeTurnWork: allowProgressPaint,
     host,
     store,
     bridge,
@@ -1066,7 +1082,6 @@ async function bootHostAppLocked(
 
   const pair = createTransportPair();
   host.addSession("gm", pair.a, gmSessionUser(GM_USER_ID));
-  const gmBus = createEventBus<ClientEvents>();
   const gmClient = new ClientSync({
     transport: pair.b,
     bus: gmBus,
@@ -1084,10 +1099,13 @@ async function bootHostAppLocked(
   });
   await new Promise<void>((resolve) => setTimeout(resolve, 0)); // loopback settle
 
-  // ── GM asset fetch path (same wire as players) ──────────────────────────────
+  // The UI uses the same fetcher as players, but the GM already stores imported media
+  // in this world. Read those blobs in-place instead of streaming them to itself or
+  // duplicating them in the player cache. Published artifacts still use ClientSync.
   const cache = await AssetCache.open();
   const fetcher = new AssetFetcher({
     cache,
+    readLocal: (assetId) => assets.get(assetId),
     request: (assetId, priority, offset) => gmClient.requestAsset(assetId, priority, offset),
   });
   gmBus.on("asset", (msg) => fetcher.onChunk(msg));
@@ -1621,6 +1639,8 @@ async function bootHostAppLocked(
       channel.stop();
       removeLifecycle();
       runner.terminate();
+      fetcher.close();
+      cache.close();
       gmClient.close();
       host.removeSession("gm");
       host.dispose();

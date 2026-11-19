@@ -1217,6 +1217,7 @@ export class HostSync {
     if (!session) return;
     this.cancelImageUpload(session);
     this.sessions.delete(peerId);
+    this.transfer?.dropPeer(peerId);
     for (const viewers of this.fxViewers.values()) viewers.peers.delete(peerId);
     try {
       session.transport.close();

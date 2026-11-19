@@ -1180,6 +1180,7 @@ export interface PlayerSurface {
   transport(): string;
   /** Asset chunks received over the wire this session (§7 cache-hit tests). */
   assetChunks(): number;
+  assetBytes(): number;
   /** §5A strategic replica readbacks (null before the first snapshot). */
   simCount(): number | null;
   simVersion(): number;
@@ -1910,6 +1911,7 @@ function playerSurface(playerApp: PlayerApp): PlayerSurface {
     connState: () => playerApp.session.stats.state,
     transport: () => playerApp.transportKind,
     assetChunks: () => playerApp.assetChunks,
+    assetBytes: () => playerApp.assetBytes,
     simCount: () => client()?.simReplica?.count ?? null,
     simVersion: () => client()?.simReplicaVersion ?? -1,
     simInfo: () => client()?.simInfo ?? null,
@@ -5871,7 +5873,7 @@ async function runMassBattleAcceptance(
     // green V05 exists to rule out.
     const snap = deploySnapshot(units, factions, PF1E_MODEL_SCHEMA, {
       laneX: (k) => (k === 0 ? 1000 : 1200),
-      laneY: (j) => 1000 + j * 250,
+      laneY: (j) => 1000 + j * 100,
     });
     const ranges = new Map<string, readonly [number, number] | null>(
       snap.ranges as Array<[string, readonly [number, number] | null]>,

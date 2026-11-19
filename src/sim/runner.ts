@@ -10,7 +10,7 @@ import type { ArmyView, RulesContext, RulesModule, UnitView } from "../core/rule
 import type { OrderQueue, ModelPool } from "../core/strategic";
 import { ModelStatus } from "../core/strategic";
 import type { DocId, UnitId } from "../core/ids";
-import type { SimEvent, TurnReport } from "../core/sim";
+import type { SimCodecVersion, SimEvent, TurnReport } from "../core/sim";
 import { createMassBattleBasic } from "../packages/massBattleBasic";
 import { BulkDice } from "../dice/bulk";
 import { distributionsToJson, summarizeDistributions } from "../core/reportSummary";
@@ -29,6 +29,7 @@ export interface SimLoadRequest {
   sceneId: DocId;
   /** RulesModule-declared sys columns (must match the pool snapshot). */
   sys: SysSchema;
+  codecVersion?: SimCodecVersion;
   /** §12 package source — blob-URL-imported + validated inside the worker. */
   rulesSource?: string | undefined;
   /** Resume state; omitted → fresh empty pool (version 0). */
@@ -107,17 +108,19 @@ export class SimRunnerCore {
   private pool: ModelPool;
   private version = 0;
   private readonly sys: SysSchema;
+  private readonly codecVersion: SimCodecVersion;
   private rules: RulesModule;
   private ctx: RulesContext;
   private units: UnitView[];
 
   constructor(load: SimLoadRequest, rules?: RulesModule) {
     this.sys = load.sys;
+    this.codecVersion = load.codecVersion ?? 1;
     this.ctx = load.ctx;
     this.units = load.units;
     this.rules = rules ?? createMassBattleBasic();
     if (load.snapshot) {
-      const { snapshot } = decodeSimSnapshot(load.snapshot.bytes);
+      const { snapshot } = decodeSimSnapshot(load.snapshot.bytes, this.codecVersion);
       this.pool = poolFromSnapshot(snapshot, load.snapshot.maxHpMax, this.sys);
       this.version = load.snapshot.version;
     } else {
@@ -165,14 +168,14 @@ export class SimRunnerCore {
   snapshotBytes(): { bytes: Uint8Array; maxHpMax: number; version: number } {
     const maxHpMax = maxHpMaxOf(this.pool);
     return {
-      bytes: encodeSimSnapshot(snapshotFromPool(this.pool, "", this.version, this.sys), maxHpMax),
+      bytes: encodeSimSnapshot(snapshotFromPool(this.pool, "", this.version, this.sys, this.codecVersion), maxHpMax),
       maxHpMax,
       version: this.version,
     };
   }
 
   hash(): string {
-    return canonicalPoolHash(this.pool, this.sys);
+    return canonicalPoolHash(this.pool, this.sys, this.codecVersion);
   }
 
   /** Contiguous live modelRanges per unit slot, recomputed after compaction. */
@@ -214,17 +217,35 @@ export class SimRunnerCore {
     return out;
   }
 
+  /** Refuse invalid writes without advertising a partially mutated pool/version. */
+  private withPoolRollback<T>(step: (prev: ModelPool) => T): T {
+    const previous = clonePool(this.pool);
+    const version = this.version;
+    const rollbackRules = this.rules.prepareRollback?.();
+    try {
+      return step(previous);
+    } catch (error) {
+      this.pool = previous;
+      this.version = version;
+      rollbackRules?.();
+      throw error;
+    }
+  }
+
   resolve(req: SimResolveRequest): SimResolveResult {
+    return this.withPoolRollback((previous) => this.resolveTurn(req, previous));
+  }
+
+  private resolveTurn(req: SimResolveRequest, prevPool: ModelPool): SimResolveResult {
     const before = this.statSnapshots();
     const events: SimEvent[] = [];
     const orders = new Map<string, OrderQueue>(req.orders);
-    const prevPool = clonePool(this.pool);
     // Checkpoint N is written at advance (freeze) — the §8A resume/replay base
     const freezeBytes = encodeSimSnapshot(
-      snapshotFromPool(prevPool, "", this.version, this.sys),
+      snapshotFromPool(prevPool, "", this.version, this.sys, this.codecVersion),
       maxHpMaxOf(prevPool),
     );
-    const freezeHash = canonicalPoolHash(prevPool, this.sys);
+    const freezeHash = canonicalPoolHash(prevPool, this.sys, this.codecVersion);
 
     // §11: BulkDice keeps the §5A PRNG contract (raw draws identical to the
     // previous XoshiroPRNG) and adds the compile-cached formula evaluator.
@@ -250,32 +271,33 @@ export class SimRunnerCore {
 
     const fromVersion = this.version;
     this.version += 1;
-    const delta = diffPools(prevPool, this.pool, "", this.sys);
+    const delta = diffPools(prevPool, this.pool, "", this.sys, this.codecVersion);
     delta.sceneId = "";
     delta.fromVersion = fromVersion;
     delta.toVersion = this.version;
     const deltaMaxHpMax = maxHpMaxOf(this.pool);
     const checkpointMaxHpMax = deltaMaxHpMax;
-    const poolHash = canonicalPoolHash(this.pool, this.sys);
+    const poolHash = canonicalPoolHash(this.pool, this.sys, this.codecVersion);
 
-    // M12 (D-224): reconcile campaign analytics into the TurnReport at the one
-    // place a turn is actually resolved. The PF1e module's analytics collector
-    // lives on this runner's rules instance for the instance's whole lifetime,
-    // so forecast() inside resolve() *is* the real generateReport() call the
-    // checklist demanded (not a collector-only fixture): per-army cumulative
-    // totals — attacks/hits/hit-rate/net damage/kills/losses — replicate with
-    // every report. The faction projection in broadcastSimTurn keeps each
-    // player's copy to armies they can see; the GM gets the full sheet.
+    // M12 (D-224): publish cumulative per-army analytics from this runner's
+    // rules instance. Group the units once instead of scanning every unit for
+    // each army. Each forecast gets units in their original resolver order.
     let analytics: Record<string, Record<string, import("../core/documents").Json>> | undefined;
     if (this.rules.forecast && this.ctx.armies.length > 0) {
       analytics = {};
+      const byArmy = new Map<string, UnitView[]>();
+      for (const unit of this.units) {
+        let members = byArmy.get(unit.armyId);
+        if (!members) byArmy.set(unit.armyId, members = []);
+        members.push(unit);
+      }
       for (const army of this.ctx.armies) {
         const view: ArmyView = {
           id: army._id,
           factionId: army.factionId,
           name: army.name,
           supply: army.supply,
-          units: this.units.filter((u) => u.armyId === army._id),
+          units: byArmy.get(army._id) ?? [],
         };
         analytics[army._id] = this.rules.forecast(this.ctx, view).data;
       }
@@ -312,7 +334,7 @@ export class SimRunnerCore {
       freezeMaxHpMax: maxHpMaxOf(prevPool),
       freezeHash,
       checkpointBytes: encodeSimSnapshot(
-        snapshotFromPool(this.pool, "", this.version, this.sys),
+        snapshotFromPool(this.pool, "", this.version, this.sys, this.codecVersion),
         checkpointMaxHpMax,
       ),
       checkpointMaxHpMax,
@@ -324,7 +346,10 @@ export class SimRunnerCore {
   }
 
   tick(req: SimTickRequest): SimTickResult {
-    const prevPool = clonePool(this.pool);
+    return this.withPoolRollback((previous) => this.tickOnce(req, previous));
+  }
+
+  private tickOnce(req: SimTickRequest, prevPool: ModelPool): SimTickResult {
     const orders = new Map<string, OrderQueue>(req.orders);
     const events: SimEvent[] = [];
     const tickFn = this.rules.tick;
@@ -343,7 +368,7 @@ export class SimRunnerCore {
     }
     const fromVersion = this.version;
     this.version += 1;
-    const delta = diffPools(prevPool, this.pool, "", this.sys);
+    const delta = diffPools(prevPool, this.pool, "", this.sys, this.codecVersion);
     delta.sceneId = "";
     delta.fromVersion = fromVersion;
     delta.toVersion = this.version;

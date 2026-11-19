@@ -3,12 +3,13 @@
  *
  * Wire form (payload after the [u8] MsgKind channel byte, §6.1):
  *   fflate(deflate) ∘ msgpack(header object) where each column's packed
- *   values ride as msgpack `bin`. Quantization per §5A: positions int16 in
- *   grid units / 16 (SIM_POS_QUANTUM), hp uint16 permille of hpMax
+ *   values ride as msgpack `bin`. Positions use legacy int16 or opt-in wide int32
+ *   at 1/16 world-unit precision, hp uint16 permille of hpMax
  *   (SIM_HP_PERMILLE), rot uint16 turn fractions of 2π. A column whose
  *   changed fraction exceeds SIM_FULL_RESEND_THRESHOLD is sent whole
  * (fullResend). sys columns pack per their declared ModelColumnType.
  */
+import { SimPositionRangeError } from "../core/sim";
 import { compressSync, decompressSync } from "fflate";
 import { decode, encode } from "@msgpack/msgpack";
 import { ModelStatus, type ModelPool } from "../core/strategic";
@@ -16,6 +17,8 @@ import {
   SIM_FULL_RESEND_THRESHOLD,
   SIM_HP_PERMILLE,
   SIM_POS_QUANTUM,
+  simPositionFits,
+  type SimCodecVersion,
   type SimDelta,
   type SimSnapshot,
   type SimColumnDelta,
@@ -28,7 +31,7 @@ const TAU = Math.PI * 2;
 type ColKind = "u32" | "i32" | "u16" | "i16" | "u8" | "i8" | "f32";
 
 /** Per-column wire element kind. Base columns fixed (§5A); sys by schema. */
-function colKind(name: string, sys: SysSchema): ColKind | null {
+function colKind(name: string, sys: SysSchema, codecVersion: SimCodecVersion): ColKind | null {
   switch (name) {
     case "id":
     case "unitIdx":
@@ -36,7 +39,7 @@ function colKind(name: string, sys: SysSchema): ColKind | null {
       return "u32";
     case "x":
     case "y":
-      return "i16"; // grid units × SIM_POS_QUANTUM
+      return codecVersion === 2 ? "i32" : "i16";
     case "rot":
       return "u16"; // turn = u16 / 65536 × 2π
     case "hp":
@@ -63,11 +66,14 @@ function colKind(name: string, sys: SysSchema): ColKind | null {
 const KIND_BYTES: Record<ColKind, number> = { u32: 4, i32: 4, u16: 2, i16: 2, u8: 1, i8: 1, f32: 4 };
 
 /** Quantized code for one element of a column (deterministic rounding). */
-function quantize(name: string, value: number, ctx: QuantCtx): number {
+function quantize(name: string, kind: ColKind, value: number, ctx: QuantCtx): number {
   switch (name) {
     case "x":
     case "y":
-      return clampInt(Math.round(value * SIM_POS_QUANTUM), -0x8000, 0x7fff);
+      if (!simPositionFits(value, kind === "i32" ? 2 : 1)) {
+        throw new SimPositionRangeError(`Simulation ${name} position ${value} is outside the ${kind === "i32" ? "wide" : "legacy"} map range`);
+      }
+      return Math.round(value * SIM_POS_QUANTUM);
     case "rot":
       return ((Math.round((value / TAU) * 0x10000) % 0x10000) + 0x10000) % 0x10000;
     case "hp":
@@ -106,7 +112,7 @@ interface QuantCtx {
 /** Encode one element: f32 columns as IEEE bits, others quantized. */
 function encodeCode(name: string, kind: ColKind, value: number, ctx: QuantCtx): number {
   if (kind === "f32") return numberToF32Bits(value);
-  return quantize(name, value, ctx);
+  return quantize(name, kind, value, ctx);
 }
 
 function clampInt(v: number, lo: number, hi: number): number {
@@ -242,11 +248,12 @@ export function diffPools(
   next: ModelPool,
   sceneId: string,
   sys: SysSchema,
+  codecVersion: SimCodecVersion = 1,
 ): SimDelta {
   const maxHpMax = poolMaxHpMax(next);
   const columns: SimColumnDelta[] = [];
   for (const name of columnNames(next)) {
-    const kind = colKind(name, sys);
+    const kind = colKind(name, sys, codecVersion);
     const src = columnValues(next, name);
     if (!kind || !src) continue;
     const prevCol = columnValues(prev, name);
@@ -285,7 +292,10 @@ export function diffPools(
       fullResend: full,
     });
   }
-  return { sceneId, fromVersion: 0, toVersion: 0, count: next.count, columns };
+  return {
+    sceneId, fromVersion: 0, toVersion: 0, count: next.count, columns,
+    ...(codecVersion === 2 ? { codecVersion } : {}),
+  };
 }
 
 interface WireColumn {
@@ -295,24 +305,25 @@ interface WireColumn {
   b: Uint8Array;
 }
 
-interface WireDelta {
-  t: 1;
+interface WireDeltaHeader {
   s: string;
   f: number;
   v: number;
   c: number;
   m: number;
-  cols: WireColumn[];
 }
 
-interface WireSnapshot {
-  t: 2;
+interface WireSnapshotHeader {
   s: string;
   v: number;
   c: number;
   m: number;
-  cols: WireColumn[];
 }
+
+// No `cols` on wide frames: old readers that didn't check the tag still fail
+// rather than interpreting four-byte positions as a different number of i16s.
+type WireDelta = WireDeltaHeader & ({ t: 1; cols: WireColumn[] } | { t: 3; wide: WireColumn[] });
+type WireSnapshot = WireSnapshotHeader & ({ t: 2; cols: WireColumn[] } | { t: 4; wide: WireColumn[] });
 
 /**
  * §5A realtime: merge strictly sequential SimDeltas (v0→v1, v1→v2, …) into
@@ -324,6 +335,8 @@ export function mergeSimDeltas(deltas: SimDelta[], sys: SysSchema): SimDelta | n
   const first = deltas[0];
   const last = deltas[deltas.length - 1];
   if (!first || !last) return null;
+  const codecVersion = first.codecVersion ?? 1;
+  if (deltas.some((d) => (d.codecVersion ?? 1) !== codecVersion)) return null;
   const count = last.count;
   const columns: SimColumnDelta[] = [];
   const names: string[] = [];
@@ -333,7 +346,7 @@ export function mergeSimDeltas(deltas: SimDelta[], sys: SysSchema): SimDelta | n
     }
   }
   for (const name of names) {
-    const kind = colKind(name, sys);
+    const kind = colKind(name, sys, codecVersion);
     if (!kind) continue;
     const latest = new Map<number, number>();
     for (const d of deltas) {
@@ -354,7 +367,7 @@ export function mergeSimDeltas(deltas: SimDelta[], sys: SysSchema): SimDelta | n
     }
     if (latest.size === 0) continue;
     const indices = [...latest.keys()].sort((a, b) => a - b);
-    const full = indices.length > count * SIM_FULL_RESEND_THRESHOLD;
+    const full = indices.length === count && indices[0] === 0 && indices[indices.length - 1] === count - 1;
     const runs: Array<readonly [number, number]> = [];
     for (const idx of indices) {
       const prevRun = runs[runs.length - 1];
@@ -373,6 +386,7 @@ export function mergeSimDeltas(deltas: SimDelta[], sys: SysSchema): SimDelta | n
     });
   }
   return {
+    ...(codecVersion === 2 ? { codecVersion } : {}),
     sceneId: last.sceneId,
     fromVersion: first.fromVersion,
     toVersion: last.toVersion,
@@ -383,35 +397,37 @@ export function mergeSimDeltas(deltas: SimDelta[], sys: SysSchema): SimDelta | n
 
 /** Compress a SimDelta to its wire payload (fflate ∘ msgpack). */
 export function encodeSimDelta(delta: SimDelta, maxHpMax: number): Uint8Array {
-  const wire: WireDelta = {
-    t: 1,
-    s: delta.sceneId,
-    f: delta.fromVersion,
-    v: delta.toVersion,
-    c: delta.count,
-    m: maxHpMax,
-    cols: delta.columns.map((c) => ({
-      n: c.column,
-      fr: c.fullResend || undefined,
-      r: c.fullResend ? undefined : c.runs.map((r) => [r[0], r[1]] as number[]),
-      b: c.values,
-    })),
+  const header = {
+    s: delta.sceneId, f: delta.fromVersion, v: delta.toVersion, c: delta.count, m: maxHpMax,
   };
+  const columns: WireColumn[] = delta.columns.map((c) => ({
+    n: c.column,
+    fr: c.fullResend || undefined,
+    r: c.fullResend ? undefined : c.runs.map(([start, len]) => [start, len]),
+    b: c.values,
+  }));
+  const wire: WireDelta = delta.codecVersion === 2
+    ? { t: 3, ...header, wide: columns }
+    : { t: 1, ...header, cols: columns };
   return compressSync(encode(wire));
 }
 
-/** Decompress + parse a delta payload. */
-export function decodeSimDelta(bytes: Uint8Array): { delta: SimDelta; maxHpMax: number } {
-  const wire = decode(decompressSync(bytes)) as unknown as WireDelta;
+/** Decompress + parse a delta payload for the already negotiated codec. */
+export function decodeSimDelta(bytes: Uint8Array, codecVersion: SimCodecVersion = 1): { delta: SimDelta; maxHpMax: number } {
+  const wire = decode(decompressSync(bytes)) as WireDelta;
+  const columns = codecVersion === 1 && wire?.t === 1 ? wire.cols
+    : codecVersion === 2 && wire?.t === 3 ? wire.wide : null;
+  if (!Array.isArray(columns)) throw new Error("Simulation delta codec mismatch");
   return {
     delta: {
       sceneId: wire.s,
       fromVersion: wire.f,
       toVersion: wire.v,
       count: wire.c,
-      columns: wire.cols.map((c) => ({
+      ...(codecVersion === 2 ? { codecVersion } : {}),
+      columns: columns.map((c) => ({
         column: c.n,
-        runs: (c.r ?? []).map((r) => [r[0], r[1]] as readonly [number, number]),
+        runs: (c.r ?? []).map(([start, len]) => [start ?? 0, len ?? 0] as const),
         values: c.b,
         fullResend: c.fr === true,
       })),
@@ -426,11 +442,12 @@ export function snapshotFromPool(
   sceneId: string,
   version: number,
   sys: SysSchema,
+  codecVersion: SimCodecVersion = 1,
 ): SimSnapshot {
   const maxHpMax = poolMaxHpMax(pool);
   const columns: Array<{ column: string; values: Uint8Array }> = [];
   for (const name of columnNames(pool)) {
-    const kind = colKind(name, sys);
+    const kind = colKind(name, sys, codecVersion);
     const src = columnValues(pool, name);
     if (!kind || !src) continue;
     const codes = new Array<number>(pool.count);
@@ -440,29 +457,30 @@ export function snapshotFromPool(
     }
     columns.push({ column: name, values: packCodes(codes, kind) });
   }
-  return { sceneId, version, count: pool.count, columns };
+  return { sceneId, version, count: pool.count, columns, ...(codecVersion === 2 ? { codecVersion } : {}) };
 }
 
 export function encodeSimSnapshot(snap: SimSnapshot, maxHpMax: number): Uint8Array {
-  const wire: WireSnapshot = {
-    t: 2,
-    s: snap.sceneId,
-    v: snap.version,
-    c: snap.count,
-    m: maxHpMax,
-    cols: snap.columns.map((c) => ({ n: c.column, b: c.values })),
-  };
+  const header = { s: snap.sceneId, v: snap.version, c: snap.count, m: maxHpMax };
+  const columns: WireColumn[] = snap.columns.map((c) => ({ n: c.column, b: c.values }));
+  const wire: WireSnapshot = snap.codecVersion === 2
+    ? { t: 4, ...header, wide: columns }
+    : { t: 2, ...header, cols: columns };
   return compressSync(encode(wire));
 }
 
-export function decodeSimSnapshot(bytes: Uint8Array): { snapshot: SimSnapshot; maxHpMax: number } {
-  const wire = decode(decompressSync(bytes)) as unknown as WireSnapshot;
+export function decodeSimSnapshot(bytes: Uint8Array, codecVersion: SimCodecVersion = 1): { snapshot: SimSnapshot; maxHpMax: number } {
+  const wire = decode(decompressSync(bytes)) as WireSnapshot;
+  const columns = codecVersion === 1 && wire?.t === 2 ? wire.cols
+    : codecVersion === 2 && wire?.t === 4 ? wire.wide : null;
+  if (!Array.isArray(columns)) throw new Error("Simulation snapshot codec mismatch");
   return {
     snapshot: {
       sceneId: wire.s,
       version: wire.v,
       count: wire.c,
-      columns: wire.cols.map((c) => ({ column: c.n, values: c.b })),
+      ...(codecVersion === 2 ? { codecVersion } : {}),
+      columns: columns.map((c) => ({ column: c.n, values: c.b })),
     },
     maxHpMax: wire.m,
   };
@@ -504,7 +522,7 @@ export function applySimDelta(
     a.column === "hpMax" ? -1 : b.column === "hpMax" ? 1 : 0,
   );
   for (const col of ordered) {
-    const kind = colKind(col.column, sys);
+    const kind = colKind(col.column, sys, delta.codecVersion ?? 1);
     if (!kind) continue;
     const codes = unpackCodes(col.values, kind);
     if (col.fullResend) {
@@ -563,6 +581,7 @@ export function poolFromSnapshot(
       fromVersion: -1,
       toVersion: snap.version,
       count: snap.count,
+      ...(snap.codecVersion === 2 ? { codecVersion: snap.codecVersion } : {}),
       columns: snap.columns.map((c) => ({
         column: c.column,
         runs: [],
@@ -591,7 +610,7 @@ export function projectSimDelta(
 ): SimDelta {
   const columns: SimColumnDelta[] = [];
   for (const col of delta.columns) {
-    const kind = colKind(col.column, sys);
+    const kind = colKind(col.column, sys, delta.codecVersion ?? 1);
     if (!kind) continue;
     const codes = unpackCodes(col.values, kind);
     const srcIdx: number[] = [];
@@ -638,9 +657,10 @@ export function projectSimDelta(
  * live pool may hold sub-quantum float noise; identical logical states must
  * hash identically regardless. Round-trips through the snapshot codec first.
  */
-export function canonicalPoolHash(pool: ModelPool, sys: SysSchema): string {
-  const snap = snapshotFromPool(pool, "", 0, sys);
-  const canonical = poolFromSnapshot(snap, 1, sys);
+export function canonicalPoolHash(pool: ModelPool, sys: SysSchema, codecVersion: SimCodecVersion = 1): string {
+  const snap = snapshotFromPool(pool, "", 0, sys, codecVersion);
+  // Keep the historical v1 hash contract. Wide checkpoints include absolute HP.
+  const canonical = poolFromSnapshot(snap, codecVersion === 2 ? poolMaxHpMax(pool) : 1, sys);
   return hashPool(canonical);
 }
 
@@ -660,7 +680,7 @@ export function projectSimSnapshot(
 ): SimSnapshot {
   const columns: Array<{ column: string; values: Uint8Array }> = [];
   for (const col of snapshot.columns) {
-    const kind = colKind(col.column, sys);
+    const kind = colKind(col.column, sys, snapshot.codecVersion ?? 1);
     if (!kind) continue;
     const codes = unpackCodes(col.values, kind);
     const out = new Array<number>(codes.length);

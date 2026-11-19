@@ -44,10 +44,17 @@ starter-world specs open the built archives, and a bare `pnpm build` wipes them.
 | `test:e2e:hexcrawl` | 8 | 16 | 15 min | 8.2 min | **16 passed** |
 | `test:e2e:images` | 10 | 31 | 15 min | 4.9 min | **30 passed / 1 skipped** |
 | `test:e2e:net` | 5 | 6 | 15 min | 0.9 min (D-488) | **6 passed** (D-488; `fog_big_frame.spec.ts` joined this batch — it is a transport test) |
+| `test:e2e:strategic` | 1 | 2 | 2.5 min | ~11 s test run | **2 passed** on Chromium with `STRATEGIC_TEST_DATABASE_URL`; otherwise they skip |
 | `test:e2e:ais` | 7 | 28 | 25 min | 12.3 min (D-487; 14.8 min for 27 on the D-486 run) | **28 passed** (D-487, 2026-10-15) |
 | `test:e2e:ui-adapters` | 2 | 5 | 15 min | 1.6 min | **5 passed** |
 | `test:e2e:pf1e-combat` | 16 | 70 | 20 min | 12.7 min | 64 passed / **6 pre-existing failures** |
 | `test:e2e:pf1e-sheets` | 14 | 28 | 20 min | 4.3 min | 23 passed / **5 pre-existing failures** |
+
+`test:e2e:strategic` builds the separate hosted service and runs two cases, each with three browser
+contexts, against actual WebSocket/HTTP and a disposable PostgreSQL database: one spans rejoin,
+withheld apply, report scope and revocation, the other a generated 50k-model field with a hidden
+sentry, both view bodies and frame pacing. See the
+[service runbook](services/strategic-room/README.md#verify-and-measure).
 
 The older groups in `FX_TEST_BATCHES.md` are still the right commands for their areas; measured on
 the AIS tree, `test:fx:canvas` is **27 passed / 8.2 min** (D-488) and `test:multilevel` is

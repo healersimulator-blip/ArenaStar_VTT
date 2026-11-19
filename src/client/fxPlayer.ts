@@ -130,8 +130,8 @@ export interface FxPlayerOptions {
   stage: Stage;
   fetchAsset: (hash: string) => Promise<Uint8Array>;
   /**
-   * This serverless viewer is also the host that owns the source bytes. Its client fetcher
-   * still uses the normal loopback path, but that internal hop is not audience delivery.
+   * This serverless viewer is also the host that owns the source bytes. Local reads are not
+   * audience delivery.
    */
   isAssetLocal?: (hash: string) => boolean;
   sceneId: () => string | null;
@@ -762,8 +762,7 @@ export class FxPlayer {
       // Attribute only delay that media adds after the browser gets an opportunity to run
       // this cue. A throttled event loop can service the preload continuation and an overdue
       // section timer in the same turn; when the preload won that race (`landed`), it did not
-      // hold playback back. The host's own source bytes are local too: reading them through
-      // its client loopback is an implementation hop, not a failed audience delivery. If a
+      // hold playback back. Reading the host's own source bytes is not audience delivery. If a
       // remote viewer still lacks bytes when its timer runs, the subsequent wait remains
       // genuine media lateness.
       const locallyOwned = this.options.isAssetLocal?.(section.assetId) === true;

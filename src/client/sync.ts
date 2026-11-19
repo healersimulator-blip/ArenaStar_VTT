@@ -1,3 +1,4 @@
+import type { TurnProgressStage } from "../core/turnProgress";
 import { AIS_SHARED_COMPRESSED_BYTES } from "../core/aisSharedModule";
 import type { ActionDescriptor } from "../core/actionRevert";
 import { LEVEL_NAVIGATION_FEATURE } from "../core/levelNavigation";
@@ -58,6 +59,9 @@ export interface ClientEvents {
   sim: { version: number; count: number; kind: "delta" | "snapshot" };
   /** §5A phase announcements. */
   turnPhase: TurnPhaseMsg;
+  turnProgress: TurnProgressStage | null;
+  /** Local GM command/worker error; never a player wire payload. */
+  turnError: string;
   /** §5A projected turn report (report field of the wire message). */
   turnReport: TurnReportMsg;
   /** D-468: the host's shared AIS module set for this world (also retained as `aisProfile`). */
@@ -176,6 +180,18 @@ export class ClientSync {
   private readonly bus: EventBus<ClientEvents>;
   /** §5A: the retained last turn report (see `lastTurnReport`). */
   private lastTurnReportMsg: TurnReportMsg | null = null;
+  private progress: TurnProgressStage | null = null;
+  private closingTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastTurnPhaseMsg: TurnPhaseMsg | null = null;
+
+  get turnProgress(): TurnProgressStage | null { return this.progress; }
+
+  private setTurnProgress(stage: TurnProgressStage | null) {
+    if (stage !== "closing") clearTimeout(this.closingTimer);
+    if (stage === this.progress) return;
+    this.progress = stage;
+    this.bus.emit("turnProgress", stage);
+  }
   private lastAisProfile: AisProfileMsg | null = null;
   /** D-468: the latest `ais.profile` (a runtime created after the welcome must not miss it). */
   get aisProfile(): AisProfileMsg | null { return this.lastAisProfile; }
@@ -264,6 +280,8 @@ export class ClientSync {
     this.hostFeatures = new Set();
     this.clearLevelFocus(); // never reuse capabilities from a previous host/connection
     this.transport.onMessage = null;
+    this.setTurnProgress(null);
+    this.lastTurnPhaseMsg = null;
     this.transport = transport;
     this.bindTransport();
     // re-stamp lastSeq from the CURRENT replica seq (connect() stored the
@@ -1064,6 +1082,10 @@ export class ClientSync {
         return;
       }
       case "turn.phase":
+        this.lastTurnPhaseMsg = msg;
+        if (msg.phase === "resolution") this.setTurnProgress(msg.progress === "applying" ? "applying" : "resolving");
+        else if (msg.phase === "report" && this.waitingForTurnResult(msg)) this.setTurnProgress("applying");
+        else if (this.progress !== "closing" || msg.phase !== "orders") this.setTurnProgress(null);
         this.bus.emit("turnPhase", msg);
         return;
       case "turn.report":
@@ -1155,6 +1177,18 @@ export class ClientSync {
     this.requestSimSnapshot();
   }
 
+  private waitingForTurnResult({ result }: TurnPhaseMsg): boolean {
+    return !!this.simSys && !!result && result.sceneId === this.simSceneId &&
+      Number.isSafeInteger(result.version) && this.simVersion < result.version;
+  }
+
+  private finishTurnResult() {
+    const phase = this.lastTurnPhaseMsg;
+    if (this.progress === "applying" && phase?.phase === "report" && !this.waitingForTurnResult(phase)) {
+      this.setTurnProgress(null);
+    }
+  }
+
   private applySimDelta(msg: SimDeltaMsg): void {
     if (!this.simSys || (this.simSceneId && msg.sceneId !== this.simSceneId)) return;
     const { delta, maxHpMax } = decodeSimDelta(msg.bytes);
@@ -1162,6 +1196,7 @@ export class ClientSync {
       applySimDelta(this.simPool, delta, maxHpMax, this.simSys);
       this.simVersion = delta.toVersion;
       this.bus.emit("sim", { version: this.simVersion, count: this.simPool.count, kind: "delta" });
+      this.finishTurnResult();
       return;
     }
     if (delta.toVersion <= this.simVersion) return; // stale (e.g. post-undo replay)
@@ -1198,6 +1233,7 @@ export class ClientSync {
         });
       }
     }
+    this.finishTurnResult();
   }
 
   /** Explicitly ask the host for a full pool snapshot (§5A gap recovery). */
@@ -1284,6 +1320,11 @@ export class ClientSync {
     action: SimControlAction,
     extra: { rateHz?: number; mode?: "stepwise" | "realtime"; deadlineMs?: number } = {},
   ): void {
+    if (action === "advance" && this.user?.role === "GM" && this.lastTurnPhaseMsg?.phase === "orders" && this.lastTurnPhaseMsg.mode !== "realtime") {
+      if (this.progress !== null) return;
+      this.setTurnProgress("closing");
+      this.closingTimer = setTimeout(() => this.setTurnProgress(null), 5000);
+    }
     this.send({
       kind: "sim.control",
       action,

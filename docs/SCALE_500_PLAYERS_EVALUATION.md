@@ -8,6 +8,9 @@ measurements · Appendix C reproduction · Appendix D caveats · Appendix E gate
 Every number in here was measured on this sandbox against the real modules; nothing is inferred
 from documentation alone.
 
+Follow-up: [the 50,000-model strategic scaling plan](STRATEGIC_500_PLAYER_PLAN.md) benchmarks both
+requested unit counts and a full 500-commander order burst, and recommends a hosted-room design.
+
 ---
 
 ## 1. Verdict

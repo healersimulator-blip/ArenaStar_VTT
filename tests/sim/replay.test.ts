@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ReplayEngine } from "../../src/sim/replay";
 import type { CheckpointRecord } from "../../src/storage/strategicStore";
-import { encodeSimSnapshot } from "../../src/sim/codec";
+import { allocModel, createModelPool } from "../../src/sim/pool";
+import { encodeSimSnapshot, snapshotFromPool } from "../../src/sim/codec";
 
 describe("After-Action Replay (§8A)", () => {
   it("loads checkpoints, steps through turns, and decodes ModelPool frames", () => {
@@ -66,4 +67,18 @@ describe("After-Action Replay (§8A)", () => {
     engine.seek(0);
     expect(engine.getState().index).toBe(0);
   });
+});
+
+
+it("requires a matching checkpoint codec to replay wide positions", () => {
+  const pool = createModelPool(1);
+  allocModel(pool, { id: 1, unitIdx: 0, x: -4200.125, y: 8000.0625, hp: 1 });
+  const bytes = encodeSimSnapshot(snapshotFromPool(pool, "wide", 0, {}, 2), 1);
+  const checkpoint: CheckpointRecord = { worldId: "w", sceneId: "wide", slot: 1, turnNumber: 1, tick: null,
+    pool: bytes, codecVersion: 2, maxHpMax: 1, version: 0, unitStats: {}, seed: 1, rulesVersion: "1", hash: "opaque" };
+  expect(() => new ReplayEngine({}).load([checkpoint])).toThrow(/codec mismatch/);
+  const replay = new ReplayEngine({}, undefined, 2);
+  replay.load([checkpoint]);
+  expect(replay.getFrame(0)?.pool.x[0]).toBe(-4200.125);
+  expect(replay.getFrame(0)?.pool.y[0]).toBe(8000.0625);
 });

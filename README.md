@@ -1,9 +1,13 @@
 # VTT — serverless browser-only Virtual Tabletop
 
 A Foundry-class virtual tabletop that ships as **one self-contained `index.html`**
-(all JS/CSS/wasm/fonts inlined). No dedicated server: the GM's browser tab is the
+(all JS/CSS/wasm/fonts inlined). In the default mode, the GM's browser tab is the
 authoritative host, persister and relay; players join with a link/code. Implements
 the architecture spec in `uploads/VTT_Task.txt` (§0–§19) — see `PLAN.md`.
+
+For a separate, opt-in PF1e simultaneous battle with durable server authority, see the
+[Hosted Strategic Room pilot](services/strategic-room/README.md). It does not replace
+browser hosting, and its 500-commander target is not a qualified capacity.
 
 ## Quickstart
 
@@ -265,6 +269,21 @@ walks into sight or the player's token walks up to it. The GM is never gated: th
 a translucent overlay marking where fog lies while every token and map feature stays visible
 under it (**God view**, on by default; switch it off in Settings → Scene or GM extras to
 preview the opaque cover players get). The GM's own map is the union of every vision token.
+
+## Token artwork and attached effects
+
+Import artwork and FX media into the world and reuse the same library asset on multiple
+tokens or effects. Arena Star identifies imported files by their content, not by token
+ID. The GM reads those files from the local world store, without streaming them to their
+own canvas. Each player's browser downloads only the permitted media it needs and keeps
+the bytes for subsequent visits. A portrait used by hundreds of tokens is one download
+per cold browser, and an unchanged, cached portrait or effect needs no retransmission.
+
+New or changed files, new browser profiles, and cleared or evicted browser storage still
+need a first download. Use the same HTTPS address and browser profile for reliable reuse;
+some `file://` origins don't preserve the media cache across reloads. External URL images
+follow the external server's caching policy. Prefer imported files over inline image data.
+Token positions, other game state and active effect instructions still sync normally.
 
 ## file:// limitations (§15)
 

@@ -104,6 +104,12 @@ export class AssetTransfer {
     this.schedulePump();
   }
 
+  /** Stop work for a disconnected session, including its pacing state. */
+  dropPeer(peerId: PeerId): void {
+    this.nextAllowedAt.delete(peerId);
+    for (const [key, job] of this.jobs) if (job.peerId === peerId) this.jobs.delete(key);
+  }
+
   /** Number of queued (in-flight) transfers. */
   get queued(): number {
     return this.jobs.size;
@@ -151,8 +157,9 @@ export class AssetTransfer {
 
   private earliestGate(): number | undefined {
     let earliest: number | undefined;
-    for (const gate of this.nextAllowedAt.values()) {
-      if (earliest === undefined || gate < earliest) earliest = gate;
+    for (const job of this.jobs.values()) {
+      const gate = this.nextAllowedAt.get(job.peerId);
+      if (gate !== undefined && (earliest === undefined || gate < earliest)) earliest = gate;
     }
     return earliest;
   }
@@ -171,7 +178,10 @@ export class AssetTransfer {
           if (wait > 0) await this.sleep(wait);
           continue;
         }
-        const read = await this.source(job.assetId, job.offset, this.chunkSize, job.peerId);
+        const key = jobKey(job.peerId, job.assetId);
+        const offset = job.offset;
+        const read = await this.source(job.assetId, offset, this.chunkSize, job.peerId).catch(() => undefined);
+        if (this.jobs.get(key) !== job || job.offset !== offset) continue; // disconnected or resumed during the read
         if (!read) {
           // Unknown asset → miss sentinel (D-039)
           this.sink.send(job.peerId, {
@@ -182,27 +192,25 @@ export class AssetTransfer {
             bytes: new Uint8Array(0),
             done: true,
           });
-          this.jobs.delete(jobKey(job.peerId, job.assetId));
+          this.jobs.delete(key);
           continue;
         }
-        const end = job.offset + read.bytes.length;
+        const end = offset + read.bytes.length;
         const done = end >= read.total;
         this.sink.send(job.peerId, {
           kind: "asset.chunk",
           assetId: job.assetId,
-          offset: job.offset,
+          offset,
           total: read.total,
           bytes: read.bytes,
           done,
         });
-        if (done) {
-          this.jobs.delete(jobKey(job.peerId, job.assetId));
-        } else {
-          job.offset = end;
-          // bandwidth cap: pace this peer (D-040)
-          const paceMs = (read.bytes.length / this.bytesPerSecond) * 1000;
-          this.nextAllowedAt.set(job.peerId, this.now() + paceMs);
-        }
+        if (this.jobs.get(key) !== job) continue; // sink may have just closed the peer
+        // Charge the final (often only) chunk too: thousands of small portraits
+        // are still subject to the per-peer byte budget.
+        this.nextAllowedAt.set(job.peerId, this.now() + (read.bytes.length / this.bytesPerSecond) * 1000);
+        if (done) this.jobs.delete(key);
+        else job.offset = end;
       }
     } finally {
       this.pumping = false;

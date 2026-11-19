@@ -6,6 +6,7 @@
  * and as a same-thread fallback (trusted built-in rules only).
  */
 import type { RulesContext, RulesModule, UnitView } from "../core/rules";
+import { SimPositionRangeError } from "../core/sim";
 import type { UnitId } from "../core/ids";
 import {
   SimRunnerCore,
@@ -156,7 +157,7 @@ export class WorkerSimRunner implements SimRunner {
         this.cpuTimer = null;
       }
       if (ev.data.ok) waiter.resolve(ev.data);
-      else waiter.reject(new Error(ev.data.error));
+      else waiter.reject(ev.data.code === "position_range" ? new SimPositionRangeError(ev.data.error) : new Error(ev.data.error));
     };
     worker.onerror = () => {
       for (const w of this.pending.values()) w.reject(new Error("sim worker crashed"));

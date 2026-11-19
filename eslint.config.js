@@ -8,6 +8,8 @@ export default tseslint.config(
   {
     ignores: [
       "dist/**",
+      "services/**/dist/**",
+      ".local/**",
       "node_modules/**",
       "playwright-report/**",
       "test-results/**",
@@ -34,7 +36,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["scripts/**/*.mjs", "tools/**/*.mjs", "vite.config.ts", "playwright.config.ts", "e2e/**/*.ts"],
+    files: ["scripts/**/*.mjs", "tools/**/*.mjs", "services/**/*.mjs", "performance/**/*.mjs", "vite.config.ts", "playwright.config.ts", "e2e/**/*.ts"],
     languageOptions: { globals: { ...globals.node } },
   },
   {

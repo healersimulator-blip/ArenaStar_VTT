@@ -11,6 +11,7 @@ import {
   type SimTickRequest,
 } from "../sim/runner";
 import { importRulesModule, RulesModuleRegistry, type RulesPackageInfo } from "../sim/rulesLoader";
+import { SimPositionRangeError } from "../core/sim";
 import type { RulesModule } from "../core/rules";
 
 // ─── sandbox hardening (§12: no network, no storage in the worker) ───────────
@@ -77,7 +78,7 @@ export type SimWorkerResponse =
       maxHpMax: number;
       version: number;
     }
-  | { id: number; ok: false; error: string };
+  | { id: number; ok: false; error: string; code?: "position_range" };
 
 let core: SimRunnerCore | null = null;
 /** §12 imported packages, keyed by exact source text (one import per package). */
@@ -154,6 +155,7 @@ async function handleRequest(msg: SimWorkerRequest): Promise<void> {
         break;
     }
   } catch (e) {
-    post({ id: msg.id, ok: false, error: e instanceof Error ? e.message : String(e) });
+    post({ id: msg.id, ok: false, error: e instanceof Error ? e.message : String(e),
+      ...(e instanceof SimPositionRangeError ? { code: "position_range" } : {}) });
   }
 }

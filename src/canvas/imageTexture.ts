@@ -80,7 +80,7 @@ export async function videoTexture(bytes: Uint8Array, mime: string): Promise<{ t
   };
 }
 
-/** Shared tile textures, owned by one canvas. Prune only after its views reconcile. */
+/** Shared token, lower-floor token and tile textures, owned by one canvas. Prune after views reconcile. */
 export class TileImageCache {
   private readonly entries = new Map<string, Promise<Texture | null>>();
   constructor(private readonly fetch: (hash: string) => Promise<{ bytes: Uint8Array; mime: string }>) {}
@@ -94,7 +94,11 @@ export class TileImageCache {
           : await this.fetch(image).then(({ bytes, mime }) => imageTexture(bytes, mime));
         if (this.entries.get(image) !== work) { texture.destroy(true); return null; }
         return texture;
-      } catch { return null; }
+      } catch {
+        // Don't permanently memoize a failed read/decode (e.g. a not-yet-published asset).
+        if (this.entries.get(image) === work) this.entries.delete(image);
+        return null;
+      }
     });
     this.entries.set(image, work);
     return work;

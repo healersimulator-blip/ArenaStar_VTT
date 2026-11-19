@@ -18,6 +18,7 @@
 import type { DocId, UnitId } from "../core/ids";
 import type { UnitView } from "../core/rules";
 import type { FactionDocument } from "../core/strategic";
+import { simPositionFits, type SimCodecVersion } from "../core/sim";
 import { createModelPool, allocModel, type SysSchema } from "./pool";
 import { snapshotFromPool, encodeSimSnapshot } from "./codec";
 
@@ -61,6 +62,8 @@ export interface DeployOptions {
   /** Cap per unit and total (default 100k total — the pool budget, §19). */
   maxPerUnit?: number;
   maxTotal?: number;
+  /** Legacy is the default; hosted deployment explicitly selects the wide codec. */
+  codecVersion?: SimCodecVersion;
 }
 
 const DEFAULT_MAX_TOTAL = 100_000;
@@ -158,6 +161,7 @@ export function deploySnapshot(
   ranges: Array<[UnitId, [number, number] | null]>;
 } {
   const layout = deployLayout(units, factions, opts);
+  const codecVersion = opts.codecVersion ?? 1;
   const total = layout.plans.reduce((n, p) => n + p.count, 0);
   const pool = createModelPool(Math.max(1024, total), sys);
   const ranges: Array<[UnitId, [number, number] | null]> = [];
@@ -173,11 +177,16 @@ export function deploySnapshot(
     for (let i = 0; i < plan.count; i++) {
       const pos = plan.positions[i];
       if (!pos) throw new Error("deploy: formation offsets shorter than count");
+      const x = plan.anchor.x + pos.x;
+      const y = plan.anchor.y + pos.y;
+      if (!simPositionFits(x, codecVersion) || !simPositionFits(y, codecVersion)) {
+        throw new RangeError(`Cannot deploy unit ${plan.unitId}: (${x}, ${y}) is outside the simulation map range`);
+      }
       allocModel(pool, {
         id: nextId++,
         unitIdx: pi,
-        x: plan.anchor.x + pos.x,
-        y: plan.anchor.y + pos.y,
+        x,
+        y,
         rot: 0,
         hp: 1,
         hpMax: 1,
@@ -189,7 +198,7 @@ export function deploySnapshot(
     ranges.push([plan.unitId, [start, pool.count]]);
   }
   return {
-    bytes: encodeSimSnapshot(snapshotFromPool(pool, "", 0, sys), 1),
+    bytes: encodeSimSnapshot(snapshotFromPool(pool, "", 0, sys, codecVersion), 1),
     maxHpMax: 1,
     ranges,
   };

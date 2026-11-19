@@ -35,8 +35,33 @@ export interface PF1eBattleReport {
   units: Record<string, UnitAnalyticsSummary>;
 }
 
+/** Object.values(report.units) visits integer-index keys before other keys. */
+function arrayIndex(id: string): number {
+  const n = Number(id);
+  return Number.isInteger(n) && n >= 0 && n < 0xffffffff && String(n) === id ? n : Infinity;
+}
+
 export class PF1eBattleAnalyticsCollector {
   private unitsMap = new Map<string, UnitAnalyticsSummary>();
+  private firstSeen = new Map<string, number>();
+
+  checkpoint(): () => void {
+    const units = new Map([...this.unitsMap].map(([id, unit]) => [id, { ...unit }]));
+    const order = new Map(this.firstSeen);
+    return () => { this.unitsMap = units; this.firstSeen = order; };
+  }
+
+  /** Only an army's entries, in the same order as filtering the full report. */
+  summariesFor(ids: readonly string[]): UnitAnalyticsSummary[] {
+    const entries: UnitAnalyticsSummary[] = [];
+    for (const id of new Set(ids)) {
+      const entry = this.unitsMap.get(id);
+      if (entry) entries.push(entry);
+    }
+    return entries.sort((a, b) => arrayIndex(a.unitId) - arrayIndex(b.unitId) ||
+      (this.firstSeen.get(a.unitId) ?? 0) - (this.firstSeen.get(b.unitId) ?? 0))
+      .map((entry) => ({ ...entry }));
+  }
 
   private ensureUnit(unitId: string): UnitAnalyticsSummary {
     let entry = this.unitsMap.get(unitId);
@@ -66,6 +91,7 @@ export class PF1eBattleAnalyticsCollector {
         concentrationPassed: 0,
         concentrationFailed: 0,
       };
+      this.firstSeen.set(unitId, this.unitsMap.size);
       this.unitsMap.set(unitId, entry);
     }
     return entry;

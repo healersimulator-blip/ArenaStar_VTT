@@ -243,6 +243,8 @@ export interface RulesOrderVocabulary {
 export interface RulesModule {
   schema: RulesSchema;
   validateOrder(ctx: RulesContext, unit: UnitView, order: Order): OkOrErr;
+  /** Capture optional module-local counters before a runner step; called back only on failure. */
+  prepareRollback?(): () => void;
   /** M10 — castable-spell vocabulary for order UIs; absent ⇒ no caster controls. */
   orderVocabulary?(): RulesOrderVocabulary;
   resolveTurn(

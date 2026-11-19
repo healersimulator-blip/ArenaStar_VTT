@@ -37,8 +37,10 @@ import {
   createInterruptQueue,
   queueMovementAoOs,
   resolveNextInterrupt,
+  squaresLeft,
 } from "./pf1e/interrupts";
 import type { PF1eCell } from "./pf1e/targeting";
+import { StrategicThreatIndex } from "./pf1e/strategicThreat";
 import { resolvePF1eAOESpell } from "./pf1e/spells";
 import { planPF1eStride, type PF1eStridePace } from "./pf1e/stride";
 import {
@@ -150,6 +152,8 @@ export interface MassBattlePf1eOptions {
    * ships in a pack, and so the reference system stays pack-driven otherwise.
    */
   spellEntry?: Readonly<Record<string, unknown>> | undefined;
+  /** Hosted worker starting from a frozen checkpoint (turn-local interrupt labels). */
+  resolvedTurns?: number;
 }
 
 /** Read `data.spell` (the pack entry id an order names); absent → default spell. */
@@ -176,7 +180,7 @@ export function createMassBattlePf1e(
   // turn (P06/D-184). `RulesContext` carries no turn number, so the module counts its own
   // calls; like the analytics collector it is module-lifetime state and resets when a
   // SimWorker restarts, which costs nothing because each queue is turn-local anyway.
-  let strategicTurn = 0;
+  let strategicTurn = opts.resolvedTurns ?? 0;
   // Campaign-lifetime analytics: one collector per module instance, NOT per turn — that is
   // what lets `forecast` answer with real accumulated totals (M11). Caveat: a SimWorker
   // restart starts a fresh collector, so totals only cover this module instance's turns.
@@ -237,6 +241,12 @@ export function createMassBattlePf1e(
       >,
       orderTypes: ["move", "attack", "custom", "hold", "retreat"],
       subPhases: [...subPhases],
+    },
+
+    prepareRollback() {
+      const turn = strategicTurn;
+      const undoAnalytics = analytics.checkpoint();
+      return () => { strategicTurn = turn; undoAnalytics(); };
     },
 
     // M10 — the caster control vocabulary. Registry-driven (so the `spellEntry` test seam
@@ -408,39 +418,28 @@ export function createMassBattlePf1e(
         (ctx.worldSettings as Record<string, unknown>)
           ?.strategicSimultaneous === true;
 
-      // F02 — squad fan-out: an order keyed by squadId expands to every unit in that squad (no new doc type)
-      // Per-unit orders win (do not overwrite). SquadId is the UnitView.squadId tag (ArmyWindow squadId).
+      const unitById = new Map<string, { unit: UnitView; index: number }>();
+      const squads = new Map<string, UnitView[]>();
+      for (const [index, unit] of units.entries()) {
+        if (!unitById.has(unit.id)) unitById.set(unit.id, { unit, index });
+        if (unit.squadId == null) continue;
+        let members = squads.get(unit.squadId);
+        if (!members) squads.set(unit.squadId, members = []);
+        members.push(unit);
+      }
+      // F02 — squad fan-out, in the original order; an exact unit order wins.
       {
-        const expanded = new Map<
-          string,
-          import("../core/strategic").OrderQueue
-        >(orders as Map<string, import("../core/strategic").OrderQueue>);
-        for (const [key, queue] of orders.entries()) {
-          const isUnit = units.some((u) => u.id === key);
-          if (isUnit) continue;
-          const members = units.filter(
-            (u) =>
-              (u as unknown as { squadId?: string | null }).squadId === key,
-          );
-          if (members.length === 0) continue;
-          for (const m of members)
-            if (!expanded.has(m.id)) expanded.set(m.id, queue);
+        const expanded = new Map(orders);
+        for (const [key, queue] of orders) {
+          if (unitById.has(key)) continue;
+          const members = squads.get(key);
+          if (!members) continue;
+          for (const member of members) if (!expanded.has(member.id)) expanded.set(member.id, queue);
           expanded.delete(key);
         }
-        // Rebind the local `orders` binding for the rest of resolveTurn
-        (
-          orders as unknown as Map<
-            string,
-            import("../core/strategic").OrderQueue
-          >
-        ).clear();
-        for (const [k, v] of expanded.entries())
-          (
-            orders as unknown as Map<
-              string,
-              import("../core/strategic").OrderQueue
-            >
-          ).set(k, v);
+        const mutableOrders = orders as Map<string, import("../core/strategic").OrderQueue>;
+        mutableOrders.clear();
+        for (const [key, queue] of expanded) mutableOrders.set(key, queue);
       }
 
       // ── G-04/D-223 — Combat_Resolver_5 doctrine mode (world setting
@@ -477,6 +476,7 @@ export function createMassBattlePf1e(
           }
           return indices;
         });
+        const anchors = units.map((unit) => anchorPosition(pool, unit));
         for (let ui = 0; ui < units.length; ui++) {
           const unit = units[ui];
           if (!unit) continue;
@@ -485,52 +485,41 @@ export function createMassBattlePf1e(
           if (unit.doctrine === "hold") continue;
           const ownLiving = livingByUnit[ui] ?? [];
           if (ownLiving.length === 0) continue;
-          const anchor = anchorPosition(pool, unit);
-          if (anchor === null) continue;
-          // Nearest living enemy by anchor distance; engage the same unit whose
-          // models stand closest (one pass keeps both honest).
-          let nearest: {
-            unit: UnitView;
-            idx: number;
-            dAnchor: number;
-            dMin: number;
-          } | null = null;
-          for (let oi = 0; oi < units.length; oi++) {
-            if (oi === ui) continue;
-            const other = units[oi];
-            if (!other || other.factionId === unit.factionId) continue;
-            const otherLiving = livingByUnit[oi] ?? [];
-            if (otherLiving.length === 0) continue;
-            const otherAnchor = anchorPosition(pool, other);
-            if (otherAnchor === null) continue;
-            const dAnchor = Math.hypot(
-              otherAnchor.x - anchor.x,
-              otherAnchor.y - anchor.y,
-            );
-            let dMin2 = Infinity;
-            let dMinIdx = otherLiving[0] ?? 0;
-            for (const a of ownLiving) {
-              const ax = pool.x[a] ?? 0;
-              const ay = pool.y[a] ?? 0;
-              for (const b of otherLiving) {
-                // V07: squared distance in the inner O(own × foe) doctrine scan. The loop only
-                // ever asks "which pair is smaller", and √ is strictly monotonic, so the winner
-                // (and therefore `dMinIdx`) is identical without a `Math.hypot` per pair. The
-                // one real distance is taken once, outside both loops, for the report line.
-                const dx = (pool.x[b] ?? 0) - ax;
-                const dy = (pool.y[b] ?? 0) - ay;
-                const d2 = dx * dx + dy * dy;
-                if (d2 < dMin2) {
-                  dMin2 = d2;
-                  dMinIdx = b;
-                }
+          const anchor = anchors[ui];
+          if (!anchor) continue;
+          // Doctrine chooses by anchor distance, keeping the first unit on ties. Only
+          // the chosen opponent needs a model-pair scan for contact and the waypoint.
+          let nearestIndex = -1;
+          let nearestDistance = Infinity;
+          for (const [oi, other] of units.entries()) {
+            if (other.factionId === unit.factionId) continue;
+            const otherAnchor = anchors[oi];
+            if (!otherAnchor) continue;
+            const distance = Math.hypot(otherAnchor.x - anchor.x, otherAnchor.y - anchor.y);
+            if (distance < nearestDistance) {
+              nearestIndex = oi;
+              nearestDistance = distance;
+            }
+          }
+          const opponent = units[nearestIndex];
+          const otherLiving = livingByUnit[nearestIndex];
+          if (!opponent || !otherLiving?.length) continue;
+          let dMin2 = Infinity;
+          let dMinIdx = otherLiving[0] ?? 0;
+          for (const a of ownLiving) {
+            const ax = pool.x[a] ?? 0;
+            const ay = pool.y[a] ?? 0;
+            for (const b of otherLiving) {
+              const dx = (pool.x[b] ?? 0) - ax;
+              const dy = (pool.y[b] ?? 0) - ay;
+              const d2 = dx * dx + dy * dy;
+              if (d2 < dMin2) {
+                dMin2 = d2;
+                dMinIdx = b;
               }
             }
-            const dMin = Number.isFinite(dMin2) ? Math.sqrt(dMin2) : Infinity;
-            if (nearest === null || dAnchor < nearest.dAnchor)
-              nearest = { unit: other, idx: dMinIdx, dAnchor, dMin };
           }
-          if (nearest === null) continue;
+          const nearest = { unit: opponent, idx: dMinIdx, dMin: Math.sqrt(dMin2) };
           const reachFt = reachFeetByUnitIdx[ui] ?? cellFeet;
           if (nearest.dMin <= reachFt) {
             orders.set(unit.id, {
@@ -689,7 +678,7 @@ export function createMassBattlePf1e(
       // tactical layer reaches through `combatState`, so "does leaving this square
       // provoke?" has a single answer per scale.
       const leaderModelIdx = (unitId: string): number => {
-        const unit = units.find((u) => u.id === unitId);
+        const unit = unitById.get(unitId)?.unit;
         const [start, end] = unit?.modelRange ?? [0, 0];
         for (let i = start; i < end && i < pool.count; i++) {
           if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0) return i;
@@ -711,6 +700,7 @@ export function createMassBattlePf1e(
           reachSquares: reachSquaresByUnitIdx[unitIdx] ?? 1,
         });
       };
+      const movePhase: { threatIndex?: StrategicThreatIndex } = {};
       let interruptQueue = createInterruptQueue(strategicTurn, "turn");
       // M05 — the march's attacks of opportunity, hoisted out of the stepwise path so the
       // simultaneous path provokes too (it did not: a mode bug, not a design — the same
@@ -729,156 +719,119 @@ export function createMassBattlePf1e(
         withdraw: boolean;
       }): void => {
         const { mover, from, to, dx, dy, withdraw } = input;
-                // ── attacks of opportunity against the march (P06, D-184). The walk is taken from
-                // the grid walk itself (`cellsAlongSegment`) rather than from the continuous
-                // displacement, so the interrupted squares are *squares* and the phantom
-                // "grazed" square of a diagonal never provokes. A withdraw (order kind
-                // `retreat`, SRD: "You can move up to double your speed … The square you start
-                // out in is not considered threatened by any opponent you can see") exempts the
-                // start square and nothing else; the sim has no visibility model, so every
-                // enemy is treated as seen and the exemption applies to all of them.
-                  const walked = cellsAlongSegment(from, to, cellFeet);
-                  const moverIdx = leaderModelIdx(mover.id);
-                  const moverUnitIdx = pool.unitIdx[moverIdx] ?? 0;
-                  if (moverIdx >= 0 && walked.length > 1) {
-                    const reactors: Array<{
-                      id: string;
-                      name: string;
-                      threatens: (cell: PF1eCell) => boolean;
-                      modelIdx: number;
-                    }> = [];
-                    for (const other of units) {
-                      if (other.id === mover.id) continue;
-                      const otherLeader = leaderModelIdx(other.id);
-                      if (otherLeader < 0) continue;
-                      // Enemies only, on the same relation the flanking pass uses (M04/D-182): a
-                      // different faction. An ally — and the mover's own unit — never reacts.
-                      const otherUnitIdx = pool.unitIdx[otherLeader] ?? 0;
-                      if (
-                        (factionByUnitIdx[otherUnitIdx] ?? null) ===
-                        (factionByUnitIdx[moverUnitIdx] ?? null)
-                      ) {
-                        continue;
-                      }
-                      // Threat is per model, but a unit moves as a formation: any living model of the
-                      // unit can take the opportunity, so the unit threatens what its members threaten.
-                      const otherStart = other.modelRange?.[0] ?? 0;
-                      const otherEnd = other.modelRange?.[1] ?? 0;
-                      let threatenedSet: Set<string> | null = null;
-                      // The model that actually reacts: the first living member whose reach covers a
-                      // square the march left (so the budget is spent on a model that could strike).
-                      let threatModel: number | null = null;
-                      for (let i = otherStart; i < otherEnd && i < pool.count; i++) {
-                        if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
-                        const cells = threatenedByModel(i);
-                        if (cells.length === 0) continue;
-                        if (threatenedSet === null) threatenedSet = new Set<string>();
-                        for (const c of cells) threatenedSet.add(`${c.col},${c.row}`);
-                        if (threatModel === null) threatModel = i;
-                      }
-                      if (threatenedSet === null || threatModel === null) continue;
-                      const set = threatenedSet;
-                      reactors.push({
-                        id: other.id,
-                        name: other.name,
-                        modelIdx: threatModel,
-                        threatens: (cell) => set.has(`${cell.col},${cell.row}`),
-                      });
-                    }
-                    const result = queueMovementAoOs(interruptQueue, {
-                      turn: strategicTurn,
-                      substep: "move",
-                      moverId: mover.id,
-                      actionId: `move:${strategicTurn}:${mover.id}`,
-                      path: walked,
-                      ...(withdraw ? { withdraw: true } : {}),
-                      cellFeet,
-                      reactors,
-                    });
-                    interruptQueue = result.queue;
-                    // The opportunity interrupts the march: it resolves where the provoker stood,
-                    // before the rest of the move is committed. Movement in the sim is a formation
-                    // translation applied below, so the queue is drained before that write — which is
-                    // what makes the ordering rule true here rather than merely asserted.
-                    while (true) {
-                      const popped = resolveNextInterrupt(interruptQueue, {
-                        initiativeOf: (id) => -leaderModelIdx(id),
-                      });
-                      interruptQueue = popped.queue;
-                      const interrupt = popped.interrupt;
-                      if (interrupt === null) break;
-                      const reactor = reactors.find(
-                        (r) => r.id === interrupt.reactorId,
-                      );
-                      if (reactor === undefined) continue;
-                      const provokerIdx = moverIdx;
-                      const used = pool.sys["aooUsed"]?.[reactor.modelIdx] ?? 0;
-                      const refusal = aooRefusal({
-                        used,
-                        budgetMax: pool.sys["aooMax"]?.[reactor.modelIdx] ?? 1,
-                      });
-                      if (refusal !== null) {
-                        // Say why the reaction did not happen rather than dropping it silently: a
-                        // spent budget and a legal opportunity look identical in the log otherwise.
-                        emit({
-                          subPhase: "move",
-                          type: "opportunity-refused",
-                          unitId: reactor.id,
-                          targetUnitId: mover.id,
-                          at: {
-                            x: pool.x[provokerIdx] ?? 0,
-                            y: pool.y[provokerIdx] ?? 0,
-                          },
-                          text: `${reactor.name} forgoes the attack of opportunity — ${refusal}`,
-                          data: {
-                            kind: "attack-of-opportunity",
-                            reactorId: reactor.id,
-                            reason: refusal,
-                          },
-                        });
-                        continue;
-                      }
-                      // Spend first: the budget is per round and the opportunity is being taken now.
-                      const column = pool.sys["aooUsed"];
-                      if (column !== undefined) column[reactor.modelIdx] = used + 1;
-                      const res = resolvePF1eAttacks({
-                        pool,
-                        attackers: [reactor.modelIdx],
-                        defenders: [provokerIdx],
-                        registry: profiles.registry,
-                        rng: forkRng(rng, unitIndex(mover), 4),
-                      });
-                      const damage = res.metrics.netDamageDealt;
-                      emit({
-                        subPhase: "move",
-                        type: "opportunity",
-                        unitId: reactor.id,
-                        targetUnitId: mover.id,
-                        at: {
-                          x: pool.x[provokerIdx] ?? 0,
-                          y: pool.y[provokerIdx] ?? 0,
-                        },
-                        text: `${reactor.name} strikes ${mover.name} as it leaves the threatened square`,
-                        data: {
-                          kind: "attack-of-opportunity",
-                          reactorId: reactor.id,
-                          provokerId: mover.id,
-                          feetMoved: Math.round(Math.hypot(dx, dy) * 100) / 100,
-                          squaresLeft: result.squaresLeft.length,
-                          // The square the opportunity happened in — where the provoker was
-                          // attacked, not where this march ends (P06's ordering rule).
-                          square: interrupt.trigger.left ?? null,
-                          ...(res.metrics.hits > 0
-                            ? {
-                                hits: res.metrics.hits,
-                                damage: Math.round(damage * 100) / 100,
-                              }
-                            : {}),
-                        },
-                      });
-                    }
+        const walked = cellsAlongSegment(from, to, cellFeet);
+        const left = squaresLeft(walked, { withdraw });
+        if (left.length === 0) return;
+        const moverIdx = leaderModelIdx(mover.id);
+        if (moverIdx < 0) return;
+        const moverFaction = factionByUnitIdx[pool.unitIdx[moverIdx] ?? 0] ?? null;
+        const index = movePhase.threatIndex ??= new StrategicThreatIndex(pool, units, threatenedByModel);
+        const reactors: Array<{
+          id: string;
+          name: string;
+          threatens: (cell: PF1eCell) => boolean;
+          modelIdx: number;
+        }> = [];
+        for (const [unitIndex, threatens] of index.candidates(left)) {
+          const other = units[unitIndex];
+          if (!other || other.id === mover.id) continue;
+          const otherLeader = leaderModelIdx(other.id);
+          if (otherLeader < 0 || (factionByUnitIdx[pool.unitIdx[otherLeader] ?? 0] ?? null) === moverFaction) continue;
+          const modelIdx = index.firstReactor(unitIndex);
+          if (modelIdx >= 0) reactors.push({ id: other.id, name: other.name, modelIdx, threatens });
+        }
+        if (reactors.length === 0) return;
+        const result = queueMovementAoOs(interruptQueue, {
+          turn: strategicTurn,
+          substep: "move",
+          moverId: mover.id,
+          actionId: `move:${strategicTurn}:${mover.id}`,
+          path: walked,
+          ...(withdraw ? { withdraw: true } : {}),
+          cellFeet,
+          reactors,
+        });
+        interruptQueue = result.queue;
+        const reactorById = new Map(reactors.map((reactor) => [reactor.id, reactor]));
+        // The opportunity interrupts the march: it resolves where the provoker stood,
+        // before the rest of the move is committed. Movement in the sim is a formation
+        // translation applied below, so the queue is drained before that write — which is
+        // what makes the ordering rule true here rather than merely asserted.
+        while (true) {
+          const popped = resolveNextInterrupt(interruptQueue, {
+            initiativeOf: (id) => -leaderModelIdx(id),
+          });
+          interruptQueue = popped.queue;
+          const interrupt = popped.interrupt;
+          if (interrupt === null) break;
+          const reactor = reactorById.get(interrupt.reactorId);
+          if (reactor === undefined) continue;
+          const provokerIdx = moverIdx;
+          const used = pool.sys["aooUsed"]?.[reactor.modelIdx] ?? 0;
+          const refusal = aooRefusal({
+            used,
+            budgetMax: pool.sys["aooMax"]?.[reactor.modelIdx] ?? 1,
+          });
+          if (refusal !== null) {
+            // Say why the reaction did not happen rather than dropping it silently: a
+            // spent budget and a legal opportunity look identical in the log otherwise.
+            emit({
+              subPhase: "move",
+              type: "opportunity-refused",
+              unitId: reactor.id,
+              targetUnitId: mover.id,
+              at: {
+                x: pool.x[provokerIdx] ?? 0,
+                y: pool.y[provokerIdx] ?? 0,
+              },
+              text: `${reactor.name} forgoes the attack of opportunity — ${refusal}`,
+              data: {
+                kind: "attack-of-opportunity",
+                reactorId: reactor.id,
+                reason: refusal,
+              },
+            });
+            continue;
+          }
+          // Spend first: the budget is per round and the opportunity is being taken now.
+          const column = pool.sys["aooUsed"];
+          if (column !== undefined) column[reactor.modelIdx] = used + 1;
+          const res = resolvePF1eAttacks({
+            pool,
+            attackers: [reactor.modelIdx],
+            defenders: [provokerIdx],
+            registry: profiles.registry,
+            rng: forkRng(rng, unitIndex(mover), 4),
+          });
+          const damage = res.metrics.netDamageDealt;
+          emit({
+            subPhase: "move",
+            type: "opportunity",
+            unitId: reactor.id,
+            targetUnitId: mover.id,
+            at: {
+              x: pool.x[provokerIdx] ?? 0,
+              y: pool.y[provokerIdx] ?? 0,
+            },
+            text: `${reactor.name} strikes ${mover.name} as it leaves the threatened square`,
+            data: {
+              kind: "attack-of-opportunity",
+              reactorId: reactor.id,
+              provokerId: mover.id,
+              feetMoved: Math.round(Math.hypot(dx, dy) * 100) / 100,
+              squaresLeft: result.squaresLeft.length,
+              // The square the opportunity happened in — where the provoker was
+              // attacked, not where this march ends (P06's ordering rule).
+              square: interrupt.trigger.left ?? null,
+              ...(res.metrics.hits > 0
+                ? {
+                    hits: res.metrics.hits,
+                    damage: Math.round(damage * 100) / 100,
                   }
-
+                : {}),
+            },
+          });
+        }
       };
 
 
@@ -1132,6 +1085,9 @@ export function createMassBattlePf1e(
             }
           }
 
+          const movedUnit = unitById.get(unit.id);
+          if (movedUnit) movePhase.threatIndex?.refresh(movedUnit.index);
+
           const paceLabel = order.kind === "retreat" ? "retreat" : order.pace;
           const verb =
             order.kind === "retreat"
@@ -1309,7 +1265,7 @@ export function createMassBattlePf1e(
           const queue = orders.get(unit.id);
           const order = queue?.active ?? queue?.pending[0];
           if (order?.kind !== "attack" || !order.targetUnitId) continue;
-          const target = units.find((u) => u.id === order.targetUnitId);
+          const target = unitById.get(order.targetUnitId)?.unit;
           if (!target) continue;
           const anchorA = anchorPosition(pool, unit);
           const anchorB = anchorPosition(pool, target);
@@ -1559,10 +1515,9 @@ export function createMassBattlePf1e(
         const order = queue?.active ?? queue?.pending[0];
         if (!order || order.kind !== "attack" || !order.targetUnitId) continue;
 
-        const targetUnit = units.find((u) => u.id === order.targetUnitId);
-        if (!targetUnit) continue;
-
-        const targetUnitIdx = units.indexOf(targetUnit);
+        const target = unitById.get(order.targetUnitId);
+        if (!target) continue;
+        const { unit: targetUnit, index: targetUnitIdx } = target;
         const engageProfile = profiles.byUnitId.get(unit.id);
         const shoots =
           order.mode === "shot" ||
@@ -2035,11 +1990,7 @@ export function createMassBattlePf1e(
       // The collector lives as long as this module instance (all turns this worker has
       // resolved), so the forecast reports accumulated campaign totals for this army's
       // units — a SimWorker restart begins fresh accumulation (M11).
-      const report = analytics.generateReport();
-      const armyUnitIds = new Set(army.units.map((u) => u.id));
-      const armyUnits = Object.values(report.units).filter((u) =>
-        armyUnitIds.has(u.unitId),
-      );
+      const armyUnits = analytics.summariesFor(army.units.map((unit) => unit.id));
       const sum = (pick: (u: UnitAnalyticsSummary) => number): number =>
         armyUnits.reduce((acc, u) => acc + pick(u), 0);
       const totalAttacks = sum((u) => u.totalAttacks);

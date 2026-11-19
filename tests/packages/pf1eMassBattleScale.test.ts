@@ -123,7 +123,8 @@ function arena(): Arena {
     }
   }
 
-  const snap = deploySnapshot(units, factions, PF1E_MODEL_SCHEMA);
+  // Space each lane explicitly so the legacy codec does not stack distant ranks.
+  const snap = deploySnapshot(units, factions, PF1E_MODEL_SCHEMA, { laneY: (j) => 96 * j });
   const ranges = new Map<UnitId, readonly [number, number] | null>(snap.ranges);
   for (const unit of units) unit.modelRange = ranges.get(unit.id) ?? null;
 

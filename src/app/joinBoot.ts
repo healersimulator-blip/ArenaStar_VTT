@@ -55,6 +55,7 @@ export interface PlayerApp {
   readonly transportKind: string;
   /** §7: asset chunks streamed over the wire this session. */
   assetChunks: number;
+  assetBytes: number;
   cacheHas(hash: string): Promise<boolean>;
   /** UI hooks (assignment-safe; joinBoot chains the internal handlers). */
   onDisconnected: ((reason: string) => void) | null;
@@ -72,6 +73,7 @@ export class PlayerAppImpl implements PlayerApp {
   onConnectionState: ((state: PeerConnectionState) => void) | null = null;
   /** §7: asset chunks streamed over the wire this session. */
   assetChunks = 0;
+  assetBytes = 0;
   private cacheRef: AssetCache | null = null;
   readonly ready: Promise<void>;
 
@@ -102,6 +104,12 @@ export class PlayerAppImpl implements PlayerApp {
     this.inner.client = client;
     this.inner.fetcher = fetcher;
     this.cacheRef = cache;
+  }
+
+  /** @internal: an explicit close or a kick, not a recoverable disconnect. */
+  closeAssets(): void {
+    this.fetcher?.close();
+    this.cacheRef?.close();
   }
 
   async cacheHas(hash: string): Promise<boolean> {
@@ -178,6 +186,7 @@ export async function bootPlayerApp(options: PlayerAppOptions): Promise<PlayerAp
 
   let welcomed = false;
   bus.on("welcome", () => {
+    app.fetcher?.resume();
     welcomed = true;
     resolveReady();
   });
@@ -188,11 +197,13 @@ export async function bootPlayerApp(options: PlayerAppOptions): Promise<PlayerAp
     session.close(`kicked: ${reason}`);
   });
   session.onClosed = (reason) => {
+    app.closeAssets();
     if (!welcomed) rejectReady(new Error(`connection closed before welcome: ${reason}`));
     app.onDisconnected?.(reason);
   };
   let dropped = false;
   session.onStateChange = (state) => {
+    if (state !== "connected") app.fetcher?.pause();
     app.onConnectionState?.(state);
     if (state === "failed") {
       // §6.5 keeps retrying underneath; over Manual signaling the player must
@@ -218,6 +229,12 @@ export async function bootPlayerApp(options: PlayerAppOptions): Promise<PlayerAp
     }
     if (state === "connected" && !app.client) {
       void (async () => {
+        const transport = session.transport;
+        const cache = await AssetCache.open();
+        if (app.client || session.stats.state !== "connected" || session.transport !== transport) {
+          cache.close();
+          return;
+        }
         const meta: StoreMeta = {
           worldId: options.invite.roomId,
           name: "Joining…",
@@ -225,20 +242,21 @@ export async function bootPlayerApp(options: PlayerAppOptions): Promise<PlayerAp
           systemVersion: "1.0.0",
         };
         const client = new ClientSync({
-          transport: session.transport,
+          transport,
           bus,
           meta,
           // §5A/N01: no schema/scene guess — the joiner adopts the host's
           // welcome-announced battle (active package columns + scene) before
           // the first sim frame, so PF1e campaigns decode correctly on join.
         });
-        const cache = await AssetCache.open();
         const fetcher = new AssetFetcher({
           cache,
           request: (id, priority, offset) => client.requestAsset(id, priority, offset),
         });
+        fetcher.pause(); // the transport opening is not yet an authenticated session
         bus.on("asset", (chunk) => {
           app.assetChunks += 1;
+          app.assetBytes += chunk.bytes.byteLength;
           fetcher.onChunk(chunk);
         });
         app.attach(client, fetcher, cache);
