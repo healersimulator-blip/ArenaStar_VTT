@@ -1,3 +1,4 @@
+import { battleOf } from "../core/strategicRoom/campaignScene";
 import { unitViewFor } from "../sim/turnPlan";
 import { SaveWork } from "../storage/saveCoordinator";
 /**
@@ -298,12 +299,18 @@ export class TurnChannel {
 
   // ─── campaign lifecycle ─────────────────────────────────────────────────────
 
+  private startingLocal = false;
+  get canLaunchHosted() { return !this.startingLocal && this.engine.phase === "idle" && !this.bridge.started && !this.store.getAll("turns").length; }
+
   /** Start the campaign (GM): loads the SimBridge, creates Turn 1 (§8A resume). */
   start(
     mode: "stepwise" | "realtime" | "simultaneous",
     initial?: { bytes: Uint8Array; maxHpMax: number },
   ): Promise<number> {
-    return this.saveWork.run(() => this.startInner(mode, initial));
+    if (this.store.getAll("scenes").some(s=>battleOf(s,this.store.meta.worldId))) return Promise.reject(new Error("Finish the hosted battle before starting the local simulator."));
+    if (this.startingLocal) return Promise.reject(new Error("Local simulation already starting."));
+    this.startingLocal = true;
+    return this.saveWork.run(() => this.startInner(mode, initial)).finally(()=>{this.startingLocal=false;});
   }
 
   private async startInner(

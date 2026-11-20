@@ -1,11 +1,18 @@
 import { expect, test } from "@playwright/test";
-import { entry, gmCall, hostCall, waitForSurface } from "./lib";
+import {
+  entry,
+  gmCall,
+  hostCall,
+  playerCall,
+  surfaceCallArg,
+  waitForSurface,
+} from "./lib";
+
+import { joinFromInvite } from "./realUsers";
 
 /**
- * P03/D-198 — movement legality through the real drag path. A canvas drag is
- * judged by `pf1eMovePlan` inside `onTokenMove` BEFORE the opportunity queue,
- * so an illegal walk never provokes and never commits: the controller restores
- * the token's square on the "cancel" return (D-185's own contract).
+ * The GM deliberately bypasses PF1e movement restrictions. Exercise player drags through
+ * the joined player's own canvas and check the host's refusal, not a GM notification.
  *
  * The placed actors author no speed, so the derivation's own named default
  * (30 ft) is what the walk is judged against — the same default the sheet
@@ -71,66 +78,70 @@ async function sceneWith(
 }
 
 test.describe("PF1e movement legality (P03)", () => {
-  test("a walk beyond speed is refused before it commits, with the named cost", async ({
-    page,
-  }) => {
-    const errors: string[] = [];
-    page.on("pageerror", (e) => errors.push(e.message));
-    // The mover (first placed, so tokenPos tracks it) at (2,2).
-    await sceneWith(page, [
-      { id: "mover", col: 2, row: 2 },
-      { id: "far", col: 14, row: 14 },
-    ]);
-    const before = await hostCall<{ x: number; y: number }>(page, "tokenPos");
-    expect(before).toEqual(centre(2, 2));
-
-    // 8 orthogonal squares = 40 ft, against the derivation's 30-ft default.
-    await dragWorld(page, centre(2, 2), centre(10, 2));
-
-    // The token never moved, and the refusal is the notification's own line.
-    await expect
-      .poll(async () => hostCall<{ x: number; y: number }>(page, "tokenPos"))
-      .toEqual(centre(2, 2));
-    const notifications = await gmCall<Array<{ message: string }>>(
-      page,
-      "notifications",
-    );
-    expect(
-      notifications.some((n) =>
-        n.message.includes(
-          "mover can't move there — the walk costs 40 ft but a move action moves 30 ft",
-        ),
-      ),
-    ).toBe(true);
-    expect(errors).toEqual([]);
-  });
-
-  test("you can never end movement in an occupied square", async ({ page }) => {
-    const errors: string[] = [];
-    page.on("pageerror", (e) => errors.push(e.message));
-    await sceneWith(page, [
-      { id: "mover", col: 0, row: 0 },
-      { id: "blocker", col: 3, row: 0 },
-    ]);
-
-    // 15 ft — inside the budget — but the destination is blocker's square.
-    await dragWorld(page, centre(0, 0), centre(3, 0));
-    await expect
-      .poll(async () => hostCall<{ x: number; y: number }>(page, "tokenPos"))
-      .toEqual(centre(0, 0));
-    const notifications = await gmCall<Array<{ message: string }>>(
-      page,
-      "notifications",
-    );
-    expect(
-      notifications.some((n) =>
-        n.message.includes(
-          "you can never end movement in an occupied square — the destination overlaps blocker's space",
-        ),
-      ),
-    ).toBe(true);
-    expect(errors).toEqual([]);
-  });
+  for (const { label, from, to, other, reason } of [
+    {
+      label: "an over-budget walk",
+      from: [2, 2],
+      to: [10, 2],
+      other: [14, 14],
+      reason: "the walk costs 40 ft but a move action moves 30 ft",
+    },
+    {
+      label: "an occupied destination",
+      from: [0, 0],
+      to: [3, 0],
+      other: [3, 0],
+      reason: "the destination overlaps blocker's space",
+    },
+  ] as const)
+    test(`the authority refuses a joined player's drag: ${label}`, async ({
+      page: gm,
+      browser,
+    }) => {
+      test.setTimeout(90000);
+      const player = await browser.newPage();
+      try {
+        await sceneWith(gm, [
+          { id: "mover", col: from[0], row: from[1] },
+          { id: "blocker", col: other[0], row: other[1] },
+        ]);
+        await joinFromInvite(gm, player);
+        const screen = async (cell: readonly [number, number]) => {
+          const point = await surfaceCallArg<{ x: number; y: number } | null>(
+            player,
+            "playerCanvas",
+            "screenOf",
+            centre(cell[0], cell[1]),
+          );
+          if (!point) throw Error("Player canvas unavailable");
+          return point;
+        };
+        const start = await screen(from),
+          end = await screen(to);
+        await player.mouse.move(start.x, start.y);
+        await player.mouse.down();
+        await player.mouse.move(end.x, end.y, { steps: 8 });
+        await player.mouse.up();
+        await expect
+          .poll(
+            async () =>
+              (
+                await playerCall<{ detail: string } | null>(
+                  player,
+                  "lastRejected",
+                )
+              )?.detail,
+          )
+          .toContain(reason);
+        for (const read of [
+          () => hostCall(gm, "tokenPos"),
+          () => playerCall(player, "tokenPos"),
+        ])
+          await expect.poll(read).toEqual(centre(from[0], from[1]));
+      } finally {
+        await player.close();
+      }
+    });
 
   test("a walk inside the budget commits through the ordinary op path", async ({
     page,

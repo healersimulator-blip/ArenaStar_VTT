@@ -5,6 +5,7 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 import pkg from "./package.json" with { type: "json" };
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -43,8 +44,19 @@ function firstPartyPackages(): Array<Record<string, unknown>> {
 }
 
 export default defineConfig({
-  plugins: [svelte(), viteSingleFile()],
+  plugins: [svelte(), viteSingleFile(), {
+    // The offline artifact embeds its workspace stylesheet (including fonts). Store the
+    // bytes once; main.ts restores it synchronously before either shell measures layout.
+    name: "packed-workspace-style", enforce: "post", apply: "build",
+    generateBundle: { order: "post", handler(_options, bundle) {
+      const html = bundle["index.html"];
+      if (html?.type !== "asset" || typeof html.source !== "string") return;
+      html.source = html.source.replace(/<style\b[^>]*>([\s\S]*?)<\/style>/, (_, css: string) =>
+        `<script id="vtt-workspace-style" type="application/octet-stream">${gzipSync(css, {level:9}).toString("base64")}</script>`);
+    } }
+  }],
   define: {
+    __AIS_PIXI_GZ__: JSON.stringify(gzipSync(readFileSync(new URL("./node_modules/pixi.js/dist/pixi.min.js", import.meta.url)), { level: 9 }).toString("base64")),
     __APP_VERSION__: JSON.stringify(pkg.version),
     __FIRST_PARTY_PACKAGES__: JSON.stringify(firstPartyPackages()),
   },

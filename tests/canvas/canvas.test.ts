@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { fitRect, screenToWorld, worldToScreen, zoomAt } from "../../src/canvas/camera";
 import { snapToGrid, squareGridLines } from "../../src/canvas/grid";
 import { dispositionColor, marqueeRect, tokenInMarquee, tokenRect } from "../../src/canvas/tokens";
@@ -167,16 +167,18 @@ describe("host lifecycle (§6.5)", () => {
     expect(drains).toBe(1); // unchanged after remove
   });
 
-  test("interval tick drains periodically", async () => {
-    const target = makeTarget();
-    let drains = 0;
-    const persister: Drainable = { drain: () => ((drains += 1), Promise.resolve()) };
-    const remove = installHostLifecycle(persister, target, { flushIntervalMs: 5 });
-    await new Promise((r) => setTimeout(r, 18));
-    remove();
-    const after = drains;
-    await new Promise((r) => setTimeout(r, 12));
-    expect(drains).toBe(after); // interval cleared
-    expect(after).toBeGreaterThanOrEqual(2);
+  test("interval tick drains periodically", () => {
+    vi.useFakeTimers();
+    try {
+      const drain = vi.fn(() => Promise.resolve());
+      const remove = installHostLifecycle({ drain }, makeTarget(), { flushIntervalMs: 5 });
+      vi.advanceTimersByTime(18);
+      expect(drain).toHaveBeenCalledTimes(3);
+      remove();
+      vi.advanceTimersByTime(12);
+      expect(drain).toHaveBeenCalledTimes(3); // interval cleared
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

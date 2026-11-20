@@ -9,6 +9,7 @@ import {
 import { PostgresRoom } from "./postgres";
 import { deploy, generatedScenario, parseScenario } from "./scenario";
 import { extractScenario } from "./worldExtract";
+import { serveCampaign } from "./campaign";
 import { serve } from "./server";
 
 async function jsonFile(path: string | undefined): Promise<unknown> {
@@ -121,10 +122,11 @@ async function main() {
         { flag: "wx", mode: 0o600 },
       );
       await chmod(arg1, 0o600);
-    } else if (command === "serve") {
+    } else if (command === "serve" || command === "campaign") {
       const port = Number(process.env.PORT ?? 8788);
       if (!integer(port, 1, 65535)) throw new Error("Invalid PORT.");
-      const service = await serve(db, publicOrigins(port), port);
+      const service = command === "campaign" ? await serveCampaign(url, room, pin, publicOrigins(port), port, process.env.STRATEGIC_LAUNCH_KEY ?? "") : await serve(db, publicOrigins(port), port);
+      if (command === "campaign") await db.dispose();
       running = true;
       process.once("SIGTERM", () => {
         void service.close();

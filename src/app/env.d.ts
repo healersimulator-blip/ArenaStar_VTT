@@ -32,3 +32,5 @@ declare module "*.svelte" {
   const component: Component;
   export default component;
 }
+
+declare const __AIS_PIXI_GZ__: string;

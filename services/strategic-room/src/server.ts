@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import {
   createServer,
@@ -21,13 +21,16 @@ import {
   STRATEGIC_API,
   STRATEGIC_PROTOCOL,
   STRATEGIC_VIEW_TYPE,
+  STRATEGIC_PATCH_TYPE,
   type BaselineMeta,
+  type MemberRow,
   type ModelMarker,
   type RegionPatch,
   type ReportPage,
   type ServerMessage,
   type UnitMarker,
 } from "../../../src/core/strategicRoom/protocol";
+import { BulkReads } from "./bulkReads";
 import { StrategicAuthority } from "./authority";
 import { diffRegion } from "./battle";
 import { PostgresRoom } from "./postgres";
@@ -39,10 +42,13 @@ const SESSION_BYTES = 64 * 1024;
 const ROOM_BYTES = 8 * 1024 * 1024;
 const BULK_CONCURRENCY = 64;
 const AUTH_CONCURRENCY = 64;
+const MAX_SCENE_MEDIA = 24 * 1024 * 1024;
+const MAX_SCENE_MEDIA_FILES = 64;
 const SESSION_MS = 30 * 60_000;
 const secret = () => randomBytes(32).toString("base64url");
 
 type Session = {
+  deliveredMarkersVersion?: number;
   socket: WebSocket;
   member: Member;
   bearer: string;
@@ -75,7 +81,15 @@ async function webAssets() {
     data: await readFile(new URL("index.html", base)),
     type: contentTypes.html ?? "text/html",
   });
-  for (const file of await readdir(new URL("assets/", base))) {
+  // A source checkout has no asset directory until the service web build runs; the API and
+  // socket lanes must still start so a deployment failure is visible, not fatal.
+  let built: string[];
+  try {
+    built = await readdir(new URL("assets/", base));
+  } catch {
+    built = [];
+  }
+  for (const file of built) {
     const type = contentTypes[file.split(".").at(-1) ?? ""];
     if (type && /^[a-zA-Z0-9_.-]+$/.test(file))
       files.set(`/assets/${file}`, {
@@ -108,6 +122,47 @@ function reply(res: ServerResponse, status: number, body: unknown) {
   });
   res.end(text);
 }
+/** GM roster with live presence; players never reach this branch. */
+async function roster(
+  db: PostgresRoom,
+  sessions: ReadonlyMap<string, Session>,
+): Promise<MemberRow[]> {
+  const rows = await db.roster();
+  return rows
+    .filter((row) => row.role === "PLAYER")
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      role: row.role,
+      factionId: row.factionId,
+      units: row.units,
+      deployed: row.deployed,
+      claimed: row.claimed,
+      invite: row.invite,
+      online: sessions.has(row.id),
+    }));
+}
+
+/** Optional preloaded battle art: `scene.webp` / `scene/<slot>.webp` beside the service web build. */
+async function mediaAssets(): Promise<Buffer[]> {
+  const dir = new URL("../web/scene/", import.meta.url);
+  const out: Buffer[] = [];
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names.sort()) {
+    if (!/^[a-zA-Z0-9_-]{1,32}\.webp$/.test(name)) continue;
+    const data = await readFile(new URL(name, dir));
+    if (data.byteLength > MAX_SCENE_MEDIA) continue;
+    out.push(data);
+    if (out.length >= MAX_SCENE_MEDIA_FILES) break;
+  }
+  return out;
+}
+
 const numeric = (value: string | null) =>
   value !== null && /^(0|[1-9][0-9]{0,9})$/.test(value) ? Number(value) : NaN;
 
@@ -115,7 +170,7 @@ const numeric = (value: string | null) =>
 export async function serve(
   db: PostgresRoom,
   origins: ReadonlySet<string>,
-  port: number,
+  port: number | null,
 ) {
   const assets = await webAssets();
   const socketOrigins = [...origins]
@@ -129,13 +184,23 @@ export async function serve(
       protocols.has(STRATEGIC_PROTOCOL) ? STRATEGIC_PROTOCOL : false,
   });
   const sessions = new Map<string, Session>();
+  /** Content-hashed image bytes, offered to any admitted session as a cache seed. */
+  const media = (await mediaAssets()).map((data) => ({
+    data,
+    hash: createHash("sha256").update(data).digest("hex"),
+  }));
+  const mediaByHash = new Map(media.map((asset) => [asset.hash, asset]));
   const byBearer = new Map<string, Session>();
   const unauth = new Set<WebSocket>();
   const heartbeats = new WeakSet<WebSocket>();
   let totalBuffered = 0;
   let maxBuffered = 0;
   let dropped = 0;
-  let bulk = 0;
+  const bulk = new BulkReads<Session>(
+    BULK_CONCURRENCY,
+    MAX_COMMANDERS + 1,
+    1500,
+  );
   // Compatibility JSON also shares its serialized tail, but is not the browser default.
   const tails = new WeakMap<UnitMarker[], Buffer>();
   function replyView(
@@ -144,17 +209,21 @@ export async function serve(
     data: BaselineMeta,
     markers: UnitMarker[],
     packed: Buffer | undefined,
+    changes: boolean,
   ) {
     res.setHeader("Vary", "Accept");
     res.setHeader("Cache-Control", "no-store, no-transform");
-    if (req.headers.accept === STRATEGIC_VIEW_TYPE) {
+    if (
+      req.headers.accept === STRATEGIC_VIEW_TYPE ||
+      req.headers.accept === STRATEGIC_PATCH_TYPE
+    ) {
       const prefix = viewPrefix(data, packed?.byteLength ?? 0);
       if (!prefix) {
         reply(res, 503, { error: "view_too_large" });
         return;
       }
       res.writeHead(200, {
-        "Content-Type": STRATEGIC_VIEW_TYPE,
+        "Content-Type": changes ? STRATEGIC_PATCH_TYPE : STRATEGIC_VIEW_TYPE,
         "Content-Length": prefix.byteLength + (packed?.byteLength ?? 0),
       });
       if (packed) {
@@ -191,11 +260,16 @@ export async function serve(
     sessions.get(s.member.id) === s &&
     s.expires > Date.now() &&
     s.socket.readyState === WebSocket.OPEN;
-  const drop = (s: Session) => {
+  /** Retire a session's authority and its HTTP permits. The socket close frame is the caller's
+   * job: a kick must hand the browser a documented reason, while a shed session is terminated. */
+  const retire = (s: Session) => {
     if (sessions.get(s.member.id) === s) sessions.delete(s.member.id);
-    byBearer.delete(s.bearer);
+    if (byBearer.get(s.bearer) === s) byBearer.delete(s.bearer);
     s.region = null;
     for (const response of s.responses) response.destroy();
+  };
+  const drop = (s: Session) => {
+    retire(s);
     s.socket.terminate();
   };
   function send(socket: WebSocket, message: ServerMessage, s?: Session) {
@@ -255,9 +329,17 @@ export async function serve(
             sessions: sessions.size,
             maxBuffered,
             dropped,
-            bulk,
+            bulk: bulk.active,
           }),
         );
+    },
+    kick: (id) => {
+      // Live session only. The browser may resume this seat with its existing key, so this is a
+      // deliberate close rather than a terminate: the client sees why it must rejoin.
+      const s = sessions.get(id);
+      if (!s) return;
+      retire(s);
+      s.socket.close(4001, "kicked");
     },
     revoke: (id) => {
       const s = sessions.get(id);
@@ -427,6 +509,40 @@ export async function serve(
       return;
     }
     const path = url.pathname.slice(STRATEGIC_API.length);
+    const sceneMedia = (asset: string) => {
+      const hash = asset.replace(/\.webp$/, "");
+      if (!/^[0-9a-f]{64}$/.test(hash)) return undefined;
+      const found = mediaByHash.get(hash);
+      if (!found) return undefined;
+      // Same origin the session was admitted from; a shared reader can cache it, not mutate it.
+      if (req.headers.origin && !origins.has(req.headers.origin))
+        return undefined;
+      return found;
+    };
+    if (
+      url.pathname.startsWith(`${STRATEGIC_API}/scene/`) &&
+      req.method === "GET" &&
+      req.headers.origin &&
+      origins.has(req.headers.origin)
+    ) {
+      const asset = sceneMedia(
+        decodeURIComponent(
+          url.pathname.slice(`${STRATEGIC_API}/scene/`.length),
+        ),
+      );
+      if (!asset) {
+        reply(res, 404, { error: "not_found" });
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "image/webp",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Length": asset.data.byteLength,
+        ETag: `"${asset.hash}"`,
+      });
+      res.end(asset.data);
+      return;
+    }
     if (
       !url.pathname.startsWith(`${STRATEGIC_API}/`) ||
       !["/view", "/region", "/report"].includes(path)
@@ -444,27 +560,52 @@ export async function serve(
       return;
     }
     if (
-      bulk >= BULK_CONCURRENCY ||
       session.responses.size >= 3 ||
       (path === "/region" && session.regionBusy)
     ) {
       reply(res, 429, { error: "view_busy" });
       return;
     }
-    bulk++;
+    let release = bulk.enter();
+    // Don't make the publication herd throw away authenticated connections and retry in waves.
+    // Regions, reports, or duplicate requests do not get a waiting slot.
+    if (
+      !release &&
+      path === "/view" &&
+      req.headers.accept === STRATEGIC_PATCH_TYPE &&
+      session.deliveredMarkersVersion === authority.room.version - 1 &&
+      numeric(url.searchParams.get("markersVersion")) ===
+        session.deliveredMarkersVersion
+    ) {
+      const pending = new AbortController();
+      const cancel = () => pending.abort();
+      session.responses.add(res);
+      res.once("close", cancel);
+      try {
+        release = await bulk.wait(session, pending.signal);
+      } finally {
+        res.off("close", cancel);
+        session.responses.delete(res);
+      }
+    }
+    if (!release) {
+      reply(res, 429, { error: "view_busy" });
+      return;
+    }
+    if (!live(session) || res.destroyed) {
+      release();
+      reply(res, 401, { error: "not_admitted" });
+      return;
+    }
     session.responses.add(res);
     if (path === "/region") session.regionBusy = true;
-    const release = () => {
-      bulk--;
-      session.responses.delete(res);
-      if (path === "/region") session.regionBusy = false;
-    };
     let released = false;
     const done = () => {
-      if (!released) {
-        released = true;
-        release();
-      }
+      if (released) return;
+      released = true;
+      session.responses.delete(res);
+      if (path === "/region") session.regionBusy = false;
+      release();
     };
     res.on("close", done);
     res.on("finish", done);
@@ -486,6 +627,13 @@ export async function serve(
       return;
     }
     if (path === "/view") {
+      // A roster read can finish after the session was dropped by a kick, revoke or disconnect.
+      const members =
+        session.member.role === "GM" ? await roster(db, sessions) : undefined;
+      if (!live(session) || res.destroyed) {
+        reply(res, 401, { error: "not_admitted" });
+        return;
+      }
       const data: BaselineMeta = {
         epoch: session.epoch,
         head: publicHead(room),
@@ -496,17 +644,43 @@ export async function serve(
         factions: current.scenario.factions,
         own: current.own(session.member),
         orders,
+        ...(members
+          ? {
+              members,
+              media: media.map(({ hash, data }) => ({
+                hash,
+                name: `scene-${hash.slice(0, 12)}.webp`,
+                mime: "image/webp",
+                size: data.byteLength,
+                url: `scene/${hash}.webp`,
+              })),
+            }
+          : {}),
       };
-      // This is a bandwidth hint, never a permission selector. Only reuse this publication.
+      // The version is only a bandwidth hint; select data by the admitted member.
       const known = numeric(url.searchParams.get("markersVersion"));
+      const changes =
+        req.headers.accept === STRATEGIC_PATCH_TYPE &&
+        session.deliveredMarkersVersion === known &&
+        known === room.version - 1
+          ? current.markerChanges(session.member)
+          : undefined;
+      res.once("finish", () => {
+        if (res.statusCode === 200 && known !== room.version)
+          session.deliveredMarkersVersion = Math.max(
+            session.deliveredMarkersVersion ?? -1,
+            room.version,
+          );
+      });
       replyView(
         req,
         res,
         data,
         current.markers(session.member),
-        req.headers.accept === STRATEGIC_VIEW_TYPE && known !== room.version
-          ? current.packedMarkers(session.member)
-          : undefined,
+        known === room.version
+          ? undefined
+          : (changes ?? current.packedMarkers(session.member)),
+        changes !== undefined,
       );
       return;
     }
@@ -631,13 +805,14 @@ export async function serve(
   try {
     if (!authority.active)
       throw new Error("Room authority lost during startup.");
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(port, "0.0.0.0", () => {
-        server.off("error", reject);
-        resolve();
+    if (port !== null)
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(port, "0.0.0.0", () => {
+          server.off("error", reject);
+          resolve();
+        });
       });
-    });
   } catch (error) {
     await close();
     throw error;

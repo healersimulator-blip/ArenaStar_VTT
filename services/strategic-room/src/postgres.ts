@@ -13,31 +13,38 @@ import {
 import { turnSeed } from "../../../src/host/turnEngine";
 import type { Scenario, UnitState } from "./scenario";
 import type {
+  Control,
   Frozen,
   FrozenOrder,
   Member,
+  MemberRecord,
   Published,
   Result,
   RoomRecord,
 } from "./state";
 
-const columns = `turn_id AS "turnId", version, phase, deadline_ms AS "deadlineMs", generation`;
-const memberColumns = `id, role, faction_id AS "factionId", epoch`;
+const columns = `turn_id AS "turnId", version, phase, deadline_ms AS "deadlineMs", generation, members_version AS "members"`;
+const memberColumns = `id, coalesce(name,id) AS "name", role, faction_id AS "factionId", epoch`;
 const publishedColumns =
   'version, checkpoint AS bytes, hp_max AS "maxHpMax", pool_hash AS hash, units';
-type RoomRow = Omit<RoomRecord, "deadlineMs"> & { deadlineMs: string | null };
+type RoomRow = Omit<RoomRecord, "deadlineMs" | "members"> & {
+  deadlineMs: string | null;
+  members: number;
+};
 const roomRecord = ({
   turnId,
   phase,
   version,
   deadlineMs,
   generation,
+  members,
 }: RoomRow): RoomRecord => ({
   turnId,
   phase,
   version,
   deadlineMs: deadlineMs === null ? null : Number(deadlineMs),
   generation,
+  members,
 });
 const secret = () => randomBytes(32).toString("base64url");
 const digest = (text: string) =>
@@ -48,6 +55,10 @@ export type CommittedCommand = {
   receipt: Receipt;
   room?: RoomRecord;
   revoked?: string;
+  control?: string;
+  invites?: Record<string, string>;
+  /** A live session the edge must drop, without revoking the seat. */
+  kicked?: string;
 };
 
 /** The lease serializes admission across processes; the generation also fences late commits after lease loss. */
@@ -146,9 +157,26 @@ export class PostgresRoom {
       lease.off("error", lost);
       lease.off("end", lost);
       // A lost connection is already released by the lease listener.
-      if (this.lease === lease) this.lease = null;
-      if (!released) lease.release(true);
+      if (this.lease === lease) {
+        this.lease = null;
+        await this.releaseLock(lease);
+      } else if (!released) lease.release(true);
       throw error;
+    }
+  }
+
+  private async releaseLock(lease: PoolClient) {
+    // Closing a TCP socket is not an acknowledgement that PostgreSQL has ended the
+    // backend session. Unlock on the owning connection before allowing a clean restart.
+    try {
+      await lease.query(
+        "SELECT pg_advisory_unlock(hashtextextended('arenastar-strategic:' || $1, 0))",
+        [this.id],
+      );
+    } catch {
+      // A lost session releases the lock at PostgreSQL. Never return it to the pool.
+    } finally {
+      lease.release(true);
     }
   }
 
@@ -157,8 +185,10 @@ export class PostgresRoom {
     const lease = this.lease;
     this.lease = null;
     this.ownedGeneration = null;
-    if (lease) lease.release(true); // Closes the backend session and its advisory lock.
-    return (this.disposed = this.pool.end());
+    return (this.disposed = (async () => {
+      if (lease) await this.releaseLock(lease);
+      await this.pool.end();
+    })());
   }
 
   private async locked(
@@ -183,21 +213,35 @@ export class PostgresRoom {
     scenario: Scenario,
     state: Published,
     publicKeys: Readonly<Record<string, string>> = {},
+    campaign?: { slot: string; invite: (slot: string) => string },
   ) {
     return this.tx(async (client) => {
       await client.query(
         "INSERT INTO strategic_rooms(id,rules_pin,scenario,projection_key) VALUES($1,$2,$3,$4)",
         [this.id, this.pin, scenario, randomBytes(32)],
       );
+      if (campaign)
+        await client.query(
+          "INSERT INTO strategic_campaign_bindings(room_id,slot) VALUES ($1,$2)",
+          [this.id, campaign.slot],
+        );
       await this.insertVersion(client, state, null);
-      const members = [{ id: "gm", factionId: null }, ...scenario.commanders];
+      const members = [
+        { id: "gm", name: "Game Master", factionId: null },
+        ...scenario.commanders.map((c) => ({
+          id: c.id,
+          name: c.name ?? c.id,
+          factionId: c.factionId,
+        })),
+      ];
       const invites: Record<string, string> = {};
-      const values = members.map(({ id, factionId }) => {
+      const values = members.map(({ id, name, factionId }) => {
         const key = Object.hasOwn(publicKeys, id) ? publicKeys[id] : undefined;
-        const code = key ? null : secret();
+        const code = key ? null : (campaign?.invite(id) ?? secret());
         if (code) invites[id] = code;
         return {
           id,
+          name,
           role: id === "gm" ? "GM" : "PLAYER",
           faction: factionId,
           key: key ?? null,
@@ -205,13 +249,69 @@ export class PostgresRoom {
         };
       });
       await client.query(
-        `INSERT INTO strategic_members(room_id,id,role,faction_id,public_key,invite_hash,invite_expires)
-        SELECT $1,id,role,faction,key,invite,now() + interval '30 minutes'
-        FROM jsonb_to_recordset($2::jsonb) AS m(id text,role text,faction text,key text,invite text)`,
+        `INSERT INTO strategic_members(room_id,id,name,role,faction_id,public_key,invite_hash,invite_expires)
+        SELECT $1,id,name,role,faction,key,invite,now() + interval '30 minutes'
+        FROM jsonb_to_recordset($2::jsonb) AS m(id text,name text,role text,faction text,key text,invite text)`,
         [this.id, json(values)],
       );
       return invites;
     });
+  }
+
+  /** GM-only roster: identity binding, invite state and current unit grants. */
+  async roster(): Promise<MemberRecord[]> {
+    const { rows } = await this.pool.query<{
+      id: string;
+      name: string;
+      role: Member["role"];
+      factionId: string | null;
+      claimed: boolean;
+      invite: boolean;
+      units: string[] | null;
+      deployed: string[] | null;
+    }>(
+      `SELECT m.id, coalesce(m.name,m.id) AS name, m.role, m.faction_id AS "factionId",
+        m.public_key IS NOT NULL AS claimed,
+        (m.invite_hash IS NOT NULL AND m.invite_expires > now()) AS invite,
+        coalesce(
+          (SELECT array_agg(c.unit_id ORDER BY c.unit_id COLLATE "C")
+            FROM strategic_control c WHERE c.room_id=m.room_id AND c.member_id=m.id),
+          (SELECT array_agg(u->>'id' ORDER BY u->>'id' COLLATE "C")
+            FROM strategic_rooms r,
+              jsonb_array_elements(r.scenario->'commanders') c,
+              jsonb_array_elements(c->'units') u
+            WHERE r.id=m.room_id AND c->>'id'=m.id AND m.role='PLAYER')
+        ) AS units,
+        (SELECT array_agg(u->>'id' ORDER BY u->>'id' COLLATE "C")
+          FROM strategic_rooms r,
+            jsonb_array_elements(r.scenario->'commanders') c,
+            jsonb_array_elements(c->'units') u
+          WHERE r.id=m.room_id AND c->>'id'=m.id AND m.role='PLAYER') AS deployed
+      FROM strategic_members m WHERE m.room_id=$1 AND m.active
+      ORDER BY m.id COLLATE "C"`,
+      [this.id],
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      role: row.role,
+      factionId: row.factionId,
+      // No grant rows means the seat's own deployment (rooms created before grants existed).
+      units: row.units ?? [],
+      deployed: row.deployed ?? [],
+      claimed: row.claimed,
+      invite: row.invite ? "reissued" : null,
+    }));
+  }
+
+  /** One commander's committed grants (empty array = explicitly none). */
+  async grants(memberId: string): Promise<string[]> {
+    const { rows } = await this.pool.query<{ unitId: string }>(
+      `SELECT unit_id AS "unitId" FROM strategic_control
+      WHERE room_id=$1 AND member_id=$2 ORDER BY unit_id COLLATE "C"`,
+      [this.id, memberId],
+    );
+    return rows.map((row) => row.unitId);
   }
 
   async admit(publicKey: string, invite?: string): Promise<Member | null> {
@@ -243,6 +343,7 @@ export class PostgresRoom {
     admittedAt: number,
     seed: number,
     validate: (edit: UnitEdit) => string | null,
+    deployable: (memberId: string) => readonly string[],
   ): Promise<CommittedCommand> {
     const generation = this.generation;
     const requestDigest = digest(json(cmd));
@@ -339,6 +440,70 @@ export class PostgresRoom {
       }
       if (member.role !== "GM")
         return deny("forbidden", "Only the GM may use this command.");
+      if (cmd.kind === "member.update") {
+        const target = (
+          await client.query<{ role: string; factionId: string | null }>(
+            `SELECT role,faction_id AS "factionId" FROM strategic_members
+            WHERE room_id=$1 AND id=$2 AND active FOR UPDATE`,
+            [this.id, cmd.memberId],
+          )
+        ).rows[0];
+        if (!target || target.role !== "PLAYER")
+          return deny("forbidden", "No active commander with that slot ID.");
+        // The wire parser trims too; keep the durable row canonical for direct authority callers.
+        const name = cmd.name?.trim();
+        if (name !== undefined) {
+          if (!name || name.length > 64)
+            return deny("invalid_order", "Commander names are 1–64 characters.");
+          await client.query(
+            "UPDATE strategic_members SET name=$3 WHERE room_id=$1 AND id=$2",
+            [this.id, cmd.memberId, name],
+          );
+        }
+        if (cmd.units !== undefined) {
+          const owned = new Set(deployable(cmd.memberId));
+          if (cmd.units.some((unit) => !owned.has(unit)))
+            return deny(
+              "invalid_order",
+              "That unit does not belong to this commander's deployment.",
+            );
+          await client.query(
+            "DELETE FROM strategic_control WHERE room_id=$1 AND member_id=$2",
+            [this.id, cmd.memberId],
+          );
+          if (cmd.units.length)
+            await client.query(
+              `INSERT INTO strategic_control(room_id,member_id,unit_id)
+              SELECT $1,$2,unit FROM unnest($3::text[]) unit`,
+              [this.id, cmd.memberId, cmd.units],
+            );
+          // An accepted order for a unit the commander just lost would otherwise resolve silently.
+          if (room.phase === "orders") {
+            await client.query(
+              "DELETE FROM strategic_orders WHERE room_id=$1 AND turn_id=$2 AND member_id=$3 AND NOT (unit_id = ANY($4::text[]))",
+              [this.id, room.turnId, cmd.memberId, cmd.units],
+            );
+            const revision =
+              (
+                await client.query<{ revision: number }>(
+                  "SELECT revision FROM strategic_revisions WHERE room_id=$1 AND turn_id=$2 AND member_id=$3",
+                  [this.id, room.turnId, cmd.memberId],
+                )
+              ).rows[0]?.revision ?? 0;
+            await client.query(
+              `INSERT INTO strategic_revisions VALUES($1,$2,$3,$4)
+              ON CONFLICT (room_id,turn_id,member_id) DO UPDATE SET revision=EXCLUDED.revision`,
+              [this.id, room.turnId, cmd.memberId, revision + 1],
+            );
+          }
+        }
+        return finish({
+          receipt: ok(room.turnId),
+          // Only an actual allowlist change needs the live view refreshed.
+          ...(cmd.units === undefined ? {} : { control: cmd.memberId }),
+          room: await this.setMembers(client),
+        });
+      }
       if (cmd.kind === "member.revoke") {
         const revoked = await client.query(
           `UPDATE strategic_members SET active=false,epoch=epoch+1,invite_hash=NULL,invite_expires=NULL
@@ -352,7 +517,52 @@ export class PostgresRoom {
             "DELETE FROM strategic_orders WHERE room_id=$1 AND turn_id=$2 AND member_id=$3",
             [this.id, room.turnId, cmd.memberId],
           );
-        return finish({ receipt: ok(room.turnId), revoked: cmd.memberId });
+        return finish({
+          receipt: ok(room.turnId),
+          revoked: cmd.memberId,
+          room: await this.setMembers(client),
+        });
+      }
+      if (cmd.kind === "member.kick") {
+        const target = (
+          await client.query<{ role: string }>(
+            "SELECT role FROM strategic_members WHERE room_id=$1 AND id=$2 AND active",
+            [this.id, cmd.memberId],
+          )
+        ).rows[0];
+        if (!target || target.role !== "PLAYER")
+          return deny("forbidden", "No active commander with that slot ID.");
+        // The seat and its key stay intact; the live session is dropped by the edge.
+        return finish({
+          receipt: ok(room.turnId),
+          kicked: cmd.memberId,
+          room: await this.setMembers(client),
+        });
+      }
+      if (cmd.kind === "member.invite") {
+        const target = (
+          await client.query<{ role: string; publicKey: string | null }>(
+            `SELECT role, public_key AS "publicKey" FROM strategic_members
+            WHERE room_id=$1 AND id=$2 AND active FOR UPDATE`,
+            [this.id, cmd.memberId],
+          )
+        ).rows[0];
+        if (!target || target.role !== "PLAYER")
+          return deny("forbidden", "No active commander with that slot ID.");
+        // A bound browser keeps its seat. Re-issuing there would be a takeover, not an invite.
+        if (target.publicKey)
+          return deny(
+            "forbidden",
+            "This commander is already claimed. Kick or revoke the seat before inviting a new browser.",
+          );
+        await client.query(
+          "UPDATE strategic_members SET invite_hash=$3, invite_expires=now() + interval '30 minutes' WHERE room_id=$1 AND id=$2",
+          [this.id, cmd.memberId, digest(cmd.invite)],
+        );
+        return finish({
+          receipt: ok(room.turnId),
+          invites: { [cmd.memberId]: cmd.invite },
+        });
       }
       if (cmd.turnId !== room.turnId)
         return deny("turn_closed", "That turn is no longer current.");
@@ -382,6 +592,17 @@ export class PostgresRoom {
       }
       return deny("wrong_phase", "Command is not available in this phase.");
     });
+  }
+
+  /** A membership change is not a publication; it only tells clients to refetch their own view. */
+  private async setMembers(client: PoolClient): Promise<RoomRecord> {
+    const { rows } = await client.query<RoomRow>(
+      `UPDATE strategic_rooms SET members_version=members_version+1 WHERE id=$1 RETURNING ${columns}`,
+      [this.id],
+    );
+    const row = rows[0];
+    if (!row) throw new StaleAuthority("Room missing.");
+    return roomRecord(row);
   }
 
   private async freeze(
@@ -526,7 +747,34 @@ export class PostgresRoom {
     );
     const row = rows[0];
     if (!row) throw new Error("Committed checkpoint missing.");
-    return row;
+    return { ...row, control: await this.control(version) };
+  }
+
+  /** Unit grants are part of a publication, not a live overlay: a view always states its own grants. */
+  private async control(version: number): Promise<Control> {
+    const { rows } = await this.pool.query<{
+      memberId: string;
+      units: string[];
+    }>(
+      `SELECT member_id AS "memberId", array_agg(unit_id ORDER BY unit_id COLLATE "C") AS units
+      FROM strategic_control WHERE room_id=$1 GROUP BY member_id`,
+      [this.id],
+    );
+    // No rows anywhere means no commander has been restricted yet. Grant rows are never deleted
+    // for an allowed unit, so an empty table is the pre-grant default, not "everyone owns nothing".
+    void version;
+    if (!rows.length) return {};
+    // A restricted commander with an empty allowlist has no row here (array_agg skips NULL);
+    // reconstruct it from the member list so `own` can distinguish "none" from "unchanged".
+    const members = await this.pool.query<{ id: string }>(
+      "SELECT id FROM strategic_members WHERE room_id=$1 AND active AND role='PLAYER'",
+      [this.id],
+    );
+    const control: Control = Object.fromEntries(
+      members.rows.map((row) => [row.id, [] as string[]]),
+    );
+    for (const row of rows) control[row.memberId] = row.units;
+    return control;
   }
 
   async privateState(

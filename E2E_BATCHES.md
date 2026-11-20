@@ -342,3 +342,5 @@ shipped scene controls, edits/binds the native Wizard timeline, verifies PF1
 condition modifiers, and checks rendered persistent FX and release/expiry.
 See [PF1_ENTANGLE_FX.md](docs/PF1_ENTANGLE_FX.md). The native `pf1e_entangle.spec.ts`
 remains in the native combat batch and is not upstream acceptance evidence.
+
+`test:e2e:formation-reference` runs the standalone example in Chromium (60 s cap, no database). These are reference mechanics, **not** the hosted rules. See [mechanics, fixes and integrated campaign load evidence](docs/STRATEGIC_MECHANICS_TEST_REPORT.md).

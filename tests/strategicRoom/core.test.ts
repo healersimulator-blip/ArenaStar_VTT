@@ -234,7 +234,7 @@ test("offline extraction copies only allowed strategic deployment fields from a 
       coll: "scenes",
       id: "field",
       doc: {
-        grid: { type: "square", distance: 5 },
+        grid: { type: "square", distance: 5, units: "ft" },
         flags: { core: { scale: "strategic" } },
         walls: [],
         img: "private-asset",
@@ -272,6 +272,10 @@ test("offline extraction copies only allowed strategic deployment fields from a 
   };
   const extracted = extractScenario({ docs }, layout);
   expect(extracted).toEqual(scenario);
+  for (const units of ["m", "", undefined]) {
+    const scene = docs[0]?.doc;
+    expect(() => extractScenario({ docs: [{ ...docs[0], doc: { ...scene, grid: { type: "square", distance: 5, units } } }, ...docs.slice(1)] }, layout)).toThrow(/5-ft/);
+  }
   expect(JSON.stringify(extracted)).not.toMatch(
     /private-owner|private-asset|pending spell/,
   );

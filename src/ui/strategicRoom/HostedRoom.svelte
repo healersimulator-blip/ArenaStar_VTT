@@ -3,6 +3,7 @@
   import { SvelteMap } from "svelte/reactivity";
   import TurnProgress from "../sim/TurnProgress.svelte";
   import HostedMap from "./HostedMap.svelte";
+  import HostedRoster from "./HostedRoster.svelte";
   import { HostedRoomClient, type HostedState } from "../../client/hostedRoom";
   import { openVttDb } from "../../storage/idb";
   import { ensureIdentity } from "../../net/identityStore";
@@ -14,6 +15,8 @@
     type RoomOrder,
   } from "../../core/strategicRoom/protocol";
 
+  const campaignPath = /^\/battle\/[0-9a-f-]{36}\/$/.test(location.pathname) ? location.pathname : null;
+  const resumeKey = "arenastar.hosted.resume" + (campaignPath ?? "");
   let client: HostedRoomClient | undefined;
   let state = $state.raw<HostedState>({
     view: null,
@@ -36,6 +39,7 @@
   let reportNotice = $state("");
   let GMduration = $state<number | undefined>();
   let revokeSlot = $state("");
+  let rosterOpen = $state(false);
   let region = $state<{ x: number; y: number } | null>(null);
   let turn = 0;
   let handled = "";
@@ -60,6 +64,25 @@
       !blocked,
   );
   const unit = $derived(ownById.get(selected));
+  /** GM unit list per commander, with any order accepted this turn, for the roster. */
+  const gmUnits = $derived.by(() => {
+    const byId = new Map(
+      (view?.markers ?? []).map((marker) => [marker.id, marker.name]),
+    );
+    const edges = new SvelteMap<string, { id: string; name: string; order: RoomOrder | null }[]>();
+    for (const member of view?.members ?? []) {
+      // Enumerate the deployment, not the grant: an unchecked unit must stay re-grantable.
+      edges.set(
+        member.id,
+        member.deployed.map((id) => ({
+          id,
+          name: byId.get(id) ?? id,
+          order: accepted.get(id) ?? null,
+        })),
+      );
+    }
+    return edges;
+  });
   const label = (order: RoomOrder | null | undefined) =>
     order === null
       ? "Clear"
@@ -101,19 +124,19 @@
           if (!next.view.own.some((u) => u.id === selected))
             selected = next.view.own[0]?.id ?? "";
           try {
-            localStorage.setItem("arenastar.hosted.resume", "1");
+            localStorage.setItem(resumeKey, "1");
           } catch {
             /* optional preference */
           }
           invite = "";
-        });
+        }, campaignPath ? `${campaignPath}api/strategic` : undefined);
         ready = true;
         state = {
           ...state,
           notice: "Enter a one-time invite, or resume from this browser.",
         };
         try {
-          if (localStorage.getItem("arenastar.hosted.resume")) client.join();
+          if ((campaignPath && location.search === "?resume") || localStorage.getItem(resumeKey)) client.join();
         } catch {
           /* manual resume */
         }
@@ -307,8 +330,23 @@
                     (GMduration < 1 || GMduration > 86400))}
                 onclick={() => control("turn.next")}>Open next turn</button
               >{/if}
+            {#if view.members}<button
+                type="button"
+                data-roster-toggle
+                onclick={() => (rosterOpen = !rosterOpen)}
+                >{rosterOpen ? "Hide commanders" : `Commanders (${view.members.length})`}</button
+              >{/if}
+            {#if rosterOpen && view.members}
+              <HostedRoster
+                members={view.members}
+                units={gmUnits}
+                markers={view.markers}
+                busy={blocked}
+                onCommand={(command) => client?.submit(command)}
+              />
+            {/if}
             <details>
-              <summary>Membership</summary>
+              <summary>Membership (revoke by seat ID)</summary>
               <label
                 >Commander slot <input
                   maxlength="64"
@@ -473,7 +511,7 @@
               ><tbody>
                 {#each report.rows as row (row.unitId)}<tr
                     data-report-unit={row.unitId}
-                    ><td>{row.name}</td><td>{row.alive} / {row.before}</td><td
+                    ><td>{row.name}{#if row.marchBlocked} · March blocked{/if}</td><td>{row.alive} / {row.before}</td><td
                       >{row.lost}</td
                     ></tr
                   >{/each}

@@ -136,6 +136,174 @@ describe.skipIf(!url)("real PostgreSQL hosted order/turn authority", () => {
     );
   });
 
+  test("names, unit grants, invites, kick and ban are durable and enforced", async () => {
+    const f = await fixture();
+    const kick = vi.fn();
+    const a = await StrategicAuthority.open(f.db, { ...signal(), kick }, later);
+    authorities.push(a);
+    const gm = await member(f.db, f.members.gm);
+    const red = await member(f.db, f.members["commander-2"]);
+
+    // GM assigns a display name; players cannot.
+    expect(
+      await a.submit(gm, {
+        kind: "member.update",
+        requestId: id(),
+        memberId: "commander-2",
+        name: "  Vanguard  ",
+      }),
+    ).toMatchObject({ status: "accepted" });
+    expect(
+      (await f.db.roster()).find((m) => m.id === "commander-2")?.name,
+    ).toBe("Vanguard");
+    expect(
+      await a.submit(red, {
+        kind: "member.update",
+        requestId: id(),
+        memberId: "commander-2",
+        name: "Me",
+      }),
+    ).toMatchObject({ code: "forbidden" });
+    expect(
+      (await f.db.roster()).find((m) => m.id === "commander-2")?.name,
+    ).toBe("Vanguard");
+
+    // Only the GM may widen a grant, and only to that commander's own deployment.
+    expect(
+      await a.submit(red, {
+        kind: "member.update",
+        requestId: id(),
+        memberId: "commander-2",
+        units: ["unit-1-1"],
+      }),
+    ).toMatchObject({ code: "forbidden" });
+    expect(
+      await a.submit(gm, {
+        kind: "member.update",
+        requestId: id(),
+        memberId: "commander-2",
+        units: ["unit-1-1"],
+      }),
+    ).toMatchObject({ code: "invalid_order" });
+
+    // Grants gate the order path and the visible list, not just the rendered UI.
+    const redUnits = a.battle.own(red).map((unit) => unit.id);
+    expect(redUnits.length).toBe(5);
+    const [kept, removed] = redUnits as [string, string];
+    expect(await a.submit(red, order(removed))).toMatchObject({ revision: 1 });
+    expect(await a.submit(red, order(kept, 1, 1))).toMatchObject({
+      revision: 2,
+    });
+    expect(
+      await a.submit(gm, {
+        kind: "member.update",
+        requestId: id(),
+        memberId: "commander-2",
+        units: [kept],
+      }),
+    ).toMatchObject({ status: "accepted" });
+    // The withdrawn order is gone and the commander's revision moved, so their in-flight
+    // batch cannot silently re-add it.
+    const after = await f.db.privateState(red);
+    expect(after?.orders.revision).toBe(3);
+    expect(after?.orders.edits.map((e) => e.unitId)).toEqual([kept]);
+    expect(await a.submit(red, order(removed, 1, 3))).toMatchObject({
+      code: "invalid_order",
+    });
+    expect(a.battle.own(red).map((u) => u.id)).toEqual([kept]);
+    // The GM still sees the withdrawn unit as part of the seat's deployment, so it can be
+    // granted back; the grant list itself is what shrank.
+    const seat = (await f.db.roster()).find((m) => m.id === "commander-2");
+    expect(seat?.units).toEqual([kept]);
+    expect(seat?.deployed).toEqual([...redUnits].sort());
+
+    // Invites: a bound seat cannot be re-invited. The scenario fixture binds every seat, so a
+    // second room leaves one commander unclaimed to exercise the real invite path.
+    expect(
+      await a.submit(gm, {
+        kind: "member.invite",
+        requestId: id(),
+        memberId: "commander-2",
+        invite: "z".repeat(32),
+      }),
+    ).toMatchObject({ code: "forbidden" });
+    // Kick drops the live session without revoking the seat.
+    expect(
+      await a.submit(gm, {
+        kind: "member.kick",
+        requestId: id(),
+        memberId: "commander-2",
+      }),
+    ).toMatchObject({ status: "accepted" });
+    expect(kick).toHaveBeenCalledWith("commander-2");
+    expect(
+      (await f.db.roster()).find((m) => m.id === "commander-2"),
+    ).toMatchObject({
+      claimed: true,
+    });
+    expect(await f.db.admit(f.members["commander-2"])).not.toBeNull();
+
+    // Ban is permanent for the battle: the bound key stops being admitted and the seat leaves
+    // the roster. (The live-session drop itself belongs to the session edge.)
+    expect(
+      await a.submit(gm, {
+        kind: "member.revoke",
+        requestId: id(),
+        memberId: "commander-2",
+      }),
+    ).toMatchObject({ status: "accepted" });
+    expect(await f.db.admit(f.members["commander-2"])).toBeNull();
+    expect((await f.db.roster()).some((m) => m.id === "commander-2")).toBe(
+      false,
+    );
+  });
+
+  test("an unclaimed seat can be invited once, then the bound key is the only way in", async () => {
+    const room = `test-${id()}`;
+    const scenario = generatedScenario();
+    const db = database(room);
+    await db.migrate();
+    await db.create(scenario, deploy(scenario), { gm: "11".repeat(32) });
+    testRooms.push(room);
+    const a = await StrategicAuthority.open(db, signal(), later);
+    authorities.push(a);
+    const gm = await member(db, "11".repeat(32));
+    expect(
+      (await db.roster()).filter((m) => m.role === "PLAYER" && !m.claimed),
+    ).toHaveLength(2);
+    expect(
+      await a.submit(gm, {
+        kind: "member.invite",
+        requestId: id(),
+        memberId: "commander-2",
+        invite: "y".repeat(32),
+      }),
+    ).toMatchObject({ status: "accepted" });
+    expect(await db.admit("55".repeat(32), "n".repeat(32))).toBeNull();
+    expect((await db.admit("44".repeat(32), "y".repeat(32)))?.id).toBe(
+      "commander-2",
+    );
+    // The code is one-time: neither another key nor a replay can use it again.
+    expect(await db.admit("66".repeat(32), "y".repeat(32))).toBeNull();
+    expect(await db.admit("44".repeat(32))).toMatchObject({
+      id: "commander-2",
+    });
+    expect(
+      await a.submit(gm, {
+        kind: "member.invite",
+        requestId: id(),
+        memberId: "commander-2",
+        invite: "w".repeat(32),
+      }),
+    ).toMatchObject({ code: "forbidden" });
+    expect(
+      (await db.roster()).find((m) => m.id === "commander-2"),
+    ).toMatchObject({
+      claimed: true,
+      invite: null,
+    });
+  });
+
   test("freezes FIFO at manual close; resumes abandoned resolution and fences old publications", async () => {
     const f = await fixture();
     let captured: Frozen | undefined;
@@ -287,5 +455,10 @@ describe.skipIf(!url)("real PostgreSQL hosted order/turn authority", () => {
     await expect(
       database(f.room, "not-the-original-build").acquire(() => undefined),
     ).rejects.toThrow(/pinned build/);
+    // A failed pin check acquired the advisory lock before checking the build. Its
+    // rejection must also leave a clean handoff, without a sleep or retry window.
+    const replacement = database(f.room);
+    const claimed = await replacement.acquire(() => undefined);
+    expect(claimed.room.version).toBe(1);
   });
 });

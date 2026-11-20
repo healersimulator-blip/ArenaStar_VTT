@@ -42,7 +42,7 @@ import {
 import type { PF1eCell } from "./pf1e/targeting";
 import { StrategicThreatIndex } from "./pf1e/strategicThreat";
 import { resolvePF1eAOESpell } from "./pf1e/spells";
-import { planPF1eStride, type PF1eStridePace } from "./pf1e/stride";
+import { planPF1eStride, type PF1eStridePace, type PF1eStrideInput, type PF1eStrideResult } from "./pf1e/stride";
 import {
   parsePackSpellOrder,
   PF1E_PACK_MASS_SPELL_MIRRORS,
@@ -154,6 +154,8 @@ export interface MassBattlePf1eOptions {
   spellEntry?: Readonly<Record<string, unknown>> | undefined;
   /** Hosted worker starting from a frozen checkpoint (turn-local interrupt labels). */
   resolvedTurns?: number;
+  /** Optional turn-scoped occupancy policy, applied before reactions or translation. */
+  simultaneousStride?: (input: PF1eStrideInput, pool: ModelPool, unit: UnitView) => PF1eStrideResult;
 }
 
 /** Read `data.spell` (the pack entry id an order names); absent → default spell. */
@@ -885,7 +887,7 @@ export function createMassBattlePf1e(
           // what they cost to cross), so no rule is escapable by choosing a turn mode.
           const pace: PF1eStridePace =
             order.kind === "retreat" ? "withdraw" : order.pace;
-          const stride = planPF1eStride({
+          const input: PF1eStrideInput = {
             from: { x: anchorX, y: anchorY },
             path: order.kind === "retreat" ? [order.toward] : order.path,
             pace,
@@ -894,7 +896,8 @@ export function createMassBattlePf1e(
             difficult: difficultCells,
             blockAt: (fx, fy, tx, ty) => firstMoveBlock(fx, fy, tx, ty, ctx.walls),
             blockEpsilon: MOVE_BLOCK_EPSILON,
-          });
+          };
+          const stride = opts.simultaneousStride?.(input, pool, unit) ?? planPF1eStride(input);
           if (stride.refusal !== null) {
             emit({
               subPhase: "move",
@@ -1340,10 +1343,13 @@ export function createMassBattlePf1e(
             // the wrap ratchets outward as corner models fall).
             let cornerIdx = -1;
             let cornerLat = -Infinity;
+            let cornerDepth = Infinity;
             for (const b of foeLiving) {
               const l = latOf(b) * side;
-              if (l > cornerLat) {
+              const depth = (pool.x[b] ?? 0) * ux + (pool.y[b] ?? 0) * uy;
+              if (l > cornerLat || (l === cornerLat && depth < cornerDepth)) {
                 cornerLat = l;
+                cornerDepth = depth;
                 cornerIdx = b;
               }
             }
@@ -1351,7 +1357,9 @@ export function createMassBattlePf1e(
             const foeEdge = side === 1 ? foeMax : foeMin;
             const excess = ownLiving
               .filter((a) => side * (latOf(a) - foeEdge) > cellFeet * 0.5)
-              .sort((a, b) => side * (latOf(b) - latOf(a)) || a - b);
+              // Fold from the edge outward: the nearest overhang takes the hinge;
+              // farther files continue along the defender toward its rear.
+              .sort((a, b) => side * (latOf(a) - latOf(b)) || a - b);
             const cx = pool.x[cornerIdx] ?? 0;
             const cy = pool.y[cornerIdx] ?? 0;
             for (let k = 0; k < excess.length; k++) {
@@ -1359,8 +1367,8 @@ export function createMassBattlePf1e(
               if (m === undefined) continue;
               // Slot k: at own reach beside the corner, stepped down the
               // enemy's side toward its rear by one square per wrap rank.
-              pool.x[m] = cx + px * side * reachFt - ux * (k * cellFeet);
-              pool.y[m] = cy + py * side * reachFt - uy * (k * cellFeet);
+              pool.x[m] = cx + px * side * reachFt + ux * (k * cellFeet);
+              pool.y[m] = cy + py * side * reachFt + uy * (k * cellFeet);
               wrapped++;
             }
           }

@@ -10,6 +10,8 @@ import type { Scenario, UnitState } from "./scenario";
 
 export type Member = {
   id: string;
+  /** GM-assigned label; absent on plain test fixtures and older callers. */
+  name?: string;
   role: "GM" | "PLAYER";
   factionId: string | null;
   epoch: number;
@@ -19,12 +21,27 @@ export type FrozenOrder = {
   memberId: string;
   order: RoomOrder;
 };
+/** Commander slot → the seats that may order its units. Frozen with each publication. */
+export type Control = Record<string, string[]>;
+export type MemberRecord = {
+  id: string;
+  name: string;
+  role: Member["role"];
+  factionId: string | null;
+  /** Units the seat may order now. */
+  units: string[];
+  /** Every unit in the seat's own deployment, granted or not. */
+  deployed: string[];
+  claimed: boolean;
+  invite: string | null;
+};
 export type Published = {
   version: number;
   bytes: Uint8Array;
   maxHpMax: number;
   hash: string;
   units: UnitState[];
+  control?: Control;
 };
 export type Frozen = {
   turnId: number;
@@ -40,7 +57,7 @@ export type Result = {
   report: Uint8Array;
   metrics: { resolveMs: number; rulesMs: number; artifactMs: number };
 };
-export type RoomRecord = Head & { generation: number };
+export type RoomRecord = Head & { generation: number; members: number };
 
 export function checkpointPool(state: Published) {
   const frame = decodeSimSnapshot(state.bytes, STRATEGIC_CODEC);
@@ -53,6 +70,6 @@ export function checkpointPool(state: Published) {
 }
 
 export function publicHead(room: RoomRecord): Head {
-  const { turnId, version, phase, deadlineMs } = room;
-  return { turnId, version, phase, deadlineMs };
+  const { turnId, version, phase, deadlineMs, members } = room;
+  return { turnId, version, phase, deadlineMs, members };
 }

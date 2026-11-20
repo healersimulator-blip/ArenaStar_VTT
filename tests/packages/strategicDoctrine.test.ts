@@ -166,19 +166,109 @@ describe("G-04 doctrine mode (Combat_Resolver_5 parallel execution port)", () =>
     expect(pool.y[second]).toBe(5);
     // Wrapped models now stand beside the defender's flank at reach (y=10 / y=−5 rows),
     // stepping down the enemy side one square per rank. Side +1 corner is (4,5):
-    // slots (4,10), (−1,10), (−6,10), (−11,10) taken by the +side excess in
-    // descending y (25, 20, 15, 10 → pool indices 9, 7, 5, 3).
-    expect([pool.x[9], pool.y[9]]).toEqual([4, 10]);
-    expect([pool.x[7], pool.y[7]]).toEqual([-1, 10]);
-    expect([pool.x[5], pool.y[5]]).toEqual([-6, 10]);
-    expect([pool.x[3], pool.y[3]]).toEqual([-11, 10]);
-    // Side −1 corner is (4,0): slots (4,−5), (−1,−5), (−6,−5), (−11,−5),
-    // excess in ascending y (−20, −15, −10, −5 → pool indices 8, 6, 4, 2).
-    expect([pool.x[8], pool.y[8]]).toEqual([4, -5]);
-    expect([pool.x[6], pool.y[6]]).toEqual([-1, -5]);
-    expect([pool.x[4], pool.y[4]]).toEqual([-6, -5]);
-    expect([pool.x[2], pool.y[2]]).toEqual([-11, -5]);
+    // slots (4,10), (9,10), (14,10), (19,10) taken by the +side excess in
+    // ascending y (10, 15, 20, 25 → pool indices 3, 5, 7, 9).
+    expect([pool.x[9], pool.y[9]]).toEqual([19, 10]);
+    expect([pool.x[7], pool.y[7]]).toEqual([14, 10]);
+    expect([pool.x[5], pool.y[5]]).toEqual([9, 10]);
+    expect([pool.x[3], pool.y[3]]).toEqual([4, 10]);
+    // Side −1 corner is (4,0): slots (4,−5), (9,−5), (14,−5), (19,−5),
+    // excess in descending y (−5, −10, −15, −20 → pool indices 2, 4, 6, 8).
+    expect([pool.x[8], pool.y[8]]).toEqual([19, -5]);
+    expect([pool.x[6], pool.y[6]]).toEqual([14, -5]);
+    expect([pool.x[4], pool.y[4]]).toEqual([9, -5]);
+    expect([pool.x[2], pool.y[2]]).toEqual([4, -5]);
   });
+
+  // Test the shared PF1e resolver with doctrine explicitly enabled. Hosted rooms disable it.
+  test.each([0, 1, 2, 3])(
+    "envelopment is relative to the combatants, not the world axes (quarter-turn %i)",
+    (rotation) => {
+      // Rotate a symmetric 7-file vs 3-file front around a translated battlefield.
+      const rotate = (x: number, y: number) => {
+        for (let i = 0; i < rotation; i++) [x, y] = [-y, x];
+        return { x: x + 105, y: y - 95 };
+      };
+      for (const [distance, shouldWrap] of [
+        [4, true],
+        [10, true],
+        [10.0625, false],
+      ] as const) {
+        const pool = createModelPool(13, PF1E_MODEL_SCHEMA);
+        // Defender's rear corners come before its front corners in the pool:
+        // a tied lateral extreme must select the front, not the first array index.
+        const ys = [0, 5, -5, 10, -10, 15, -15, 0, 5, -5, 0, 5, -5];
+        const startX=(i:number)=>i<7?0:distance+(i>=8 && i<=10?5:0);
+        ys.forEach((y, i) =>
+          allocModel(pool, {
+            id: i + 1,
+            unitIdx: i < 7 ? 0 : 1,
+            ...rotate(startX(i), y),
+            hp: 50,
+            hpMax: 50,
+          }),
+        );
+        const units: UnitView[] = [0, 1].map((i) => ({
+          id: `u${i}`,
+          armyId: `a${i}`,
+          factionId: `f${i}`,
+          type: "infantry",
+          name: `Line ${i}`,
+          profile: {},
+          stats: {},
+          orders: null,
+          formation: "line",
+          sceneId: "scene-1",
+          modelRange: i ? [7, 13] : [0, 7],
+          leaderTokenId: null,
+        }));
+        const orders = new Map<string, OrderQueue>([
+          [
+            "u0",
+            {
+              issuedBy: "gm",
+              issuedTurn: 1,
+              pending: [{ kind: "attack", targetUnitId: "u1" }],
+            },
+          ],
+          [
+            "u1",
+            {
+              issuedBy: "gm",
+              issuedTurn: 1,
+              pending: [{ kind: "hold", stance: "hold" }],
+            },
+          ],
+        ]);
+        const events: SimEvent[] = [];
+        createMassBattlePf1e().resolveTurn(
+          ctxWith({ strategicDoctrine: true }),
+          pool,
+          units,
+          orders,
+          new XoshiroPRNG(19),
+          (e) => events.push(e),
+        );
+        const wrap = events.filter((e) => e.type === "envelop");
+        expect(wrap.length).toBe(shouldWrap ? 1 : 0);
+        if (shouldWrap) expect(wrap[0]?.data).toMatchObject({ wrapped: 4 });
+        ys.forEach((y, i) => {
+          // Engaged central files and defender hold. On each side, nearest excess file takes
+          // the corner and the next file takes the next slot. Outside reach + one square none move.
+          const expected =
+            i >= 7
+              ? rotate(startX(i), y)
+              : !shouldWrap || Math.abs(y) <= 5
+                ? rotate(0, y)
+                : rotate(
+                    distance + (Math.abs(y) === 15 ? 5 : 0),
+                    Math.sign(y) * 10,
+                  );
+          expect({ x: pool.x[i], y: pool.y[i] }).toEqual(expected);
+        });
+      }
+    },
+  );
 
   test("envelop per-unit opt-out (envelop: false) leaves excess files standing", () => {
     const rules = createMassBattlePf1e();

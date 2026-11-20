@@ -1,4 +1,5 @@
 /** Actual WS(S) + HTTP(S) requests. A protocol benchmark, not a browser/renderer test. */
+import { campaignFixture } from "./campaignFixture";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { monitorEventLoopDelay } from "node:perf_hooks";
@@ -14,6 +15,7 @@ import {
   STRATEGIC_API,
   STRATEGIC_PROTOCOL,
   STRATEGIC_VIEW_TYPE,
+  STRATEGIC_PATCH_TYPE,
   VIEW_PREFIX_BYTES,
   type Baseline,
   type Command,
@@ -36,10 +38,13 @@ if (!endpoint || !credentials)
     "Pass origin, invite-file path, turn count, workload, and optionally number of commanders.",
   );
 const origin = new URL(endpoint).origin;
-const { invites } = JSON.parse(await readFile(credentials, "utf8")) as {
-  invites: Record<string, string>;
-};
-const count = Number(countArg ?? Object.keys(invites).length - 1);
+const localCampaign = credentials === "--local-campaign";
+const saved = localCampaign
+  ? null
+  : (JSON.parse(await readFile(credentials, "utf8")) as {
+      invites: Record<string, string>;
+    });
+const count = Number(countArg ?? Object.keys(saved?.invites ?? {}).length - 1);
 const turns = Number(turnsArg);
 const viewMode = process.env.STRATEGIC_LOAD_VIEW ?? "compact";
 if (viewMode !== "json" && viewMode !== "compact")
@@ -70,6 +75,16 @@ if (
   !["idle", "mixed", "march", "contact", "dense"].includes(work)
 )
   throw new Error("Invalid workload, commander count or turn count.");
+const fixture = localCampaign
+  ? await campaignFixture(
+      origin,
+      count,
+      Number(process.env.STRATEGIC_LOAD_UNITS ?? 10),
+      work,
+    )
+  : null;
+const api = (fixture?.path ?? "") + STRATEGIC_API;
+const invites = fixture?.invites ?? saved?.invites ?? {};
 const report = (data: Record<string, unknown>) =>
   console.log(JSON.stringify(data));
 const percentile = (values: number[], p: number) =>
@@ -128,7 +143,7 @@ class Peer {
     this.seq = 0;
     this.stopped = false;
     const socket = (this.socket = new WebSocket(
-      `${origin.replace(/^http/, "ws")}${STRATEGIC_API}/socket`,
+      `${origin.replace(/^http/, "ws")}${api}/socket`,
       STRATEGIC_PROTOCOL,
       { origin },
     ));
@@ -241,7 +256,7 @@ class Peer {
     markerBytes: number;
   }> {
     for (let i = 0; i < VIEW_ATTEMPTS; i++) {
-      const res = await fetch(`${origin}${STRATEGIC_API}/view`, {
+      const res = await fetch(`${origin}${api}/view`, {
         headers: { Authorization: `Bearer ${this.bearer}`, Accept: accept },
         signal: AbortSignal.timeout(6000),
       });
@@ -288,10 +303,22 @@ class Peer {
     }
     return { version: -1, epoch: "", markerBytes: 0 };
   }
-  async view(): Promise<Baseline> {
+  markerChangesApplied = 0;
+  async view(base?: Baseline): Promise<Baseline> {
+    const changes =
+      viewMode === "compact" &&
+      base?.epoch === this.epoch &&
+      process.env.STRATEGIC_LOAD_FULL_VIEWS !== "1" &&
+      base !== undefined;
+    const url =
+      `${origin}${api}/view` +
+      (changes ? `?markersVersion=${base.head.version}` : "");
     for (let i = 0; i < VIEW_ATTEMPTS; i++) {
-      const res = await fetch(`${origin}${STRATEGIC_API}/view`, {
-        headers: { Authorization: `Bearer ${this.bearer}`, Accept: accept },
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${this.bearer}`,
+          Accept: changes ? STRATEGIC_PATCH_TYPE : accept,
+        },
         signal: AbortSignal.timeout(6000),
       });
       const body = new Uint8Array(await res.arrayBuffer());
@@ -301,16 +328,27 @@ class Peer {
       this.viewBytes += body.byteLength;
       if (res.ok) {
         const type = res.headers.get("content-type");
-        if (viewMode === "compact" && type !== STRATEGIC_VIEW_TYPE)
+        if (
+          viewMode === "compact" &&
+          type !== STRATEGIC_VIEW_TYPE &&
+          !(changes && type === STRATEGIC_PATCH_TYPE)
+        )
           throw new Error("Server did not send a compact view.");
         const decodeStart = performance.now();
-        const v = await decodeView(body, type);
+        const v = await decodeView(body, type, base);
+        if (type === STRATEGIC_PATCH_TYPE) this.markerChangesApplied++;
         this.decodeMs += performance.now() - decodeStart;
+        const expected = fixture?.roster.get(this.slot);
         if (
           v.epoch !== this.epoch ||
+          (expected &&
+            (expected.size !== v.own.length ||
+              new Set(v.own.map((u) => u.id)).size !== expected.size)) ||
           (this.slot !== "gm" &&
-            v.own.some(
-              (u) => !u.id.startsWith(`unit-${this.slot.split("-")[1]}-`),
+            v.own.some((u) =>
+              expected
+                ? !expected.has(u.id)
+                : !u.id.startsWith(`unit-${this.slot.split("-")[1]}-`),
             ))
         )
           throw new Error("View escaped its authority.");
@@ -341,7 +379,7 @@ class Peer {
   /** One unretried view fetch; 401 means this session is no longer admitted. */
   async probeStatus(): Promise<number> {
     try {
-      const res = await fetch(`${origin}${STRATEGIC_API}/view`, {
+      const res = await fetch(`${origin}${api}/view`, {
         headers: { Authorization: `Bearer ${this.bearer}`, Accept: accept },
         signal: AbortSignal.timeout(5000),
       });
@@ -431,11 +469,11 @@ try {
         const index = i + j,
           slot = index === 0 ? "gm" : `commander-${index}`;
         const code = invites[slot];
-        if (!code)
+        if (!code && !(index === 0 && fixture))
           throw new Error(`A fresh demo invite is required for ${slot}.`);
         const peer = (peers[index] = new Peer(
           slot,
-          await generateIdentity(),
+          index === 0 && fixture ? fixture.gm : await generateIdentity(),
           code,
         ));
         await peer.connect();
@@ -475,10 +513,13 @@ try {
         viewBytes: peer.viewBytes,
         encodedBytes: peer.httpEncodedBytes,
         decodedMs: peer.decodeMs,
+        patches: peer.markerChangesApplied,
+        base: process.env.STRATEGIC_LOAD_FULL_VIEWS === "1" ? undefined : view,
         retries: peer.viewRetries,
       };
     });
-    // This is a protocol generator, not 500 retained browser UI trees.
+    // Only the immediately preceding authorized view is retained for change decoding;
+    // no renderer/UI tree. The forced full-view control can release every old baseline.
     views.length = 0;
     const orderStart = performance.now();
     const acks = await Promise.all(
@@ -520,6 +561,8 @@ try {
         const disconnectedAt = performance.now();
         await peer.connect();
         const restored = await peer.view();
+        const pre = preOrders[index];
+        if (pre?.base) pre.base = restored;
         if (restored.head.version < head.version)
           throw new Error("Rejoined an obsolete version.");
         rejoinMs = performance.now() - disconnectedAt;
@@ -556,7 +599,7 @@ try {
         const decoded = sampleEvery === 0 || i % sampleEvery === 0;
         try {
           ok = decoded
-            ? (await peer.view()).head.version > head.version
+            ? (await peer.view(preOrders[i]?.base)).head.version > head.version
             : (await peer.viewHead()).version > head.version;
         } catch {
           // Count failed views in addition to the timings of successful views.
@@ -661,6 +704,10 @@ try {
       ),
       noticeApplyP95: turnSample.noticeApplyP95,
       viewFailed: turnSample.viewFailed,
+      markerChangesApplied: preOrders.reduce(
+        (n, p) => n + p.peer.markerChangesApplied - p.patches,
+        0,
+      ),
       viewRetries: preOrders.reduce(
         (n, p) => n + p.peer.viewRetries - p.retries,
         0,
@@ -697,6 +744,8 @@ try {
       ackSamples: acks.map((a) => a.ms),
       applySamples: apply.map((a) => a.ms),
     });
+    if (fixture && (Object.keys(refused).length || turnSample.viewFailed))
+      throw new Error("Campaign load gate: order refusals or missing views.");
     lagMax = Math.max(lagMax, lag.percentile(95) / 1e6);
     lag.reset();
     if (round + 1 < turns) {
@@ -717,6 +766,7 @@ try {
       );
     }
   }
+  await fixture?.audit(turns);
   report({
     stage: "summary",
     turns: summary.length,
@@ -732,4 +782,5 @@ try {
 } finally {
   lag.disable();
   for (const p of peers) p?.close();
+  if (fixture) await fixture.finish();
 }
