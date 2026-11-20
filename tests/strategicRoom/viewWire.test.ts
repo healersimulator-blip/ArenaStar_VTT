@@ -6,6 +6,7 @@ import {
   MAX_VIEW_BYTES,
   MAX_VIEW_META_BYTES,
   STRATEGIC_VIEW_TYPE,
+  STRATEGIC_PATCH_TYPE,
   type BaselineMeta,
   type MarkerLabels,
   type UnitMarker,
@@ -23,6 +24,7 @@ import {
 import type { Member } from "../../services/strategic-room/src/state";
 import {
   packMarkers,
+  packMarkerChanges,
   viewPrefix,
 } from "../../services/strategic-room/src/viewEncoding";
 
@@ -131,6 +133,76 @@ describe("hosted compact views", () => {
     ).toEqual([]);
   });
 
+  test("applies one publication of exact changes, retains runs and drops concealed rows", async () => {
+    const before = Array.from({ length: 8 }, (_, i): UnitMarker => ({
+      id: `id-${i}`,
+      name: `N${i}`,
+      factionId: "red",
+      at: { x: i, y: -i },
+    }));
+    const after = before
+      .map((m, i) =>
+        i === 2
+          ? { ...m, at: { ...m.at, y: -8192.125 } }
+          : i === 3
+            ? { ...m, at: { ...m.at, x: 4096 + 2 / 3 } }
+            : i === 4
+              ? { ...m, at: { x: 10, y: 20 } }
+              : m,
+      )
+      .filter((_, i) => i !== 5);
+    const base = { ...meta, markers: before };
+    const next = {
+      ...meta,
+      head: { ...meta.head, version: meta.head.version + 1 },
+      orders: { revision: 0, edits: [] },
+    };
+    const changes = packMarkerChanges(before, after, 1000);
+    if (!changes) throw new Error("Expected patch");
+    const readPatch = (b = changes, previous: typeof base | undefined = base) =>
+      decodeView(frame(next, b), STRATEGIC_PATCH_TYPE, previous);
+    const applied = await readPatch();
+    expect(applied).toEqual({ ...next, markers: after });
+    expect(applied.markers[0]).toBe(before[0]);
+    expect(base.markers[3]?.at.x).toBe(3);
+    for (const wrong of [
+      { ...base, epoch: "stale" },
+      { ...base, role: "GM" as const },
+      { ...base, factionId: "red" },
+      { ...base, head: next.head },
+      { ...base, markers: [] },
+    ]) {
+      await expect(readPatch(changes, wrong)).rejects.toBeInstanceOf(
+        MissingViewMarkers,
+      );
+    }
+    await expect(
+      decodeView(frame(next, changes), STRATEGIC_PATCH_TYPE),
+    ).rejects.toBeInstanceOf(MissingViewMarkers);
+    expect((await readPatch(packMarkerChanges(before, [], 4))).markers).toEqual(
+      [],
+    );
+    const first = before[0];
+    if (!first) throw new Error("Missing first marker");
+    for (const incompatible of [
+      [{ ...first, id: "new" }],
+      [{ ...first, name: "renamed" }],
+      [{ ...first, factionId: "blue" }],
+      before.slice().reverse(),
+    ])
+      expect(packMarkerChanges(before, incompatible, 1000)).toBeUndefined();
+    expect(
+      packMarkerChanges(before, after, changes.length - 1),
+    ).toBeUndefined();
+    for (const corrupt of [
+      changes.subarray(0, -1),
+      Buffer.concat([changes, Buffer.from([0, 0, 0, 1])]),
+      Buffer.from([0, 8, 0, 0, 0, 0, 0, 0]),
+      Buffer.from([0, 8, 0, 1, 0, 7, 0, 2]),
+    ])
+      await expect(readPatch(corrupt)).rejects.toThrow();
+  });
+
   test("rejects corrupt frames, invalid columns and oversized compressed or inflated bodies", async () => {
     const packed = packMarkers(markers, meta.factions);
     const valid = frame(meta, packed);
@@ -167,6 +239,29 @@ describe("hosted compact views", () => {
     expect(
       viewPrefix({ ...meta, name: "a".repeat(MAX_VIEW_META_BYTES) }, 0),
     ).toBeNull();
+  });
+
+  test("carries a 500-seat GM roster in the metadata head", async () => {
+    // The GM view is the only one with `members`; a big room must not be rejected as oversized
+    // metadata just because 500 seats × their deployment are listed.
+    const seats = Array.from({ length: 500 }, (_, i) => ({
+      id: `commander-${i + 1}`,
+      name: `Commander ${i + 1} with a fairly long display name`,
+      role: "PLAYER" as const,
+      factionId: i % 2 ? "red" : "blue",
+      units: Array.from({ length: 5 }, (_, u) => `unit-${(i % 2) + 1}-${i * 5 + u + 1}`),
+      deployed: Array.from({ length: 5 }, (_, u) => `unit-${(i % 2) + 1}-${i * 5 + u + 1}`),
+      claimed: true,
+      invite: null,
+      online: i < 7,
+    }));
+    const head = { ...meta, members: seats };
+    expect(Buffer.byteLength(JSON.stringify(head))).toBeGreaterThan(64 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(head))).toBeLessThan(MAX_VIEW_META_BYTES);
+    const packed = packMarkers(markers, meta.factions);
+    const decoded = await read(Uint8Array.from(frame(head, packed)));
+    expect(decoded.members).toHaveLength(500);
+    expect(decoded.markers).toHaveLength(markers.length);
   });
 
   test("shares encoded fog projections only within the authorized cohort", async () => {

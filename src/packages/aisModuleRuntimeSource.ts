@@ -1,4 +1,9 @@
-import pixiSource from "../../node_modules/pixi.js/dist/pixi.min.js?raw";
+import { gunzipSync, strFromU8 } from "fflate";
+let decoded: string | undefined;
+// Only Foundry-profile sandboxes need the second, classic-script build of Pixi.
+function pixiSource(): string {
+  return decoded ??= strFromU8(gunzipSync(Uint8Array.from(atob(__AIS_PIXI_GZ__), c => c.charCodeAt(0))));
+}
 /** Minimal AIS SDK injected before an independent module's classic-script entry point. */
 import type { Json } from "../core/documents";
 
@@ -9,7 +14,7 @@ export function aisModuleRuntimeSource(
   const foundry = runtimeContext !== null && typeof runtimeContext === "object" && !Array.isArray(runtimeContext) && runtimeContext.profile === "foundry-module";
   // Use the application's actual pinned, MIT-licensed Pixi library in Foundry
   // sandboxes too; never fake graphics types or copy a proprietary Foundry bundle.
-  const graphics = foundry ? `(function () { ${pixiSource}\n globalThis.PIXI = Object.assign({}, PIXI, { DisplayObject: PIXI.Container }); })();` : "";
+  const graphics = foundry ? `(function () { ${pixiSource()}\n globalThis.PIXI = Object.assign({}, PIXI, { DisplayObject: PIXI.Container }); })();` : "";
   return `
 ${graphics}
 "use strict";

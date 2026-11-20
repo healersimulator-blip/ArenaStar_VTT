@@ -4,6 +4,7 @@ import {
   STRATEGIC_API,
   STRATEGIC_PROTOCOL,
   STRATEGIC_VIEW_TYPE,
+  STRATEGIC_PATCH_TYPE,
   type Baseline,
   type Command,
   type Head,
@@ -72,6 +73,7 @@ export class HostedRoomClient {
   constructor(
     private readonly identity: Identity,
     private readonly change: (state: HostedState) => void,
+    private readonly apiRoot = STRATEGIC_API,
   ) {}
 
   private update(change: Partial<HostedState>) {
@@ -100,7 +102,7 @@ export class HostedRoomClient {
 
   private connect() {
     if (this.stopped || this.denied) return;
-    const url = new URL(`${STRATEGIC_API}/socket`, location.href);
+    const url = new URL(`${this.apiRoot}/socket`, location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     const socket = (this.socket = new WebSocket(url, STRATEGIC_PROTOCOL));
     this.update({ notice: "Connecting…", view: null });
@@ -108,10 +110,16 @@ export class HostedRoomClient {
       if (this.socket !== socket) return;
       void this.read(socket, event.data as string).catch(() => socket.close());
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (this.socket !== socket) return;
       this.clearView();
       this.socket = undefined;
+      if (event.code === 4001) {
+        // A GM kick ends this live session only: a fresh challenge resumes the same seat.
+        this.update({
+          notice: "The GM disconnected this session. Rejoining…",
+        });
+      }
       if (!this.stopped && !this.denied) {
         this.update({ notice: "Disconnected. Rejoining…" });
         this.retryTimer = setTimeout(() => this.connect(), this.retryDelay);
@@ -142,6 +150,7 @@ export class HostedRoomClient {
       }
       case "welcome":
         this.epoch = message.epoch;
+        this.denied = false;
         this.bearer = message.bearer;
         this.invite = "";
         this.seq = 0;
@@ -160,10 +169,12 @@ export class HostedRoomClient {
         if (message.head.phase !== "orders") this.closingTurn = null;
         const view = this.state.view;
         // Phase-only heads don't need a new battlefield or discard the displayed map.
+        // A roster/control change keeps the same version but invalidates `own` and the GM roster.
         if (
           view &&
           view.head.version === message.head.version &&
-          view.head.turnId === message.head.turnId
+          view.head.turnId === message.head.turnId &&
+          (view.head.members ?? 0) === (message.head.members ?? 0)
         ) {
           this.update({ view: { ...view, head: message.head } });
         } else {
@@ -227,8 +238,9 @@ export class HostedRoomClient {
           this.invite = "";
           this.pending = null;
           this.update({
-            notice:
-              "Not admitted. Membership may be revoked, or the invite may be invalid or expired.",
+            notice: this.state.view
+              ? "Not admitted. Membership may be revoked, or the invite may be invalid or expired."
+              : "Not admitted. Membership may be revoked, the invite may be invalid or expired, or another browser holds this seat.",
             receipt: null,
             busy: false,
           });
@@ -274,7 +286,7 @@ export class HostedRoomClient {
     signal = this.requestLifetime.signal,
     accept = "application/json",
   ) {
-    const res = await fetch(`${STRATEGIC_API}${path}`, {
+    const res = await fetch(`${this.apiRoot}${path}`, {
       signal,
       cache: "no-store",
       headers: { Authorization: `Bearer ${this.bearer}`, Accept: accept },
@@ -297,7 +309,9 @@ export class HostedRoomClient {
     const stopped = () => signal.aborted || epoch !== this.epoch;
     const previous = this.state.view;
     let base =
-      previous?.epoch === epoch && previous.head.version === head.version
+      previous?.epoch === epoch &&
+      (previous.head.version === head.version ||
+        previous.head.version + 1 === head.version)
         ? previous
         : undefined;
     const compact = typeof DecompressionStream === "function";
@@ -317,7 +331,11 @@ export class HostedRoomClient {
             await this.request(
               path,
               signal,
-              compact ? STRATEGIC_VIEW_TYPE : undefined,
+              compact
+                ? base && base.head.version < head.version
+                  ? STRATEGIC_PATCH_TYPE
+                  : STRATEGIC_VIEW_TYPE
+                : undefined,
             ),
             base,
           );
@@ -380,7 +398,15 @@ export class HostedRoomClient {
   submit(command: Command): boolean {
     if (!this.bearer || this.pending) return false;
     this.pending = command;
-    return this.sendPending();
+    if (this.sendPending()) return true;
+    // Nothing reached the wire: unlike a missing durable receipt this is safe to discard.
+    this.pending = null;
+    this.update({
+      busy: false,
+      receipt: null,
+      notice: "Order not sent. Connection busy; submit again.",
+    });
+    return false;
   }
 
   retry(): boolean {

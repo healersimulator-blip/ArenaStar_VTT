@@ -1786,12 +1786,20 @@ snapshot/delta format and their existing boot and join paths.
 | Lane | Message or endpoint | Contract |
 |---|---|---|
 | WS | `challenge` → `auth` → `welcome` | Sign the JSON array `[subprotocol, room, origin, nonce]` with the browser identity. Previously bound keys resume; first use needs a one-time, 30-minute invite for a fixed slot. Welcome supplies a short-lived bearer and a fresh random view epoch. The bearer is only for the same-origin HTTPS endpoints and is invalid when that socket closes, expires, is superseded or is revoked. |
-| WS | `head` | Authoritative `turnId`, phase, deadline and published `version`, with a per-socket `seq` and epoch. No private order traffic is inferred from sequence gaps. Loss of continuity forces rejoin. A phase-only head doesn't require a battlefield reload. |
+| WS | `head` | Authoritative `turnId`, phase, deadline and published `version`, with a per-socket `seq` and epoch. `members` is an optional roster/control generation counter: a new value on an unchanged `version` means the seat's authorized view (the GM's roster, a commander's `own` list) changed and must be refetched. No private order traffic is inferred from sequence gaps. Loss of continuity forces rejoin. A phase-only head doesn't require a battlefield reload. |
 | WS | `orders.submit` → private `receipt` | Up to 10 distinct unit edits, with `null` meaning clear. `expectedRevision` starts at 0 per commander per turn. An accepted transaction advances it once and returns the private durable receipt. After authorization, retry identity is checked before phase/revision. The same key with different content is rejected; a transient `busy` or `unavailable` can be retried with the identical command. |
-| WS | `turn.close`, `turn.next`, `turn.retry`, `member.revoke` | GM only. Manual close is a barrier on the same lane as submissions. A timed order must reach the server before the deadline; receipt may follow it. Retry uses the same frozen inputs. No generic intent, script, asset or direct model mutation routes. |
-| HTTPS | `GET /api/strategic/view` | Bearer, current membership and authority generation. A complete baseline includes the epoch/version, scoped unit markers, assigned units and private orders. Report publication is durable before notice; clients retain the previous map while applying a newer authorized baseline. |
+| WS | `turn.close`, `turn.next`, `turn.retry` | GM only. Manual close is a barrier on the same lane as submissions. A timed order must reach the server before the deadline; receipt may follow it. Retry uses the same frozen inputs. No generic intent, script, asset or direct model mutation routes. |
+| WS | `member.update`, `member.invite`, `member.kick`, `member.revoke` | GM only, one seat at a time, keyed by seat ID. `member.update` sets a display `name` (trimmed, 1–64 characters) and/or replaces that seat's unit grants (≤10 unit IDs from the seat's own deployment). Withdrawing a unit deletes any accepted order for it and bumps that commander's revision. `member.invite` issues a single-use 30-minute invite for an unclaimed seat and refuses a bound one. `member.kick` ends the holder's live session without touching the seat, its key or its grants; the same browser may resume. `member.revoke` (ban) deactivates the seat, drops its grants and orders, and its key is refused at admit. Names are labels only; the seat ID and bound key remain the boundary. Each accepted command bumps the roster generation. |
+| HTTPS | `GET /api/strategic/view` | Bearer, current membership and authority generation. A complete baseline includes the epoch/version, scoped unit markers, assigned units and private orders. Only the GM baseline carries the seat roster (`members`: name, deployment, grants, claim state, invite state, presence) and the preload media list; a player baseline never has either field. Report publication is durable before notice; clients retain the previous map while applying a newer authorized baseline. |
 | HTTPS | `GET /api/strategic/region?x=&y=&version=&cursor=` | User-selected 120-ft tile, not a permission grant. Returns up to 1,200 authorized live models as a full tile (`fromCursor: null`) or `enter/update/leave` against that session's matching tile and cursor. Client checks epoch, battle version and cursor; a mismatch requires a new baseline. Stable model IDs are opaque, not global pool slots. |
+| HTTPS | `GET /api/strategic/scene/<sha256>.webp` | Same-origin only, no bearer needed for the content-addressed bytes. Serves battle art the GM view advertised in `media` (`hash`, `name`, `mime`, `size`). A malformed or unknown hash, or a cross-site `Origin`, is `404`; the bytes are cacheable and immutable. |
 | HTTPS | `GET /api/strategic/report?version=&page=` | Zero-based pages of at most 40 private, typed unit outcome rows. The commander gets only own rows for that publication; the GM gets all. Rechecked against current membership. Raw dice, report events and archive bytes aren't player HTTP endpoints. |
+
+An accepted `move` receipt commits the order, not its destination. At freeze/resolve the hosted worker
+reserves whole-company 5-ft footprints against starting occupants and earlier swept paths in stable
+roster order. Starting cells remain reserved until the turn ends (no swaps). A shortened/stopped march
+has `marchBlocked: true` in its scoped report row; no blocker identity or path is sent. Older rows
+omit the optional field. The frozen worker hash pins the new semantics as usual.
 
 **View format (D-489).** With `Accept: application/vnd.arenastar.strategic-view.v1`, a browser that can
 inflate gzip receives `u32be` private-metadata length, `u32be` marker-table length, the private UTF-8
@@ -1800,12 +1808,28 @@ metadata JSON, then one gzip member of the visible marker cohort. The inflated m
 `[ids, names, factionIndexes]` label table of equal length; faction indexes select `factions` from the
 metadata. The members are projected once per publication from already-authorized GM or faction cohorts,
 so the table holds no private orders, units, tokens, fog or report data. Responses are
-`Cache-Control: no-store, no-transform`, `Vary: Accept`, and bounded to 64 KiB of metadata and 4 MiB of
-wire or inflated body. A plain `GET` without that `Accept` still returns the complete JSON baseline for
-older clients. A client may send a marker-table length of zero only to reuse an exactly matching
+`Cache-Control: no-store, no-transform`, `Vary: Accept`, and bounded to 512 KiB of metadata and 4 MiB of
+wire or inflated body. The larger metadata allowance covers a 500-seat GM roster; a player's metadata
+stays a few hundred bytes. A plain `GET` without a recognized strategic media type still returns the complete JSON baseline for
+older clients. A server may return a marker-table length of zero only to reuse an exactly matching
 epoch/version/role/faction baseline it still holds, and must refetch in full otherwise. Missing or
 malformed frames, a mismatched count/label length or an unknown faction index are a fatal decode
 error, not a partial view.
+
+**Optional adjacent-publication changes.** A client holding the preceding view requests
+`/view?markersVersion=N` with `Accept: application/vnd.arenastar.strategic-marker-changes.v1`.
+Only after delivering N to this same session may the service answer with that type for N+1.
+The lengths and private JSON prefix are unchanged. The uncompressed tail starts with two `u16be`
+counts (base and result), followed by records in current roster order. Each begins with a `u16be`:
+the low 14 bits index the old *visible* marker list. With both high bits clear, another `u16be`
+is the nonzero number of unchanged rows to copy. Otherwise bits `0x4000`/`0x8000` select changed
+X/Y coordinates, transmitted as exact `f64be` values in that order. Skip omitted rows; references
+must advance, stay within the old list, and produce exactly the stated result count. Never apply to a
+different epoch, version, role or faction. There is no new roster or private state in this table.
+A new/renamed/reordered visible marker, poor compression economics, lost base, reconnect, or restart
+falls back to a complete view. No patch history or old model pools are retained. During a publication
+burst, at most one eligible view per session can wait up to 1.5 s for an existing HTTP processing slot;
+queued requests hold neither a connection to PostgreSQL nor view data, and are rechecked on admission.
 
 Frames received by the room are capped at 16 KiB with bounded paths (12 waypoints), a 1,024-command
 lane, and per-session command and byte limits. The room can shed blocked receivers and cap authorized

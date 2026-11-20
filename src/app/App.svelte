@@ -33,6 +33,8 @@
   import type { PlayerPresence } from "../ui/permissions/PermissionsPanel.svelte";
   import { onMount, untrack } from "svelte";
   import { detectCapabilities } from "./capabilities";
+  import CampaignBattle from "../ui/strategicRoom/CampaignBattle.svelte";
+  import { battleOf } from "../core/strategicRoom/campaignScene";
   import { DEFAULT_SCENE_ID, GM_USER_ID, makeToken, type HostApp } from "./hostBoot";
   import { createAgentManager, type AgentManager } from "./agentManager";
   import { createStage, type Stage } from "../canvas/stage";
@@ -313,6 +315,8 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { pf1eThreatModel } from "../packages/pf1e/threatPreview";
   import { deriveFromActorDocument } from "../packages/pf1e/actor";
   import { copyText } from "../ui/clipboard";
+  import { planScenePack, SCENE_PACK_EXTENSION } from "../core/scenePreload";
+  import { writeScenePack } from "../client/scenePack";
   import { autoResolveAoosOf } from "../packages/pf1e/aooSettings";
   import {
     attackOfOpportunityBudget,
@@ -620,6 +624,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
 /** Wall pick tolerance in screen pixels (D-257). */
 const WALL_PICK_RADIUS = 12;
   const sceneBackground = new SceneBackgroundPlayer();
+  let battlePanel = $state<string | null>(null);
   const levelPreviewScene = $derived.by(() => { void storeVersion; return activeScene(); });
   /** D-465: the scene whose lights the Light tool draws as markers — re-read on every store change. */
   const lightMarkerScene = $derived.by(() => {
@@ -3060,7 +3065,7 @@ const WALL_PICK_RADIUS = 12;
     openWindow("hexcrawl-wizard", "New hexcrawl scene", "hexcrawl-wizard");
   }
 
-  function addScene(): void {
+  function addScene(strategic = false): void {
     if (!app) return;
     const scene = activeScene();
     const id = `scene-${globalThis.crypto.randomUUID().slice(0, 6)}`;
@@ -3071,18 +3076,18 @@ const WALL_PICK_RADIUS = 12;
         data: {
           _id: id,
           type: "scene",
-          name: `Scene ${(app.gm.client.store.getAll("scenes") as readonly SceneDocument[]).length + 1}`,
+          name: `${strategic ? "Battlefield" : "Scene"} ${(app.gm.client.store.getAll("scenes") as readonly SceneDocument[]).length + 1}`,
           ownership: { default: 1 },
-          flags: {},
+          flags: strategic ? { core: { scale: "strategic" } } : {},
           system: {},
           active: false,
           img: null,
-          width: scene?.width ?? 2000,
-          height: 1500,
+          width: strategic ? 5000 : scene?.width ?? 2000,
+          height: strategic ? 5000 : 1500,
           darkness: 0,
-          grid: scene?.grid ?? {
+          grid: (!strategic ? scene?.grid : undefined) ?? {
             type: "square",
-            size: 100,
+            size: strategic ? 20 : 100,
             distance: 5,
             units: "ft",
             diagonals: "555",
@@ -3717,6 +3722,50 @@ const WALL_PICK_RADIUS = 12;
   function clearCopyTimer(): void {
     if (copyTimer !== null) clearTimeout(copyTimer);
     copyTimer = null;
+  }
+
+  /**
+   * D-A?? player scene preload: media for the current scene only, through the same
+   * publication policy a player projection would apply. Not a world archive.
+   */
+  let preloadNotice = $state("");
+  async function exportScenePreload(): Promise<void> {
+    const current = app;
+    const scene = activeScene();
+    if (!current || !scene) return;
+    try {
+      const manifest = await current.assets.manifest();
+      const world = current.gm.client.store.world;
+      const { manifest: pack, hashes } = planScenePack({
+        world: current.worldId,
+        name: scene.name,
+        scenes: [{ id: scene._id, name: scene.name }],
+        collections: world as unknown as import("../core/documents").WorldCollections,
+        manifest,
+        createdAt: Date.now(),
+      });
+      if (!hashes.length) {
+        preloadNotice = "This scene has no shareable media. A scene pack would be empty.";
+        return;
+      }
+      const blobs = new SvelteMap<string, Uint8Array>();
+      for (const hash of hashes) {
+        const bytes = await current.assets.get(hash);
+        if (bytes) blobs.set(hash, bytes);
+      }
+      const archive = writeScenePack(pack, blobs);
+      const url = URL.createObjectURL(
+        new Blob([new Uint8Array(archive)], { type: "application/zip" }),
+      );
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${scene.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || "scene"}${SCENE_PACK_EXTENSION}.zip`;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5_000);
+      preloadNotice = `${scene.name}: ${blobs.size} shared file(s), ${(archive.byteLength / 1024 / 1024).toFixed(1)} MiB. Share this instead of the whole world; it contains no players, notes, tokens or flags.`;
+    } catch (error) {
+      preloadNotice = `scene pack failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
   async function exportWorld(): Promise<void> {
@@ -5677,6 +5726,7 @@ const WALL_PICK_RADIUS = 12;
       { id: "gm-settings", label: "World settings", icon: "settings", run: () => openWindow("settings", "Settings", "settings") },
       { id: "gm-scene-settings", label: "Scene settings", icon: "map", run: () => openSceneSettings() },
       { id: "export-world", label: "Export world", icon: "export", run: () => { void exportWorld(); } },
+      { id: "export-scene-preload", label: "Export scene pack (player preload)", icon: "export", run: () => { void exportScenePreload(); } },
       { id: "import-map-action", label: "Import map", icon: "images", run: () => document.getElementById("map-input")?.click() },
       { id: "session-open", label: "Session & world", icon: "share", run: openSession },
       { id: "gm-perms", label: "Players & permissions", icon: "permissions", run: () => openWindow("permissions", "Players & permissions", "permissions") },
@@ -5724,6 +5774,12 @@ const WALL_PICK_RADIUS = 12;
             aria-label="New scene"
             aria-expanded={sceneMenu}>+</button
           >
+          {#if !viewingAs && levelPreviewScene?.flags.core?.scale === "strategic"}
+            {#if levelPreviewScene}
+              <button onclick={() => { if (levelPreviewScene) battlePanel=levelPreviewScene._id; pagesOpen=false; }}>{battleOf(levelPreviewScene,app.worldId)?'Resume multiplayer battle':'Multiplayer battle…'}</button>
+            {/if}
+          {/if}
+          {#if preloadNotice}<p role="status" data-scene-preload-notice>{preloadNotice}</p>{/if}
           {#if activeScene()}
             <button
               id="scene-settings-open"
@@ -5744,6 +5800,7 @@ const WALL_PICK_RADIUS = 12;
                   addScene();
                 }}>Blank scene</button
               >
+              <button type="button" role="menuitem" onclick={()=>{sceneMenu=false;addScene(true);}}>Strategic battlefield</button>
               <button
                 id="scene-new-hexcrawl"
                 type="button"
@@ -5761,6 +5818,9 @@ const WALL_PICK_RADIUS = 12;
         </div>
         <div class="dice3d-host" bind:this={dice3dHost}></div>
         <div class="board" style="position: relative;">
+          {#if !viewingAs && levelPreviewScene && battlePanel===levelPreviewScene._id}
+            {#key levelPreviewScene._id}<CampaignBattle {app} scene={levelPreviewScene} onClose={()=>battlePanel=null} />{/key}
+          {/if}
           {#if gmStairOffer}<StairChooser offer={gmStairOffer} tokenName={gmStairTokenName(gmStairOffer.tokenId)} onChoose={answerGmStairs} />{/if}
           <ZoomControl {stage} onInput={() => fxPlayer?.cancelCamera()} />
           {#if !viewingAs && levelPreviewScene?.tiles.some((tile) => tile.above)}

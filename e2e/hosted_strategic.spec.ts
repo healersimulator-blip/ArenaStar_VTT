@@ -15,6 +15,7 @@ import {
 } from "@playwright/test";
 import {
   STRATEGIC_VIEW_TYPE,
+  STRATEGIC_PATCH_TYPE,
   VIEW_PREFIX_BYTES,
   type Baseline,
   type ServerMessage,
@@ -40,7 +41,6 @@ async function availablePort() {
 }
 const viewPath = "/api/strategic/view";
 const viewRoute = /\/api\/strategic\/view(?:\?|$)/;
-const isView = (url: string) => new URL(url).pathname === viewPath;
 
 // The monitor and the test both inspect some responses. Chromium drops a response body once its
 // request leaves the network log, so read each one once and decode it per caller's baseline.
@@ -63,7 +63,9 @@ async function captureView(
   const type = headers["content-type"];
   const view = await decodeView(Uint8Array.from(body), type, base);
   const markerBytes =
-    type === STRATEGIC_VIEW_TYPE ? body.readUInt32BE(4) : null;
+    type === STRATEGIC_VIEW_TYPE || type === STRATEGIC_PATCH_TYPE
+      ? body.readUInt32BE(4)
+      : null;
   const tail = markerBytes
     ? body.subarray(VIEW_PREFIX_BYTES + body.readUInt32BE(0))
     : null;
@@ -234,6 +236,16 @@ test("hosted room: nonblocking progress, private receipts, rejoin after crash, r
       )
       .toBeGreaterThan(0);
     await blue.getByRole("button", { name: "Draft hold" }).click();
+    // A separate company marches east into a stationary opposing rank. The order is legal
+    // to submit; only the resolving worker knows its safe prefix. No enemy ID in the report.
+    const marcher = observed.views
+      .at(-1)
+      ?.own.find((u) => u.id === "unit-1-2")?.at;
+    if (!marcher) throw Error("Missing company");
+    await blue.getByLabel("Assigned unit").selectOption("unit-1-2");
+    await blue.getByLabel("March X").fill(String(marcher.x + 20));
+    await blue.getByLabel("March Y").fill(String(marcher.y - 22.5));
+    await blue.getByRole("button", { name: "Draft march" }).click();
     await blue.getByRole("button", { name: "Submit orders" }).click();
     await expect(blue.locator("[data-revision]")).toHaveText("1");
     expect(redObserved.messages.some((m) => m.kind === "receipt")).toBe(false);
@@ -270,7 +282,8 @@ test("hosted room: nonblocking progress, private receipts, rejoin after crash, r
       const response = await route.fetch();
       if (
         response.ok() &&
-        (await captureView(response)).view.head.version === 1
+        (await captureView(response, observed.views.at(-1))).view.head
+          .version === 1
       )
         await applyGate;
       await route.fulfill({ response }).catch(() => undefined);
@@ -342,6 +355,9 @@ test("hosted room: nonblocking progress, private receipts, rejoin after crash, r
     );
     await blue.getByRole("button", { name: "View report" }).click();
     await expect(blue.locator("[data-report-unit]")).toHaveCount(5);
+    await expect(blue.locator('[data-report-unit="unit-1-2"]')).toContainText(
+      "March blocked",
+    );
     await expect(blue.locator('[data-report-unit^="unit-2-"]')).toHaveCount(0);
     const openedCapture = observed.next();
     await gm.getByRole("button", { name: "Open next turn" }).click();
@@ -356,11 +372,81 @@ test("hosted room: nonblocking progress, private receipts, rejoin after crash, r
     expect(opened.view.markers).toBe(restored.view.markers);
     expect(opened.view.orders).toEqual({ revision: 0, edits: [] });
 
+    // GM roster: names, per-unit control, kick, invites and the media endpoint.
+    await gm.getByRole("button", { name: /^Commanders \(/ }).click();
+    const roster = gm.locator("[data-hosted-roster]");
+    await expect(roster).toBeVisible();
+    await expect(roster.locator("[data-roster-count]")).toContainText(
+      "2 seats",
+    );
+    const redRow = roster.locator('[data-member="commander-2"]');
+    await expect(redRow).toHaveAttribute("data-online", "true");
+    // The roster is GM-only: a player's view never carries it.
+    expect(redObserved.views.every((v) => v.members === undefined)).toBe(true);
+    const row = roster.locator('[data-member="commander-1"]');
+    await row.locator("[data-member-name]").fill("Blue vanguard");
+    await row.locator("[data-member-name]").press("Enter");
+    await expect(row.locator("[data-member-name]")).toHaveValue(
+      "Blue vanguard",
+    );
+    // A checkbox waits for its controlled state; the roster is server-authoritative, so poll.
+    await row.locator('[data-member-unit="unit-1-2"]').click();
+    await expect
+      .poll(async () =>
+        roster.locator('[data-member-unit="unit-1-2"]').isChecked(),
+      )
+      .toBe(false);
+    await expect
+      .poll(
+        async () =>
+          await blue.getByLabel("Assigned unit").locator("option").count(),
+      )
+      .toBe(4);
+    // Restore the grant so the rest of the run keeps both blue companies available.
+    await row.locator('[data-member-unit="unit-1-2"]').click();
+    await expect
+      .poll(async () =>
+        roster.locator('[data-member-unit="unit-1-2"]').isChecked(),
+      )
+      .toBe(true);
+    await expect
+      .poll(
+        async () =>
+          await blue.getByLabel("Assigned unit").locator("option").count(),
+      )
+      .toBe(5);
+    // Kick ends the live session; the same browser resumes the seat (no invite needed).
+    await redRow.locator("[data-member-kick]").click();
+    await redRow.locator("[data-member-kick-confirm]").click();
+    await expect
+      .poll(
+        () => redObserved.messages.filter((m) => m.kind === "welcome").length,
+      )
+      .toBeGreaterThan(1);
+    // The room is already on turn 2 when the kick lands, so the seat resumes there.
+    await expect(
+      red.locator('[data-turn="2"][data-phase="orders"]'),
+    ).toBeVisible();
+    // A claimed seat cannot be re-invited: that would be a takeover, so the roster offers no
+    // invite control for it at all (and the server refuses one if a client asks anyway).
+    await expect(redRow.locator("[data-member-invite-new]")).toHaveCount(0);
+    await expect(redRow.locator("[data-member-invite]")).toHaveCount(0);
+    await expect(redRow.getByText("claimed")).toBeVisible();
+
+    const membersResponse = await fetch(`${origin}${viewPath}`, {
+      headers: { Accept: STRATEGIC_VIEW_TYPE },
+    });
+    expect(membersResponse.status).toBe(401);
+    const scene = await fetch(
+      `${origin}/api/strategic/scene/${"0".repeat(64)}.webp`,
+    );
+    expect(scene.status).toBe(404);
+
     const bearer = [...observed.messages]
       .reverse()
       .find((m) => m.kind === "welcome")?.bearer;
     if (!bearer) throw new Error("No active bearer captured");
-    await gm.getByText("Membership", { exact: true }).click();
+    await gm.getByText(/^Membership \(revoke by seat ID\)$/).click();
     await gm.getByLabel("Commander slot").fill("commander-1");
     gm.once("dialog", (dialog) => {
       void dialog.accept();
@@ -395,8 +481,11 @@ test("hosted room: nonblocking progress, private receipts, rejoin after crash, r
     ).toBeVisible();
   } finally {
     releaseApply();
-    await Promise.all(contexts.map((c) => c.close()));
-    await stop();
+    try {
+      await Promise.all(contexts.map((c) => c.close()));
+    } finally {
+      await stop();
+    }
   }
 });
 
@@ -558,9 +647,7 @@ test("hosted room: Chromium round-trips a 50k-model compact view, sharing only f
     if (!gm || !blue || !ally) throw new Error("Expected three clients");
     const observed = monitor(blue);
     const allyObserved = monitor(ally);
-    const gmCapture = gm
-      .waitForResponse((r) => r.ok() && isView(r.url()))
-      .then((r) => captureView(r));
+    const gmCapture = monitor(gm).next();
     const blueCapture = observed.next();
     const allyCapture = allyObserved.next();
     await Promise.all([
@@ -620,14 +707,17 @@ test("hosted room: Chromium round-trips a 50k-model compact view, sharing only f
     const resultCaptures = [observed.next(), allyObserved.next()];
     await gm.getByRole("button", { name: "Close and resolve" }).click();
     await Promise.all(
-      [blue, ally].map((page) =>
-        expect(
-          page.locator('[data-version="1"][data-phase="report"]'),
-        ).toBeVisible(),
+      [blue, ally].map(
+        (page) =>
+          expect(
+            page.locator('[data-version="1"][data-phase="report"]'),
+          ).toBeVisible({ timeout: 20000 }), // 50k functional wait, not a latency assertion
       ),
     );
     const [result, allyResult] = await Promise.all(resultCaptures);
     if (!result || !allyResult) throw new Error("Missing result capture");
+    expect(result.headers["content-type"]).toBe(STRATEGIC_PATCH_TYPE);
+    expect(new URL(result.url).searchParams.get("markersVersion")).toBe("0");
     expect(result.markerBytes).toBeGreaterThan(0);
     expect(result.size).toBe(Number(result.headers["content-length"]));
     expect(result.size).toBeLessThan(128 * 1024);
@@ -645,6 +735,21 @@ test("hosted room: Chromium round-trips a 50k-model compact view, sharing only f
     expect(typeof applyMs).toBe("number");
     const applyRecord = await stopFrameRecorder(blue);
     const applyFrames = applyRecord.frames;
+
+    // Independent complete representation, without giving the server any previous-version hint.
+    const full = await fetch(`${origin}${viewPath}`, {
+      headers: {
+        Authorization: `Bearer ${bearer}`,
+        Accept: STRATEGIC_VIEW_TYPE,
+      },
+    });
+    expect(full.headers.get("content-type")).toBe(STRATEGIC_VIEW_TYPE);
+    expect(
+      await decodeView(
+        new Uint8Array(await full.arrayBuffer()),
+        STRATEGIC_VIEW_TYPE,
+      ),
+    ).toEqual(result.view);
 
     // Same marker count and camera work as the pre-turn window, but now on the version-1 baseline:
     // a difference isolates applying the publication from drawing 5,000 markers per frame.
@@ -690,7 +795,10 @@ test("hosted room: Chromium round-trips a 50k-model compact view, sharing only f
     if (process.env.STRATEGIC_METRICS === "1")
       console.log(JSON.stringify(metrics));
   } finally {
-    await Promise.all(contexts.map((c) => c.close()));
-    await stop();
+    try {
+      await Promise.all(contexts.map((c) => c.close()));
+    } finally {
+      await stop();
+    }
   }
 });

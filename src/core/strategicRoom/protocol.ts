@@ -11,10 +11,17 @@ export const MAX_REGION_MODELS = 1200;
 export const PAGE_ROWS = 40;
 export const STRATEGIC_VIEW_TYPE =
   "application/vnd.arenastar.strategic-view.v1";
+/** Opt-in one-publication marker changes. The server can always return a full v1 view. */
+export const STRATEGIC_PATCH_TYPE =
+  "application/vnd.arenastar.strategic-marker-changes.v1";
+export const MARKER_X_BIT = 0x4000;
+export const MARKER_Y_BIT = 0x8000;
 export const VIEW_PREFIX_BYTES = 8;
 export const MARKER_COUNT_BYTES = 4;
 export const MARKER_POINT_BYTES = 16;
-export const MAX_VIEW_META_BYTES = 64 * 1024;
+/** A GM view carries the whole seat roster (500 seats with their units), so the head
+ * allowance has to fit a large room while markers stay bounded separately. */
+export const MAX_VIEW_META_BYTES = 512 * 1024;
 export const MAX_VIEW_BYTES = 4 * 1024 * 1024;
 
 export type Point = { x: number; y: number };
@@ -40,7 +47,23 @@ export type Command =
       turnId: number;
       durationMs: number | null;
     }
-  | { kind: "member.revoke"; requestId: string; memberId: string };
+  | { kind: "member.revoke"; requestId: string; memberId: string }
+  | { kind: "member.kick"; requestId: string; memberId: string }
+  | {
+      kind: "member.invite";
+      requestId: string;
+      memberId: string;
+      /** One-time code the GM shows to the commander; the server stores only its digest. */
+      invite: string;
+    }
+  | {
+      kind: "member.update";
+      requestId: string;
+      memberId: string;
+      name?: string;
+      /** Explicit unit allowlist. `undefined` leaves control unchanged. */
+      units?: string[];
+    };
 export type RejectCode =
   | "forbidden"
   | "turn_closed"
@@ -77,6 +100,8 @@ export type Head = {
   version: number;
   phase: "orders" | "resolution" | "report" | "paused";
   deadlineMs: number | null;
+  /** Roster/control generation. Same version + a new value means: refetch your authorized view. */
+  members?: number;
 };
 export type ServerMessage =
   | { kind: "challenge"; room: string; nonce: string }
@@ -100,6 +125,31 @@ export type OwnUnit = {
   weapon: "melee" | "shot";
 };
 export type OwnOrders = { revision: number; edits: UnitEdit[] };
+/** Service-hosted static media with immutable, content-addressed URLs. */
+export type StoreMedia = {
+  hash: string;
+  name: string;
+  mime: string;
+  size: number;
+  url: string;
+};
+/** GM-only roster row. Never sent to a player-view response. */
+export type MemberRow = {
+  id: string;
+  name: string;
+  role: "GM" | "PLAYER";
+  factionId: string | null;
+  /** Units this commander may order now; an empty list means visibly no control. */
+  units: string[];
+  /** The seat's whole deployment, so a withdrawn unit can be granted again. */
+  deployed: string[];
+  /** A bound browser key is present: this seat cannot be claimed with an invite. */
+  claimed: boolean;
+  /** Active invite currently shown to the GM (the seat can still be claimed). */
+  invite: string | null;
+  /** Whether the holder's session is connected right now (heartbeat-based). */
+  online: boolean;
+};
 export type Baseline = {
   epoch: string;
   head: Head;
@@ -108,6 +158,10 @@ export type Baseline = {
   role: "GM" | "PLAYER";
   factionId: string | null;
   factions: Array<{ id: string; name: string; color: string }>;
+  /** Present only for the GM; players never receive the roster. */
+  members?: MemberRow[];
+  /** GM-only service-hosted battle art that a join can cache before the first frame. */
+  media?: StoreMedia[];
   markers: UnitMarker[];
   own: OwnUnit[];
   orders: OwnOrders;
@@ -138,6 +192,7 @@ export type ReportRow = {
   alive: number;
   lost: number;
   order: RoomOrder["kind"] | null;
+  marchBlocked?: true;
 };
 export type ReportPage = {
   epoch: string;
@@ -165,6 +220,9 @@ export function reject(
 
 export const isId = (v: unknown): v is string =>
   typeof v === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(v);
+/** A GM-assigned display label; carried in messages, never used as an ID or grant. */
+export const memberName = (v: unknown): v is string =>
+  typeof v === "string" && v.trim().length > 0 && v.length <= 64;
 export const isRequestId = (v: unknown): v is string =>
   typeof v === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(v);
 export const isPublicKey = (v: unknown): v is string =>
@@ -224,6 +282,44 @@ export function parseCommand(v: unknown): Command | null {
     isId(v.memberId)
   ) {
     return { kind: v.kind, requestId, memberId: v.memberId };
+  }
+  if (
+    v.kind === "member.kick" &&
+    only(v, "kind", "requestId", "memberId") &&
+    isId(v.memberId)
+  ) {
+    return { kind: v.kind, requestId, memberId: v.memberId };
+  }
+  if (
+    v.kind === "member.invite" &&
+    only(v, "kind", "requestId", "memberId", "invite") &&
+    isId(v.memberId) &&
+    typeof v.invite === "string" &&
+    v.invite.length >= 16 &&
+    v.invite.length <= 128
+  ) {
+    return { kind: v.kind, requestId, memberId: v.memberId, invite: v.invite };
+  }
+  if (
+    v.kind === "member.update" &&
+    only(v, "kind", "requestId", "memberId", "name", "units") &&
+    isId(v.memberId) &&
+    (v.name === undefined || memberName(v.name)) &&
+    (v.units === undefined ||
+      (Array.isArray(v.units) &&
+        v.units.length <= 10 &&
+        v.units.every((id) => isId(id)) &&
+        new Set(v.units).size === v.units.length))
+  ) {
+    return {
+      kind: v.kind,
+      requestId,
+      memberId: v.memberId,
+      ...(typeof v.name === "string"
+        ? { name: v.name.trim().slice(0, 64) }
+        : {}),
+      ...(Array.isArray(v.units) ? { units: v.units as string[] } : {}),
+    };
   }
   if (!integer(v.turnId, 1)) return null;
   const turnId = v.turnId;
@@ -291,4 +387,23 @@ export function parseAuth(v: unknown): AuthProof | null {
     signature: v.signature,
     ...(v.invite === undefined ? {} : { invite: v.invite }),
   };
+}
+
+/** Scope one GM management proof to an operation, deployment origin and battle. The
+ * launch credential grants provisioning entitlement; the signature proves seat identity. */
+export function campaignProof(
+  action: "launch" | "finish",
+  origin: string,
+  id: string,
+  at: number,
+  scenario: unknown,
+) {
+  return JSON.stringify([
+    "arenastar-campaign-v1",
+    action,
+    origin,
+    id,
+    at,
+    scenario ?? null,
+  ]);
 }

@@ -18,8 +18,13 @@ import {
 import { planPF1eStride } from "../../../src/packages/pf1e/stride";
 import { createMassBattlePf1e } from "../../../src/packages/massBattlePf1e";
 import { CELL_FEET, inBounds, rulesInput, type Scenario } from "./scenario";
-import { checkpointPool, type Member, type Published } from "./state";
-import { packMarkers } from "./viewEncoding";
+import {
+  checkpointPool,
+  type Control,
+  type Member,
+  type Published,
+} from "./state";
+import { packMarkerChanges, packMarkers } from "./viewEncoding";
 
 const rules = createMassBattlePf1e();
 type BattleInput = ReturnType<typeof rulesInput>;
@@ -33,6 +38,7 @@ type UnitSlot = {
 type Cohort = {
   markers: UnitMarker[];
   packedMarkers: Buffer;
+  changes: Buffer | undefined;
   visible: Set<string>;
   regions: Map<string, ModelMarker[]>;
 };
@@ -43,12 +49,15 @@ export class BattleView {
   private readonly pool;
   private readonly units = new Map<string, UnitSlot>();
   private readonly owners = new Map<string, OwnUnit[]>();
+  /** Effective unit allowlist per commander, frozen with the publication it belongs to. */
+  private readonly control = new Map<string, Set<string>>();
   private readonly cohorts = new Map<string | null, Cohort>();
 
   constructor(
     readonly scenario: Scenario,
     readonly state: Published,
     projectionKey: Uint8Array,
+    previous?: BattleView,
   ) {
     this.input = rulesInput(scenario, state.units);
     this.pool = checkpointPool(state);
@@ -90,6 +99,13 @@ export class BattleView {
         index++;
       }
       this.owners.set(army._id, ownUnits);
+    }
+    for (const army of this.input.armies) {
+      const granted = state.control?.[army.commander[0] ?? ""];
+      this.control.set(
+        army.commander[0] ?? "",
+        new Set(granted ?? army.units.map((unit) => unit._id)),
+      );
     }
     const grid = new DetectionGrid(CELL_FEET);
     grid.reseed(sources, scenario.bounds);
@@ -151,9 +167,17 @@ export class BattleView {
           });
         }
       }
+      const packedMarkers = packMarkers(markers, scenario.factions);
+      const old =
+        previous?.state.version === state.version - 1
+          ? previous.cohorts.get(factionId)
+          : undefined;
       this.cohorts.set(factionId, {
         markers,
-        packedMarkers: packMarkers(markers, scenario.factions),
+        packedMarkers,
+        changes:
+          old &&
+          packMarkerChanges(old.markers, markers, packedMarkers.byteLength - 1),
         visible,
         regions,
       });
@@ -175,12 +199,27 @@ export class BattleView {
   markers(member: Member): UnitMarker[] {
     return this.cohort(member).markers;
   }
+  markerChanges(member: Member) {
+    return this.cohort(member).changes;
+  }
   packedMarkers(member: Member): Buffer {
     return this.cohort(member).packedMarkers;
   }
 
+  /** Apply already-durable grants to a freshly built view (never during a publication). */
+  applyControl(control: Control) {
+    for (const [memberId, units] of Object.entries(control))
+      this.control.set(memberId, new Set(units));
+  }
+
+  /** Only units this commander may currently order; a revoked grant disappears with the view. */
   own(member: Member): OwnUnit[] {
-    return this.owners.get(member.id) ?? [];
+    if (member.role === "GM") return this.owners.get(member.id) ?? [];
+    const granted = this.control.get(member.id);
+    if (!granted) return [];
+    return (this.owners.get(member.id) ?? []).filter((unit) =>
+      granted.has(unit.id),
+    );
   }
   region(member: Member, key: string): ModelMarker[] {
     return this.cohort(member).regions.get(key) ?? [];
@@ -192,6 +231,7 @@ export class BattleView {
     if (
       !unit ||
       unit.army.commander[0] !== member.id ||
+      !(this.control.get(member.id)?.has(unitId) ?? false) ||
       !can(member, "order", unit.doc, "units", { parent: unit.army })
     ) {
       return "Unit is not assigned to this commander.";

@@ -232,7 +232,7 @@ function walkLeg(
  * Price a whole march: the pace's legality first (a refused pace moves nobody), then the
  * legs, in order, until the budget is gone or a wall stops the formation.
  */
-export function planPF1eStride(input: PF1eStrideInput): PF1eStrideResult {
+export function planPF1eStride(input: PF1eStrideInput, onWalkedLeg?: (x: number, y: number) => void): PF1eStrideResult {
   const {
     from,
     path,
@@ -295,6 +295,7 @@ export function planPF1eStride(input: PF1eStrideInput): PF1eStrideResult {
     if (leg.u > 0) {
       cx += (wp.x - cx) * leg.u;
       cy += (wp.y - cy) * leg.u;
+      onWalkedLeg?.(cx, cy);
       traveled += leg.spent;
       terrainExtra += leg.terrainExtra;
       terrainSquares += leg.terrainSquares;

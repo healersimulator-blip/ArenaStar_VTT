@@ -1,0 +1,209 @@
+{
+  "environment": "Isolated same-host HTTP/WS, Node 22.22.3, PostgreSQL 17.6, two vCPUs, 3.85 GiB. Signed real campaign launch; 500 separate protocol clients plus GM, all 500 reconstruct each result. No TLS, WAN, or 500 renderers.",
+  "command": "STRATEGIC_LOAD_DECODE_SAMPLE=0 node performance/strategic/localCampaign.mjs 500 10 2 mixed",
+  "runs": [
+    {
+      "label": "isolated-full-before",
+      "peers": 501,
+      "turns": [
+        {
+          "turn": 1,
+          "count": 500,
+          "units": 5000,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "rejoined": 10,
+          "ackP95": 7.545928999999887,
+          "closeP95": 3460.9518039999994,
+          "viewRetries": 88,
+          "viewFailed": 0,
+          "markerChangesApplied": 0,
+          "noticeApplyP95": 2283.217391,
+          "viewDecodeMsP95": 1519.9472600000008,
+          "defaultPayloadBytesP95": 47801
+        },
+        {
+          "turn": 2,
+          "count": 500,
+          "units": 5000,
+          "modelCountBefore": 43976,
+          "refused": {},
+          "rejoined": 10,
+          "ackP95": 7.128597999999329,
+          "closeP95": 2779.890833999998,
+          "viewRetries": 111,
+          "viewFailed": 0,
+          "markerChangesApplied": 0,
+          "noticeApplyP95": 1991.7844210000003,
+          "viewDecodeMsP95": 1264.171183999999,
+          "defaultPayloadBytesP95": 46129
+        }
+      ],
+      "summary": {
+        "stage": "summary",
+        "turns": 2,
+        "work": "mixed",
+        "viewMode": "compact",
+        "worstAckP95": 7.545928999999887,
+        "worstCloseP95": 3460.9518039999994,
+        "worstNoticeApplyP95": 2283.217391,
+        "viewFailures": 0,
+        "worstDefaultPayloadBytesP95": 47801,
+        "generatorLagMaxP95": 72.941567
+      }
+    },
+    {
+      "label": "final-control",
+      "forceFullViews": true,
+      "peers": 501,
+      "turns": [
+        {
+          "turn": 1,
+          "count": 500,
+          "units": 5000,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "rejoined": 10,
+          "ackP95": 9.24398199999996,
+          "closeP95": 3544.6568100000004,
+          "viewRetries": 116,
+          "viewFailed": 0,
+          "markerChangesApplied": 0,
+          "noticeApplyP95": 2254.750387,
+          "viewDecodeMsP95": 1343.957840000001,
+          "defaultPayloadBytesP95": 47802
+        },
+        {
+          "turn": 2,
+          "count": 500,
+          "units": 5000,
+          "modelCountBefore": 43976,
+          "refused": {},
+          "rejoined": 10,
+          "ackP95": 73.50080700000035,
+          "closeP95": 2935.105598000002,
+          "viewRetries": 57,
+          "viewFailed": 0,
+          "markerChangesApplied": 0,
+          "noticeApplyP95": 1892.2284719999989,
+          "viewDecodeMsP95": 1223.0727110000007,
+          "defaultPayloadBytesP95": 46129
+        }
+      ],
+      "summary": {
+        "stage": "summary",
+        "turns": 2,
+        "work": "mixed",
+        "viewMode": "compact",
+        "worstAckP95": 73.50080700000035,
+        "worstCloseP95": 3544.6568100000004,
+        "worstNoticeApplyP95": 2254.750387,
+        "viewFailures": 0,
+        "worstDefaultPayloadBytesP95": 47802,
+        "generatorLagMaxP95": 62.849023
+      }
+    },
+    {
+      "label": "final-repeat1",
+      "forceFullViews": false,
+      "peers": 501,
+      "turns": [
+        {
+          "turn": 1,
+          "count": 500,
+          "units": 5000,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "rejoined": 10,
+          "ackP95": 8.341445000000022,
+          "closeP95": 3535.321237000001,
+          "viewRetries": 0,
+          "viewFailed": 0,
+          "markerChangesApplied": 500,
+          "noticeApplyP95": 899.4522140000008,
+          "viewDecodeMsP95": 9.8162140000004,
+          "defaultPayloadBytesP95": 44450
+        },
+        {
+          "turn": 2,
+          "count": 500,
+          "units": 5000,
+          "modelCountBefore": 43976,
+          "refused": {},
+          "rejoined": 10,
+          "ackP95": 8.684165000000576,
+          "closeP95": 2877.826313999998,
+          "viewRetries": 0,
+          "viewFailed": 0,
+          "markerChangesApplied": 500,
+          "noticeApplyP95": 557.8750590000018,
+          "viewDecodeMsP95": 1.204267000000982,
+          "defaultPayloadBytesP95": 25871
+        }
+      ],
+      "summary": {
+        "stage": "summary",
+        "turns": 2,
+        "work": "mixed",
+        "viewMode": "compact",
+        "worstAckP95": 8.684165000000576,
+        "worstCloseP95": 3535.321237000001,
+        "worstNoticeApplyP95": 899.4522140000008,
+        "viewFailures": 0,
+        "worstDefaultPayloadBytesP95": 44450,
+        "generatorLagMaxP95": 53.542911
+      }
+    },
+    {
+      "label": "final-repeat2",
+      "forceFullViews": false,
+      "peers": 501,
+      "turns": [
+        {
+          "turn": 1,
+          "count": 500,
+          "units": 5000,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "rejoined": 10,
+          "ackP95": 29.901950000000397,
+          "closeP95": 3811.869769000001,
+          "viewRetries": 0,
+          "viewFailed": 0,
+          "markerChangesApplied": 500,
+          "noticeApplyP95": 982.2786240000005,
+          "viewDecodeMsP95": 8.94350299999951,
+          "defaultPayloadBytesP95": 44450
+        },
+        {
+          "turn": 2,
+          "count": 500,
+          "units": 5000,
+          "modelCountBefore": 43976,
+          "refused": {},
+          "rejoined": 10,
+          "ackP95": 60.40610799999922,
+          "closeP95": 2844.381881000001,
+          "viewRetries": 0,
+          "viewFailed": 0,
+          "markerChangesApplied": 500,
+          "noticeApplyP95": 602.2409000000007,
+          "viewDecodeMsP95": 0.792064000001119,
+          "defaultPayloadBytesP95": 25871
+        }
+      ],
+      "summary": {
+        "stage": "summary",
+        "turns": 2,
+        "work": "mixed",
+        "viewMode": "compact",
+        "worstAckP95": 60.40610799999922,
+        "worstCloseP95": 3811.869769000001,
+        "worstNoticeApplyP95": 982.2786240000005,
+        "viewFailures": 0,
+        "worstDefaultPayloadBytesP95": 44450,
+        "generatorLagMaxP95": 46.661631
+      }
+    }
+  ]
+}

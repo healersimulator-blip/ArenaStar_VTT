@@ -1,6 +1,8 @@
 import { gzipSync } from "node:zlib";
 import {
   MARKER_COUNT_BYTES,
+  MARKER_X_BIT,
+  MARKER_Y_BIT,
   MARKER_POINT_BYTES,
   MAX_VIEW_BYTES,
   MAX_VIEW_META_BYTES,
@@ -57,4 +59,57 @@ export function viewPrefix(
   prefix.writeUInt32BE(markerBytes, 4);
   prefix.write(json, VIEW_PREFIX_BYTES, metaBytes, "utf8");
   return prefix;
+}
+
+/** Rebuild the visible list in current roster order. Omitted old indices disappear. A run
+ * references unchanged rows; a move carries exact projected doubles, never model positions.
+ * A newly visible or relabelled row needs a full baseline, not an out-of-cohort lookup. */
+export function packMarkerChanges(
+  before: readonly UnitMarker[],
+  after: readonly UnitMarker[],
+  budget: number,
+): Buffer | undefined {
+  if (before.length >= MARKER_X_BIT || after.length > before.length)
+    return undefined;
+  const data = Buffer.allocUnsafe(Math.min(budget, 4 + 18 * after.length));
+  if (data.length < 4) return undefined;
+  data.writeUInt16BE(before.length);
+  data.writeUInt16BE(after.length, 2);
+  let cursor = 0,
+    offset = 4,
+    run = -1;
+  for (const marker of after) {
+    while (cursor < before.length && before[cursor]?.id !== marker.id) {
+      cursor++;
+      run = -1;
+    }
+    const old = before[cursor];
+    if (!old || old.name !== marker.name || old.factionId !== marker.factionId)
+      return undefined;
+    const move =
+      (old.at.x !== marker.at.x ? MARKER_X_BIT : 0) |
+      (old.at.y !== marker.at.y ? MARKER_Y_BIT : 0);
+    if (!move) {
+      if (run === -1) {
+        if (offset + 4 > data.length) return undefined;
+        data.writeUInt16BE(cursor, offset);
+        run = offset + 2;
+        offset += 4;
+        data.writeUInt16BE(1, run);
+      } else data.writeUInt16BE(data.readUInt16BE(run) + 1, run);
+    } else {
+      const end =
+        offset +
+        2 +
+        (move & MARKER_X_BIT ? 8 : 0) +
+        (move & MARKER_Y_BIT ? 8 : 0);
+      if (end > data.length) return undefined;
+      offset = data.writeUInt16BE(move | cursor, offset);
+      if (move & MARKER_X_BIT) offset = data.writeDoubleBE(marker.at.x, offset);
+      if (move & MARKER_Y_BIT) offset = data.writeDoubleBE(marker.at.y, offset);
+      run = -1;
+    }
+    cursor++;
+  }
+  return data.subarray(0, offset);
 }

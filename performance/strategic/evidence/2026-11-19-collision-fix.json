@@ -1,0 +1,179 @@
+{
+  "date": "2026-11-19",
+  "environment": "Same-host HTTP/WS + PostgreSQL 17.6, Node 22.22.3, 2 CPUs, 3.8 GiB; concurrent unit regression suite. Not a WAN/renderer qualification.",
+  "runs": [
+    {
+      "work": "march",
+      "peers": 501,
+      "fullPostPublishDecodesPerTurn": 500,
+      "turns": [
+        {
+          "turn": 1,
+          "count": 500,
+          "units": 500,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 41.381852000000436,
+          "closeP95": 2933.6044980000006,
+          "noticeApplyP95": 1214.281054000001,
+          "viewFailed": 0,
+          "viewRetries": 181,
+          "rejoined": 10
+        },
+        {
+          "turn": 2,
+          "count": 500,
+          "units": 500,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 106.17760199999975,
+          "closeP95": 2724.5430739999993,
+          "noticeApplyP95": 717.7087090000023,
+          "viewFailed": 0,
+          "viewRetries": 0,
+          "rejoined": 10
+        },
+        {
+          "turn": 3,
+          "count": 500,
+          "units": 500,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 65.34053000000131,
+          "closeP95": 2551.3467439999986,
+          "noticeApplyP95": 994.8538929999995,
+          "viewFailed": 0,
+          "viewRetries": 167,
+          "rejoined": 10
+        },
+        {
+          "turn": 4,
+          "count": 500,
+          "units": 500,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 43.27248300000065,
+          "closeP95": 2545.0519920000006,
+          "noticeApplyP95": 762.3249130000004,
+          "viewFailed": 0,
+          "viewRetries": 70,
+          "rejoined": 10
+        },
+        {
+          "turn": 5,
+          "count": 500,
+          "units": 500,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 145.01624000000083,
+          "closeP95": 2505.6669539999966,
+          "noticeApplyP95": 736.8182400000005,
+          "viewFailed": 0,
+          "viewRetries": 169,
+          "rejoined": 10
+        }
+      ],
+      "checkpointAudit": [
+        {
+          "version": 0,
+          "models": 50000,
+          "companies": 500,
+          "moved": 0,
+          "modelsBeyondFirstPerCell": 0
+        },
+        {
+          "version": 1,
+          "models": 50000,
+          "companies": 500,
+          "moved": 500,
+          "modelsBeyondFirstPerCell": 0
+        },
+        {
+          "version": 2,
+          "models": 50000,
+          "companies": 500,
+          "moved": 3,
+          "modelsBeyondFirstPerCell": 0
+        },
+        {
+          "version": 3,
+          "models": 50000,
+          "companies": 500,
+          "moved": 4,
+          "modelsBeyondFirstPerCell": 0
+        },
+        {
+          "version": 4,
+          "models": 50000,
+          "companies": 500,
+          "moved": 5,
+          "modelsBeyondFirstPerCell": 0
+        },
+        {
+          "version": 5,
+          "models": 50000,
+          "companies": 500,
+          "moved": 6,
+          "modelsBeyondFirstPerCell": 0
+        }
+      ],
+      "summary": {
+        "turns": 5,
+        "work": "march",
+        "viewMode": "compact",
+        "worstAckP95": 145.01624000000083,
+        "worstCloseP95": 2933.6044980000006,
+        "worstNoticeApplyP95": 1214.281054000001,
+        "viewFailures": 0,
+        "worstDefaultPayloadBytesP95": 3430,
+        "generatorLagMaxP95": 45.776895
+      }
+    },
+    {
+      "work": "mixed",
+      "peers": 501,
+      "fullPostPublishDecodesPerTurn": 500,
+      "turns": [
+        {
+          "turn": 1,
+          "count": 500,
+          "units": 5000,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 19.261218999999983,
+          "closeP95": 4723.853394,
+          "noticeApplyP95": 3153.125188,
+          "viewFailed": 0,
+          "viewRetries": 208,
+          "rejoined": 10
+        },
+        {
+          "turn": 2,
+          "count": 500,
+          "units": 5000,
+          "modelCountBefore": 43976,
+          "refused": {},
+          "ackP95": 97.05686100000094,
+          "closeP95": 4022.997596000001,
+          "noticeApplyP95": 3850.3656139999985,
+          "viewFailed": 0,
+          "viewRetries": 202,
+          "rejoined": 10
+        }
+      ],
+      "checkpointAudit": [],
+      "summary": {
+        "turns": 2,
+        "work": "mixed",
+        "viewMode": "compact",
+        "worstAckP95": 97.05686100000094,
+        "worstCloseP95": 4723.853394,
+        "worstNoticeApplyP95": 3850.3656139999985,
+        "viewFailures": 0,
+        "worstDefaultPayloadBytesP95": 47804,
+        "generatorLagMaxP95": 124.125183
+      }
+    }
+  ],
+  "workerSha256": "1ecbf1c075f00fd9925781a00715094f751c81c1425072871c3a0834e5147ce7"
+}

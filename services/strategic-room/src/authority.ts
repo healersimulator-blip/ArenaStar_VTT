@@ -7,7 +7,7 @@ import {
 import { BattleView } from "./battle";
 import { PostgresRoom, StaleAuthority } from "./postgres";
 import type { Scenario } from "./scenario";
-import type { Frozen, Member, Result, RoomRecord } from "./state";
+import type { Control, Frozen, Member, Result, RoomRecord } from "./state";
 
 export const COMMAND_BACKLOG = 1024;
 const WORKER_LIMIT_MS = 30_000;
@@ -67,6 +67,7 @@ export class CommandLane {
 type Notify = {
   change: (room: RoomRecord) => void;
   revoke: (id: string) => void;
+  kick?: (id: string) => void;
   lost: () => void;
 };
 
@@ -84,6 +85,8 @@ export class StrategicAuthority {
     readonly scenario: Scenario,
     private readonly projectionKey: Buffer,
     public battle: BattleView,
+    /** Grants installed with `battle`; re-applied only after a durable change commits. */
+    private control: Control,
     private readonly notify: Notify,
     private readonly resolveJob: ResolveJob,
     private readonly clock: () => number,
@@ -100,11 +103,10 @@ export class StrategicAuthority {
       lease.authority?.lose();
       notify.lost();
     });
-    const battle = new BattleView(
-      scenario,
-      await db.version(room.version),
-      key,
-    );
+    const published = await db.version(room.version);
+    const control = published.control ?? {};
+    const battle = new BattleView(scenario, published, key);
+    battle.applyControl(control);
     if (db.generation !== room.generation)
       throw new StaleAuthority("Lease lost during startup.");
     const authority = (lease.authority = new StrategicAuthority(
@@ -113,6 +115,7 @@ export class StrategicAuthority {
       scenario,
       key,
       battle,
+      control,
       notify,
       resolveJob,
       clock,
@@ -145,8 +148,20 @@ export class StrategicAuthority {
         admittedAt,
         this.scenario.seed,
         (edit) => this.battle.validate(member, edit),
+        (id) =>
+          this.scenario.commanders
+            .find((c) => c.id === id)
+            ?.units.map((u) => u.id) ?? [],
       );
       if (result.revoked) this.notify.revoke(result.revoked);
+      if (result.kicked) this.notify.kick?.(result.kicked);
+      if (result.control) {
+        // Grants are durable already; install them on the live view so the next GET and the
+        // next order validation both see the same thing. The next checkpoint records them too.
+        const units = await this.db.grants(result.control);
+        this.control = { ...this.control, [result.control]: units };
+        this.battle.applyControl({ [result.control]: units });
+      }
       if (result.room) this.changed(result.room);
       if (cmd.kind === "orders.submit")
         this.metric("order", {
@@ -236,10 +251,16 @@ export class StrategicAuthority {
       const result = await this.resolveJob(job, this.abort.signal);
       if (!this.active) return;
       const resolved = performance.now();
+      // Grants committed while this turn resolved belong to the publication it creates.
+      const control = await this.db.version(result.state.version).then(
+        (published) => published.control ?? {},
+        () => this.control,
+      );
       const battle = new BattleView(
         this.scenario,
-        result.state,
+        { ...result.state, control },
         this.projectionKey,
+        this.battle,
       );
       const projected = performance.now();
       // Serialize in-memory state transitions with commands (a durable next could otherwise race installation).
@@ -252,6 +273,7 @@ export class StrategicAuthority {
           result,
         );
         this.battle = battle;
+        this.control = control;
         this.metric("publish", {
           turnId: start.turnId,
           loadMs: loaded - (this.closingAt ?? loaded),

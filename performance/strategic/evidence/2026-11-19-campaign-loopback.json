@@ -1,0 +1,287 @@
+{
+  "date": "2026-11-19",
+  "environment": "Linux x64, 2 vCPU, 3.8 GiB, Node v22.22.3, PostgreSQL 17.6; local HTTP/WS, no TLS",
+  "runs": [
+    {
+      "seats": 100,
+      "unitsPerSeat": 10,
+      "workload": "mixed",
+      "orderSpreadMs": 1800,
+      "fullPostPublishDecodesPerTurn": 10,
+      "connectedPeers": 101,
+      "turns": [
+        {
+          "turn": 1,
+          "modelCountBefore": 10000,
+          "refused": {},
+          "ackP95": 8.219511000000011,
+          "closeP95": 1641.4581990000001,
+          "noticeApplyP95": 237.9854489999998,
+          "viewRetries": 0,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 97.2158260000001
+        },
+        {
+          "turn": 2,
+          "modelCountBefore": 8747,
+          "refused": {},
+          "ackP95": 7.266161999999895,
+          "closeP95": 1364.3929159999998,
+          "noticeApplyP95": 225.59011400000054,
+          "viewRetries": 0,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 66.64023900000029
+        }
+      ]
+    },
+    {
+      "seats": 250,
+      "unitsPerSeat": 5,
+      "workload": "contact",
+      "orderSpreadMs": 1800,
+      "fullPostPublishDecodesPerTurn": 10,
+      "connectedPeers": 251,
+      "turns": [
+        {
+          "turn": 1,
+          "modelCountBefore": 25000,
+          "refused": {},
+          "ackP95": 30.484995000000254,
+          "closeP95": 2138.037918,
+          "noticeApplyP95": 357.63139000000047,
+          "viewRetries": 0,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 90.20291300000008
+        },
+        {
+          "turn": 2,
+          "modelCountBefore": 15112,
+          "refused": {},
+          "ackP95": 20.529766999999993,
+          "closeP95": 1587.0712679999997,
+          "noticeApplyP95": 404.47625900000094,
+          "viewRetries": 0,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 57.505645999999615
+        }
+      ]
+    },
+    {
+      "seats": 500,
+      "unitsPerSeat": 10,
+      "workload": "mixed",
+      "orderSpreadMs": 1800,
+      "fullPostPublishDecodesPerTurn": 10,
+      "connectedPeers": 501,
+      "turns": [
+        {
+          "turn": 1,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 36.74033899999995,
+          "closeP95": 4086.255870000001,
+          "noticeApplyP95": 613.6727310000006,
+          "viewRetries": 109,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 94.69985400000041
+        },
+        {
+          "turn": 2,
+          "modelCountBefore": 43812,
+          "refused": {},
+          "ackP95": 8.037376999996923,
+          "closeP95": 3700.5406059999987,
+          "noticeApplyP95": 499.16943600000013,
+          "viewRetries": 20,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 72.42739300000176
+        },
+        {
+          "turn": 3,
+          "modelCountBefore": 39575,
+          "refused": {},
+          "ackP95": 10.050182999999379,
+          "closeP95": 2782.7061410000024,
+          "noticeApplyP95": 499.25159899999926,
+          "viewRetries": 0,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 82.41307600000073
+        }
+      ]
+    },
+    {
+      "seats": 500,
+      "unitsPerSeat": 5,
+      "workload": "dense",
+      "orderSpreadMs": 1800,
+      "fullPostPublishDecodesPerTurn": 500,
+      "connectedPeers": 501,
+      "turns": [
+        {
+          "turn": 1,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 26.744670000000042,
+          "closeP95": 2722.421007,
+          "noticeApplyP95": 1685.2603090000011,
+          "viewRetries": 97,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 69.16884500000015
+        },
+        {
+          "turn": 2,
+          "modelCountBefore": 30223,
+          "refused": {},
+          "ackP95": 25.21217699999943,
+          "closeP95": 1679.494589,
+          "noticeApplyP95": 1345.4517419999993,
+          "viewRetries": 208,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 53.28350800000044
+        },
+        {
+          "turn": 3,
+          "modelCountBefore": 18416,
+          "refused": {},
+          "ackP95": 27.702916000002006,
+          "closeP95": 1613.8193260000007,
+          "noticeApplyP95": 1306.8277129999988,
+          "viewRetries": 9,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 59.00868400000036
+        }
+      ]
+    },
+    {
+      "seats": 500,
+      "unitsPerSeat": 1,
+      "workload": "march",
+      "deployment": "sceneDeployment(empty campaign scene, strength 100)",
+      "orderSpreadMs": 1800,
+      "fullPostPublishDecodesPerTurn": 500,
+      "connectedPeers": 501,
+      "turns": [
+        {
+          "turn": 1,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 11.703476000000592,
+          "closeP95": 2306.0519569999997,
+          "noticeApplyP95": 738.8917739999988,
+          "viewRetries": 83,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 85.745723
+        },
+        {
+          "turn": 2,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 3.6910009999992326,
+          "closeP95": 2215.535446,
+          "noticeApplyP95": 523.3723010000012,
+          "viewRetries": 16,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 63.9937630000004
+        },
+        {
+          "turn": 3,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 32.313593000000765,
+          "closeP95": 2044.7259519999989,
+          "noticeApplyP95": 717.1308309999986,
+          "viewRetries": 57,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 39.27417299999979
+        },
+        {
+          "turn": 4,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 7.095126000000164,
+          "closeP95": 2023.7648010000012,
+          "noticeApplyP95": 585.199392999999,
+          "viewRetries": 153,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 41.76378199999817
+        },
+        {
+          "turn": 5,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "ackP95": 25.97731500000009,
+          "closeP95": 2135.7560429999976,
+          "noticeApplyP95": 627.2471760000008,
+          "viewRetries": 45,
+          "viewFailed": 0,
+          "rejoined": 10,
+          "rejoinP95": 34.60504700000092
+        }
+      ],
+      "checkpointAudit": [
+        {
+          "stage": "checkpoint-audit",
+          "version": 0,
+          "models": 50000,
+          "companies": 500,
+          "moved": 0,
+          "modelsBeyondFirstPerCell": 0
+        },
+        {
+          "stage": "checkpoint-audit",
+          "version": 1,
+          "models": 50000,
+          "companies": 500,
+          "moved": 500,
+          "modelsBeyondFirstPerCell": 6731
+        },
+        {
+          "stage": "checkpoint-audit",
+          "version": 2,
+          "models": 50000,
+          "companies": 500,
+          "moved": 499,
+          "modelsBeyondFirstPerCell": 9819
+        },
+        {
+          "stage": "checkpoint-audit",
+          "version": 3,
+          "models": 50000,
+          "companies": 500,
+          "moved": 499,
+          "modelsBeyondFirstPerCell": 13654
+        },
+        {
+          "stage": "checkpoint-audit",
+          "version": 4,
+          "models": 50000,
+          "companies": 500,
+          "moved": 498,
+          "modelsBeyondFirstPerCell": 15543
+        },
+        {
+          "stage": "checkpoint-audit",
+          "version": 5,
+          "models": 50000,
+          "companies": 500,
+          "moved": 498,
+          "modelsBeyondFirstPerCell": 16502
+        }
+      ]
+    }
+  ]
+}

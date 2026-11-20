@@ -184,3 +184,21 @@ test("Save now includes same-turn GM edits and fog without a manual settle", asy
     expect((await app.db.get("fog", [app.worldId, DEFAULT_SCENE_ID, "gm"])).png).toEqual(new Uint8Array([1, 2, 3]));
   } finally { await app.close(); }
 });
+
+test('hosted battle fences system and peer edits as well as the local sim, but permits scene navigation', async () => {
+  const app = await boot();
+  try {
+    const ref = {coll:'scenes' as const,id:DEFAULT_SCENE_ID};
+    const bound={world:app.worldId,scene:ref.id,id:crypto.randomUUID(),armies:[],factions:[],seed:1,seats:2,strength:1};
+    const diff={flags:{core:{scale:'strategic',campaignBattle:bound}}};
+    expect(app.host.commitSystem([{kind:'update',ref,diff}]).ok).toBe(false);
+    expect(app.host.commitBattleScene(ref.id,diff).ok).toBe(true);
+    await expect(app.gm.channel.start('simultaneous')).rejects.toThrow(/hosted battle/);
+    app.gm.client.submit([{kind:'update',ref,diff:{name:'not committed'}}]); await settle();
+    expect(app.store.get('scenes',ref.id)?.name).not.toBe('not committed');
+    expect(app.host.commitSystem([{kind:'delete',ref}]).ok).toBe(false);
+    expect(app.host.commitSystem([{kind:'update',ref,diff:{active:false}}]).ok).toBe(true);
+    expect(app.host.commitBattleScene(ref.id,{'-=flags.core.campaignBattle':null}).ok).toBe(true);
+    expect(app.host.commitSystem([{kind:'update',ref,diff:{name:'editable again'}}]).ok).toBe(true);
+  } finally {await app.close();}
+});

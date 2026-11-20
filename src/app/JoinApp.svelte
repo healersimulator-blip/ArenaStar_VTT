@@ -123,6 +123,8 @@
   } from "../core/documents";
   import type { Op } from "../core/ops";
   import { copyText } from "../ui/clipboard";
+  import { AssetCache } from "../client/assets";
+  import { readScenePack } from "../client/scenePack";
   import { FogExploration } from "../client/fogExploration";
   import { FxPlayer } from "../client/fxPlayer";
   import { refusalNotifier, type RefusalNotifier } from "../client/moveRefusals";
@@ -148,6 +150,10 @@
   let inviteText = $state("");
   let answerText = $state("");
   let hostCode = $state("");
+  /** Optional preload from the GM: cached now so the first scene does not stream it. */
+  let preload = $state<{ name: string; files: number; bytes: number; pack: string } | null>(null);
+  let preloadError = $state<string | null>(null);
+  let preloading = $state(false);
 
   let worldName = $state("—");
   let seq = $state(0);
@@ -678,6 +684,36 @@
       });
     }
     answerText = "";
+  }
+
+  async function importPreload(file: File | undefined): Promise<void> {
+    if (!file) return;
+    preloading = true;
+    preloadError = null;
+    try {
+      const result = await readScenePack(new Uint8Array(await file.arrayBuffer()));
+      const cache = await AssetCache.open();
+      try {
+        for (const asset of result.accepted) await cache.put(asset.hash, asset.bytes, asset.mime);
+      } finally {
+        cache.close();
+      }
+      preload = {
+        name: result.manifest.name,
+        files: result.accepted.length,
+        bytes: result.accepted.reduce((sum, asset) => sum + asset.bytes.byteLength, 0),
+        pack: result.manifest.packId,
+      };
+      // The pack seeds a cache only; the host still decides what this browser may see.
+      preloadError =
+        result.rejected || result.accepted.length !== Object.keys(result.manifest.assets).length
+          ? `${result.rejected} damaged or unexpected file(s) were skipped.`
+          : null;
+    } catch (error) {
+      preloadError = error instanceof Error ? error.message : String(error);
+    } finally {
+      preloading = false;
+    }
   }
 
   async function copyCode(value: string, label: string): Promise<void> {
@@ -2124,6 +2160,34 @@
       >
         Connect to game
       </button>
+
+      <section class="preload-panel" aria-label="Scene preload">
+        <h3>Scene preload (optional)</h3>
+        <p class="hint">
+          Your GM may send a scene pack — a small file with the battle map, token art and
+          sounds. Loading it now fills this browser's cache so they arrive with the
+          first scene; it does not grant access or change what the host shows you.
+        </p>
+        <label for="scene-preload">Scene pack file</label>
+        <input
+          id="scene-preload"
+          data-scene-preload
+          type="file"
+          accept=".zip,.arenastar-scene-pack,application/zip"
+          disabled={preloading}
+          onchange={(event) => {
+            const input = event.currentTarget;
+            void importPreload(input.files?.[0]).finally(() => { input.value = ""; });
+          }}
+        />
+        {#if preload}
+          <p role="status" data-preload-status>
+            Cached {preload.files} file(s) ({(preload.bytes / 1024 / 1024).toFixed(1)} MiB)
+            from “{preload.name}”. Expires with the browser cache.
+          </p>
+        {/if}
+        {#if preloadError}<p class="error" role="alert">{preloadError}</p>{/if}
+      </section>
 
       <section class="recent-games" data-games-you-played aria-label="Games you played">
         <h3>Games you played</h3>

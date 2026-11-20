@@ -7,6 +7,14 @@ import Root from "./Root.svelte";
 import type { HostApp } from "./hostBoot";
 import { exposeSvelteRuntime } from "./svelteRuntime";
 
+import { gunzipSync, strFromU8 } from "fflate";
+const packedStyle = document.getElementById("vtt-workspace-style");
+if (packedStyle) {
+  const style = document.createElement("style");
+  style.textContent = strFromU8(gunzipSync(Uint8Array.from(atob(packedStyle.textContent ?? ""), c=>c.charCodeAt(0))));
+  packedStyle.replaceWith(style);
+}
+
 const target = document.getElementById("app");
 if (!target) throw new Error("boot: #app container missing from index.html");
 

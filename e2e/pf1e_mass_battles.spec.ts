@@ -175,6 +175,8 @@ test.describe("Pathfinder 1e packages (§1.8 browser half)", () => {
       }>(page, "rulesBoot");
       expect(boot).toEqual({
         source: "package",
+        inPage: "package",
+        ui: "package",
         packageId: "pf1e-mass-battles",
         version: "1.0.0",
         error: null,

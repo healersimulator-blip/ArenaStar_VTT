@@ -23,7 +23,7 @@ for (const [i, name] of ["worker", "main"].entries()) {
 await build({
   configFile: false,
   root: `${root}web`,
-  base: "/",
+  base: "./",
   plugins: [svelte()],
   build: { target: "es2022", outDir: "../dist/web", emptyOutDir: true },
 });

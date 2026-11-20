@@ -1,3 +1,4 @@
+import { MarchReservation } from "./marchReservation";
 import { gzipSync } from "node:zlib";
 import { STRATEGIC_CODEC } from "../../../src/core/strategicRoom/protocol";
 import { createMassBattlePf1e } from "../../../src/packages/massBattlePf1e";
@@ -9,7 +10,11 @@ import type { Frozen, OutcomeRow, Result } from "./state";
 export function resolveFrozen(job: Frozen): Result {
   const begin = performance.now();
   const { ctx, units } = rulesInput(job.scenario, job.start.units);
-  const rules = createMassBattlePf1e({ resolvedTurns: job.turnId - 1 });
+  const march = new MarchReservation(job.scenario.bounds);
+  const rules = createMassBattlePf1e({
+    resolvedTurns: job.turnId - 1,
+    simultaneousStride: march.plan.bind(march),
+  });
   let rulesMs = 0;
   const runner = new SimRunnerCore(
     {
@@ -63,6 +68,7 @@ export function resolveFrozen(job: Frozen): Result {
       alive: count(range),
       lost: count(before.range) - count(range),
       order: orders.get(unit.id) ?? null,
+      ...(march.blocked.has(unit.id) ? { marchBlocked: true as const } : {}),
     });
     return { range, stats };
   });
