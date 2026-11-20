@@ -76,6 +76,16 @@ async function member(db: PostgresRoom, key: string) {
   return admitted;
 }
 
+/** Graceful restart: release the advisory lease, then reopen from committed PostgreSQL state. */
+async function reopen(room: string) {
+  for (const a of authorities.splice(0)) await a.close();
+  for (const db of dbs.splice(0)) await db.dispose();
+  const db = database(room);
+  const authority = await StrategicAuthority.open(db, signal(), later);
+  authorities.push(authority);
+  return { db, authority };
+}
+
 afterEach(async () => {
   await Promise.all(authorities.splice(0).map((a) => a.close()));
   await Promise.all(dbs.splice(0).map((db) => db.dispose()));
@@ -271,14 +281,22 @@ describe.skipIf(!url)("real PostgreSQL hosted order/turn authority", () => {
     expect(
       (await db.roster()).filter((m) => m.role === "PLAYER" && !m.claimed),
     ).toHaveLength(2);
+    const issued = "y".repeat(32);
     expect(
       await a.submit(gm, {
         kind: "member.invite",
         requestId: id(),
         memberId: "commander-2",
-        invite: "y".repeat(32),
+        invite: issued,
       }),
-    ).toMatchObject({ status: "accepted" });
+    ).toMatchObject({
+      status: "accepted",
+      invites: { "commander-2": issued },
+    });
+    // The GM roster can resend the same accepted code after a reload.
+    expect(
+      (await db.roster()).find((m) => m.id === "commander-2")?.invite,
+    ).toBe(issued);
     expect(await db.admit("55".repeat(32), "n".repeat(32))).toBeNull();
     expect((await db.admit("44".repeat(32), "y".repeat(32)))?.id).toBe(
       "commander-2",
@@ -460,5 +478,146 @@ describe.skipIf(!url)("real PostgreSQL hosted order/turn authority", () => {
     const replacement = database(f.room);
     const claimed = await replacement.acquire(() => undefined);
     expect(claimed.room.version).toBe(1);
+  });
+
+  test("one seat's grant survives restart without disabling every other seat", async () => {
+    const f = await fixture();
+    const a = await StrategicAuthority.open(f.db, signal(), later);
+    authorities.push(a);
+    const gm = await member(f.db, f.members.gm);
+    const red = await member(f.db, f.members["commander-2"]);
+    expect(a.battle.own(red).map((u) => u.id)).toHaveLength(5);
+    expect(
+      await a.submit(gm, {
+        kind: "member.update",
+        requestId: id(),
+        memberId: "commander-1",
+        units: ["unit-1-1"],
+      }),
+    ).toMatchObject({ status: "accepted" });
+
+    const { db, authority } = await reopen(f.room);
+    const restartedRed = await member(db, f.members["commander-2"]);
+    expect(authority.battle.own(restartedRed).map((u) => u.id)).toHaveLength(5);
+    expect(
+      await authority.submit(restartedRed, order("unit-2-1")),
+    ).toMatchObject({ status: "accepted" });
+    expect(
+      (await db.roster()).find((m) => m.id === "commander-2")?.units,
+    ).toHaveLength(5);
+    expect(
+      (await db.roster()).find((m) => m.id === "commander-1")?.units,
+    ).toEqual(["unit-1-1"]);
+  });
+
+  test("an explicit empty allowlist stays empty after restart", async () => {
+    const f = await fixture();
+    const a = await StrategicAuthority.open(f.db, signal(), later);
+    authorities.push(a);
+    const gm = await member(f.db, f.members.gm);
+    const blue = await member(f.db, f.members["commander-1"]);
+    expect(
+      await a.submit(gm, {
+        kind: "member.update",
+        requestId: id(),
+        memberId: "commander-1",
+        units: [],
+      }),
+    ).toMatchObject({ status: "accepted" });
+    expect(a.battle.own(blue)).toEqual([]);
+
+    const { db, authority } = await reopen(f.room);
+    const restartedBlue = await member(db, f.members["commander-1"]);
+    expect(authority.battle.own(restartedBlue)).toEqual([]);
+    expect(
+      (await db.roster()).find((m) => m.id === "commander-1")?.units,
+    ).toEqual([]);
+    expect(
+      (await db.roster()).find((m) => m.id === "commander-2")?.units,
+    ).toHaveLength(5);
+    expect(
+      await authority.submit(restartedBlue, order("unit-1-1", 1, 1)),
+    ).toMatchObject({ code: "invalid_order" });
+  });
+
+  test("invite bumps roster generation and revoke removes both grant representations", async () => {
+    const f = await fixture();
+    const a = await StrategicAuthority.open(f.db, signal(), later);
+    authorities.push(a);
+    const gm = await member(f.db, f.members.gm);
+    expect(
+      await a.submit(gm, {
+        kind: "member.update",
+        requestId: id(),
+        memberId: "commander-1",
+        units: ["unit-1-1"],
+      }),
+    ).toMatchObject({ status: "accepted" });
+    expect(await f.db.grants("commander-1")).toEqual(["unit-1-1"]);
+    // Simulate a seat whose browser identity was never claimed, so an invite is legal.
+    await f.db.pool.query(
+      "UPDATE strategic_members SET public_key=NULL WHERE room_id=$1 AND id='commander-1'",
+      [f.room],
+    );
+
+    const beforeInvite = a.room.members;
+    const inviteCode = "g".repeat(32);
+    expect(
+      await a.submit(gm, {
+        kind: "member.invite",
+        requestId: id(),
+        memberId: "commander-1",
+        invite: inviteCode,
+      }),
+    ).toMatchObject({
+      status: "accepted",
+      invites: { "commander-1": inviteCode },
+    });
+    await vi.waitFor(() =>
+      expect(a.room.members).toBeGreaterThan(beforeInvite),
+    );
+    expect(
+      (await f.db.roster()).find((m) => m.id === "commander-1")?.invite,
+    ).toBe(inviteCode);
+
+    expect(
+      await a.submit(gm, {
+        kind: "member.revoke",
+        requestId: id(),
+        memberId: "commander-1",
+      }),
+    ).toMatchObject({ status: "accepted" });
+    expect(await f.db.grants("commander-1")).toBeNull();
+    const legacy = await f.db.pool.query(
+      "SELECT unit_id FROM strategic_control WHERE room_id=$1 AND member_id='commander-1'",
+      [f.room],
+    );
+    expect(legacy.rowCount).toBe(0);
+    expect(
+      (await f.db.roster()).find((m) => m.id === "commander-1"),
+    ).toBeUndefined();
+  });
+
+  test("a later grant edit does not rewrite an older publication's control", async () => {
+    const f = await fixture();
+    const a = await StrategicAuthority.open(f.db, signal(), later);
+    authorities.push(a);
+    const gm = await member(f.db, f.members.gm);
+    expect(await a.submit(gm, close(1))).toMatchObject({ status: "accepted" });
+    await vi.waitFor(() => expect(a.room.phase).toBe("report"));
+    expect((await f.db.version(0)).control).toEqual({});
+    expect((await f.db.version(1)).control).toEqual({});
+    expect(
+      await a.submit(gm, {
+        kind: "member.update",
+        requestId: id(),
+        memberId: "commander-1",
+        units: ["unit-1-1"],
+      }),
+    ).toMatchObject({ status: "accepted" });
+    expect((await f.db.version(1)).control).toEqual({});
+    expect(
+      (await f.db.roster()).find((m) => m.id === "commander-1")?.units,
+    ).toEqual(["unit-1-1"]);
   });
 });

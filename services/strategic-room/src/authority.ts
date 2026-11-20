@@ -104,7 +104,8 @@ export class StrategicAuthority {
       notify.lost();
     });
     const published = await db.version(room.version);
-    const control = published.control ?? {};
+    // The live view uses today's canonical seat grants, not an older publication's snapshot.
+    const control = await db.liveControl();
     const battle = new BattleView(scenario, published, key);
     battle.applyControl(control);
     if (db.generation !== room.generation)
@@ -158,9 +159,9 @@ export class StrategicAuthority {
       if (result.control) {
         // Grants are durable already; install them on the live view so the next GET and the
         // next order validation both see the same thing. The next checkpoint records them too.
-        const units = await this.db.grants(result.control);
-        this.control = { ...this.control, [result.control]: units };
-        this.battle.applyControl({ [result.control]: units });
+        const { memberId, units } = result.control;
+        this.control[memberId] = units;
+        this.battle.applyControl({ [memberId]: units });
       }
       if (result.room) this.changed(result.room);
       if (cmd.kind === "orders.submit")
@@ -169,7 +170,9 @@ export class StrategicAuthority {
           durableMs: performance.now() - queued,
           accepted: result.receipt.status === "accepted",
         });
-      return result.receipt;
+      return result.invites
+        ? { ...result.receipt, invites: result.invites }
+        : result.receipt;
     });
     try {
       return work === null
@@ -251,26 +254,25 @@ export class StrategicAuthority {
       const result = await this.resolveJob(job, this.abort.signal);
       if (!this.active) return;
       const resolved = performance.now();
-      // Grants committed while this turn resolved belong to the publication it creates.
-      const control = await this.db.version(result.state.version).then(
-        (published) => published.control ?? {},
-        () => this.control,
-      );
-      const battle = new BattleView(
-        this.scenario,
-        { ...result.state, control },
-        this.projectionKey,
-        this.battle,
-      );
-      const projected = performance.now();
       // Serialize in-memory state transitions with commands (a durable next could otherwise race installation).
       await this.lane.enqueue(async () => {
         if (!this.active) return;
+        // Capture grants inside the barrier: edits committed while the worker ran belong to
+        // this publication, and the snapshot is stored with its version, not recomputed later.
+        const control = { ...this.control };
+        const battle = new BattleView(
+          this.scenario,
+          { ...result.state, control },
+          this.projectionKey,
+          this.battle,
+        );
+        const projected = performance.now();
         const beforeCommit = performance.now();
         const room = await this.db.publish(
           start.turnId,
           start.generation,
           result,
+          control,
         );
         this.battle = battle;
         this.control = control;

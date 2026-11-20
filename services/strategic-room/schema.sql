@@ -32,7 +32,11 @@ CREATE TABLE IF NOT EXISTS strategic_members (
 -- Upgrade a room created by an earlier service build. Additive and idempotent.
 ALTER TABLE strategic_members ADD COLUMN IF NOT EXISTS name text;
 ALTER TABLE strategic_rooms ADD COLUMN IF NOT EXISTS members_version integer NOT NULL DEFAULT 0;
--- Who may order which commander's units. Missing rows mean the seat's own units (pre-update rooms).
+-- Canonical per-seat control: SQL NULL means the seat's own deployment; [] means no units.
+-- `strategic_control` remains as a legacy mirror for readers of older exports.
+ALTER TABLE strategic_members ADD COLUMN IF NOT EXISTS control_units jsonb;
+-- Encrypted short-lived resend copy of a one-time invite; never sent to a player view.
+ALTER TABLE strategic_members ADD COLUMN IF NOT EXISTS invite_cipher text;
 CREATE TABLE IF NOT EXISTS strategic_control (
   room_id text NOT NULL,
   member_id text NOT NULL,
@@ -40,6 +44,15 @@ CREATE TABLE IF NOT EXISTS strategic_control (
   PRIMARY KEY (room_id, member_id, unit_id),
   FOREIGN KEY (room_id, member_id) REFERENCES strategic_members(room_id, id) ON DELETE CASCADE
 );
+-- Sparse grant rows cannot distinguish "unrestricted" from an explicit empty allowlist.
+-- Preserve every non-empty legacy allowlist; a lost explicit [] must be re-applied by the GM.
+UPDATE strategic_members m
+SET control_units = grants.units
+FROM (
+  SELECT room_id, member_id, jsonb_agg(unit_id ORDER BY unit_id COLLATE "C") AS units
+  FROM strategic_control GROUP BY room_id, member_id
+) AS grants
+WHERE grants.room_id=m.room_id AND grants.member_id=m.id AND m.control_units IS NULL;
 CREATE TABLE IF NOT EXISTS strategic_versions (
   room_id text NOT NULL REFERENCES strategic_rooms(id) ON DELETE CASCADE,
   version integer NOT NULL,
@@ -50,6 +63,21 @@ CREATE TABLE IF NOT EXISTS strategic_versions (
   raw_report bytea,
   PRIMARY KEY (room_id, version)
 );
+-- A publication states its own grants. Old versions get a best-effort snapshot from the
+-- legacy grant rows; new publications always insert the resolved control map explicitly.
+ALTER TABLE strategic_versions ADD COLUMN IF NOT EXISTS control jsonb;
+UPDATE strategic_versions v
+SET control = coalesce((
+  SELECT jsonb_object_agg(c.member_id, c.units)
+  FROM (
+    SELECT room_id, member_id, jsonb_agg(unit_id ORDER BY unit_id COLLATE "C") AS units
+    FROM strategic_control GROUP BY room_id, member_id
+  ) AS c
+  WHERE c.room_id=v.room_id
+), '{}'::jsonb)
+WHERE v.control IS NULL;
+ALTER TABLE strategic_versions ALTER COLUMN control SET DEFAULT '{}'::jsonb;
+ALTER TABLE strategic_versions ALTER COLUMN control SET NOT NULL;
 CREATE TABLE IF NOT EXISTS strategic_frozen (
   room_id text NOT NULL REFERENCES strategic_rooms(id) ON DELETE CASCADE,
   turn_id integer NOT NULL,

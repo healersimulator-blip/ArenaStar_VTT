@@ -13,6 +13,7 @@ import {
   campaignProof,
 } from "../../../src/core/strategicRoom/protocol";
 import { parseScenario, deploy } from "./scenario";
+import { digest, openInvite, sealInvite } from "./invite";
 import { PostgresRoom } from "./postgres";
 import { serve } from "./server";
 
@@ -38,11 +39,15 @@ export async function serveCampaign(
     throw new Error(
       "Set STRATEGIC_LAUNCH_KEY to a random secret of at least 32 characters.",
     );
+  // The API test path may run before `pnpm build`; the deployed campaign still uses the
+  // real single-file app shell. Keep the fallback inert so no test can drive GM UI from it.
   const shell = Buffer.from(
     (
       await readFile(
         new URL("../../../../dist/index.html", import.meta.url),
         "utf8",
+      ).catch(
+        () => '<!doctype html><meta charset="utf-8"><title>Arena Star</title>',
       )
     ).replace("<head>", '<head><meta name="arenastar-campaign" content="v1">'),
   );
@@ -50,6 +55,7 @@ export async function serveCampaign(
   let live: { id: string; edge: Awaited<ReturnType<typeof serve>> } | null =
     null;
   let busy = false;
+  let createdInvites: Record<string, string> = {};
   async function attach(id: string) {
     if (live?.id === id) return;
     if (live) throw new Error("Slot occupied");
@@ -130,6 +136,7 @@ export async function serveCampaign(
       )
         return json(res, 400, { error: "Invalid battle identity" });
       const { id, publicKey } = body;
+      createdInvites = {};
       const action = req.url === "/api/campaign/finish" ? "finish" : "launch";
       if (
         typeof body.at !== "number" ||
@@ -221,21 +228,57 @@ export async function serveCampaign(
         }
         const db = new PostgresRoom(url, id, pin);
         try {
-          await db.create(scenario, state, { gm: publicKey }, { slot, invite });
+          createdInvites = await db.create(
+            scenario,
+            state,
+            { gm: publicKey },
+            { slot, invite },
+          );
         } finally {
           await db.dispose();
         }
       }
       await attach(id);
-      const ids = (
-        await registry.pool.query<{ id: string }>(
-          `SELECT id FROM strategic_members WHERE room_id=$1 AND active AND invite_hash IS NOT NULL AND invite_expires>now() ORDER BY id`,
+      const rows = (
+        await registry.pool.query<{
+          id: string;
+          inviteHash: string;
+          inviteCipher: string | null;
+          projectionKey: Buffer;
+        }>(
+          `SELECT m.id,m.invite_hash AS "inviteHash",m.invite_cipher AS "inviteCipher",
+            r.projection_key AS "projectionKey"
+          FROM strategic_members m JOIN strategic_rooms r ON r.id=m.room_id
+          WHERE m.room_id=$1 AND m.active AND m.invite_hash IS NOT NULL
+            AND m.invite_expires>now() ORDER BY m.id`,
           [id],
         )
-      ).rows.map((r) => r.id);
+      ).rows;
+      const invites: Record<string, string> = {};
+      for (const row of rows) {
+        const code = row.inviteCipher
+          ? openInvite(row.projectionKey, id, row.id, row.inviteCipher)
+          : null;
+        if (code && digest(code) === row.inviteHash) {
+          invites[row.id] = code;
+          continue;
+        }
+        // Pre-migration rooms used launch-key HMAC invites with no resend copy. Verify
+        // before returning one, then seal it so later retries and the GM roster agree.
+        if (!row.inviteCipher) {
+          const legacy = invite(row.id);
+          if (digest(legacy) === row.inviteHash) {
+            invites[row.id] = legacy;
+            await registry.pool.query(
+              "UPDATE strategic_members SET invite_cipher=$3 WHERE room_id=$1 AND id=$2",
+              [id, row.id, sealInvite(row.projectionKey, id, row.id, legacy)],
+            );
+          }
+        }
+      }
       return json(res, 200, {
         id,
-        invites: Object.fromEntries(ids.map((i) => [i, invite(i)])),
+        invites: existing ? invites : { ...invites, ...createdInvites },
       });
     } finally {
       busy = false;

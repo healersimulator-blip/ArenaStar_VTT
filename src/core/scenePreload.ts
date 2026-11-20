@@ -227,7 +227,11 @@ export function parseScenePackManifest(raw: unknown): ScenePackManifest {
     const e = entry as Record<string, unknown>;
     if (typeof e.name !== "string" || typeof e.mime !== "string")
       throw new ScenePackError("Scene pack asset metadata is incomplete.");
-    if (!Number.isSafeInteger(e.size) || (e.size as number) < 0)
+    if (
+      !Number.isSafeInteger(e.size) ||
+      (e.size as number) < 0 ||
+      (e.size as number) > MAX_PACK_BYTES
+    )
       throw new ScenePackError("Scene pack asset size is malformed.");
     // Bytes from a pack are only ever a *cache* seed; strip anything the reader would treat as
     // a grant or as GM bookkeeping.

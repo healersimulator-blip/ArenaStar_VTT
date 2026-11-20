@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import {
   MAX_PACK_ASSETS,
+  MAX_PACK_BYTES,
   parseScenePackManifest,
   planScenePack,
   ScenePackError,
@@ -20,6 +21,7 @@ import type {
 } from "../../src/core/documents";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { strToU8, zipSync } from "fflate";
 
 const hash = (text: string) =>
   bytesToHex(sha256(new TextEncoder().encode(text)));
@@ -210,6 +212,51 @@ describe("scene-pack archive", () => {
     [mapHash]: asset("map.webp", mapBytes.byteLength),
     [tokenHash]: asset("token.webp", tokenBytes.byteLength),
   };
+  /** Forge one declared uncompressed size in a zip fixture, leaving the other header intact. */
+  function forgeUncompressedSize(
+    archive: Uint8Array,
+    name: string,
+    value: number,
+    target: "local" | "central",
+  ): boolean {
+    const view = new DataView(
+      archive.buffer,
+      archive.byteOffset,
+      archive.byteLength,
+    );
+    let end = -1;
+    for (let at = archive.byteLength - 22; at >= 0; at--) {
+      if (view.getUint32(at, true) !== 0x06054b50) continue;
+      if (at + 22 + view.getUint16(at + 20, true) === archive.byteLength) {
+        end = at;
+        break;
+      }
+    }
+    if (end < 0) throw new Error("Fixture has no EOCD");
+    const entries = view.getUint16(end + 10, true);
+    let at = view.getUint32(end + 16, true);
+    for (let index = 0; index < entries; index++) {
+      if (
+        at + 46 > archive.byteLength ||
+        view.getUint32(at, true) !== 0x02014b50
+      )
+        throw new Error("Fixture has no central directory");
+      const nameLength = view.getUint16(at + 28, true);
+      const extraLength = view.getUint16(at + 30, true);
+      const commentLength = view.getUint16(at + 32, true);
+      const found = new TextDecoder().decode(
+        archive.subarray(at + 46, at + 46 + nameLength),
+      );
+      if (found === name) {
+        if (target === "central") view.setUint32(at + 24, value, true);
+        else view.setUint32(view.getUint32(at + 42, true) + 22, value, true);
+        return true;
+      }
+      at += 46 + nameLength + extraLength + commentLength;
+    }
+    return false;
+  }
+
   const plan = () =>
     planScenePack({
       world: "world-1",
@@ -315,5 +362,86 @@ describe("scene-pack archive", () => {
     await expect(
       readScenePack(archive.subarray(0, archive.length - 30)),
     ).rejects.toBeInstanceOf(ScenePackError);
+  });
+
+  test("rejects a manifest size mismatch and an unlisted zip-bomb before inflation", async () => {
+    const pack = plan();
+    const wrongSize = {
+      ...pack,
+      assets: {
+        ...pack.assets,
+        [mapHash]: asset("map.webp", mapBytes.byteLength + 1),
+      },
+    };
+    const mismatch = await readScenePack(
+      writeScenePack(wrongSize, new Map([[mapHash, mapBytes]])),
+    );
+    expect(mismatch.accepted).toHaveLength(0);
+    expect(mismatch.rejected).toBe(1);
+
+    // A tiny archive whose central directory claims one unlisted entry expands past the cap.
+    // The reader must reject it from the directory, before unzipSync allocates anything.
+    const bomb = zipSync(
+      {
+        "scene-pack.json": strToU8(JSON.stringify(pack)),
+        [`assets/${"f".repeat(64)}`]: new Uint8Array(1024),
+      },
+      { level: 9 },
+    );
+    const view = new DataView(bomb.buffer, bomb.byteOffset, bomb.byteLength);
+    let end = -1;
+    for (let at = bomb.byteLength - 22; at >= 0; at--) {
+      if (view.getUint32(at, true) !== 0x06054b50) continue;
+      if (at + 22 + view.getUint16(at + 20, true) === bomb.byteLength) {
+        end = at;
+        break;
+      }
+    }
+    if (end < 0) throw new Error("Bomb fixture has no EOCD");
+    let at = view.getUint32(end + 16, true);
+    let forged = false;
+    for (let index = 0; index < view.getUint16(end + 10, true); index++) {
+      if (at + 46 > bomb.byteLength || view.getUint32(at, true) !== 0x02014b50)
+        throw new Error("Bomb fixture has no central directory");
+      const nameLength = view.getUint16(at + 28, true);
+      const extraLength = view.getUint16(at + 30, true);
+      const commentLength = view.getUint16(at + 32, true);
+      const name = new TextDecoder().decode(
+        bomb.subarray(at + 46, at + 46 + nameLength),
+      );
+      if (name.startsWith("assets/") && !pack.assets[name.slice(7)]) {
+        view.setUint32(at + 24, MAX_PACK_BYTES + 1, true);
+        forged = true;
+        break;
+      }
+      at += 46 + nameLength + extraLength + commentLength;
+    }
+    expect(forged).toBe(true);
+    await expect(readScenePack(bomb)).rejects.toThrow(
+      /expands beyond the byte limit/,
+    );
+  });
+
+  test("rejects local and central headers whose declared sizes disagree", async () => {
+    const pack = plan();
+    const unlisted = `assets/${"f".repeat(64)}`;
+    const source = zipSync(
+      {
+        "scene-pack.json": strToU8(JSON.stringify(pack)),
+        [unlisted]: new Uint8Array(1024),
+      },
+      { level: 9 },
+    );
+    // fflate allocates output from declared sizes. A forged central directory must not
+    // be allowed to truncate an entry whose local header says otherwise (or vice versa).
+    const centralLie = Uint8Array.from(source);
+    expect(forgeUncompressedSize(centralLie, unlisted, 1, "central")).toBe(
+      true,
+    );
+    await expect(readScenePack(centralLie)).rejects.toThrow(/disagree/);
+
+    const localLie = Uint8Array.from(source);
+    expect(forgeUncompressedSize(localLie, unlisted, 1, "local")).toBe(true);
+    await expect(readScenePack(localLie)).rejects.toThrow(/disagree/);
   });
 });

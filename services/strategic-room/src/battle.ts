@@ -51,6 +51,8 @@ export class BattleView {
   private readonly owners = new Map<string, OwnUnit[]>();
   /** Effective unit allowlist per commander, frozen with the publication it belongs to. */
   private readonly control = new Map<string, Set<string>>();
+  /** A missing control entry means the seat's own deployment (unrestricted). */
+  private readonly defaultControl = new Map<string, Set<string>>();
   private readonly cohorts = new Map<string | null, Cohort>();
 
   constructor(
@@ -101,11 +103,12 @@ export class BattleView {
       this.owners.set(army._id, ownUnits);
     }
     for (const army of this.input.armies) {
-      const granted = state.control?.[army.commander[0] ?? ""];
-      this.control.set(
-        army.commander[0] ?? "",
-        new Set(granted ?? army.units.map((unit) => unit._id)),
-      );
+      const commander = army.commander[0] ?? "";
+      const deployment = new Set(army.units.map((unit) => unit._id));
+      this.defaultControl.set(commander, deployment);
+      const granted = state.control?.[commander];
+      if (granted !== undefined && granted !== null)
+        this.control.set(commander, new Set(granted));
     }
     const grid = new DetectionGrid(CELL_FEET);
     grid.reseed(sources, scenario.bounds);
@@ -208,14 +211,25 @@ export class BattleView {
 
   /** Apply already-durable grants to a freshly built view (never during a publication). */
   applyControl(control: Control) {
-    for (const [memberId, units] of Object.entries(control))
-      this.control.set(memberId, new Set(units));
+    for (const [memberId, units] of Object.entries(control)) {
+      if (units === null) this.control.delete(memberId);
+      else this.control.set(memberId, new Set(units));
+    }
+  }
+
+  private allows(memberId: string, unitId: string): boolean {
+    return (
+      this.control.get(memberId) ??
+      this.defaultControl.get(memberId) ??
+      new Set<string>()
+    ).has(unitId);
   }
 
   /** Only units this commander may currently order; a revoked grant disappears with the view. */
   own(member: Member): OwnUnit[] {
     if (member.role === "GM") return this.owners.get(member.id) ?? [];
-    const granted = this.control.get(member.id);
+    const granted =
+      this.control.get(member.id) ?? this.defaultControl.get(member.id);
     if (!granted) return [];
     return (this.owners.get(member.id) ?? []).filter((unit) =>
       granted.has(unit.id),
@@ -231,7 +245,7 @@ export class BattleView {
     if (
       !unit ||
       unit.army.commander[0] !== member.id ||
-      !(this.control.get(member.id)?.has(unitId) ?? false) ||
+      !this.allows(member.id, unitId) ||
       !can(member, "order", unit.doc, "units", { parent: unit.army })
     ) {
       return "Unit is not assigned to this commander.";

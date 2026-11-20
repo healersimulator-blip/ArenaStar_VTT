@@ -145,7 +145,14 @@ class Peer {
     const socket = (this.socket = new WebSocket(
       `${origin.replace(/^http/, "ws")}${api}/socket`,
       STRATEGIC_PROTOCOL,
-      { origin },
+      {
+        origin,
+        // The sandbox qualification proxy uses a locally generated self-signed cert.
+        ...(origin.startsWith("https:") &&
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0"
+          ? { rejectUnauthorized: false }
+          : {}),
+      },
     ));
     socket.on("error", (error) =>
       console.error(`peer ${this.slot} socket`, String(error.message ?? error)),

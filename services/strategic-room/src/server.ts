@@ -512,19 +512,20 @@ export async function serve(
     const sceneMedia = (asset: string) => {
       const hash = asset.replace(/\.webp$/, "");
       if (!/^[0-9a-f]{64}$/.test(hash)) return undefined;
-      const found = mediaByHash.get(hash);
-      if (!found) return undefined;
-      // Same origin the session was admitted from; a shared reader can cache it, not mutate it.
-      if (req.headers.origin && !origins.has(req.headers.origin))
-        return undefined;
-      return found;
+      return mediaByHash.get(hash);
     };
     if (
       url.pathname.startsWith(`${STRATEGIC_API}/scene/`) &&
-      req.method === "GET" &&
-      req.headers.origin &&
-      origins.has(req.headers.origin)
+      req.method === "GET"
     ) {
+      // Browsers omit Origin on a same-origin GET/image fetch. Reject an explicit foreign
+      // origin and a cross-site fetch hint; do not require a header the browser cannot set.
+      const origin = req.headers.origin;
+      const site = String(req.headers["sec-fetch-site"] ?? "");
+      if ((origin && !origins.has(origin)) || site === "cross-site") {
+        reply(res, 404, { error: "not_found" });
+        return;
+      }
       const asset = sceneMedia(
         decodeURIComponent(
           url.pathname.slice(`${STRATEGIC_API}/scene/`.length),
@@ -568,15 +569,18 @@ export async function serve(
     }
     let release = bulk.enter();
     // Don't make the publication herd throw away authenticated connections and retry in waves.
-    // Regions, reports, or duplicate requests do not get a waiting slot.
-    if (
-      !release &&
+    // A same-version full view is a metadata-only roster/control refetch; it is wait-eligible
+    // too. Regions, reports, or duplicate requests do not get a waiting slot.
+    const markersVersion = numeric(url.searchParams.get("markersVersion"));
+    const waitEligible =
       path === "/view" &&
-      req.headers.accept === STRATEGIC_PATCH_TYPE &&
-      session.deliveredMarkersVersion === authority.room.version - 1 &&
-      numeric(url.searchParams.get("markersVersion")) ===
-        session.deliveredMarkersVersion
-    ) {
+      ((req.headers.accept === STRATEGIC_PATCH_TYPE &&
+        session.deliveredMarkersVersion === authority.room.version - 1 &&
+        markersVersion === session.deliveredMarkersVersion) ||
+        (req.headers.accept === STRATEGIC_VIEW_TYPE &&
+          session.deliveredMarkersVersion === authority.room.version &&
+          markersVersion === authority.room.version));
+    if (!release && waitEligible) {
       const pending = new AbortController();
       const cancel = () => pending.abort();
       session.responses.add(res);
@@ -652,7 +656,8 @@ export async function serve(
                 name: `scene-${hash.slice(0, 12)}.webp`,
                 mime: "image/webp",
                 size: data.byteLength,
-                url: `scene/${hash}.webp`,
+                // Relative to the campaign battle path, which the in-process edge rewrites.
+                url: `${STRATEGIC_API.replace(/^\//, "")}/scene/${hash}.webp`,
               })),
             }
           : {}),

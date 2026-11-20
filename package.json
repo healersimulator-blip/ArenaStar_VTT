@@ -13,6 +13,7 @@
     "build": "node scripts/buildSystemPackages.mjs && vite build",
     "test": "vitest run",
     "bench:strategic": "node performance/strategic/run.mjs",
+    "qualify:strategic:sandbox": "node performance/strategic/sandboxQualification.mjs",
     "build:strategic": "node services/strategic-room/build.mjs",
     "bench:dense": "VTT_DENSE_BENCH=1 vitest run tests/packages/pf1eDenseArmyBenchmark.test.ts",
     "e2e:browser": "node scripts/e2e/installHeadlessChromium.mjs",
