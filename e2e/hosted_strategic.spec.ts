@@ -427,9 +427,11 @@ test("hosted room: nonblocking progress, private receipts, rejoin after crash, r
     await expect(
       red.locator('[data-turn="2"][data-phase="orders"]'),
     ).toBeVisible();
-    // A claimed seat cannot be re-invited: that would be a takeover.
-    await redRow.locator("[data-member-invite-new]").click();
+    // A claimed seat cannot be re-invited: that would be a takeover, so the roster offers no
+    // invite control for it at all (and the server refuses one if a client asks anyway).
+    await expect(redRow.locator("[data-member-invite-new]")).toHaveCount(0);
     await expect(redRow.locator("[data-member-invite]")).toHaveCount(0);
+    await expect(redRow.getByText("claimed")).toBeVisible();
 
     const membersResponse = await fetch(`${origin}${viewPath}`, {
       headers: { Accept: STRATEGIC_VIEW_TYPE },
@@ -444,7 +446,7 @@ test("hosted room: nonblocking progress, private receipts, rejoin after crash, r
       .reverse()
       .find((m) => m.kind === "welcome")?.bearer;
     if (!bearer) throw new Error("No active bearer captured");
-    await gm.getByText("Membership", { exact: true }).click();
+    await gm.getByText(/^Membership \(revoke by seat ID\)$/).click();
     await gm.getByLabel("Commander slot").fill("commander-1");
     gm.once("dialog", (dialog) => {
       void dialog.accept();

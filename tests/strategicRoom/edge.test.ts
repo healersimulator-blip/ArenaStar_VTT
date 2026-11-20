@@ -230,6 +230,21 @@ describe.skipIf(!url)("hosted room edge", () => {
     ).toEqual(["unit-1-1"]);
   });
 
+  test("a claimed seat cannot be handed to another browser by an invite", async () => {
+    const { origin, keys } = await listen();
+    const gm = await join(origin, keys.gm, "gm");
+    await join(origin, keys["commander-1"], "commander-1");
+    // commander-1 is bound; re-issuing would be a takeover, so the GM's command is refused
+    // even though the roster never renders an invite control for a claimed seat.
+    expect(
+      await submit(gm, {
+        kind: "member.invite",
+        memberId: "commander-1",
+        invite: "z".repeat(32),
+      }),
+    ).toMatchObject({ status: "rejected", code: "forbidden" });
+  });
+
   test("kick closes the holder's socket and the same key resumes the seat", async () => {
     const { origin, keys } = await listen();
     const gm = await join(origin, keys.gm, "gm");
