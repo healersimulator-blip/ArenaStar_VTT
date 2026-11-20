@@ -216,6 +216,11 @@ test("hosted room: nonblocking progress, private receipts, rejoin after crash, r
     );
     const [gm, blue, red] = pages;
     if (!gm || !blue || !red) throw new Error("Expected three clients");
+    const mediaRequests: string[] = [];
+    gm.on("request", (request) => {
+      if (request.url().includes("/api/strategic/scene/"))
+        mediaRequests.push(request.url());
+    });
     const observed = monitor(blue);
     const redObserved = monitor(red);
     await Promise.all([
@@ -441,6 +446,13 @@ test("hosted room: nonblocking progress, private receipts, rejoin after crash, r
       `${origin}/api/strategic/scene/${"0".repeat(64)}.webp`,
     );
     expect(scene.status).toBe(404);
+    // The GM browser's prefetch uses the relative URL advertised in its private baseline;
+    // a same-origin GET without an Origin header must now return the immutable bytes.
+    await expect.poll(() => mediaRequests.length).toBeGreaterThan(0);
+    const artResponse = await gm.request.get(mediaRequests.at(-1) ?? "");
+    expect(artResponse.status()).toBe(200);
+    expect(artResponse.headers()["content-type"]).toContain("image/webp");
+    expect(artResponse.headers()["cache-control"]).toContain("immutable");
 
     const bearer = [...observed.messages]
       .reverse()

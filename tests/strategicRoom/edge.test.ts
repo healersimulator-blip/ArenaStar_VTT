@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { WebSocket } from "ws";
 import { PostgresRoom } from "../../services/strategic-room/src/postgres";
@@ -277,19 +278,38 @@ describe.skipIf(!url)("hosted room edge", () => {
     expect((await view(origin, again.bearer)).response.status).toBe(200);
   });
 
-  test("scene media is same-origin and refuses unknown or malformed hashes", async () => {
+  test("scene media is reachable without Origin and refuses foreign or malformed hashes", async () => {
     const { origin, keys } = await listen();
     await join(origin, keys.gm, "gm");
-    const hash = "a".repeat(64);
-    expect(
-      (await fetch(`${origin}/api/strategic/scene/${hash}.webp`)).status,
-    ).toBe(404);
+    const art = await readFile(
+      new URL(
+        "../../services/strategic-room/web/scene/scene.webp",
+        import.meta.url,
+      ),
+    );
+    const hash = createHash("sha256").update(art).digest("hex");
+    const found = await fetch(`${origin}/api/strategic/scene/${hash}.webp`);
+    expect(found.status).toBe(200);
+    expect(found.headers.get("content-type")).toBe("image/webp");
+    expect(found.headers.get("cache-control")).toContain("immutable");
+    expect(Buffer.from(await found.arrayBuffer())).toEqual(art);
     expect(
       (
-        await fetch(`${origin}/api/strategic/scene/${"0".repeat(64)}.webp`, {
+        await fetch(`${origin}/api/strategic/scene/${hash}.webp`, {
           headers: { Origin: "https://attacker.example" },
         })
       ).status,
+    ).toBe(404);
+    expect(
+      (
+        await fetch(`${origin}/api/strategic/scene/${hash}.webp`, {
+          headers: { "Sec-Fetch-Site": "cross-site" },
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (await fetch(`${origin}/api/strategic/scene/${"0".repeat(64)}.webp`))
+        .status,
     ).toBe(404);
     expect(
       (await fetch(`${origin}/api/strategic/scene/not-a-hash.webp`)).status,

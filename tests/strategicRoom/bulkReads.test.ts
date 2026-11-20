@@ -24,6 +24,18 @@ test("publication waiters share the active cap, one slot per session, in arrival
   expect(gate.active).toBe(0);
 });
 
+test("a direct read never jumps ahead of an already queued waiter", () => {
+  const gate = new BulkReads<string>(3, 2, 1000);
+  const state = gate as unknown as {
+    active: number;
+    queue: Map<string, () => void>;
+  };
+  // Rare race window: a slot has freed but the queued wake-up has not installed itself yet.
+  state.active = 1;
+  state.queue.set("waiting", () => undefined);
+  expect(gate.enter()).toBeUndefined();
+});
+
 test("closed or expired waiters release their backlog slot without consuming a read", async () => {
   vi.useFakeTimers();
   try {

@@ -28,7 +28,10 @@
   }: {
     members: readonly MemberRow[];
     /** Unit ids and names per commander, from the GM's authorized view. */
-    units: ReadonlyMap<string, readonly { id: string; name: string; order: RoomOrder | null }[]>;
+    units: ReadonlyMap<
+      string,
+      readonly { id: string; name: string; order: RoomOrder | null }[]
+    >;
     markers?: readonly { id: string; name: string }[];
     busy?: boolean;
     onCommand: (command: Command) => void;
@@ -36,7 +39,6 @@
 
   let filter = $state("");
   let names = $state<Record<string, string>>({});
-  let invites = $state.raw<Record<string, string>>({});
   /** `kick:<seat>` / `ban:<seat>`: the destructive action waits for a second click. */
   let confirming = $state<string | null>(null);
   let online = $derived(members.filter((m) => m.online).length);
@@ -68,8 +70,9 @@
     send({ kind: "member.update", memberId: member.id, units: next.sort() });
   }
   function invite(member: MemberRow): void {
+    // The code is rendered only after the server's accepted roster view returns it.
+    // A refused command, disconnect or reload therefore cannot leave a phantom invite on screen.
     const code = crypto.randomUUID().replace(/-/g, "");
-    invites = { ...invites, [member.id]: code };
     send({ kind: "member.invite", memberId: member.id, invite: code });
   }
 </script>
@@ -80,14 +83,18 @@
     <span data-roster-count>{members.length} seats · {online} connected</span>
   </header>
   <p class="hint">
-    Names are labels for you and the commander; the seat ID and its browser key are
-    the actual boundary. A claimed seat needs a kick or a ban before another browser
-    can take it. Unchecking a unit stops that commander ordering it and withdraws any
-    order already accepted for it this turn.
+    Names are labels for you and the commander; the seat ID and its browser key
+    are the actual boundary. A claimed seat needs a kick or a ban before another
+    browser can take it. Unchecking a unit stops that commander ordering it and
+    withdraws any order already accepted for it this turn.
   </p>
   <label class="filter"
-    >Find <input type="search" bind:value={filter} placeholder="name, seat or side"
-  /></label>
+    >Find <input
+      type="search"
+      bind:value={filter}
+      placeholder="name, seat or side"
+    /></label
+  >
   <div class="scroll">
     <table>
       <thead>
@@ -102,9 +109,13 @@
       <tbody>
         {#each shown as member (member.id)}
           {@const list = units.get(member.id) ?? []}
-          <tr data-member={member.id} data-online={member.online ? "true" : "false"}>
+          <tr
+            data-member={member.id}
+            data-online={member.online ? "true" : "false"}
+          >
             <td>
-              <span class="dot" class:online={member.online} aria-hidden="true"></span>
+              <span class="dot" class:online={member.online} aria-hidden="true"
+              ></span>
               <input
                 type="text"
                 maxlength="64"
@@ -141,17 +152,17 @@
             </td>
             <td class="invite">
               {#if member.claimed}<small>claimed</small>
-              {:else if invites[member.id]}
-                <code data-member-invite>{invites[member.id]}</code>
-                <small>one-time, 30 min</small>
-              {:else if member.invite}
-                <small>invite already issued</small>
               {:else}
+                {#if member.invite}
+                  <code data-member-invite>{member.invite}</code>
+                  <small>one-time, 30 min</small>
+                {/if}
                 <button
                   type="button"
                   disabled={busy}
                   data-member-invite-new
-                  onclick={() => invite(member)}>Create invite</button
+                  onclick={() => invite(member)}
+                  >{member.invite ? "Reissue invite" : "Create invite"}</button
                 >
               {/if}
             </td>
@@ -161,7 +172,8 @@
                   type="button"
                   disabled={busy}
                   data-member-kick
-                  onclick={() => (confirming = `kick:${member.id}`)}>Kick</button
+                  onclick={() => (confirming = `kick:${member.id}`)}
+                  >Kick</button
                 >
               {/if}
               {#if confirming === `kick:${member.id}`}
@@ -174,7 +186,9 @@
                     confirming = null;
                   }}>Confirm kick</button
                 >
-                <button type="button" onclick={() => (confirming = null)}>Cancel</button>
+                <button type="button" onclick={() => (confirming = null)}
+                  >Cancel</button
+                >
               {:else if confirming === `ban:${member.id}`}
                 <button
                   type="button"
@@ -186,7 +200,9 @@
                     confirming = null;
                   }}>Confirm ban</button
                 >
-                <button type="button" onclick={() => (confirming = null)}>Cancel</button>
+                <button type="button" onclick={() => (confirming = null)}
+                  >Cancel</button
+                >
               {:else}
                 <button
                   type="button"

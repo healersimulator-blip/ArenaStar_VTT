@@ -29,8 +29,11 @@ const probe = createServer().listen(0, "127.0.0.1");
 await once(probe, "listening");
 const port = probe.address().port;
 await new Promise((r) => probe.close(r));
-const origin = `http://127.0.0.1:${port}`,
-  key = randomUUID();
+// Optional sandbox qualification wrapper: the service can bind one loopback port while
+// clients talk to a TLS/WAN-emulating proxy on another origin.
+const servicePort = Number(process.env.STRATEGIC_TEST_SERVICE_PORT ?? port);
+const origin = process.env.STRATEGIC_TEST_ORIGIN ?? `http://127.0.0.1:${port}`;
+const key = randomUUID();
 const service = spawn(
   process.execPath,
   ["services/strategic-room/dist/server/main.mjs", "campaign"],
@@ -38,7 +41,7 @@ const service = spawn(
     stdio: ["ignore", "ignore", "inherit"],
     env: {
       ...process.env,
-      PORT: String(port),
+      PORT: String(servicePort),
       STRATEGIC_BIND_ADDRESS: "127.0.0.1",
       STRATEGIC_ROOM: `local-${randomUUID()}`,
       STRATEGIC_LAUNCH_KEY: key,

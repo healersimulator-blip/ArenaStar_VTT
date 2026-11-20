@@ -1,0 +1,183 @@
+{
+  "kind": "arenastar-strategic-sandbox-qualification-v1",
+  "generatedAt": "2026-11-20T03:03:35.111Z",
+  "fullQualification": false,
+  "disclaimer": "Surrogate evidence only. Loopback TLS/WSS, synthetic delay/loss, Node protocol clients and CPU-throttled Chromium cannot qualify real WAN paths, 500 browser renderers, long-duration soak or reference-laptop frame rate.",
+  "machine": {
+    "node": "v22.22.3",
+    "platform": "linux",
+    "kernel": "6.1.158+",
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "cores": 2,
+    "memoryMiB": 3940,
+    "commit": "9d58441c2b8eb8298cac55ca1b7326c0d30561e6",
+    "dirty": true,
+    "databaseHost": "127.0.0.1"
+  },
+  "configuration": {
+    "seats": 500,
+    "unitsPerSeat": 10,
+    "turnsPerLoop": 2,
+    "loops": 1,
+    "workload": "idle",
+    "proxyOrigin": "https://127.0.0.1:46629",
+    "servicePort": 46065,
+    "tls": "self-signed localhost certificate",
+    "viewMode": "compact",
+    "fullViews": true,
+    "decodeSample": 10,
+    "reconnectPeers": 10,
+    "requestDelayMs": 40,
+    "requestJitterMs": 10,
+    "connectionLossPct": 0,
+    "cpuThrottleRate": 4
+  },
+  "loadRuns": [
+    {
+      "loop": 1,
+      "reports": [
+        {
+          "stage": "connected",
+          "peers": 501,
+          "elapsedMs": 3174.6542309999995,
+          "tls": true,
+          "viewMode": "compact",
+          "work": "idle"
+        },
+        {
+          "stage": "turn",
+          "turn": 1,
+          "count": 500,
+          "work": "idle",
+          "units": 5000,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "burstMs": 1801.7082609999998,
+          "ackP95": 32.79349600000023,
+          "ackP99": 36.200989999999365,
+          "closeP95": 2703.158781,
+          "closeP99": 2706.213484,
+          "rejoined": 10,
+          "rejoinP95": 176.42549900000085,
+          "viewApplyP95": 1309.4041369999995,
+          "noticeApplyP95": 1328.6284940000005,
+          "viewFailed": 0,
+          "markerChangesApplied": 0,
+          "viewRetries": 13,
+          "wsBytesP95": 429,
+          "httpBodyBytesP95": 22199,
+          "httpEncodedBytesP95": 22199,
+          "defaultPayloadBytesP95": 22628,
+          "viewDecodeMsP95": 0,
+          "viewDecodeMsSum": 3277.9876349999995,
+          "stalledPeerShedMs": null,
+          "stalledPeerRejoinMs": null,
+          "stalledPeerRejoinError": null,
+          "stalledPeerEpoch": null,
+          "generatorLagP95": 39.256063,
+          "generatorLagMaxP95": 0,
+          "omittedSamples": {
+            "ack": 500,
+            "apply": 500
+          }
+        },
+        {
+          "stage": "turn",
+          "turn": 2,
+          "count": 500,
+          "work": "idle",
+          "units": 5000,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "burstMs": 1800.055918,
+          "ackP95": 44.94810299999881,
+          "ackP99": 66.93220999999903,
+          "closeP95": 2543.0312080000003,
+          "closeP99": 2543.8809089999995,
+          "rejoined": 10,
+          "rejoinP95": 157.76675299999988,
+          "viewApplyP95": 1227.3511849999995,
+          "noticeApplyP95": 1241.6874349999998,
+          "viewFailed": 0,
+          "markerChangesApplied": 0,
+          "viewRetries": 2,
+          "wsBytesP95": 429,
+          "httpBodyBytesP95": 22199,
+          "httpEncodedBytesP95": 22199,
+          "defaultPayloadBytesP95": 22628,
+          "viewDecodeMsP95": 0,
+          "viewDecodeMsSum": 2826.850048999997,
+          "stalledPeerShedMs": null,
+          "stalledPeerRejoinMs": null,
+          "stalledPeerRejoinError": null,
+          "stalledPeerEpoch": null,
+          "generatorLagP95": 39.485439,
+          "generatorLagMaxP95": 39.256063,
+          "omittedSamples": {
+            "ack": 500,
+            "apply": 500
+          }
+        },
+        {
+          "stage": "summary",
+          "turns": 2,
+          "work": "idle",
+          "viewMode": "compact",
+          "worstAckP95": 44.94810299999881,
+          "worstCloseP95": 2703.158781,
+          "worstNoticeApplyP95": 1328.6284940000005,
+          "viewFailures": 0,
+          "worstDefaultPayloadBytesP95": 22628,
+          "generatorLagMaxP95": 39.485439
+        }
+      ]
+    }
+  ],
+  "changesetPatchesApplied": 0,
+  "budgetEvaluation": {
+    "closeToDurablePublishP95Ms": {
+      "observed": 2703.158781,
+      "budgetMs": 5000,
+      "source": "worstCloseP95",
+      "withinSurrogateBudget": true
+    },
+    "applyAfterPublishP95Ms": {
+      "observed": 1328.6284940000005,
+      "budgetMs": 2000,
+      "source": "worstNoticeApplyP95",
+      "withinSurrogateBudget": true
+    },
+    "frameIntervalP95Ms": {
+      "observed": 16.80000000000001,
+      "budgetMs": 33,
+      "source": "frameSurrogate.p95FrameMs",
+      "withinSurrogateBudget": true
+    },
+    "caveat": "Budget values are surrogate observations only and do not close production qualification."
+  },
+  "qualificationSurrogates": {
+    "virtual500Clients": {
+      "executed": true,
+      "limitation": "Headless Node WS/HTTP protocol clients, not 500 human browsers or renderers."
+    },
+    "tlsAndWanLikeConditions": {
+      "executed": true,
+      "limitation": "Local TLS termination plus request delay/loss; no real WAN RTT, congestion or packet scheduling."
+    },
+    "boundedSoak": {
+      "executed": true,
+      "limitation": "Fresh short battles repeated serially; not a 50-turn or multi-hour production soak."
+    },
+    "referenceLaptopFrame": {
+      "executed": true,
+      "limitation": "Synthetic 50k marker apply under Chromium CPU throttling; not production rendering on reference hardware."
+    }
+  },
+  "stillRequiresExternalRunner": [
+    "500 representative browser clients including GM rendering",
+    "real regional WAN paths with 80 ms RTT, jitter, loss and bandwidth caps",
+    "50+ turn cold/warm soak with 600-connection headroom and multi-host recovery",
+    "published reference laptop with <=33 ms p95 frame interval assertion"
+  ],
+  "error": null
+}

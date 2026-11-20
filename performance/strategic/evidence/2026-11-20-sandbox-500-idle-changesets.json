@@ -1,0 +1,183 @@
+{
+  "kind": "arenastar-strategic-sandbox-qualification-v1",
+  "generatedAt": "2026-11-20T03:03:58.969Z",
+  "fullQualification": false,
+  "disclaimer": "Surrogate evidence only. Loopback TLS/WSS, synthetic delay/loss, Node protocol clients and CPU-throttled Chromium cannot qualify real WAN paths, 500 browser renderers, long-duration soak or reference-laptop frame rate.",
+  "machine": {
+    "node": "v22.22.3",
+    "platform": "linux",
+    "kernel": "6.1.158+",
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "cores": 2,
+    "memoryMiB": 3940,
+    "commit": "9d58441c2b8eb8298cac55ca1b7326c0d30561e6",
+    "dirty": true,
+    "databaseHost": "127.0.0.1"
+  },
+  "configuration": {
+    "seats": 500,
+    "unitsPerSeat": 10,
+    "turnsPerLoop": 2,
+    "loops": 1,
+    "workload": "idle",
+    "proxyOrigin": "https://127.0.0.1:46529",
+    "servicePort": 34853,
+    "tls": "self-signed localhost certificate",
+    "viewMode": "compact",
+    "fullViews": false,
+    "decodeSample": 10,
+    "reconnectPeers": 10,
+    "requestDelayMs": 40,
+    "requestJitterMs": 10,
+    "connectionLossPct": 0,
+    "cpuThrottleRate": 4
+  },
+  "loadRuns": [
+    {
+      "loop": 1,
+      "reports": [
+        {
+          "stage": "connected",
+          "peers": 501,
+          "elapsedMs": 3347.0684370000004,
+          "tls": true,
+          "viewMode": "compact",
+          "work": "idle"
+        },
+        {
+          "stage": "turn",
+          "turn": 1,
+          "count": 500,
+          "work": "idle",
+          "units": 5000,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "burstMs": 1802.0856970000004,
+          "ackP95": 10.558649999999943,
+          "ackP99": 16.80363000000034,
+          "closeP95": 2593.446091,
+          "closeP99": 2610.5056029999996,
+          "rejoined": 10,
+          "rejoinP95": 240.7969319999993,
+          "viewApplyP95": 1280.9790649999995,
+          "noticeApplyP95": 1332.0609600000007,
+          "viewFailed": 0,
+          "markerChangesApplied": 10,
+          "viewRetries": 42,
+          "wsBytesP95": 429,
+          "httpBodyBytesP95": 22199,
+          "httpEncodedBytesP95": 22199,
+          "defaultPayloadBytesP95": 22628,
+          "viewDecodeMsP95": 0,
+          "viewDecodeMsSum": 429.9288369999995,
+          "stalledPeerShedMs": null,
+          "stalledPeerRejoinMs": null,
+          "stalledPeerRejoinError": null,
+          "stalledPeerEpoch": null,
+          "generatorLagP95": 39.157759,
+          "generatorLagMaxP95": 0,
+          "omittedSamples": {
+            "ack": 500,
+            "apply": 500
+          }
+        },
+        {
+          "stage": "turn",
+          "turn": 2,
+          "count": 500,
+          "work": "idle",
+          "units": 5000,
+          "modelCountBefore": 50000,
+          "refused": {},
+          "burstMs": 1800.5160119999982,
+          "ackP95": 42.12898099999802,
+          "ackP99": 67.44421599999987,
+          "closeP95": 2414.721184000002,
+          "closeP99": 2415.1368230000007,
+          "rejoined": 10,
+          "rejoinP95": 178.79285399999935,
+          "viewApplyP95": 1544.0727709999992,
+          "noticeApplyP95": 1549.4410510000016,
+          "viewFailed": 0,
+          "markerChangesApplied": 10,
+          "viewRetries": 74,
+          "wsBytesP95": 429,
+          "httpBodyBytesP95": 22220,
+          "httpEncodedBytesP95": 22220,
+          "defaultPayloadBytesP95": 22649,
+          "viewDecodeMsP95": 0,
+          "viewDecodeMsSum": 381.0914780000021,
+          "stalledPeerShedMs": null,
+          "stalledPeerRejoinMs": null,
+          "stalledPeerRejoinError": null,
+          "stalledPeerEpoch": null,
+          "generatorLagP95": 38.240255,
+          "generatorLagMaxP95": 39.157759,
+          "omittedSamples": {
+            "ack": 500,
+            "apply": 500
+          }
+        },
+        {
+          "stage": "summary",
+          "turns": 2,
+          "work": "idle",
+          "viewMode": "compact",
+          "worstAckP95": 42.12898099999802,
+          "worstCloseP95": 2593.446091,
+          "worstNoticeApplyP95": 1549.4410510000016,
+          "viewFailures": 0,
+          "worstDefaultPayloadBytesP95": 22649,
+          "generatorLagMaxP95": 39.157759
+        }
+      ]
+    }
+  ],
+  "changesetPatchesApplied": 20,
+  "budgetEvaluation": {
+    "closeToDurablePublishP95Ms": {
+      "observed": 2593.446091,
+      "budgetMs": 5000,
+      "source": "worstCloseP95",
+      "withinSurrogateBudget": true
+    },
+    "applyAfterPublishP95Ms": {
+      "observed": 1549.4410510000016,
+      "budgetMs": 2000,
+      "source": "worstNoticeApplyP95",
+      "withinSurrogateBudget": true
+    },
+    "frameIntervalP95Ms": {
+      "observed": 16.700000000000017,
+      "budgetMs": 33,
+      "source": "frameSurrogate.p95FrameMs",
+      "withinSurrogateBudget": true
+    },
+    "caveat": "Budget values are surrogate observations only and do not close production qualification."
+  },
+  "qualificationSurrogates": {
+    "virtual500Clients": {
+      "executed": true,
+      "limitation": "Headless Node WS/HTTP protocol clients, not 500 human browsers or renderers."
+    },
+    "tlsAndWanLikeConditions": {
+      "executed": true,
+      "limitation": "Local TLS termination plus request delay/loss; no real WAN RTT, congestion or packet scheduling."
+    },
+    "boundedSoak": {
+      "executed": true,
+      "limitation": "Fresh short battles repeated serially; not a 50-turn or multi-hour production soak."
+    },
+    "referenceLaptopFrame": {
+      "executed": true,
+      "limitation": "Synthetic 50k marker apply under Chromium CPU throttling; not production rendering on reference hardware."
+    }
+  },
+  "stillRequiresExternalRunner": [
+    "500 representative browser clients including GM rendering",
+    "real regional WAN paths with 80 ms RTT, jitter, loss and bandwidth caps",
+    "50+ turn cold/warm soak with 600-connection headroom and multi-host recovery",
+    "published reference laptop with <=33 ms p95 frame interval assertion"
+  ],
+  "error": null
+}

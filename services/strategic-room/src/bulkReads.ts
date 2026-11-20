@@ -20,8 +20,13 @@ export class BulkReads<K> {
     };
   }
 
+  /** A direct read must not overtake sessions already queued for a slot. */
+  private available() {
+    return this.active < this.limit && this.queue.size === 0;
+  }
+
   enter() {
-    return this.active < this.limit ? this.grant() : undefined;
+    return this.available() ? this.grant() : undefined;
   }
 
   wait(key: K, signal: AbortSignal): Promise<(() => void) | undefined> {
@@ -31,7 +36,7 @@ export class BulkReads<K> {
       this.queue.size >= this.backlog
     )
       return Promise.resolve(undefined);
-    const immediate = this.enter();
+    const immediate = this.available() ? this.grant() : undefined;
     if (immediate) return Promise.resolve(immediate);
     return new Promise((resolve) => {
       const finish = (grant: boolean) => {

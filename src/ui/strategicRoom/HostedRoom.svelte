@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { SvelteMap } from "svelte/reactivity";
+  import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import TurnProgress from "../sim/TurnProgress.svelte";
   import HostedMap from "./HostedMap.svelte";
   import HostedRoster from "./HostedRoster.svelte";
@@ -15,7 +15,9 @@
     type RoomOrder,
   } from "../../core/strategicRoom/protocol";
 
-  const campaignPath = /^\/battle\/[0-9a-f-]{36}\/$/.test(location.pathname) ? location.pathname : null;
+  const campaignPath = /^\/battle\/[0-9a-f-]{36}\/$/.test(location.pathname)
+    ? location.pathname
+    : null;
   const resumeKey = "arenastar.hosted.resume" + (campaignPath ?? "");
   let client: HostedRoomClient | undefined;
   let state = $state.raw<HostedState>({
@@ -45,6 +47,19 @@
   let handled = "";
   let reportTicket = 0;
   const view = $derived(state.view);
+  const preloadedMedia = new SvelteSet<string>();
+  // Service-hosted battle art is immutable and content-addressed. A GM view may advertise it;
+  // make the browser actually fetch/cache those bytes instead of leaving `media` inert.
+  $effect(() => {
+    for (const asset of view?.media ?? []) {
+      if (preloadedMedia.has(asset.hash) || !asset.mime.startsWith("image/"))
+        continue;
+      preloadedMedia.add(asset.hash);
+      const image = new Image();
+      image.decoding = "async";
+      image.src = new URL(asset.url, location.href).href;
+    }
+  });
   const markers = $derived(view?.markers);
   const factionId = $derived(view?.factionId);
   // Heads and private orders can change without replacing the authorized marker list.
@@ -69,7 +84,10 @@
     const byId = new Map(
       (view?.markers ?? []).map((marker) => [marker.id, marker.name]),
     );
-    const edges = new SvelteMap<string, { id: string; name: string; order: RoomOrder | null }[]>();
+    const edges = new SvelteMap<
+      string,
+      { id: string; name: string; order: RoomOrder | null }[]
+    >();
     for (const member of view?.members ?? []) {
       // Enumerate the deployment, not the grant: an unchecked unit must stay re-grantable.
       edges.set(
@@ -102,41 +120,49 @@
       try {
         const identity = await ensureIdentity(db);
         if (stopped) return;
-        client = new HostedRoomClient(identity, (next) => {
-          state = next;
-          if (!next.view) {
-            report = null;
-            reportNotice = "";
-            reportTicket++;
-            return;
-          }
-          if (turn !== next.view.head.turnId) {
-            turn = next.view.head.turnId;
-            draft.clear();
-          }
-          if (
-            next.receipt?.status === "accepted" &&
-            next.receipt.requestId !== handled
-          ) {
-            handled = next.receipt.requestId;
-            if (next.receipt.revision !== undefined) draft.clear();
-          }
-          if (!next.view.own.some((u) => u.id === selected))
-            selected = next.view.own[0]?.id ?? "";
-          try {
-            localStorage.setItem(resumeKey, "1");
-          } catch {
-            /* optional preference */
-          }
-          invite = "";
-        }, campaignPath ? `${campaignPath}api/strategic` : undefined);
+        client = new HostedRoomClient(
+          identity,
+          (next) => {
+            state = next;
+            if (!next.view) {
+              report = null;
+              reportNotice = "";
+              reportTicket++;
+              return;
+            }
+            if (turn !== next.view.head.turnId) {
+              turn = next.view.head.turnId;
+              draft.clear();
+            }
+            if (
+              next.receipt?.status === "accepted" &&
+              next.receipt.requestId !== handled
+            ) {
+              handled = next.receipt.requestId;
+              if (next.receipt.revision !== undefined) draft.clear();
+            }
+            if (!next.view.own.some((u) => u.id === selected))
+              selected = next.view.own[0]?.id ?? "";
+            try {
+              localStorage.setItem(resumeKey, "1");
+            } catch {
+              /* optional preference */
+            }
+            invite = "";
+          },
+          campaignPath ? `${campaignPath}api/strategic` : undefined,
+        );
         ready = true;
         state = {
           ...state,
           notice: "Enter a one-time invite, or resume from this browser.",
         };
         try {
-          if ((campaignPath && location.search === "?resume") || localStorage.getItem(resumeKey)) client.join();
+          if (
+            (campaignPath && location.search === "?resume") ||
+            localStorage.getItem(resumeKey)
+          )
+            client.join();
         } catch {
           /* manual resume */
         }
@@ -334,7 +360,9 @@
                 type="button"
                 data-roster-toggle
                 onclick={() => (rosterOpen = !rosterOpen)}
-                >{rosterOpen ? "Hide commanders" : `Commanders (${view.members.length})`}</button
+                >{rosterOpen
+                  ? "Hide commanders"
+                  : `Commanders (${view.members.length})`}</button
               >{/if}
             {#if rosterOpen && view.members}
               <HostedRoster
@@ -511,9 +539,10 @@
               ><tbody>
                 {#each report.rows as row (row.unitId)}<tr
                     data-report-unit={row.unitId}
-                    ><td>{row.name}{#if row.marchBlocked} · March blocked{/if}</td><td>{row.alive} / {row.before}</td><td
-                      >{row.lost}</td
-                    ></tr
+                    ><td
+                      >{row.name}{#if row.marchBlocked}
+                        · March blocked{/if}</td
+                    ><td>{row.alive} / {row.before}</td><td>{row.lost}</td></tr
                   >{/each}
               </tbody>
             </table>

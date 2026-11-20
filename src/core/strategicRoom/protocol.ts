@@ -53,7 +53,7 @@ export type Command =
       kind: "member.invite";
       requestId: string;
       memberId: string;
-      /** One-time code the GM shows to the commander; the server stores only its digest. */
+      /** One-time code; the server stores its digest and an encrypted GM-only resend copy. */
       invite: string;
     }
   | {
@@ -80,6 +80,8 @@ export type Receipt =
       status: "accepted";
       turnId: number;
       revision?: number;
+      /** GM-private accepted invite codes; never present on a player's command receipt. */
+      invites?: Record<string, string>;
     }
   | {
       kind: "receipt";
@@ -145,7 +147,7 @@ export type MemberRow = {
   deployed: string[];
   /** A bound browser key is present: this seat cannot be claimed with an invite. */
   claimed: boolean;
-  /** Active invite currently shown to the GM (the seat can still be claimed). */
+  /** GM-only recoverable invite code; null when no active invite can be resent. */
   invite: string | null;
   /** Whether the holder's session is connected right now (heartbeat-based). */
   online: boolean;
@@ -160,7 +162,7 @@ export type Baseline = {
   factions: Array<{ id: string; name: string; color: string }>;
   /** Present only for the GM; players never receive the roster. */
   members?: MemberRow[];
-  /** GM-only service-hosted battle art that a join can cache before the first frame. */
+  /** GM-only service-hosted battle art, prefetched into the browser cache on view. */
   media?: StoreMedia[];
   markers: UnitMarker[];
   own: OwnUnit[];

@@ -21,8 +21,11 @@ export type FrozenOrder = {
   memberId: string;
   order: RoomOrder;
 };
-/** Commander slot → the seats that may order its units. Frozen with each publication. */
-export type Control = Record<string, string[]>;
+/**
+ * Commander slot → the units that seat may order. A missing key or `null` means the seat's
+ * own deployment; an empty array means explicitly no units. Frozen with each publication.
+ */
+export type Control = Record<string, string[] | null>;
 export type MemberRecord = {
   id: string;
   name: string;
@@ -33,6 +36,7 @@ export type MemberRecord = {
   /** Every unit in the seat's own deployment, granted or not. */
   deployed: string[];
   claimed: boolean;
+  /** GM-only recoverable invite code, or null when no active invite can be resent. */
   invite: string | null;
 };
 export type Published = {

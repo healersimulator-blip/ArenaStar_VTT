@@ -1,5 +1,6 @@
 import { build } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import { cp } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("./", import.meta.url));
@@ -27,3 +28,13 @@ await build({
   plugins: [svelte()],
   build: { target: "es2022", outDir: "../dist/web", emptyOutDir: true },
 });
+// Vite empties dist/web. Copy fixed battle art after that build so the server's
+// ../web/scene lookup resolves both from src/server.ts and dist/server/main.mjs.
+await cp(
+  new URL("./web/scene/", import.meta.url),
+  new URL("./dist/web/scene/", import.meta.url),
+  {
+    recursive: true,
+    force: true,
+  },
+);
