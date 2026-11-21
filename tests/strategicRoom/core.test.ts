@@ -41,6 +41,11 @@ const order: Command = {
 describe("hosted wire and allowlist", () => {
   test("does not accept generic Unit updates, duplicate edits or extra authority fields", () => {
     expect(parseCommand(order)).toEqual(order);
+    expect(parseCommand({ kind: "unit.faction", requestId: id, unitId: "unit-1-1", factionId: "red" }))
+      .toEqual({ kind: "unit.faction", requestId: id, unitId: "unit-1-1", factionId: "red" });
+    expect(parseCommand({ ...order, unitEdits: [{ unitId: "unit-1-1", order: {
+      kind: "cast", spellId: "entangle", itemId: "pf1e-core-spells-entangle", origin: { x: 40, y: 20 },
+    } }] })).toMatchObject({ unitEdits: [{ order: { kind: "cast", spellId: "entangle" } }] });
     for (const invalid of [
       null,
       { ...order, issuedBy: "gm" },
@@ -89,11 +94,32 @@ describe("hosted wire and allowlist", () => {
       }),
     ).toBeNull();
   });
-  test("rejects unapproved room features, unconstrained fog maps and overlapping formations", () => {
+  test("parseAuth accepts every invite length member.invite can issue", () => {
+    // Regression: the roster UI once generated 32-char codes while parseAuth
+    // required exactly 43, so reissued invites could never be claimed over the
+    // socket. Both the canonical 43-char format and legacy 32-char codes must pass.
+    const base = {
+      kind: "auth" as const,
+      publicKey: "a".repeat(64),
+      signature: "b".repeat(128),
+    };
+    expect(parseAuth({ ...base, invite: "c".repeat(43) })).not.toBeNull();
+    expect(parseAuth({ ...base, invite: "c".repeat(32) })).not.toBeNull();
+    expect(parseAuth({ ...base, invite: "c".repeat(16) })).not.toBeNull();
+    expect(parseAuth({ ...base, invite: "c".repeat(128) })).not.toBeNull();
+    expect(parseAuth({ ...base, invite: "c".repeat(15) })).toBeNull();
+    expect(parseAuth({ ...base, invite: "c".repeat(129) })).toBeNull();
+    expect(parseAuth({ ...base, invite: "not a code!" })).toBeNull();
+  });
+  test("accepts bounded projected geometry and rejects malformed maps and overlapping formations", () => {
     const scenario = generatedScenario();
-    expect(() => parseScenario({ ...scenario, walls: [] })).toThrow(
-      /supported fields/,
-    );
+    const wall = { x1: scenario.bounds.minX, y1: scenario.bounds.minY,
+      x2: scenario.bounds.minX + 10, y2: scenario.bounds.minY, restriction: 3 };
+    expect(parseScenario({ ...scenario, walls: [wall],
+      terrain: { difficultCells: [{ col: Math.floor(scenario.bounds.minX / 5),
+        row: Math.floor(scenario.bounds.minY / 5) }] } })).toMatchObject({ walls: [wall] });
+    expect(() => parseScenario({ ...scenario, walls: [{ ...wall, restriction: 16 }] }))
+      .toThrow(/wall/);
     expect(() =>
       parseScenario({
         ...scenario,
@@ -105,6 +131,23 @@ describe("hosted wire and allowlist", () => {
     if (!b || !r) throw new Error("Missing fixture units");
     r.anchor = b.anchor;
     expect(() => deploy(scenario)).toThrow(/overlap/);
+  });
+  test("rejects a tampered campaign projection manifest", () => {
+    const scenario = generatedScenario();
+    expect(() => parseScenario({ ...scenario, projection: {
+      format: "arenastar-battle-projection-v1", worldId: "world", sceneId: "field",
+      sourceSeq: 3, systemId: "pf1e", systemVersion: "1", digest: "0".repeat(64),
+    } })).toThrow(/digest/);
+  });
+  test("accepts bounded raster battlefield art and rejects malformed payloads", () => {
+    const scenario = generatedScenario();
+    const background = {
+      hash: "a".repeat(64), mime: "image/png", size: 3, width: 10, height: 10,
+      data: "AQID",
+    };
+    expect(parseScenario({ ...scenario, background }).background).toEqual(background);
+    expect(() => parseScenario({ ...scenario, background: { ...background, mime: "image/svg+xml" } })).toThrow(/background/);
+    expect(() => parseScenario({ ...scenario, background: { ...background, size: 2_000_000 } })).toThrow(/background/);
   });
 });
 

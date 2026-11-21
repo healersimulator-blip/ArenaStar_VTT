@@ -1,9 +1,11 @@
 import type { SceneDocument, DocRef } from "../documents";
 import type { Op } from "../ops";
 import type { DocumentStore } from "../store";
-import { record } from "./protocol";
+import { sceneDifficultCells } from "../rules";
+import { parsePF1eActorSystem } from "../../packages/pf1e/actor";
+import { PF1E_ENTANGLE_DOCUMENT_ID, record } from "./protocol";
 import { assertBattleScene, extractScenario } from "./worldExtract";
-import { parseScenario } from "./scenario";
+import { parseScenario, scenarioProjectionDigest, type Scenario } from "./scenario";
 
 export type BattleBinding = {
   id: string;
@@ -37,7 +39,74 @@ export function sourceArmies(store: DocumentStore, scene: string) {
     .getAll("armies")
     .filter((a) => a.units.some((u) => u.sceneId === scene));
 }
-/** Send a deployment, never documents.json, tokens, private assets or identities. */
+/** Visible, explicitly sided scene tokens can seed a constrained hosted deployment. */
+export function sourceStrategicTokens(scene: SceneDocument) {
+  return scene.tokens.filter(
+    (token) => !token.hidden && token.disposition !== "neutral",
+  );
+}
+/** Project authored geometry into battlefield feet. This is rules input, not presentation art. */
+function sceneRulesProjection(scene: SceneDocument) {
+  const feet = 5 / scene.grid.size;
+  const walls = scene.walls.map((wall) => ({
+    x1: wall.c[0] * feet,
+    y1: wall.c[1] * feet,
+    x2: wall.c[2] * feet,
+    y2: wall.c[3] * feet,
+    // Same compiled convention as TurnChannel: bit0 move, bit1 sight, bit2 sound, bit3 light.
+    restriction: (wall.move > 0 ? 1 : 0) | (wall.sight > 0 ? 2 : 0) |
+      (wall.sound > 0 ? 4 : 0) | (wall.light > 0 ? 8 : 0),
+  }));
+  const terrain = sceneDifficultCells(scene);
+  return {
+    ...(walls.length ? { walls } : {}),
+    ...(terrain ? { terrain } : {}),
+  };
+}
+
+function projectRegularEntangleCasters(store: DocumentStore, scene: SceneDocument, scenario: Scenario): Scenario {
+  const armies = sourceArmies(store, scene._id);
+  const byUnit = new Map(armies.flatMap((army) => army.units.map((unit) => [unit._id, unit] as const)));
+  const commanders = scenario.commanders.map((commander) => ({ ...commander,
+    units: commander.units.map((unit) => {
+      const source = byUnit.get(unit.id);
+      const token = source?.leaderTokenId
+        ? scene.tokens.find((candidate) => candidate._id === source.leaderTokenId) : undefined;
+      const actor = token?.actorId ? store.get("actors", token.actorId) : undefined;
+      const parsed = parsePF1eActorSystem(actor?.system?.pf1e);
+      if (!actor || !parsed.ok) return unit;
+      const spells = parsed.value.spells;
+      const casterLevel = Math.max(1, (spells?.casterLevel ?? 0) + (spells?.casterLevelBonus ?? 0));
+      const key = spells?.keyAbility;
+      const score = key ? parsed.value.abilities?.[key] : undefined;
+      const castingAbilityMod = typeof score === "number" ? Math.floor((score - 10) / 2) : 0;
+      const prepared = spells?.prepared?.filter((entry) =>
+        entry.name.trim().toLowerCase() === "entangle" && !entry.expended).length ?? 0;
+      const knows = spells?.known?.some((entry) =>
+        entry.name.trim().toLowerCase() === "entangle" && entry.level === 1) ?? false;
+      const availableLevelOne = Math.max(0,
+        (spells?.slotsPerDay?.[1] ?? 0) - (spells?.slotsUsed?.[1] ?? 0));
+      const entangleSlots = spells?.mode === "spontaneous" && knows
+        ? availableLevelOne : prepared;
+      if (entangleSlots < 1) return unit;
+      return { ...unit, spellcasting: { actorId: actor._id, itemId: PF1E_ENTANGLE_DOCUMENT_ID,
+        casterLevel, castingAbilityMod, entangleSlots } };
+    }),
+  }));
+  return { ...scenario, commanders };
+}
+
+export function strategicActionCardPolicy(scene: SceneDocument) {
+  const configured = scene.flags?.core?.strategicActionCards;
+  if (record(configured) && typeof configured.playerCharacters === "boolean" &&
+    typeof configured.units === "boolean" && typeof configured.models === "boolean")
+    return { playerCharacters: configured.playerCharacters, units: configured.units,
+      models: configured.models };
+  // Safe scale default: hero/unit events may publish; never emit one card per model unless opted in.
+  return { playerCharacters: true, units: true, models: false };
+}
+
+/** Send a validated battle projection, never the unrelated campaign graph or executable scripts. */
 export function sceneDeployment(
   store: DocumentStore,
   scene: SceneDocument,
@@ -61,8 +130,22 @@ export function sceneDeployment(
     ...armies.map((doc) => ({ coll: "armies", id: doc._id, doc })),
   ];
   const layout = { sceneId: scene._id, name: scene.name, bounds, seed };
-  if (armies.length)
-    return extractScenario(
+  const rulesProjection = sceneRulesProjection(scene);
+  const projected = (input: unknown): Scenario => {
+    const payload = parseScenario({ ...(input as object), actionCards: strategicActionCardPolicy(scene) });
+    const digest = scenarioProjectionDigest(payload);
+    return parseScenario({ ...payload, projection: {
+      format: "arenastar-battle-projection-v1",
+      worldId: store.meta.worldId,
+      sceneId: scene._id,
+      sourceSeq: store.seq,
+      systemId: store.meta.system,
+      systemVersion: store.meta.systemVersion,
+      digest,
+    } });
+  };
+  if (armies.length) {
+    const extracted = extractScenario(
       { docs },
       {
         ...layout,
@@ -71,11 +154,66 @@ export function sceneDeployment(
         ),
       },
     );
+    return projected(projectRegularEntangleCasters(store, scene,
+      parseScenario({ ...extracted, ...rulesProjection })));
+  }
+  if (!Number.isInteger(strength) || strength < 1 || strength > 120)
+    throw new Error("Choose 1–120 models per unit.");
+  const tokens = sourceStrategicTokens(scene);
+  if (tokens.length) {
+    if (tokens.length < 2 || tokens.length > 500)
+      throw new Error("Use 2–500 visible friendly/hostile tokens for a hosted deployment.");
+    const sides = new Set(tokens.map((token) => token.disposition));
+    if (!sides.has("friendly") || !sides.has("hostile"))
+      throw new Error("Token deployment needs at least one friendly and one hostile token.");
+    const factions = [
+      { id: "friendly", name: "Friendly", color: "#72bbff" },
+      { id: "hostile", name: "Hostile", color: "#ff887e" },
+    ];
+    if (!Number.isInteger(seats) || seats < 2 || seats > tokens.length)
+      throw new Error(`Choose 2–${tokens.length} commander seats for this token deployment.`);
+    const friendlySeats = Math.max(1, Math.min(seats - 1, Math.round(
+      (seats * tokens.filter((token) => token.disposition === "friendly").length) / tokens.length,
+    )));
+    const sideSeats = { friendly: friendlySeats, hostile: seats - friendlySeats };
+    const commanders = ["friendly", "hostile"].flatMap((factionId) => {
+      const side = tokens.filter((token) => token.disposition === factionId);
+      const count = sideSeats[factionId as keyof typeof sideSeats];
+      if (side.length < count)
+        throw new Error(`${factionId} needs at least ${count} visible tokens for ${seats} seats.`);
+      return Array.from({ length: count }, (_, seatIndex) => ({
+        id: "",
+        name: `${factionId === "friendly" ? "Friendly" : "Hostile"} commander ${seatIndex + 1}`,
+        factionId,
+        units: side.filter((_, unitIndex) => unitIndex % count === seatIndex).map((token) => {
+          const index = tokens.indexOf(token);
+          return {
+            id: `unit-${index + 1}`,
+            name: token.name,
+            strength,
+            weapon: "melee" as const,
+            anchor: {
+              x: ((token.x + token.width / 2) / scene.grid.size) * 5,
+              y: ((token.y + token.height / 2) / scene.grid.size) * 5,
+            },
+          };
+        }),
+      }));
+    });
+    commanders.forEach((commander, index) => { commander.id = `commander-${index + 1}`; });
+    return projected({
+      format: "arenastar-strategic-scenario-v1",
+      name: scene.name,
+      bounds,
+      seed,
+      ...rulesProjection,
+      factions,
+      commanders,
+    });
+  }
   // Arrange the same files/ranks as deploySnapshot, without overlapping boundary cells.
   if (!Number.isInteger(seats) || seats < 2 || seats > 500)
     throw new Error("Choose 2–500 commander seats.");
-  if (!Number.isInteger(strength) || strength < 1 || strength > 100)
-    throw new Error("Choose 1–100 models per seat.");
   const files = Math.min(strength, 10),
     ranks = Math.ceil(strength / 10);
   const cols = Math.floor(bounds.maxX / (5 * ranks)),
@@ -86,11 +224,12 @@ export function sceneDeployment(
     { id: "blue", name: "Blue", color: "#72bbff" },
     { id: "red", name: "Red", color: "#ff887e" },
   ];
-  return parseScenario({
+  return projected({
     format: "arenastar-strategic-scenario-v1",
     name: scene.name,
     bounds,
     seed,
+    ...rulesProjection,
     factions,
     commanders: Array.from({ length: seats }, (_, i) => {
       const red = i >= Math.ceil(seats / 2),

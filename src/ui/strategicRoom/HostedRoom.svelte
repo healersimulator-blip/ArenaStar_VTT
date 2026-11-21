@@ -4,6 +4,7 @@
   import TurnProgress from "../sim/TurnProgress.svelte";
   import HostedMap from "./HostedMap.svelte";
   import HostedRoster from "./HostedRoster.svelte";
+  import ActionCardView from "../chat/ActionCard.svelte";
   import { HostedRoomClient, type HostedState } from "../../client/hostedRoom";
   import { openVttDb } from "../../storage/idb";
   import { ensureIdentity } from "../../net/identityStore";
@@ -51,7 +52,8 @@
   // Service-hosted battle art is immutable and content-addressed. A GM view may advertise it;
   // make the browser actually fetch/cache those bytes instead of leaving `media` inert.
   $effect(() => {
-    for (const asset of view?.media ?? []) {
+    for (const asset of [view?.background, ...(view?.media ?? [])]) {
+      if (!asset) continue;
       if (preloadedMedia.has(asset.hash) || !asset.mime.startsWith("image/"))
         continue;
       preloadedMedia.add(asset.hash);
@@ -79,6 +81,8 @@
       !blocked,
   );
   const unit = $derived(ownById.get(selected));
+  const entangle = $derived(unit?.spells?.find((spell) => spell.id === "entangle"));
+  const recentLogActions = $derived((view?.actions ?? []).slice(-10).reverse());
   /** GM unit list per commander, with any order accepted this turn, for the roster. */
   const gmUnits = $derived.by(() => {
     const byId = new Map(
@@ -86,7 +90,7 @@
     );
     const edges = new SvelteMap<
       string,
-      { id: string; name: string; order: RoomOrder | null }[]
+      { id: string; name: string; factionId: string; order: RoomOrder | null }[]
     >();
     for (const member of view?.members ?? []) {
       // Enumerate the deployment, not the grant: an unchecked unit must stay re-grantable.
@@ -95,6 +99,7 @@
         member.deployed.map((id) => ({
           id,
           name: byId.get(id) ?? id,
+          factionId: view?.markers.find((marker) => marker.id === id)?.factionId ?? member.factionId ?? "",
           order: accepted.get(id) ?? null,
         })),
       );
@@ -104,6 +109,8 @@
   const label = (order: RoomOrder | null | undefined) =>
     order === null
       ? "Clear"
+      : order?.kind === "cast"
+        ? `cast Entangle → (${order.origin.x}, ${order.origin.y})`
       : order
         ? orderLabel(
             order,
@@ -253,7 +260,7 @@
           >One-time invite <input
             type="password"
             autocomplete="off"
-            maxlength="43"
+            maxlength="128"
             placeholder="Leave blank to resume"
             bind:value={invite}
           /></label
@@ -369,6 +376,7 @@
                 members={view.members}
                 units={gmUnits}
                 markers={view.markers}
+                factions={view.factions}
                 busy={blocked}
                 onCommand={(command) => client?.submit(command)}
               />
@@ -445,6 +453,18 @@
                   });
               }}>Draft march</button
             >
+            {#if entangle}
+              <button
+                disabled={!allowed || !unit.alive || entangle.slots < 1 ||
+                  aimX === undefined || aimY === undefined}
+                onclick={() => {
+                  if (aimX !== undefined && aimY !== undefined)
+                    add({ kind: "cast", spellId: "entangle", itemId: entangle.itemId,
+                      origin: { x: aimX, y: aimY } });
+                }}
+                >Draft Entangle ({entangle.slots} slot{entangle.slots === 1 ? "" : "s"})</button
+              >
+            {/if}
             <label
               >Visible enemy <select bind:value={target} disabled={!allowed}
                 ><option value="">Choose target</option>
@@ -511,6 +531,24 @@
           {#if state.receipt?.status === "rejected" && ["busy", "unavailable"].includes(state.receipt.code)}
             <button onclick={() => client?.retry()}>Retry same request</button>
           {/if}
+        </section>
+        <section class="panel" aria-label="Battle log">
+          <div class="eyebrow">BATTLE LOG</div>
+          <h2>Chat and actions</h2>
+          {#if recentLogActions.length}
+            <div class="battle-log">
+              {#each recentLogActions as action (action.id)}
+                <ActionCardView
+                  {action}
+                  currentTurn={view.head.turnId}
+                  isGM={view.role === "GM"}
+                  canRoll={() => false}
+                  onRoll={() => {}}
+                />
+              {/each}
+            </div>
+            {#if (view.actions?.length ?? 0) > recentLogActions.length}<p class="small">Showing the latest {recentLogActions.length} of {view.actions?.length} retained log entries.</p>{/if}
+          {:else}<p>No published chat or action entries yet.</p>{/if}
         </section>
         <section class="panel">
           <div class="eyebrow">AFTER ACTION</div>
@@ -755,6 +793,12 @@
   details {
     margin: 0.65rem 0;
     color: var(--muted);
+  }
+  .battle-log {
+    display: grid;
+    gap: 0.65rem;
+    max-height: 34rem;
+    overflow: auto;
   }
   table {
     width: 100%;

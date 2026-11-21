@@ -566,6 +566,8 @@ export interface AppSurface {
   pf1ePlaceTokens(
     tokens: Array<{
       id: string;
+      /** Optional explicit scene for multi-scene acceptance; defaults to the legacy fixture scene. */
+      sceneId?: string;
       col: number;
       row: number;
       size?: string;
@@ -591,6 +593,8 @@ export interface AppSurface {
        * player — the one thing a client-side *view as* preview has to emulate itself).
        */
       hidden?: boolean;
+      /** Strategic authored-scene acceptance: explicit side authored on the real token. */
+      disposition?: "friendly" | "hostile" | "neutral";
     }>,
   ): { ok: boolean; placed: number; cellSize: number };
   /**
@@ -3142,8 +3146,13 @@ function appSurface(app: HostApp): AppSurface {
       return { ok: true, error: null };
     },
     pf1ePlaceTokens: (tokens) => {
-      const s = scene();
-      if (!s) return { ok: false, placed: 0, cellSize: 0 };
+      const fallback = scene();
+      const requestedSceneId = tokens[0]?.sceneId;
+      const s = requestedSceneId
+        ? (client.store.getAll("scenes").find((candidate) => candidate._id === requestedSceneId) ?? null)
+        : fallback;
+      if (!s || tokens.some((token) => token.sceneId !== undefined && token.sceneId !== s._id))
+        return { ok: false, placed: 0, cellSize: 0 };
       const cellSize = s.grid.size > 0 ? s.grid.size : 100;
       const ops: Parameters<typeof client.submit>[0] = [];
       for (const t of tokens) {
@@ -3190,6 +3199,7 @@ function appSurface(app: HostApp): AppSurface {
                 },
               }
             : {}),
+          ...(t.disposition ? { disposition: t.disposition } : {}),
           // §2.3/D-262: a token the host withholds from players (§5 projection)
           ...(t.hidden === true ? { hidden: true } : {}),
         };

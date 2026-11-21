@@ -1,7 +1,9 @@
 import { SIM_POS_QUANTUM } from "../../../src/core/sim";
 import { ModelStatus, type ModelPool } from "../../../src/core/strategic";
 import type { UnitView } from "../../../src/core/rules";
-import type { Bounds } from "../../../src/core/strategicRoom/protocol";
+import type { Bounds, Point } from "../../../src/core/strategicRoom/protocol";
+import { pointInSpellHazard, routeAroundSpellHazards, spellHazardActive, type SpellHazard } from "../../../src/core/strategicRoom/hazardAvoidance";
+import { PF1eCondition } from "../../../src/packages/pf1e/schema";
 import {
   planPF1eStride,
   type PF1eStrideInput,
@@ -22,7 +24,9 @@ export class MarchReservation {
   private readonly col0: number;
   private readonly row0: number;
   private readonly width: number;
-  constructor(private readonly bounds: Bounds) {
+  private readonly hazards: readonly SpellHazard[];
+  constructor(private readonly bounds: Bounds, hazards: readonly SpellHazard[] = [], turn = 0) {
+    this.hazards = hazards.filter((hazard) => spellHazardActive(hazard, turn));
     this.col0 = cell(bounds.minX);
     this.row0 = cell(bounds.minY);
     this.width = cell(bounds.maxX) - this.col0 + 1;
@@ -31,10 +35,47 @@ export class MarchReservation {
     return (r - this.row0) * this.width + c - this.col0;
   }
   plan(input: PF1eStrideInput, pool: ModelPool, unit: UnitView) {
-    const legs: { x: number; y: number }[] = [];
-    const stride = planPF1eStride(input, (x, y) => legs.push({ x, y }));
     const range = unit.modelRange;
-    if (!range || stride.refusal || !legs.length) return stride;
+    if (!range) return planPF1eStride(input);
+    // Clearance includes every living file/rank offset, so the whole formation—not only
+    // its lead model—routes outside the spell area.
+    let clearance = CELL_FEET;
+    for (let i = range[0]; i < range[1]; i++) {
+      if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+      clearance = Math.max(clearance, Math.hypot(
+        (pool.x[i] ?? 0) - input.from.x,
+        (pool.y[i] ?? 0) - input.from.y,
+      ) + CELL_FEET);
+    }
+    const pfCondition = pool.sys.pfCondition;
+    let entangled = false;
+    for (let i = range[0]; i < range[1]; i++) {
+      const condition = pfCondition?.[i] ?? 0;
+      if ((condition & PF1eCondition.HAZARD_GRAPPLED) !== 0)
+        return { ...planPF1eStride(input), to: { ...input.from }, traveled: 0,
+          refusal: "Black Tentacles still grapple the formation; it must escape before fleeing" };
+      entangled ||= (condition & PF1eCondition.ENTANGLED) !== 0;
+    }
+    const difficult = new Set(input.difficult ?? []);
+    for (const hazard of this.hazards) {
+      const minC = cell(hazard.at.x - hazard.radius), maxC = cell(hazard.at.x + hazard.radius);
+      const minR = cell(hazard.at.y - hazard.radius), maxR = cell(hazard.at.y + hazard.radius);
+      for (let c = minC; c <= maxC; c++) for (let r = minR; r <= maxR; r++)
+        if (pointInSpellHazard(hazard, { x: (c + 0.5) * CELL_FEET, y: (r + 0.5) * CELL_FEET }))
+          difficult.add(`${c},${r}`);
+    }
+    const path: Point[] = [];
+    let cursor = input.from;
+    for (const requested of input.path) {
+      const routed = routeAroundSpellHazards(cursor, requested, this.hazards, clearance);
+      path.push(...routed);
+      cursor = routed.at(-1) ?? cursor;
+    }
+    const routedInput = { ...input, path: path.slice(0, 12), difficult,
+      movePoints: entangled ? input.movePoints / 2 : input.movePoints };
+    const legs: { x: number; y: number }[] = [];
+    const stride = planPF1eStride(routedInput, (x, y) => legs.push({ x, y }));
+    if (stride.refusal || !legs.length) return stride;
     if (!this.occupied) {
       this.occupied = new Uint16Array(
         this.width * (cell(this.bounds.maxY) - this.row0 + 1),

@@ -5,7 +5,7 @@ A Foundry-class virtual tabletop that ships as **one self-contained `index.html`
 authoritative host, persister and relay; players join with a link/code. Implements
 the architecture spec in `uploads/VTT_Task.txt` (§0–§19) — see `PLAN.md`.
 
-For a large PF1e simultaneous battle, the GM can [launch from a strategic scene inside the open campaign](services/strategic-room/README.md#launch-inside-a-campaign-no-second-world-file): no second world file or GM tab. This opt-in deployment uses a Node/PostgreSQL battle service; ordinary peer-hosted and offline games do not require it. The 500-commander target is not a qualified capacity.
+For a large PF1e simultaneous battle, the GM can [launch from a strategic scene inside the open campaign](services/strategic-room/README.md#launch-inside-a-campaign-no-second-world-file): no second world file or GM tab. This opt-in deployment uses a Node/PostgreSQL authority; ordinary peer-hosted and offline games do not require it. Its product direction is explicit: [strategic mode is the full VTT operating at formation scale, not a reduced battle service](docs/STRATEGIC_FULL_VTT_DESIGN.md). Current pilot omissions are integration gaps, not intended feature boundaries. The 500-commander target is not a qualified capacity.
 
 ## Quickstart
 

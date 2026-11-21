@@ -376,6 +376,8 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         if ((atkPf & PF1eCondition.SHAKEN) !== 0) attackMod -= 2;
         if ((atkPf & PF1eCondition.SICKENED) !== 0) attackMod -= 2;
         if ((atkPf & PF1eCondition.PRONE) !== 0) attackMod -= 4;
+        if ((atkPf & PF1eCondition.ENTANGLED) !== 0) attackMod -= 2;
+        if ((atkPf & (PF1eCondition.GRAPPLED | PF1eCondition.HAZARD_GRAPPLED)) !== 0) attackMod -= 2;
         // §2.9b — a broken weapon fights at −2 attack and −2 damage (CRB: Broken condition).
         if (weaponBroken) attackMod -= 2;
       }

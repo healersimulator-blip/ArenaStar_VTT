@@ -6,6 +6,8 @@ import {
 } from "../../../src/core/strategicRoom/protocol";
 import { decodeSimSnapshot, poolFromSnapshot } from "../../../src/sim/codec";
 import { PF1E_MODEL_SCHEMA } from "../../../src/packages/pf1e/schema";
+import type { SpellHazard } from "../../../src/core/strategicRoom/hazardAvoidance";
+import type { ActionCard } from "../../../src/core/action";
 import type { Scenario, UnitState } from "./scenario";
 
 export type Member = {
@@ -45,6 +47,10 @@ export type Published = {
   maxHpMax: number;
   hash: string;
   units: UnitState[];
+  /** Areas created during hosted play; authored launch areas remain in Scenario. */
+  hazards?: SpellHazard[];
+  /** Bounded shared action evidence created by hosted authoritative resolution. */
+  actions?: ActionCard[];
   control?: Control;
 };
 export type Frozen = {

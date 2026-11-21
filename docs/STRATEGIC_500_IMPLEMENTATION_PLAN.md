@@ -3,11 +3,16 @@
 **Status:** Opt-in pilot implemented; reference-host qualification and rollout are open.  
 **Basis:** [50,000-model research and baseline measurements](STRATEGIC_500_PLAYER_PLAN.md).
 
-## 1. First release
+## 1. Product direction and first release
+
+**Strategic mode should be the full VTT operating at formation scale, not a reduced battle
+service.** The hosted authority is a durability, privacy and scale adapter over the same campaign,
+documents and PF1e rules. Its compact views and `ModelPool` must not become a second schematic world.
+See [the canonical full-VTT strategic design](STRATEGIC_FULL_VTT_DESIGN.md).
 
 Deliver an opt-in **Hosted Strategic Room** for one shared PF1e battlefield in simultaneous turn-based mode. Qualify **500 connected commanders plus a GM**, each commander responsible for roughly 100 models across 5–10 units. Test both 2,500 × 20 and 5,000 × 10. The simulator keeps all 50,000 models; zoomed-out views are aggregated for presentation only.
 
-The first playable pilot supports two factions, fixed commander assignments, deployment, move/hold/melee/ranged orders, turn close/resolve/next, fog-filtered results, and reconnect. Before publishing a 500-player limit, qualify every advertised mechanic, including walls, terrain, hero actions, spells, or doctrine **if enabled**. Reject unsupported imports or orders with a clear message. Keep legacy browser-hosted worlds unchanged. Continuous realtime, hundreds of separate factions, arbitrary uploaded scripts, full tactical editing inside hosted rooms, and seamless handoff between browser and hosted authority are not part of this release.
+The first playable pilot supports two factions, fixed commander assignments, deployment, move/hold/melee/ranged orders, turn close/resolve/next, fog-filtered results, and reconnect. This narrow vocabulary is staged delivery, not intended final scope. Before publishing a 500-player limit, qualify every enabled campaign mechanic—including scene geometry, actors/items, walls, doors, floors, terrain, lighting/vision, hero actions, spells, effects, reactions, authored FX/content and reconciliation. Reject unsupported relevant imports or orders with a clear message rather than silently reducing the battle. Keep legacy browser-hosted worlds unchanged while shared projection/adapters are introduced incrementally. Continuous realtime, hundreds of separate factions and arbitrary unsandboxed uploaded scripts are not part of this first release; ordinary tactical editing and seamless authority handoff remain required strategic-mode roadmap capabilities, not exclusions.
 
 ## 2. Boundaries and contracts to settle first
 
@@ -71,13 +76,17 @@ Use a published server and browser profile; start with a dedicated 8-vCPU / 16-G
 
 [Runbook and scenario schema](../services/strategic-room/README.md) · [Wire contract](../PROTOCOL.md#hosted-strategic-room-opt-in)
 
-The pilot takes the separate service route: it reuses the PF1e rules, core runner, codec,
-permission checks and unit/seed planning. Its independent room adapter and compact map don't
-pull in browser boot, legacy `HostSync`, IndexedDB authority or legacy report/asset fan-out. The
+The pilot takes the separate service route for authority and transport, while the product remains
+one full VTT. It reuses the PF1e rules, core runner, codec, permission checks and unit/seed planning;
+subsequent projections must also preserve all battle-relevant scene, actor, item, effect, template,
+content and asset semantics described in the canonical design. Its independent room adapter and
+compact map don't pull in browser boot, legacy `HostSync`, IndexedDB authority or legacy
+report/asset fan-out; this implementation separation must not become rules/content separation. The
 map uses unit summaries, with optional visible-tile detail and a device fallback. The player UI
 never receives the raw checkpoint, report or another commander's order batch. The first hosted
-release uses per-turn outcome rows; it doesn't expose campaign-wide private analytics. The import
-is an offline allowlist for fresh deployment, not a migration of ongoing browser worlds.
+release uses per-turn outcome rows; it doesn't expose campaign-wide private analytics. The current import is an offline allowlist for fresh deployment, not yet a migration of ongoing
+browser worlds. That is a named pilot gap: the target design is a versioned, least-privilege
+projection and controlled synchronization of the relevant campaign graph, with auditable write-back.
 
 - **Turn progress:** The GM gets immediate closing feedback. Both paths show resolving and
   applying as the authoritative turn advances. Hosted clients keep the last visible battlefield and

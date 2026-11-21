@@ -220,6 +220,13 @@ export async function serveCampaign(
         let scenario, state;
         try {
           scenario = parseScenario(body.scenario);
+          if (scenario.background) {
+            const bytes = Buffer.from(scenario.background.data, "base64url");
+            if (
+              bytes.byteLength !== scenario.background.size ||
+              createHash("sha256").update(bytes).digest("hex") !== scenario.background.hash
+            ) throw new Error("Battlefield background hash or size mismatch.");
+          }
           state = deploy(scenario);
         } catch (e) {
           return json(res, 422, {

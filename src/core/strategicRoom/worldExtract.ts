@@ -61,7 +61,7 @@ export function extractScenario(documents: unknown, layout: unknown) {
         unit.type !== "infantry" ||
         unit.sceneId !== layout.sceneId ||
         unit.formation !== "line" ||
-        unit.leaderTokenId ||
+        (unit.leaderTokenId !== undefined && unit.leaderTokenId !== null && !isId(unit.leaderTokenId)) ||
         unit.squadId ||
         unit.doctrine ||
         unit.envelop === true ||
@@ -70,7 +70,7 @@ export function extractScenario(documents: unknown, layout: unknown) {
         !point(unit.profile.anchor)
       ) {
         throw new Error(
-          "Use line infantry in the selected scene, with anchors and without heroes, squads, or doctrine.",
+          "Use line infantry in the selected scene, with anchors and without squads or doctrine.",
         );
       }
       return {
@@ -98,7 +98,6 @@ export function assertBattleScene(scene: unknown) {
   const grid = scene?.grid;
   const flags = scene?.flags;
   const core = record(flags) ? flags.core : null;
-  const pf1e = record(flags) ? flags.pf1e : null;
   if (
     !scene ||
     !record(core) ||
@@ -108,12 +107,10 @@ export function assertBattleScene(scene: unknown) {
     grid.distance !== 5 ||
     typeof grid.units !== "string" ||
     !["ft", "feet", "foot"].includes(grid.units.trim().toLowerCase()) ||
-    (Array.isArray(scene.walls) && scene.walls.length > 0) ||
-    (Array.isArray(scene.levels) && scene.levels.length > 0) ||
-    (record(pf1e) && pf1e.difficultCells !== undefined)
+    (Array.isArray(scene.levels) && scene.levels.length > 0)
   ) {
     throw new Error(
-      "Select a 5-ft square strategic scene without walls, levels or authored terrain.",
+      "Select a 5-ft square strategic scene without unsupported authored levels.",
     );
   }
 }

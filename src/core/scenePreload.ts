@@ -27,7 +27,13 @@ export const SCENE_PACK_FORMAT = "arenastar-scene-pack-v1";
 export const SCENE_PACK_EXTENSION = ".arenastar-scene-pack";
 /** Entries per archive; a pack is a cache warmer, not a full world backup. */
 export const MAX_PACK_ASSETS = 2048;
-export const MAX_PACK_BYTES = 512 * 1024 * 1024;
+/**
+ * Total uncompressed budget for a pack. Kept at 128 MiB so a browser importing an
+ * untrusted pack never needs to hold hundreds of MiB of inflated bytes at once;
+ * larger media sets degrade gracefully at plan time (`overCap`) rather than
+ * failing at read time. `readScenePack` preflights this bound before `unzipSync`.
+ */
+export const MAX_PACK_BYTES = 128 * 1024 * 1024;
 
 export type ScenePackEntry = {
   /** Original bytes were replaced by the full-resolution source (large-map tiles). */

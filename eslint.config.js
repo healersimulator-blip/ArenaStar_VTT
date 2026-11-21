@@ -23,6 +23,8 @@ export default tseslint.config(
       // Byte-pinned upstream code: verified by buildAisDemo, never auto-formatted or rewritten.
       "modules/foundry-tagger/upstream/**",
       "modules/foundry-ui-*/upstream/**",
+      // Vendored third-party runtime (Showdown, MIT): minified upstream bytes, never linted.
+      "modules/ais-foundry-v13/runtime/vendor/**",
     ],
   },
   eslint.configs.recommended,
@@ -42,7 +44,7 @@ export default tseslint.config(
   {
     files: ["modules/ais-foundry-v13/runtime/*.js", "modules/foundry-tagger/automation/*.js", "modules/ais-foundry-ui/runtime/*.js"],
     languageOptions: { globals: { ...globals.browser, AIS: "readonly", Hooks: "readonly",
-      FoundryAdapter: "readonly", Tagger: "readonly", game: "readonly", Sequence: "readonly", UpstreamFlavor: "readonly" } },
+      FoundryAdapter: "readonly", Tagger: "readonly", game: "readonly", Sequence: "readonly", UpstreamFlavor: "readonly", ui: "readonly" } },
   },
   prettier,
   ...svelte.configs["flat/prettier"],

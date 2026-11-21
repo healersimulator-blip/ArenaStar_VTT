@@ -593,7 +593,7 @@
           const v = field.getInitialValue({});
           if (v !== undefined) return v;
         }
-      } catch {}
+      } catch { /* ignore */ }
       if (field.initial !== undefined) {
         const init = field.initial;
         try { return typeof init === "function" ? init({}) : init; } catch { return typeof init === "function" ? undefined : init; }
@@ -1007,14 +1007,14 @@
       if (!img || !(img instanceof HTMLImageElement)) return;
       try {
         if (img.getAttribute(AIS_ASSET_RESOLVED_ATTR) === originalPath) return;
-      } catch {}
+      } catch { /* ignore */ }
       resolveAssetPathToUrl(originalPath).then((url) => {
         if (url && img) {
           try {
             img.setAttribute(AIS_ASSET_RESOLVED_ATTR, originalPath);
             if (originalImageSrcDescriptor && originalImageSrcDescriptor.set) originalImageSrcDescriptor.set.call(img, url);
             else img.src = url;
-          } catch {}
+          } catch { /* ignore */ }
         }
       });
     };
@@ -1026,7 +1026,7 @@
           if (isProbablyAssetPath(str)) {
             applyAssetUrlToImg(this, str);
           }
-          return originalImageSrcDescriptor.set.call(this, value);
+          originalImageSrcDescriptor.set.call(this, value);
         },
         configurable: true,
       });
@@ -1069,8 +1069,8 @@
         const src = img.getAttribute("src") || img.src;
         if (isProbablyAssetPath(src)) applyAssetUrlToImg(img, src);
       });
-    } catch {}
-  } catch {}
+    } catch { /* ignore */ }
+  } catch { /* ignore */ }
 
   const { Roll, terms: diceTerms } = globalThis.__aisFoundryRoll.install({ clone, getProperty,
     postMessage: (data) => globalThis.ChatMessage.create(data) });
@@ -1211,7 +1211,7 @@
           if (!cfg.sheetClasses[scopeKey]) cfg.sheetClasses[scopeKey] = {};
           cfg.sheetClasses[scopeKey][sheetClass?.name ?? "default"] = { cls: sheetClass, ...config };
         }
-      } catch {}
+      } catch { /* ignore */ }
     },
     unregisterSheet: (docClass, scope, sheetClass) => {
       const docName = typeof docClass === "string" ? docClass : docClass?.documentName ?? docClass?.name ?? "unknown";
@@ -1247,6 +1247,8 @@
   class ActorSheetV2 extends DocumentSheetV2 { get actor() { return this.document; } }
   class ItemSheetV2 extends DocumentSheetV2 { get item() { return this.document; } }
 
+  // Foundry exposes TextEditor as a static-only compatibility class.
+  // eslint-disable-next-line @typescript-eslint/no-extraneous-class
   class TextEditor {
     static get implementation() { return globalThis.CONFIG?.ux?.TextEditor ?? this; }
     static async enrichHTML(html) {
@@ -1300,19 +1302,19 @@
       apps: { FilePicker: globalThis.FilePicker, DocumentSheetConfig, ImagePopout: (() => { const C = stubClass("ImagePopout", Application); C._handleShareImage = async () => {}; C.shareImage = async () => {}; return C; })() }, ui: { Notifications: stubClass("Notifications") }, instances: uiLayer.instances },
     documents: { ...documentClasses, collections: { WorldCollection: documentsLayer.WorldCollection, ...Object.fromEntries(["Actors", "Items", "Journal", "RollTables", "Macros", "Folders",
       "Playlists", "CombatEncounters", "Users", "Messages"].map((name) => [name, documentsLayer.WorldCollection])) }, abstract: { Document },
-      modifyBatch: async (updates) => { try { console.debug("AIS stub foundry.documents.modifyBatch", Array.isArray(updates) ? updates.length : 0); } catch {} return []; },
+      modifyBatch: async (updates) => { try { console.debug("AIS stub foundry.documents.modifyBatch", Array.isArray(updates) ? updates.length : 0); } catch { /* ignore */ } return []; },
       updateDocuments: async () => [], createDocuments: async () => [], deleteDocuments: async () => [] },
     canvas: { placeables: { Token: globalThis.Token, Tile: globalThis.Tile, Drawing: globalThis.Drawing, Wall: globalThis.Wall, AmbientLight: globalThis.AmbientLight,
       AmbientSound: globalThis.AmbientSound, MeasuredTemplate: globalThis.MeasuredTemplate, Note: globalThis.Note, Region: globalThis.Region },
       layers: { TemplateLayer: stubClass("TemplateLayer") },
-      perception: { DetectionMode: class DetectionMode { constructor(data = {}) { Object.assign(this, data); } static get DETECTION_TYPES() { return { SIGHT: 0, SOUND: 1, MOVE: 2, LIGHT: 3, OTHER: 4 }; } } } },
+      perception: { DetectionMode: class DetectionMode { constructor(data = {}) { Object.assign(this, data); } static get DETECTION_TYPES() { return { SIGHT: 0, SOUND: 1, MOVE: 2, LIGHT: 3, OTHER: 4 }; } } } }, // eslint-disable-line @typescript-eslint/no-extraneous-class -- Foundry compatibility class
     abstract: { DataModel: uiLayer.fields ? uiLayer.fields.DataModel : stubClass("DataModel"), TypeDataModel: uiLayer.fields ? uiLayer.fields.TypeDataModel : stubClass("TypeDataModel"), Document },
     data: { fields: uiLayer.fields ? uiLayer.fields.fields : {}, validation: uiLayer.fields ? uiLayer.fields.validation : {} },
     dice: { Roll: globalThis.Roll, terms: diceTerms },
     helpers: { Hooks: globalThis.Hooks, Localization: stubClass("Localization") },
     CONST: null,
     // Fallbacks for pf1 system (and any system) that touches other foundry.* namespaces
-    nue: { Tour: (() => { const C = deepStub("foundry.nue.Tour"); C.fromJSON = async function(data) { try { return new this(); } catch { return new C(); } }; return C; })() },
+    nue: { Tour: (() => { const C = deepStub("foundry.nue.Tour"); C.fromJSON = async function(data) { void data; try { return new this(); } catch { return new C(); } }; return C; })() },
     packages: { PACKAGE_TYPES: {}, Module: deepStub("foundry.packages.Module") },
     grid: { BaseGrid: deepStub("foundry.grid.BaseGrid"), SquareGrid: deepStub("foundry.grid.SquareGrid") },
     appv1: { sheets: { ActorSheet: deepStub("foundry.appv1.sheets.ActorSheet"), ItemSheet: deepStub("foundry.appv1.sheets.ItemSheet") } },
@@ -1651,7 +1653,7 @@
       blobToPath[url] = path;
     }
     // Expose for error diagnostics: blob URL -> original path
-    try { globalThis.__aisBlobToPath = blobToPath; } catch {}
+    try { globalThis.__aisBlobToPath = blobToPath; } catch { /* ignore */ }
     const map = document.createElement("script"); map.type = "importmap"; map.textContent = JSON.stringify({ imports });
     document.head.appendChild(map);
     return imports;
@@ -1682,9 +1684,9 @@
             for (const [blobUrl, origPath] of Object.entries(map)) {
               if (stack.includes(blobUrl)) mappedStack = mappedStack.split(blobUrl).join(`${origPath} [${blobUrl}]`);
             }
-          } catch {}
+          } catch { /* ignore */ }
           console.error(`Foundry module ${foundryId}: ${path} failed`, error, mappedStack);
-        } catch {}
+        } catch { /* ignore */ }
         throw new Error(`Foundry module ${foundryId}: ${path} failed — ${error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error)}`, { cause: error });
       }
       diagnostics.loaded.push({ path, kind: "esmodule" });
@@ -1915,7 +1917,7 @@
           if (globalThis.CONFIG?.compendium?.uuidRedirects) {
             // Already mutable
           }
-        } catch {}
+        } catch { /* ignore */ }
         diagnostics.packs = { count: all.length, world: worldCollections.length, foundry: foundryCollections.length, ids: all.map((c) => c.id).slice(0, 30) };
       } catch (error) {
         diagnostics.packs = { error: String(error?.message ?? error) };
@@ -1953,9 +1955,9 @@
       Tagger._aisPatched = true;
     };
     // Try immediate patch (module may have set global in its esmodule)
-    try { patchTagger(); } catch {}
+    try { patchTagger(); } catch { /* ignore */ }
     // Also patch on ready, when Tagger is definitely set
-    Hooks.on("ready", () => { try { patchTagger(); } catch {} });
+    Hooks.on("ready", () => { try { patchTagger(); } catch { /* ignore */ } });
     Hooks.callAll("init");
     Hooks.callAll("i18nInit");
     await syncSettings();
@@ -1967,7 +1969,7 @@
     Hooks.callAll("canvasReady", globalThis.canvas);
     await nativeFx?.restore();
     // Second attempt after ready hooks (Tagger sets window.Tagger in ready)
-    try { patchTagger(); } catch {}
+    try { patchTagger(); } catch { /* ignore */ }
     // Globals the module installed itself (e.g. `window.Tagger`): the surface `foundry.api` reaches.
     diagnostics.globals = Object.keys(globalThis).filter((key) => !before.has(key)).slice(0, 64);
   });
