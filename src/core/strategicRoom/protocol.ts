@@ -1,3 +1,5 @@
+import type { ActionCard } from "../action";
+
 /** Opt-in hosted wire. No legacy world/OpLog or raw ModelPool frames cross it. */
 export const STRATEGIC_VERSION = 1;
 export const STRATEGIC_CODEC = 2;
@@ -24,12 +26,16 @@ export const MARKER_POINT_BYTES = 16;
 export const MAX_VIEW_META_BYTES = 512 * 1024;
 export const MAX_VIEW_BYTES = 4 * 1024 * 1024;
 
+/** Durable shared PF1e compendium document identity; never a strategic-only spell definition. */
+export const PF1E_ENTANGLE_DOCUMENT_ID = "pf1e-core-spells-entangle";
+
 export type Point = { x: number; y: number };
 export type Bounds = { minX: number; minY: number; maxX: number; maxY: number };
 export type RoomOrder =
   | { kind: "hold"; stance: "hold" }
   | { kind: "move"; path: Point[]; pace: "march" }
-  | { kind: "attack"; targetUnitId: string; mode: "melee" | "shot" };
+  | { kind: "attack"; targetUnitId: string; mode: "melee" | "shot" }
+  | { kind: "cast"; spellId: "entangle"; itemId: string; origin: Point };
 export type UnitEdit = { unitId: string; order: RoomOrder | null };
 export type OrdersSubmit = {
   kind: "orders.submit";
@@ -49,6 +55,7 @@ export type Command =
     }
   | { kind: "member.revoke"; requestId: string; memberId: string }
   | { kind: "member.kick"; requestId: string; memberId: string }
+  | { kind: "unit.faction"; requestId: string; unitId: string; factionId: string }
   | {
       kind: "member.invite";
       requestId: string;
@@ -125,6 +132,7 @@ export type OwnUnit = {
   at: Point | null;
   alive: number;
   weapon: "melee" | "shot";
+  spells?: Array<{ id: "entangle"; itemId: string; slots: number }>;
 };
 export type OwnOrders = { revision: number; edits: UnitEdit[] };
 /** Service-hosted static media with immutable, content-addressed URLs. */
@@ -162,7 +170,14 @@ export type Baseline = {
   factions: Array<{ id: string; name: string; color: string }>;
   /** Present only for the GM; players never receive the roster. */
   members?: MemberRow[];
-  /** GM-only service-hosted battle art, prefetched into the browser cache on view. */
+  /** Service-hosted authored battlefield background, visible to every admitted participant. */
+  background?: StoreMedia;
+  /** Active persistent areas rendered from authoritative hosted state. */
+  areas?: Array<{ id: string; spell: "entangle" | "burningEntanglement" | "blackTentacles";
+    at: Point; radius: number; expiresAfterTurn?: number }>;
+  /** Bounded authoritative action history for shared cards and authored FX consumers. */
+  actions?: ActionCard[];
+  /** GM-only additional service-hosted art, prefetched into the browser cache on view. */
   media?: StoreMedia[];
   markers: UnitMarker[];
   own: OwnUnit[];
@@ -257,6 +272,11 @@ function parseOrder(v: unknown): RoomOrder | null {
     return { kind: "attack", targetUnitId: v.targetUnitId, mode: v.mode };
   }
   if (
+    v.kind === "cast" && only(v, "kind", "spellId", "itemId", "origin") &&
+    v.spellId === "entangle" && isId(v.itemId) && point(v.origin)
+  ) return { kind: "cast", spellId: "entangle", itemId: v.itemId,
+    origin: { x: v.origin.x, y: v.origin.y } };
+  if (
     v.kind === "move" &&
     only(v, "kind", "pace", "path") &&
     v.pace === "march" &&
@@ -278,6 +298,11 @@ function parseOrder(v: unknown): RoomOrder | null {
 export function parseCommand(v: unknown): Command | null {
   if (!record(v) || !isRequestId(v.requestId)) return null;
   const requestId = v.requestId;
+  if (
+    v.kind === "unit.faction" &&
+    only(v, "kind", "requestId", "unitId", "factionId") &&
+    isId(v.unitId) && isId(v.factionId)
+  ) return { kind: v.kind, requestId, unitId: v.unitId, factionId: v.factionId };
   if (
     v.kind === "member.revoke" &&
     only(v, "kind", "requestId", "memberId") &&
@@ -380,7 +405,7 @@ export function parseAuth(v: unknown): AuthProof | null {
     typeof v.signature !== "string" ||
     !/^[0-9a-f]{128}$/.test(v.signature) ||
     (v.invite !== undefined &&
-      (typeof v.invite !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(v.invite)))
+      (typeof v.invite !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(v.invite)))
   )
     return null;
   return {

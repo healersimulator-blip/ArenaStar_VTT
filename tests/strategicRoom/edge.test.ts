@@ -93,6 +93,7 @@ async function join(
   origin: string,
   key: Identity,
   slot: string,
+  invite?: string,
 ): Promise<Client> {
   const socket = new WebSocket(
     `${origin.replace(/^http/, "ws")}/api/strategic/socket`,
@@ -121,6 +122,7 @@ async function join(
               kind: "auth",
               publicKey: key.publicKeyHex,
               signature,
+              ...(invite ? { invite } : {}),
             }),
           ),
         );
@@ -244,6 +246,36 @@ describe.skipIf(!url)("hosted room edge", () => {
         invite: "z".repeat(32),
       }),
     ).toMatchObject({ status: "rejected", code: "forbidden" });
+  });
+
+  test("a reissued invite can be claimed over the real socket", async () => {
+    const { origin, keys, db, room } = await listen();
+    const gm = await join(origin, keys.gm, "gm");
+    // Unbind commander-2 so the seat is invite-claimable (fixture binds every seat).
+    await db.pool.query(
+      "UPDATE strategic_members SET public_key=NULL WHERE room_id=$1 AND id='commander-2'",
+      [room],
+    );
+    // Canonical 43-char code, as the roster UI now generates.
+    const code = "q".repeat(43);
+    expect(
+      await submit(gm, {
+        kind: "member.invite",
+        memberId: "commander-2",
+        invite: code,
+      }),
+    ).toMatchObject({ status: "accepted" });
+    // The GM roster recovers the same code after the command (no reload needed).
+    expect(
+      (await db.roster()).find((m) => m.id === "commander-2")?.invite,
+    ).toBe(code);
+    // A fresh browser identity claims the seat with the code over WS.
+    const newcomer = await identity();
+    const player = await join(origin, newcomer, "commander-2", code);
+    expect(player.bearer).toBeTruthy();
+    expect(
+      (await db.roster()).find((m) => m.id === "commander-2"),
+    ).toMatchObject({ claimed: true, invite: null });
   });
 
   test("kick closes the holder's socket and the same key resumes the seat", async () => {

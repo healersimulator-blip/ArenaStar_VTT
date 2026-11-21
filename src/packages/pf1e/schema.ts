@@ -70,6 +70,10 @@ export const PF1eCondition = {
    * at one attack (combatEngine); exceeding the HP total replaces this with UNCONSCIOUS.
    */
   STAGGERED: 1 << 12,
+  /** Entangle spell rider: half speed, −2 attacks and −4 Dexterity (applied by strategic hazards). */
+  ENTANGLED: 1 << 13,
+  /** Black Tentacles-owned grapple, distinct from creature grapples so expiry clears only its own state. */
+  HAZARD_GRAPPLED: 1 << 14,
 } as const;
 
 /** DR Type Bitfield Flags for Material/Type Bypass */

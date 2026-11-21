@@ -4,9 +4,15 @@
 
 ## Recommendation
 
+**Strategic mode should be the full VTT operating at formation scale, not a reduced battle
+service.** Hosting changes authority, persistence, projection and dense simulation—not campaign or
+PF1e meaning. The `ModelPool` is a high-density projection of authoritative campaign documents, not
+an alternative schematic world. See
+[the canonical full-VTT strategic design](STRATEGIC_FULL_VTT_DESIGN.md).
+
 Build an **optional hosted strategic room**, with one authoritative room process per battle, binary WebSockets, and the existing TypeScript simulation running off the connection thread. Keep the browser-hosted WebRTC mode for small tables. **Do not move the current broadcast path to a server unchanged.** The changes that make this viable are private, batched orders; deterministic spatial queries in the resolver; and compact, permission-filtered views instead of pushing full reports to everyone.
 
-The target is **500 connected commanders × ~100 models each = 50,000 models**, organized into **2,500–5,000 units**. Arena Star already has the right base data model: units are documents, while models live in a columnar `ModelPool`, not in 50,000 token documents. The research assumes one shared battle, simultaneous **turn-based** orders, two factions in the probes and a small number of shared visibility groups in the first release. A game in which all 500 players have separate fog of war, continuous realtime PF1e, or everyone must stream all 50,000 models at all times is a different performance target. None of those assumptions changes the requirement to keep all 50,000 models in the authoritative simulation.
+The target is **500 connected commanders × ~100 models each = 50,000 models**, organized into **2,500–5,000 units**. Arena Star already has the right performance model: units are documents, while dense model state lives in a columnar `ModelPool`, not in 50,000 token documents. This optimization does not remove the battle's links to scenes, actors, tokens, items, spells, effects, walls, doors, terrain, floors, lighting/vision, templates, reactions, FX or campaign content; those remain authoritative inputs through a validated projection and scale-specific adapters. The research assumes one shared battle, simultaneous **turn-based** orders, two factions in the probes and a small number of shared visibility groups in the first release. A game in which all 500 players have separate fog of war, continuous realtime PF1e, or everyone must stream all 50,000 models at all times is a different performance target. None of those assumptions changes the requirement to keep all 50,000 models in the authoritative simulation.
 
 **Status at this baseline:** A 50,000-model battle fits the deployment count and some turns resolve in seconds in isolation. The existing end-to-end path is not ready for 500 players. No 500-player room has been qualified over a network. See the [pilot implementation and newer diagnostics](STRATEGIC_500_IMPLEMENTATION_PLAN.md#5-pilot-verification) for follow-up.
 

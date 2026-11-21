@@ -187,6 +187,7 @@ export async function serve(
   /** Content-hashed image bytes, offered to any admitted session as a cache seed. */
   const media = (await mediaAssets()).map((data) => ({
     data,
+    mime: "image/webp",
     hash: createHash("sha256").update(data).digest("hex"),
   }));
   const mediaByHash = new Map(media.map((asset) => [asset.hash, asset]));
@@ -347,6 +348,17 @@ export async function serve(
     },
     lost,
   });
+  const authoredBackground = authority.battle.scenario.background;
+  if (authoredBackground) {
+    const data = Buffer.from(authoredBackground.data, "base64url");
+    const asset = {
+      data,
+      mime: authoredBackground.mime,
+      hash: authoredBackground.hash,
+    };
+    media.push(asset);
+    mediaByHash.set(asset.hash, asset);
+  }
 
   wss.on("connection", (socket, req: IncomingMessage) => {
     socket.on("error", () => socket.terminate());
@@ -509,8 +521,8 @@ export async function serve(
       return;
     }
     const path = url.pathname.slice(STRATEGIC_API.length);
-    const sceneMedia = (asset: string) => {
-      const hash = asset.replace(/\.webp$/, "");
+    const sceneMedia = (name: string) => {
+      const hash = name.replace(/\.(?:png|jpe?g|webp)$/, "");
       if (!/^[0-9a-f]{64}$/.test(hash)) return undefined;
       return mediaByHash.get(hash);
     };
@@ -536,7 +548,7 @@ export async function serve(
         return;
       }
       res.writeHead(200, {
-        "Content-Type": "image/webp",
+        "Content-Type": asset.mime,
         "Cache-Control": "public, max-age=31536000, immutable",
         "Content-Length": asset.data.byteLength,
         ETag: `"${asset.hash}"`,
@@ -648,6 +660,25 @@ export async function serve(
         factions: current.scenario.factions,
         own: current.own(session.member),
         orders,
+        ...(current.state.actions?.length ? { actions: current.state.actions } : {}),
+        areas: [...(current.scenario.hazards ?? []), ...(current.state.hazards ?? [])]
+          .filter((hazard) => (hazard.startsTurn ?? 0) <= room.turnId &&
+            (hazard.expiresAfterTurn ?? Number.MAX_SAFE_INTEGER) >= room.turnId)
+          .map((hazard) => ({ id: hazard.id, spell: hazard.spell, at: { ...hazard.at },
+            radius: hazard.radius,
+            ...(hazard.expiresAfterTurn !== undefined
+              ? { expiresAfterTurn: hazard.expiresAfterTurn } : {}) })),
+        ...(authoredBackground
+          ? {
+              background: {
+                hash: authoredBackground.hash,
+                name: `battlefield-${authoredBackground.hash.slice(0, 12)}`,
+                mime: authoredBackground.mime,
+                size: authoredBackground.size,
+                url: `${STRATEGIC_API.replace(/^\//, "")}/scene/${authoredBackground.hash}.${authoredBackground.mime === "image/png" ? "png" : authoredBackground.mime === "image/jpeg" ? "jpg" : "webp"}`,
+              },
+            }
+          : {}),
         ...(members
           ? {
               members,

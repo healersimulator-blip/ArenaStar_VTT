@@ -17,6 +17,7 @@ import {
 } from "../../../src/core/strategicRoom/protocol";
 import { planPF1eStride } from "../../../src/packages/pf1e/stride";
 import { createMassBattlePf1e } from "../../../src/packages/massBattlePf1e";
+import { deriveRoomKey } from "./invite";
 import { CELL_FEET, inBounds, rulesInput, type Scenario } from "./scenario";
 import {
   checkpointPool,
@@ -63,6 +64,9 @@ export class BattleView {
   ) {
     this.input = rulesInput(scenario, state.units);
     this.pool = checkpointPool(state);
+    // Purpose-separated subkey: marker IDs must not share the raw room secret
+    // with invite encryption (see `deriveRoomKey` in invite.ts).
+    const markerKey = deriveRoomKey(projectionKey, "marker");
     const sources: DetectionSource[] = [];
     let index = 0;
     for (const army of this.input.armies) {
@@ -89,22 +93,31 @@ export class BattleView {
             factionId: army.factionId,
             radius: rules.detection(this.input.ctx, view) * CELL_FEET,
           });
+        const authored = scenario.commanders.flatMap((commander) => commander.units)
+          .find((candidate) => candidate.id === doc._id);
         const own: OwnUnit = {
           id: doc._id,
           name: doc.name,
           at,
           alive,
           weapon: doc.stats.weaponIsRanged ? "shot" : "melee",
+          ...(authored?.spellcasting ? { spells: [{ id: "entangle" as const,
+            itemId: authored.spellcasting.itemId,
+            slots: Math.max(0, doc.stats.entangleSlots ?? 0) }] } : {}),
         };
         ownUnits.push(own);
         this.units.set(doc._id, { index, view, army, doc, own });
         index++;
       }
-      this.owners.set(army._id, ownUnits);
+      const commander = army.commander[0] ?? "";
+      this.owners.set(commander, [...(this.owners.get(commander) ?? []), ...ownUnits]);
     }
     for (const army of this.input.armies) {
       const commander = army.commander[0] ?? "";
-      const deployment = new Set(army.units.map((unit) => unit._id));
+      const deployment = new Set([
+        ...(this.defaultControl.get(commander) ?? []),
+        ...army.units.map((unit) => unit._id),
+      ]);
       this.defaultControl.set(commander, deployment);
       const granted = state.control?.[commander];
       if (granted !== undefined && granted !== null)
@@ -146,7 +159,7 @@ export class BattleView {
           if (models.length > MAX_REGION_MODELS) continue; // One overflow entry is enough to signal truncation.
           let id = ids.get(i);
           if (!id) {
-            id = createHmac("sha256", projectionKey)
+            id = createHmac("sha256", markerKey)
               .update(String(this.pool.id[i]))
               .digest("base64url")
               .slice(0, 22);
@@ -253,6 +266,22 @@ export class BattleView {
     if (!order) return null;
     const range = unit.view.modelRange;
     if (!range || unit.own.alive === 0) return "Unit has no living models.";
+    if (order.kind === "cast") {
+      const authored = this.scenario.commanders.flatMap((commander) => commander.units)
+        .find((candidate) => candidate.id === unitId);
+      const caster = authored?.spellcasting;
+      if (!caster || caster.itemId !== order.itemId)
+        return "This unit does not have that projected PF1e spell item.";
+      if ((unit.view.stats.entangleSlots ?? 0) < 1)
+        return "Entangle has no remaining projected spell slot.";
+      if (!inBounds(this.scenario.bounds, order.origin.x, order.origin.y))
+        return "Spell origin is outside the battlefield.";
+      const from = { x: this.pool.x[range[0]] ?? 0, y: this.pool.y[range[0]] ?? 0 };
+      if (Math.hypot(order.origin.x - from.x, order.origin.y - from.y) >
+        400 + 40 * caster.casterLevel)
+        return "Entangle origin is beyond the regular PF1e long range.";
+      return null;
+    }
     const verdict = rules.validateOrder(this.input.ctx, unit.view, order);
     if (!verdict.ok) return verdict.error;
     if (order.kind === "attack") {

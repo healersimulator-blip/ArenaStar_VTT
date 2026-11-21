@@ -10,7 +10,7 @@ import {
 } from "../../../src/core/strategicRoom/protocol";
 import { deploySnapshot } from "../../../src/sim/deploy";
 import { canonicalPoolHash } from "../../../src/sim/codec";
-import { emptyRulesWalls, unitViewFor } from "../../../src/sim/turnPlan";
+import { unitViewFor } from "../../../src/sim/turnPlan";
 import { PF1E_MODEL_SCHEMA } from "../../../src/packages/pf1e/schema";
 import { checkpointPool, type Published } from "./state";
 
@@ -43,6 +43,11 @@ function initialStats(unit: ScenarioUnit): UnitStats {
     damageDiceCount: 1,
     damageDiceSides: 8,
     damageMod: 3,
+    ...(unit.spellcasting ? {
+      casterLevel: unit.spellcasting.casterLevel,
+      castingAbilityMod: unit.spellcasting.castingAbilityMod,
+      entangleSlots: unit.spellcasting.entangleSlots,
+    } : {}),
     ...(unit.weapon === "shot"
       ? { weaponIsRanged: 1, weaponRangeIncrement: 60, weaponMaxIncrements: 10 }
       : {}),
@@ -63,20 +68,22 @@ export function rulesInput(scenario: Scenario, state: readonly UnitState[]) {
     }),
   );
   let i = 0;
-  const armies: ArmyDocument[] = scenario.commanders.map((c) => ({
-    _id: c.id,
-    type: "army",
-    name: c.id,
-    factionId: c.factionId,
-    commander: [c.id],
-    supply: {},
-    ownership: { default: 0, [c.id]: 3 },
-    flags: {},
-    system: {},
-    units: c.units.map((u) => {
-      const own = state[i++];
-      if (!own) throw new Error("Missing committed unit state.");
-      return {
+  // One simulation army per unit permits a GM to change one company's allegiance without
+  // changing its seat or grants. The commander ID remains the authority boundary.
+  const armies: ArmyDocument[] = scenario.commanders.flatMap((c) => c.units.map((u) => {
+    const own = state[i++];
+    if (!own) throw new Error("Missing committed unit state.");
+    return {
+      _id: `${c.id}-${u.id}`,
+      type: "army",
+      name: c.id,
+      factionId: u.factionId ?? c.factionId,
+      commander: [c.id],
+      supply: {},
+      ownership: { default: 0, [c.id]: 3 },
+      flags: {},
+      system: {},
+      units: [{
         _id: u.id,
         type: "infantry",
         name: u.name,
@@ -90,10 +97,11 @@ export function rulesInput(scenario: Scenario, state: readonly UnitState[]) {
         sceneId: SCENE,
         modelRange: own.range,
         envelop: false,
-      };
-    }),
+      }],
+    };
   }));
   const units = armies.flatMap((a) => a.units.map((u) => unitViewFor(a, u)));
+  const projectedWalls = scenario.walls ?? [];
   const ctx: RulesContext = {
     sceneId: SCENE,
     grid: {
@@ -103,7 +111,14 @@ export function rulesInput(scenario: Scenario, state: readonly UnitState[]) {
       units: "ft",
       diagonals: "555",
     },
-    walls: emptyRulesWalls(),
+    walls: {
+      x1: Float32Array.from(projectedWalls, (wall) => wall.x1),
+      y1: Float32Array.from(projectedWalls, (wall) => wall.y1),
+      x2: Float32Array.from(projectedWalls, (wall) => wall.x2),
+      y2: Float32Array.from(projectedWalls, (wall) => wall.y2),
+      restriction: Uint8Array.from(projectedWalls, (wall) => wall.restriction),
+    },
+    ...(scenario.terrain ? { terrain: scenario.terrain } : {}),
     factions,
     armies,
     leaderActors: {},

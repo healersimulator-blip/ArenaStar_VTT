@@ -78,6 +78,9 @@ SET control = coalesce((
 WHERE v.control IS NULL;
 ALTER TABLE strategic_versions ALTER COLUMN control SET DEFAULT '{}'::jsonb;
 ALTER TABLE strategic_versions ALTER COLUMN control SET NOT NULL;
+-- Persistent spell areas created by hosted actions are publication state, not mutable scenario input.
+ALTER TABLE strategic_versions ADD COLUMN IF NOT EXISTS hazards jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE strategic_versions ADD COLUMN IF NOT EXISTS actions jsonb NOT NULL DEFAULT '[]'::jsonb;
 CREATE TABLE IF NOT EXISTS strategic_frozen (
   room_id text NOT NULL REFERENCES strategic_rooms(id) ON DELETE CASCADE,
   turn_id integer NOT NULL,

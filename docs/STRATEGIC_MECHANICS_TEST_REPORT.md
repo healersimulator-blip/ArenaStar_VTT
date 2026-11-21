@@ -1,5 +1,11 @@
 # What the strategic battle actually does — local verification, 2026-11-19
 
+> **Historical verification report.** Statements below describe the tested build on that date, not
+> strategic mode's intended product boundary. **Strategic mode should be the full VTT operating at
+> formation scale, not a reduced battle service.** See
+> [STRATEGIC_FULL_VTT_DESIGN.md](STRATEGIC_FULL_VTT_DESIGN.md). Later work added frozen hosted spell
+> hazards; regular PF1e casting and the complete campaign projection remain integration gaps.
+
 ## Follow-up: publication latency at 500 players
 
 All 500 commanders reconstructed both mixed-combat results in each run (5,000 units, 50,000 starting models, plus one GM; 10 reconnects per turn). Timings below run from **each commander’s own publication notice to its decoded view**, not from GM close to browser paint. The 3.85 s result below was measured under contention; the first row here is the fairer isolated control.

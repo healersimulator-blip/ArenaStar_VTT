@@ -6,7 +6,13 @@
     battleOf,
     sceneDeployment,
     sourceArmies,
+    sourceStrategicTokens,
+    strategicActionCardPolicy,
   } from "../../core/strategicRoom/campaignScene";
+  import {
+    MAX_SCENARIO_BACKGROUND_BYTES,
+    type Scenario,
+  } from "../../core/strategicRoom/scenario";
   import { signText } from "../../net/identity";
   import { campaignProof } from "../../core/strategicRoom/protocol";
   import { ensureIdentity } from "../../net/identityStore";
@@ -22,6 +28,18 @@
     strength = $state(1),
     notice = $state(""),
     busy = $state(false);
+  let actionCardsPlayerCharacters = $state(true),
+    actionCardsUnits = $state(true),
+    actionCardsModels = $state(false),
+    actionCardPolicyInitialized = false;
+  $effect(() => {
+    if (actionCardPolicyInitialized) return;
+    const initial = strategicActionCardPolicy(scene);
+    actionCardsPlayerCharacters = initial.playerCharacters;
+    actionCardsUnits = initial.units;
+    actionCardsModels = initial.models;
+    actionCardPolicyInitialized = true;
+  });
   let invites = $state.raw<Record<string, string>>({}),
     showSetup = $state(true),
     preloadStatus = $state("");
@@ -45,12 +63,46 @@
   const binding = $derived(battleOf(scene, app.worldId));
   const roomUrl = $derived(binding ? `/battle/${binding.id}/` : "");
   const source = $derived(sourceArmies(app.store, scene._id));
+  const tokenSource = $derived(source.length ? [] : sourceStrategicTokens(scene));
   const playable =
     document.querySelector('meta[name="arenastar-campaign"][content="v1"]') !==
       null &&
     (location.protocol === "https:" ||
       (location.protocol === "http:" &&
         ["localhost", "127.0.0.1"].includes(location.hostname)));
+  async function withBackground(
+    scenario: Scenario,
+    current: SceneDocument,
+  ): Promise<Scenario> {
+    const hash = current.img;
+    if (!hash || !/^[0-9a-f]{64}$/.test(hash)) return scenario;
+    const manifest = await app.assets.manifest();
+    const entry = manifest[hash];
+    if (!entry || !["image/png", "image/jpeg", "image/webp"].includes(entry.mime)) {
+      notice = "Battlefield launched without its background: use PNG, JPEG or WebP.";
+      return scenario;
+    }
+    if (entry.size > MAX_SCENARIO_BACKGROUND_BYTES) {
+      notice = `Battlefield launched without its background: map exceeds ${MAX_SCENARIO_BACKGROUND_BYTES / 1024 / 1024} MiB hosted-art limit.`;
+      return scenario;
+    }
+    const bytes = await app.assets.get(hash);
+    if (!bytes || bytes.byteLength !== entry.size) return scenario;
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000)
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    return {
+      ...scenario,
+      background: {
+        hash,
+        mime: entry.mime as "image/png" | "image/jpeg" | "image/webp",
+        size: bytes.byteLength,
+        width: entry.width ?? current.width,
+        height: entry.height ?? current.height,
+        data: btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""),
+      },
+    };
+  }
   async function command(finish = false) {
     if (busy || !key || !playable) return;
     busy = true;
@@ -60,13 +112,17 @@
     try {
       const identity = await ensureIdentity(app.db);
       const publicKey = identity.publicKeyHex;
-      const current = app.store.get("scenes", scene._id);
-      if (!current) throw new Error("Scene no longer exists.");
-      let b = battleOf(current, app.worldId);
+      const stored = app.store.get("scenes", scene._id);
+      if (!stored) throw new Error("Scene no longer exists.");
+      const actionCards = { playerCharacters: actionCardsPlayerCharacters, units: actionCardsUnits,
+        models: actionCardsModels };
+      const current = { ...stored, flags: { ...stored.flags,
+        core: { ...stored.flags?.core, strategicActionCards: actionCards } } };
+      let b = battleOf(stored, app.worldId);
       if (!b && (finish || !app.gm.channel.canLaunchHosted))
         throw new Error("Launch from setup, before starting local simulation.");
       const seed = b?.seed ?? crypto.getRandomValues(new Uint32Array(1))[0] ?? 1;
-      const scenario = finish
+      let scenario = finish
         ? undefined
         : sceneDeployment(
             app.store,
@@ -75,6 +131,7 @@
             b?.seats ?? seats,
             b?.strength ?? strength,
           );
+      if (scenario) scenario = await withBackground(scenario, current);
       if (!b) {
         b = {
           id: crypto.randomUUID(),
@@ -88,6 +145,7 @@
         };
         const r = app.host.commitBattleScene(current._id, {
           "flags.core.campaignBattle": b,
+          "flags.core.strategicActionCards": actionCards,
         });
         if (!r.ok) throw new Error(r.error);
         fresh = true;
@@ -234,6 +292,27 @@
               {source.length} scene armies · one commander seat per army. Deploying:
               {source.map((a) => a.name).join(", ")}.
             </p>
+          {:else if tokenSource.length}<p>
+              {tokenSource.length} visible friendly/hostile scene tokens · one melee company
+              per token, distributed across commander seats on the same side. Token centres are
+              the hosted deployment anchors; hidden and neutral tokens are excluded.
+            </p>
+            <label
+              >Commander seats <input
+                type="number"
+                min="2"
+                max={tokenSource.length}
+                bind:value={seats}
+              /></label
+            >
+            <label
+              >Models per token <input
+                type="number"
+                min="1"
+                max="120"
+                bind:value={strength}
+              /></label
+            >
           {:else}<label
               >Fresh roster · commander seats <input
                 type="number"
@@ -246,7 +325,7 @@
               >Models per seat <input
                 type="number"
                 min="1"
-                max="100"
+                max="120"
                 bind:value={strength}
               /></label
             >
@@ -256,10 +335,20 @@
             </p>{/if}
           <p>
             Simultaneous PF1e turns on a five-foot square field. The battle uses
-            standard infantry stats and a schematic map, not campaign artwork,
-            tokens or private documents. 500 seats is a configuration limit, not
-            verified capacity.
+              standard infantry stats. A bounded PNG/JPEG/WebP scene background is
+              transferred to the hosted board; private documents and scripts are not.
+              500 seats is a configuration limit, not verified capacity.
           </p>
+        {/if}
+        {#if !binding}
+          <fieldset>
+            <legend>Action cards</legend>
+            <p>Choose which action classes may publish cards. Rules still resolve when a card class is disabled.</p>
+            <label><input type="checkbox" bind:checked={actionCardsPlayerCharacters} /> Player characters and unit leaders</label>
+            <label><input type="checkbox" bind:checked={actionCardsUnits} /> Formation/unit actions</label>
+            <label><input type="checkbox" bind:checked={actionCardsModels} /> Individual model actions</label>
+            {#if actionCardsModels}<p class="warning">Individual model cards can produce thousands of records. The hosted history remains bounded, but leave this off for large battles.</p>{/if}
+          </fieldset>
         {/if}
         <label
           >GM launch key <input

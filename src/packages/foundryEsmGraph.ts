@@ -76,9 +76,12 @@ export function parseTsConfigPaths(resources: Record<string, string>): TsconfigA
   const aliases: TsconfigAlias[] = [];
   for (const [path, text] of Object.entries(resources)) {
     if (!path.endsWith("tsconfig.json")) continue;
-    let parsed: any;
+    let parsed: unknown;
     try { parsed = JSON.parse(stripJsonComments(text)); } catch { continue; }
-    const paths = parsed?.compilerOptions?.paths;
+    if (!parsed || typeof parsed !== "object" || !("compilerOptions" in parsed)) continue;
+    const compilerOptions = parsed.compilerOptions;
+    if (!compilerOptions || typeof compilerOptions !== "object" || !("paths" in compilerOptions)) continue;
+    const paths = compilerOptions.paths;
     if (!paths || typeof paths !== "object") continue;
     const baseDir = dirname(path);
     for (const [alias, targetsRaw] of Object.entries(paths)) {

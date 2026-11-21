@@ -12,6 +12,7 @@ import {
   type Published,
 } from "../../services/strategic-room/src/state";
 import { parseCommand } from "../../src/core/strategicRoom/protocol";
+import { routeAroundSpellHazards, segmentHitsSpellHazard } from "../../src/core/strategicRoom/hazardAvoidance";
 
 function field(strength: number, distance: number) {
   return parseScenario({
@@ -47,7 +48,7 @@ function models(state: Published) {
     y: p.y[i],
   }));
 }
-test.each([1, 9, 10, 11, 19, 20, 21, 99, 100])(
+test.each([1, 9, 10, 11, 19, 20, 21, 80, 99, 100])(
   "a %i-model line deploys distinct five-foot files and retains its slots on a march",
   (strength) => {
     const scenario = field(strength, 180),
@@ -185,11 +186,195 @@ test.each([17, 42, 119])(
   },
 );
 
-test("the hosted service does not silently accept reference-only mechanics", () => {
+test("a regular projected PF1e caster spends an Entangle slot and publishes a persistent area", () => {
+  const scenario = field(20, 180);
+  const caster = scenario.commanders[0]?.units[0];
+  if (!caster) throw new Error("caster fixture missing");
+  caster.spellcasting = { actorId: "druid", itemId: "pf1e-core-spells-entangle", casterLevel: 3,
+    castingAbilityMod: 4, entangleSlots: 2 };
+  const start = deploy(scenario);
+  const battle = new BattleView(scenario, start, new Uint8Array(32));
+  const member = { id: "seat-blue", role: "PLAYER" as const, factionId: "blue", epoch: 1 };
+  const edit = { unitId: "blue", order: { kind: "cast" as const, spellId: "entangle" as const,
+    itemId: "pf1e-core-spells-entangle", origin: { x: 40, y: 0 } } };
+  expect(battle.validate(member, edit)).toBeNull();
+  const first = resolveFrozen({ start, scenario, turnId: 1, seed: 44,
+    orders: [{ ...edit, memberId: member.id }] });
+  expect(first.state.units[0]?.stats.entangleSlots).toBe(1);
+  expect(first.state.hazards).toEqual([expect.objectContaining({ spell: "entangle", at: { x: 40, y: 0 },
+    radius: 40, dc: 15, startsTurn: 1, expiresAfterTurn: 30, casterLevel: 3,
+    casterFactionId: "blue" })]);
+  expect(first.state.actions).toEqual([expect.objectContaining({ kind: "cast", label: "Entangle",
+    state: "resolved", source: expect.objectContaining({ actorId: "druid",
+      itemId: "pf1e-core-spells-entangle" }) })]);
+  const second = resolveFrozen({ start: first.state, scenario, turnId: 2, seed: 45, orders: [] });
+  expect(second.state.hazards).toEqual(first.state.hazards);
+  expect(second.state.actions).toEqual(first.state.actions);
+});
+
+test("leader-card policy is independent from unit/model cards and never suppresses spell rules", () => {
+  const scenario = field(10, 180);
+  scenario.actionCards = { playerCharacters: false, units: true, models: true };
+  const caster = scenario.commanders[0]?.units[0];
+  if (!caster) throw new Error("caster fixture missing");
+  caster.spellcasting = { actorId: "druid", itemId: "pf1e-core-spells-entangle", casterLevel: 2,
+    castingAbilityMod: 3, entangleSlots: 1 };
+  const state = resolveFrozen({ start: deploy(scenario), scenario, turnId: 1, seed: 1,
+    orders: [{ unitId: "blue", memberId: "seat-blue", order: { kind: "cast", spellId: "entangle",
+      itemId: "pf1e-core-spells-entangle", origin: { x: 30, y: 0 } } }] }).state;
+  expect(state.actions).toBeUndefined();
+  expect(state.hazards).toHaveLength(1);
+  expect(state.units[0]?.stats.entangleSlots).toBe(0);
+});
+
+test("hosted PF1e cast authority rejects wrong identity, control, bounds, range, and exhausted resources", () => {
+  const scenario = field(10, 180);
+  scenario.bounds = { minX: -1000, minY: -1000, maxX: 1000, maxY: 1000 };
+  const caster = scenario.commanders[0]?.units[0];
+  if (!caster) throw new Error("caster fixture missing");
+  caster.spellcasting = { actorId: "druid", itemId: "pf1e-core-spells-entangle", casterLevel: 1,
+    castingAbilityMod: 2, entangleSlots: 1 };
+  const member = { id: "seat-blue", role: "PLAYER" as const, factionId: "blue", epoch: 1 };
+  const start = deploy(scenario);
+  const battle = new BattleView(scenario, start, new Uint8Array(32));
+  const cast = (origin = { x: 40, y: 0 }, itemId = "pf1e-core-spells-entangle") => ({ unitId: "blue",
+    order: { kind: "cast" as const, spellId: "entangle" as const, itemId, origin } });
+  expect(battle.validate(member, cast({ x: 40, y: 0 }, "forged-item"))).toMatch(/does not have/);
+  expect(battle.validate({ ...member, id: "seat-red", factionId: "red" }, cast())).toMatch(/not assigned/);
+  expect(battle.validate(member, cast({ x: 1001, y: 0 }))).toMatch(/outside/);
+  expect(battle.validate(member, cast({ x: 500, y: 0 }))).toMatch(/range/);
+
+  const spent = resolveFrozen({ start, scenario, turnId: 1, seed: 1,
+    orders: [{ ...cast(), memberId: member.id }] }).state;
+  expect(spent.units[0]?.stats.entangleSlots).toBe(0);
+  expect(new BattleView(scenario, spent, new Uint8Array(32)).validate(member, cast())).toMatch(/no remaining/);
+});
+
+test("duplicate cast orders are rejected before they can spend one slot twice", () => {
+  const scenario = field(10, 180);
+  const caster = scenario.commanders[0]?.units[0];
+  if (!caster) throw new Error("caster fixture missing");
+  caster.spellcasting = { actorId: "druid", itemId: "pf1e-core-spells-entangle", casterLevel: 2,
+    castingAbilityMod: 3, entangleSlots: 1 };
+  const start = deploy(scenario);
+  const order: FrozenOrder = { unitId: "blue", memberId: "seat-blue", order: { kind: "cast",
+    spellId: "entangle", itemId: "pf1e-core-spells-entangle", origin: { x: 20, y: 0 } } };
+  expect(() => resolveFrozen({ start, scenario, turnId: 1, seed: 2,
+    orders: [order, structuredClone(order)] })).toThrow(/duplicate orders/);
+  expect(start.units[0]?.stats.entangleSlots).toBe(1);
+  expect(start.hazards).toBeUndefined();
+});
+
+test("projected campaign walls block hosted formations and projected difficult terrain doubles cost", () => {
+  const wallScenario = field(1, 180);
+  wallScenario.walls = [{ x1: 10, y1: -20, x2: 10, y2: 20, restriction: 1 }];
+  const wallStart = deploy(wallScenario);
+  const move: FrozenOrder = { unitId: "blue", memberId: "seat-blue",
+    order: { kind: "move", pace: "march", path: [{ x: 100, y: 0 }] } };
+  const walled = resolveFrozen({ start: wallStart, scenario: wallScenario, turnId: 1,
+    seed: 17, orders: [move] });
+  expect(Number(models(walled.state).find((model) => model.unit === 0)?.x)).toBeLessThanOrEqual(10);
+
+  const terrainScenario = field(1, 180);
+  terrainScenario.terrain = { difficultCells: Array.from({ length: 8 }, (_, col) => ({ col, row: 0 })) };
+  const terrainStart = deploy(terrainScenario);
+  const slowed = resolveFrozen({ start: terrainStart, scenario: terrainScenario, turnId: 1,
+    seed: 17, orders: [move] });
+  const open = resolveFrozen({ start: deploy(field(1, 180)), scenario: field(1, 180), turnId: 1,
+    seed: 17, orders: [move] });
+  const slowedX = Number(models(slowed.state).find((model) => model.unit === 0)?.x);
+  const openX = Number(models(open.state).find((model) => model.unit === 0)?.x);
+  expect(slowedX).toBeLessThan(openX);
+});
+
+test("Entangle and Black Tentacles routes clamp goals and take a stable tangent without ping-pong", () => {
+  const hazards = [
+    { id: "entangle-1", spell: "entangle" as const, at: { x: 0, y: 0 }, radius: 10 },
+    { id: "tentacles-1", spell: "blackTentacles" as const, at: { x: 45, y: 0 }, radius: 10 },
+  ];
+  const route = routeAroundSpellHazards({ x: -30, y: 0 }, { x: 60, y: 0 }, hazards, 5);
+  expect(route.length).toBeGreaterThan(1);
+  let from = { x: -30, y: 0 };
+  for (const point of route) {
+    for (const hazard of hazards)
+      expect(segmentHitsSpellHazard(hazard, from, point)).toBe(false);
+    from = point;
+  }
+  expect(routeAroundSpellHazards({ x: -30, y: 0 }, { x: 0, y: 0 }, hazards, 5).at(-1))
+    .toEqual({ x: 15, y: 0 });
+  expect(routeAroundSpellHazards({ x: -30, y: 0 }, { x: 60, y: 0 }, hazards, 5)).toEqual(route);
+});
+
+test("an 80-model hosted formation routes every file around an active Entangle zone", () => {
+  const scenario = field(80, 300);
+  const blueUnit = scenario.commanders[0]?.units[0];
+  const redUnit = scenario.commanders[1]?.units[0];
+  if (!blueUnit || !redUnit) throw new Error("hazard fixture units missing");
+  blueUnit.anchor = { x: -150, y: 0 };
+  redUnit.anchor = { x: 150, y: 0 };
+  scenario.hazards = [{ id: "entangle-1", spell: "entangle", at: { x: -125, y: 0 }, radius: 10 }];
+  const start = deploy(scenario);
+  const result = resolveFrozen({
+    start, scenario, turnId: 1, seed: 17,
+    orders: [{
+      unitId: "blue", memberId: "seat-blue",
+      order: { kind: "move", pace: "march", path: [{ x: -100, y: 0 }] },
+    }],
+  });
+  const blue = models(result.state).filter((model) => model.unit === 0);
+  expect(blue.some((model, index) => model.x !== models(start)[index]?.x)).toBe(true);
+  for (const model of blue)
+    expect(Math.hypot(Number(model.x) + 125, Number(model.y))).toBeGreaterThan(10);
+});
+
+test("Burning Entanglement damage and Black Tentacles CMB/grapple/constriction are deterministic", () => {
+  const scenario = field(20, 80);
+  scenario.hazards = [
+    { id: "burning-1", spell: "burningEntanglement", at: { x: 0, y: 0 }, radius: 40,
+      dc: 18, startsTurn: 1, expiresAfterTurn: 3 },
+    { id: "tentacles-1", spell: "blackTentacles", at: { x: 80, y: 0 }, radius: 40,
+      casterLevel: 8, casterFactionId: "blue", startsTurn: 1, expiresAfterTurn: 3 },
+  ];
+  const start = deploy(scenario);
+  const firstJob = { start, scenario, turnId: 1, seed: 991, orders: [] };
+  const first = resolveFrozen(firstJob);
+  expect(resolveFrozen(structuredClone(firstJob)).state.hash).toBe(first.state.hash);
+  const firstPool = checkpointPool(first.state);
+  const redHeld = Array.from(firstPool.sys.pfCondition ?? []).filter((value) =>
+    (value & (1 << 14)) !== 0).length;
+  expect(redHeld).toBeGreaterThan(0);
+  expect(first.rows[0]?.lost).toBeGreaterThan(0);
+
+  const secondJob = { start: first.state, scenario, turnId: 2, seed: 992, orders: [] };
+  const second = resolveFrozen(secondJob);
+  expect(resolveFrozen(structuredClone(secondJob)).state.hash).toBe(second.state.hash);
+  expect(models(second.state).length).toBeLessThan(models(first.state).length); // held tentacles constrict
+});
+
+test("persistent spell hazards are replay-safe, expire, clear their condition, and allow reforming", () => {
+  const scenario = field(20, 180);
+  scenario.hazards = [{ id: "entangle-1", spell: "entangle", at: { x: 0, y: 0 },
+    radius: 40, dc: 100, startsTurn: 1, expiresAfterTurn: 1, casterLevel: 5 }];
+  const start = deploy(scenario);
+  const order = (): FrozenOrder => ({ unitId: "blue", memberId: "seat-blue",
+    order: { kind: "move", pace: "march", path: [{ x: 80, y: 0 }] } });
+  const firstJob = { start, scenario, turnId: 1, seed: 719, orders: [order()] };
+  const first = resolveFrozen(firstJob);
+  expect(resolveFrozen(structuredClone(firstJob)).state.hash).toBe(first.state.hash);
+  const firstPool = checkpointPool(first.state);
+  expect(Array.from(firstPool.sys.pfCondition ?? []).some((value) => (value & (1 << 13)) !== 0)).toBe(true);
+
+  const second = resolveFrozen({ start: first.state, scenario, turnId: 2, seed: 720, orders: [order()] });
+  const secondPool = checkpointPool(second.state);
+  expect(Array.from(secondPool.sys.pfCondition ?? []).every((value) => (value & (1 << 13)) === 0)).toBe(true);
+  expect(models(second.state).filter((model) => model.unit === 0).some((model) => Number(model.x) > 0)).toBe(true);
+});
+
+test("the hosted service does not silently accept remaining reference-only mechanics", () => {
   const scenario = field(10, 20);
   for (const attr of [
     { areas: [{ type: "blackTentacles" }] },
-    { terrain: { difficultCells: [{ col: 2, row: 1 }] } },
+    { terrain: { difficultCells: [{ col: 999, row: 1 }] } },
     { strategicDoctrine: true },
   ])
     expect(() => parseScenario({ ...scenario, ...attr })).toThrow();

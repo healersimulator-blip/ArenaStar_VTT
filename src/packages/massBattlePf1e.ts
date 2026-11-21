@@ -15,7 +15,8 @@ import type { PRNG } from "../core/sim";
 import type { ModelPool, Order } from "../core/strategic";
 import { ModelStatus } from "../core/strategic";
 import { err, ok, type OkOrErr } from "../core/result";
-import { PF1E_MODEL_SCHEMA, PF1eProfileRegistry } from "./pf1e/schema";
+import { PF1E_MODEL_SCHEMA, PF1eCondition, PF1eProfileRegistry } from "./pf1e/schema";
+import { pointInSpellHazard, spellHazardActive, type SpellHazard } from "../core/strategicRoom/hazardAvoidance";
 import { buildUnitProfiles, seedPF1ePool } from "./pf1e/deploySeed";
 import {
   pf1eRngFromPrng,
@@ -156,6 +157,8 @@ export interface MassBattlePf1eOptions {
   resolvedTurns?: number;
   /** Optional turn-scoped occupancy policy, applied before reactions or translation. */
   simultaneousStride?: (input: PF1eStrideInput, pool: ModelPool, unit: UnitView) => PF1eStrideResult;
+  /** Replay-frozen persistent spell areas supplied by the hosted battle checkpoint. */
+  spellHazards?: readonly SpellHazard[];
 }
 
 /** Read `data.spell` (the pack entry id an order names); absent → default spell. */
@@ -404,6 +407,70 @@ export function createMassBattlePf1e(
       // which is what keeps an aura from stacking once per model per turn.
       const profiles = buildUnitProfiles(units, registry);
       seedPF1ePool(pool, units, profiles);
+
+      // Persistent harmful spell phase (Combat Resolver 5 C5/C13/B8). It runs before movement,
+      // from frozen turn bounds, so replay and checkpoint restart consume the same dice. Conditions
+      // from an expired area are removed; living models then save individually. Black Tentacles
+      // retains last turn's grapple long enough to constrict before attempting a new CMB check.
+      const activeHazards = (opts.spellHazards ?? []).filter((hazard) =>
+        spellHazardActive(hazard, strategicTurn));
+      const conditions = pool.sys.pfCondition;
+      if (conditions) {
+        const previous = new Uint32Array(pool.count);
+        for (let i = 0; i < pool.count; i++) {
+          previous[i] = conditions[i] ?? 0;
+          conditions[i] = (conditions[i] ?? 0) & ~(PF1eCondition.ENTANGLED | PF1eCondition.HAZARD_GRAPPLED);
+        }
+        const damage = (index: number, amount: number): void => {
+          pool.hp[index] = Math.max(0, (pool.hp[index] ?? 0) - amount);
+          if ((pool.hp[index] ?? 0) <= 0) pool.status[index] = (pool.status[index] ?? 0) | ModelStatus.dead;
+        };
+        const hazardHash = (id: string): number => {
+          let hash = 2166136261;
+          for (let i = 0; i < id.length; i++) hash = Math.imul(hash ^ id.charCodeAt(i), 16777619);
+          return hash >>> 0;
+        };
+        for (const hazard of activeHazards) {
+          const dc = hazard.dc ?? 15;
+          const cmb = (hazard.casterLevel ?? 5) + 5;
+          for (let i = 0; i < pool.count; i++) {
+            if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0 ||
+              !pointInSpellHazard(hazard, { x: pool.x[i] ?? 0, y: pool.y[i] ?? 0 })) continue;
+            const ui = pool.unitIdx[i] ?? 0;
+            const hazardRng = rng.fork((hazardHash(hazard.id) ^ (pool.id[i] ?? i) ^ strategicTurn) >>> 0);
+            const die = (sides: number): number => 1 + Math.floor(hazardRng.nextFloat() * sides);
+            if (hazard.spell === "blackTentacles") {
+              if (hazard.casterFactionId && units[ui]?.factionId === hazard.casterFactionId) continue;
+              const wasHeld = ((previous[i] ?? 0) & PF1eCondition.HAZARD_GRAPPLED) !== 0;
+              const cmd = 10 + (units[ui]?.stats.bab ?? 0) + (units[ui]?.stats.strMod ?? 0) +
+                (units[ui]?.stats.dexMod ?? 0);
+              if (die(20) + cmb + (wasHeld ? 5 : 0) >= cmd) {
+                conditions[i] = (conditions[i] ?? 0) | PF1eCondition.HAZARD_GRAPPLED;
+                if (wasHeld) damage(i, die(6) + 4);
+              }
+              continue;
+            }
+            const roll = die(20);
+            const passed = roll === 20 || (roll !== 1 && roll + (pool.sys.ref?.[i] ?? 0) >= dc);
+            if (!passed) conditions[i] = (conditions[i] ?? 0) | PF1eCondition.ENTANGLED;
+            if (hazard.spell === "burningEntanglement") {
+              const dice = ((conditions[i] ?? 0) & PF1eCondition.ENTANGLED) !== 0 ? 4 : 2;
+              let fire = 0;
+              for (let rollIndex = 0; rollIndex < dice; rollIndex++) fire += die(6);
+              damage(i, passed ? Math.floor(fire / 2) : fire);
+            }
+          }
+        }
+        // Both conditions impose −4 Dexterity. At this grain that is −2 AC/touch AC/Reflex;
+        // attack penalties are read from pfCondition by combatEngine and therefore also apply
+        // to opportunity attacks and ordinary melee/ranged routines.
+        for (let i = 0; i < pool.count; i++) {
+          if (((conditions[i] ?? 0) & (PF1eCondition.ENTANGLED | PF1eCondition.HAZARD_GRAPPLED)) === 0) continue;
+          if (pool.sys.ac) pool.sys.ac[i] = Math.max(0, (pool.sys.ac[i] ?? 0) - 2);
+          if (pool.sys.touchAc) pool.sys.touchAc[i] = Math.max(0, (pool.sys.touchAc[i] ?? 0) - 2);
+          if (pool.sys.ref) pool.sys.ref[i] = (pool.sys.ref[i] ?? 0) - 2;
+        }
+      }
 
       // ── attacks of opportunity (P06, D-183 budget / D-184 queue). Budgets refresh here, at the
       // top of the turn and before anything moves: seedPF1ePool has just written every

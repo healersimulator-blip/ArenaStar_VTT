@@ -19,7 +19,15 @@ export function runWorker(job: Frozen, signal: AbortSignal): Promise<Result> {
     const worker = new Worker(new URL("./worker.mjs", import.meta.url), {
       workerData: job,
     });
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", cancel);
+    };
     const stop = (reason: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       void worker.terminate();
       reject(reason);
     };
@@ -29,11 +37,26 @@ export function runWorker(job: Frozen, signal: AbortSignal): Promise<Result> {
     );
     const cancel = () => stop(new Error("Authority stopped."));
     signal.addEventListener("abort", cancel, { once: true });
-    worker.once("message", (result: Result) => resolve(result));
-    worker.once("error", reject);
+    worker.once("message", (result: Result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      // The resolver posts its result and stays alive; terminate so the thread
+      // does not linger until the CPU-limit timeout.
+      void worker.terminate();
+      resolve(result);
+    });
+    worker.once("error", (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      void worker.terminate();
+      reject(error);
+    });
     worker.once("exit", () => {
-      clearTimeout(timeout);
-      signal.removeEventListener("abort", cancel);
+      if (settled) return;
+      settled = true;
+      cleanup();
       reject(new Error("Resolver exited before returning a result."));
     });
   });
@@ -82,7 +105,7 @@ export class StrategicAuthority {
   private constructor(
     readonly db: PostgresRoom,
     public room: RoomRecord,
-    readonly scenario: Scenario,
+    public scenario: Scenario,
     private readonly projectionKey: Buffer,
     public battle: BattleView,
     /** Grants installed with `battle`; re-applied only after a durable change commits. */
@@ -156,6 +179,11 @@ export class StrategicAuthority {
       );
       if (result.revoked) this.notify.revoke(result.revoked);
       if (result.kicked) this.notify.kick?.(result.kicked);
+      if (result.scenario) {
+        this.scenario = result.scenario;
+        this.battle = new BattleView(this.scenario, this.battle.state, this.projectionKey, this.battle);
+        this.battle.applyControl(this.control);
+      }
       if (result.control) {
         // Grants are durable already; install them on the live view so the next GET and the
         // next order validation both see the same thing. The next checkpoint records them too.

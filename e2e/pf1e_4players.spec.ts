@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-non-null-assertion, no-empty -- browser-realm fixture probes intentionally use untyped globals, required handles, and best-effort cleanup */
 import { test, expect, type Browser, type Page } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";

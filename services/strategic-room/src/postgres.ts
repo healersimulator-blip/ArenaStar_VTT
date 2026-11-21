@@ -12,7 +12,7 @@ import {
   type UnitEdit,
 } from "../../../src/core/strategicRoom/protocol";
 import { turnSeed } from "../../../src/host/turnEngine";
-import type { Scenario, UnitState } from "./scenario";
+import { parseScenario, scenarioProjectionDigest, type Scenario, type UnitState } from "./scenario";
 import type {
   Control,
   Frozen,
@@ -27,7 +27,7 @@ import type {
 const columns = `turn_id AS "turnId", version, phase, deadline_ms AS "deadlineMs", generation, members_version AS "members"`;
 const memberColumns = `id, coalesce(name,id) AS "name", role, faction_id AS "factionId", epoch`;
 const publishedColumns =
-  'version, checkpoint AS bytes, hp_max AS "maxHpMax", pool_hash AS hash, units, control';
+  'version, checkpoint AS bytes, hp_max AS "maxHpMax", pool_hash AS hash, units, hazards, actions, control';
 type RoomRow = Omit<RoomRecord, "deadlineMs" | "members"> & {
   deadlineMs: string | null;
   members: number;
@@ -60,6 +60,8 @@ export type CommittedCommand = {
   invites?: Record<string, string>;
   /** A live session the edge must drop, without revoking the seat. */
   kicked?: string;
+  /** Durable authored allegiance change; authority rebuilds every projected cohort. */
+  scenario?: Scenario;
 };
 
 /** The lease serializes admission across processes; the generation also fences late commits after lease loss. */
@@ -68,6 +70,11 @@ export class PostgresRoom {
   private lease: PoolClient | null = null;
   private ownedGeneration: number | null = null;
   private disposed: Promise<void> | undefined;
+  /** Decrypted invite resend copies, keyed by seat; invalidated when the cipher changes. */
+  private readonly inviteCache = new Map<
+    string,
+    { cipher: string; code: string }
+  >();
 
   constructor(
     connectionString: string,
@@ -332,10 +339,21 @@ export class PostgresRoom {
       [this.id],
     );
     return rows.map((row) => {
-      const code =
-        row.hasInvite && row.inviteCipher
-          ? openInvite(row.projectionKey, this.id, row.id, row.inviteCipher)
-          : null;
+      let code: string | null = null;
+      if (row.hasInvite && row.inviteCipher) {
+        // Avoid 500 AES-GCM opens on every GM view: reuse the decrypted code
+        // while the stored cipher is unchanged (reissue/admit/revoke change it).
+        const cached = this.inviteCache.get(row.id);
+        if (cached && cached.cipher === row.inviteCipher) {
+          code = cached.code;
+        } else {
+          code = openInvite(row.projectionKey, this.id, row.id, row.inviteCipher);
+          if (code) this.inviteCache.set(row.id, { cipher: row.inviteCipher, code });
+          else this.inviteCache.delete(row.id);
+        }
+      } else {
+        this.inviteCache.delete(row.id);
+      }
       return {
         id: row.id,
         name: row.name,
@@ -489,6 +507,42 @@ export class PostgresRoom {
       }
       if (member.role !== "GM")
         return deny("forbidden", "Only the GM may use this command.");
+      if (cmd.kind === "unit.faction") {
+        if (room.phase !== "orders")
+          return deny("wrong_phase", "Unit allegiance can only change while orders are open.");
+        const row = (await client.query<{ scenario: Scenario }>(
+          "SELECT scenario FROM strategic_rooms WHERE id=$1 FOR UPDATE", [this.id],
+        )).rows[0];
+        if (!row) throw new StaleAuthority("Room missing.");
+        if (!row.scenario.factions.some((faction) => faction.id === cmd.factionId))
+          return deny("invalid_order", "Unknown battlefield faction.");
+        let found = false;
+        const candidate: Scenario = {
+          ...row.scenario,
+          commanders: row.scenario.commanders.map((commander) => ({
+            ...commander,
+            units: commander.units.map((unit) => {
+              if (unit.id !== cmd.unitId) return unit;
+              found = true;
+              return { ...unit, factionId: cmd.factionId };
+            }),
+          })),
+        };
+        if (candidate.projection) {
+          const payload = { ...candidate };
+          delete payload.projection;
+          candidate.projection = { ...candidate.projection,
+            digest: scenarioProjectionDigest(payload) };
+        }
+        const next = parseScenario(candidate);
+        if (!found) return deny("invalid_order", "Unknown battlefield unit.");
+        await client.query("UPDATE strategic_rooms SET scenario=$2::jsonb WHERE id=$1", [this.id, json(next)]);
+        // Existing orders were validated against the former friend/enemy graph. Clear them
+        // rather than allowing an attack on a new ally to resolve silently.
+        await client.query("DELETE FROM strategic_orders WHERE room_id=$1 AND turn_id=$2", [this.id, room.turnId]);
+        await client.query("UPDATE strategic_revisions SET revision=revision+1 WHERE room_id=$1 AND turn_id=$2", [this.id, room.turnId]);
+        return finish({ receipt: ok(room.turnId), scenario: next, room: await this.setMembers(client) });
+      }
       if (cmd.kind === "member.update") {
         const target = (
           await client.query<{ role: string; factionId: string | null }>(
@@ -768,8 +822,8 @@ export class PostgresRoom {
     );
     await client.query(
       `INSERT INTO strategic_versions
-        (room_id,version,checkpoint,hp_max,pool_hash,units,raw_report,control)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+        (room_id,version,checkpoint,hp_max,pool_hash,units,raw_report,control,hazards,actions)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         this.id,
         state.version,
@@ -783,6 +837,8 @@ export class PostgresRoom {
         json(state.units),
         report ? Buffer.from(report) : null,
         json(snapshot),
+        json(state.hazards ?? []),
+        json(state.actions ?? []),
       ],
     );
   }
@@ -892,7 +948,7 @@ export class PostgresRoom {
     const { rows } = await this.pool.query<
       Published & { report: Buffer | null; scenario: Scenario; pin: string }
     >(
-      `SELECT v.version,v.checkpoint AS bytes,v.hp_max AS "maxHpMax",v.pool_hash AS hash,v.units,v.control,v.raw_report AS report,r.scenario,r.rules_pin AS pin
+      `SELECT v.version,v.checkpoint AS bytes,v.hp_max AS "maxHpMax",v.pool_hash AS hash,v.units,v.hazards,v.actions,v.control,v.raw_report AS report,r.scenario,r.rules_pin AS pin
        FROM strategic_rooms r JOIN strategic_versions v ON v.room_id=r.id AND v.version=r.version WHERE r.id=$1`,
       [this.id],
     );

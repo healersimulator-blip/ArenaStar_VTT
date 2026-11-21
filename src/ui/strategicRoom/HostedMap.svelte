@@ -43,6 +43,22 @@
   let detailWanted = $state(false);
   let pan: { x: number; y: number; origin: Camera; moved: boolean } | undefined;
   const colors = $derived(new Map(view.factions.map((f) => [f.id, f.color])));
+  const backgroundUrl = $derived(
+    view.background ? new URL(view.background.url, location.href).href : null,
+  );
+  let backgroundImage = $state.raw<HTMLImageElement | null>(null);
+  $effect(() => {
+    const url = backgroundUrl;
+    backgroundImage = null;
+    if (!url) return;
+    const image = new Image();
+    image.decoding = "async";
+    image.onload = () => (backgroundImage = image);
+    image.src = url;
+    return () => {
+      image.onload = null;
+    };
+  });
 
   function fit() {
     const b = view.bounds;
@@ -226,6 +242,7 @@
       r = region,
       sel = selected,
       palette = colors,
+      art = backgroundImage,
       d = detail;
     const raf = requestAnimationFrame(() => {
       if (!canvas) return;
@@ -244,6 +261,7 @@
         mapHeight = (b.maxY - b.minY) * c.scale;
       ctx.fillStyle = "#212c2b";
       ctx.fillRect(origin.x, origin.y, mapWidth, mapHeight);
+      if (art) ctx.drawImage(art, origin.x, origin.y, mapWidth, mapHeight);
       ctx.strokeStyle = "#465553";
       ctx.strokeRect(origin.x, origin.y, mapWidth, mapHeight);
       const spacing = c.scale * (c.scale >= 2 ? 5 : 120);
@@ -268,6 +286,18 @@
         ctx.lineTo(origin.x + mapWidth, y);
       }
       ctx.stroke();
+      for (const area of v.areas ?? []) {
+        const p = worldToScreen(c, area.at.x, area.at.y);
+        const radius = area.radius * c.scale;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = area.spell === "blackTentacles" ? "#7048a955" :
+          area.spell === "burningEntanglement" ? "#d75c2355" : "#4d9b5555";
+        ctx.fill();
+        ctx.strokeStyle = area.spell === "blackTentacles" ? "#b58ae6" :
+          area.spell === "burningEntanglement" ? "#ff985f" : "#80d58a";
+        ctx.stroke();
+      }
       if (r) {
         ctx.strokeStyle = "#e0bf7c";
         ctx.setLineDash([5, 5]);
@@ -340,6 +370,7 @@
   onkeydown={key}
 >
   <canvas
+    data-hosted-background={backgroundUrl ? "true" : undefined}
     bind:this={canvas}
     onpointerdown={down}
     onpointermove={move}

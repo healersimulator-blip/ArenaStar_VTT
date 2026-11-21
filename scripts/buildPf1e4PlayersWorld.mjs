@@ -8,7 +8,7 @@
  * - Used by e2e/pf1e_4players.spec.ts to verify 4 simultaneous connections, rights, movement, charsheet/compendium
  */
 import { packageFilesFromDir, packageDirectoryHash, packageContentHashFromMap } from "./lib/packageFixture.mjs";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { strToU8, zipSync } from "fflate";
@@ -148,7 +148,7 @@ async function build() {
   ];
   const pf1SystemExtra = {
     "system.json": JSON.stringify(pf1SystemModuleJson),
-    "scripts/pf1.js": `\n      Hooks.on("init", () => {\n        console.log("PF1 system mock init");\n        CONFIG.PF1 = CONFIG.PF1 || {};\n        CONFIG.PF1.abilities = { str: "Strength", dex: "Dexterity", con: "Constitution", int: "Intelligence", wis: "Wisdom", cha: "Charisma" };\n        CONFIG.PF1.spellSchools = { evocation: "Evocation", transmutation: "Transmutation" };\n        CONFIG.PF1.conditions = { entangled: "Entangled" };\n        console.log("CONFIG.PF1 shim extended");\n      });\n      Hooks.on("ready", () => {\n        console.log("PF1 system mock ready");\n        const mod = game.modules.get("pf1");\n        if (mod) {\n          mod.api = {\n            getSpellPackInfo: async () => {\n              const pack = game.packs.find(p => p.id.includes('spells'));\n              if (!pack) return { error: \"no spells pack\" };\n              const idx = await pack.getIndex();\n              const entangle = idx.find(e => e.name.toLowerCase().includes('entangle'));\n              const fireball = idx.find(e => e.name.toLowerCase().includes('fireball'));\n              return { hasEntangle: !!entangle, hasFireball: !!fireball, count: idx.length, packId: pack.id };\n            }\n          };\n        }\n      });\n    `,
+    "scripts/pf1.js": `\n      Hooks.on("init", () => {\n        console.log("PF1 system mock init");\n        CONFIG.PF1 = CONFIG.PF1 || {};\n        CONFIG.PF1.abilities = { str: "Strength", dex: "Dexterity", con: "Constitution", int: "Intelligence", wis: "Wisdom", cha: "Charisma" };\n        CONFIG.PF1.spellSchools = { evocation: "Evocation", transmutation: "Transmutation" };\n        CONFIG.PF1.conditions = { entangled: "Entangled" };\n        console.log("CONFIG.PF1 shim extended");\n      });\n      Hooks.on("ready", () => {\n        console.log("PF1 system mock ready");\n        const mod = game.modules.get("pf1");\n        if (mod) {\n          mod.api = {\n            getSpellPackInfo: async () => {\n              const pack = game.packs.find(p => p.id.includes('spells'));\n              if (!pack) return { error: "no spells pack" };\n              const idx = await pack.getIndex();\n              const entangle = idx.find(e => e.name.toLowerCase().includes('entangle'));\n              const fireball = idx.find(e => e.name.toLowerCase().includes('fireball'));\n              return { hasEntangle: !!entangle, hasFireball: !!fireball, count: idx.length, packId: pack.id };\n            }\n          };\n        }\n      });\n    `,
     "packs/spells.db": spellEntries.map(e => JSON.stringify(e)).join("\n"),
     "packs/feats.db": JSON.stringify({ _id: "feat001", name: "Point-Blank Shot", type: "feat", flags: {} }),
     "packs/classes.db": JSON.stringify({ _id: "class001", name: "Wizard", type: "class", flags: {} })

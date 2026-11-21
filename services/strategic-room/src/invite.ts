@@ -14,11 +14,26 @@ const AAD_VERSION = "arenastar-strategic-invite-v2";
 export const digest = (text: string): string =>
   createHash("sha256").update(text).digest("hex");
 
-function keyFor(secret: Uint8Array): Buffer {
+/**
+ * Derive a purpose-separated subkey from the room's projection key. The same root
+ * secret backs both invite encryption and marker HMACs; deriving per-purpose keys
+ * keeps a compromise or misuse in one primitive from leaking into the other.
+ * The "invite" purpose preserves the original `AAD_VERSION` prefix so already-
+ * sealed `invite_cipher` rows remain decryptable after this change.
+ */
+export function deriveRoomKey(secret: Uint8Array, purpose: string): Buffer {
+  const prefix =
+    purpose === "invite"
+      ? AAD_VERSION
+      : `arenastar-strategic-${purpose}-v1`;
   return createHash("sha256")
-    .update(AAD_VERSION)
+    .update(prefix)
     .update(Buffer.from(secret.buffer, secret.byteOffset, secret.byteLength))
     .digest();
+}
+
+function keyFor(secret: Uint8Array): Buffer {
+  return deriveRoomKey(secret, "invite");
 }
 
 function aad(roomId: string, memberId: string): Buffer {

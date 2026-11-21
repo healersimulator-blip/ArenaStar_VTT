@@ -23,6 +23,7 @@
     members,
     units,
     markers = [],
+    factions,
     busy = false,
     onCommand,
   }: {
@@ -30,9 +31,10 @@
     /** Unit ids and names per commander, from the GM's authorized view. */
     units: ReadonlyMap<
       string,
-      readonly { id: string; name: string; order: RoomOrder | null }[]
+      readonly { id: string; name: string; factionId: string; order: RoomOrder | null }[]
     >;
     markers?: readonly { id: string; name: string }[];
+    factions: readonly { id: string; name: string; color: string }[];
     busy?: boolean;
     onCommand: (command: Command) => void;
   } = $props();
@@ -72,7 +74,13 @@
   function invite(member: MemberRow): void {
     // The code is rendered only after the server's accepted roster view returns it.
     // A refused command, disconnect or reload therefore cannot leave a phantom invite on screen.
-    const code = crypto.randomUUID().replace(/-/g, "");
+    // 32 random bytes as base64url (43 chars) matches the service's initial invite
+    // format (`secret()` in postgres.ts) and the `parseAuth` edge, so a reissued
+    // code can be claimed over the socket without a length mismatch.
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    const code = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     send({ kind: "member.invite", memberId: member.id, invite: code });
   }
 </script>
@@ -144,6 +152,15 @@
                       setUnits(member, unit.id, event.currentTarget.checked)}
                   />
                   {unit.name}
+                  <select
+                    aria-label={`Allegiance for ${unit.name}`}
+                    data-member-unit-faction={unit.id}
+                    value={unit.factionId}
+                    disabled={busy}
+                    onchange={(event) => send({ kind: "unit.faction", unitId: unit.id, factionId: event.currentTarget.value })}
+                  >
+                    {#each factions as faction (faction.id)}<option value={faction.id}>{faction.name}</option>{/each}
+                  </select>
                   {#if unit.order}<small class="order"
                       >{orderLabel(unit.order, (id) => unitName(id))}</small
                     >{/if}
