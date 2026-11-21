@@ -343,7 +343,9 @@ export class HostedRoomClient {
           if (view.epoch !== epoch) throw new Error("View epoch mismatch.");
           if (
             view.head.version < head.version ||
-            view.head.turnId < head.turnId
+            view.head.turnId < head.turnId ||
+            (view.head.version === head.version &&
+              (view.head.members ?? 0) < (head.members ?? 0))
           )
             throw new Error("409");
           // Do not backdate a phase-only notification overtaking an in-flight HTTPS response.
@@ -351,7 +353,8 @@ export class HostedRoomClient {
           if (
             latest &&
             view.head.turnId === latest.turnId &&
-            view.head.version === latest.version
+            view.head.version === latest.version &&
+            (view.head.members ?? 0) === (latest.members ?? 0)
           )
             view.head = latest;
           const displayed = this.state.view;
@@ -367,8 +370,14 @@ export class HostedRoomClient {
             (receipt.revision ?? 0) > view.orders.revision
           )
             throw new Error("409");
+          const envChanged =
+            previous !== null &&
+            (previous.darkness !== view.darkness ||
+              JSON.stringify(previous.doors ?? null) !==
+                JSON.stringify(view.doors ?? null));
+          if (envChanged) this.region.clear(this.epoch);
           const models =
-            this.region.version === view.head.version
+            !envChanged && this.region.version === view.head.version
               ? this.region.models
               : new Map<string, ModelMarker>();
           this.update({ view, models, notice: "Connected" });

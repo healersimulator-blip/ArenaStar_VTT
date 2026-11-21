@@ -1,33 +1,63 @@
 import { createHmac } from "node:crypto";
+import type { ActionCard } from "../../../src/core/action";
 import {
   DetectionGrid,
+  firstMoveBlock,
+  hasLineOfEffect,
   type DetectionSource,
 } from "../../../src/core/detection";
 import { can } from "../../../src/core/permissions";
-import { ModelStatus } from "../../../src/core/strategic";
+import { ModelStatus, type Order } from "../../../src/core/strategic";
 import { simPositionFits } from "../../../src/core/sim";
+import {
+  pointInSpellHazard,
+  spellHazardActive,
+  type SpellHazard,
+} from "../../../src/core/strategicRoom/hazardAvoidance";
 import {
   MAX_REGION_MODELS,
   REGION_SIZE,
   STRATEGIC_CODEC,
+  STRATEGIC_SPELL_CATALOG,
+  type Baseline,
+  type HostedChatEntry,
+  type HostedLight,
+  type HostedTemplate,
   type ModelMarker,
   type OwnUnit,
+  type Point,
+  type RoomOrder,
+  type StrategicSpellId,
   type UnitEdit,
   type UnitMarker,
 } from "../../../src/core/strategicRoom/protocol";
-import { planPF1eStride } from "../../../src/packages/pf1e/stride";
+import {
+  applyUnitConditionsToStride,
+  planPF1eStride,
+} from "../../../src/packages/pf1e/stride";
 import { createMassBattlePf1e } from "../../../src/packages/massBattlePf1e";
 import { deriveRoomKey } from "./invite";
-import { CELL_FEET, inBounds, rulesInput, type Scenario } from "./scenario";
+import {
+  CELL_FEET,
+  effectiveWallsFor,
+  inBounds,
+  initialUnitResources,
+  rulesInput,
+  unitElevationAt,
+  type Scenario,
+  type ScenarioUnit,
+} from "./scenario";
 import {
   checkpointPool,
   type Control,
+  type LiveRoomState,
   type Member,
   type Published,
 } from "./state";
 import { packMarkerChanges, packMarkers } from "./viewEncoding";
 
 const rules = createMassBattlePf1e();
+const MOVE_BLOCK_EPSILON = 0.001;
 type BattleInput = ReturnType<typeof rulesInput>;
 type UnitSlot = {
   index: number;
@@ -35,6 +65,8 @@ type UnitSlot = {
   army: BattleInput["armies"][number];
   doc: BattleInput["armies"][number]["units"][number];
   own: OwnUnit;
+  authored?: ScenarioUnit;
+  badge?: string;
 };
 type Cohort = {
   markers: UnitMarker[];
@@ -44,10 +76,47 @@ type Cohort = {
   regions: Map<string, ModelMarker[]>;
 };
 
+function toRulesOrderForValidation(order: RoomOrder): Order {
+  switch (order.kind) {
+    case "hold":
+      return { kind: "hold", stance: order.stance };
+    case "reform":
+      return { kind: "custom", type: "reform", data: null };
+    case "move":
+      return {
+        kind: "move",
+        path: order.path,
+        pace: order.pace,
+        ...(order.reform ? { reform: true } : {}),
+      };
+    case "attack":
+      return {
+        kind: "attack",
+        targetUnitId: order.targetUnitId,
+        mode: order.mode,
+        ...(order.envelop ? { envelop: true } : {}),
+      };
+    case "cast":
+    case "useItem":
+    case "ready":
+      return { kind: "hold", stance: "hold" };
+  }
+}
+
+function pointToSegmentDist(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  if (len2 <= 0) return Math.hypot(px - x1, py - y1);
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / len2));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
 /** Whole-room work is once per publication, never on the order path. */
 export class BattleView {
   private readonly input: BattleInput;
   private readonly pool;
+  private readonly grid: DetectionGrid;
   private readonly units = new Map<string, UnitSlot>();
   private readonly owners = new Map<string, OwnUnit[]>();
   /** Effective unit allowlist per commander, frozen with the publication it belongs to. */
@@ -55,18 +124,61 @@ export class BattleView {
   /** A missing control entry means the seat's own deployment (unrestricted). */
   private readonly defaultControl = new Map<string, Set<string>>();
   private readonly cohorts = new Map<string | null, Cohort>();
+  live: LiveRoomState;
 
   constructor(
     readonly scenario: Scenario,
     readonly state: Published,
     projectionKey: Uint8Array,
     previous?: BattleView,
+    live: LiveRoomState = {},
   ) {
-    this.input = rulesInput(scenario, state.units);
+    this.live = live;
+    this.input = rulesInput(scenario, state.units, {
+      live,
+      ...(state.extras ? { extras: state.extras } : {}),
+      turnId: state.version,
+    });
     this.pool = checkpointPool(state);
-    // Purpose-separated subkey: marker IDs must not share the raw room secret
-    // with invite encryption (see `deriveRoomKey` in invite.ts).
     const markerKey = deriveRoomKey(projectionKey, "marker");
+    const defaultFacingByFaction = new Map<string, number>();
+    if (state.version === 0 && scenario.factions.length > 1) {
+      const sumX = new Map<string, { x: number; n: number }>();
+      let allX = 0,
+        allN = 0;
+      for (const a of this.input.armies) {
+        const u = a.units[0];
+        const pt = u?.profile.anchor as { x?: number; y?: number } | undefined;
+        if (pt && typeof pt.x === "number") {
+          const cur = sumX.get(a.factionId) ?? { x: 0, n: 0 };
+          cur.x += pt.x;
+          cur.n += 1;
+          sumX.set(a.factionId, cur);
+          allX += pt.x;
+          allN += 1;
+        }
+      }
+      if (allN > 0) {
+        const midX = allX / allN;
+        for (const [fid, cur] of sumX) {
+          if (cur.n > 0 && cur.x / cur.n > midX + 5) {
+            defaultFacingByFaction.set(fid, Math.round(Math.PI * 1000) / 1000);
+          }
+        }
+      }
+    }
+
+    const authoredById = new Map<string, ScenarioUnit>();
+    for (const commander of scenario.commanders) {
+      for (const u of commander.units) authoredById.set(u.id, u);
+    }
+    const baseResources = initialUnitResources(scenario);
+    const runtimeResources = state.extras?.unitResources ?? {};
+
+    const darkness = this.darkness();
+    const activeLights = this.activeLights();
+    const factionAnchors = new Map<string, Array<{ pt: Point; lowLight: boolean }>>();
+
     const sources: DetectionSource[] = [];
     let index = 0;
     for (const army of this.input.armies) {
@@ -77,40 +189,154 @@ export class BattleView {
         const [start, end] = doc.modelRange ?? [0, 0];
         let sx = 0,
           sy = 0,
-          alive = 0;
+          sinSum = 0,
+          cosSum = 0,
+          alive = 0,
+          minXIdx = -1,
+          maxXIdx = -1,
+          minYIdx = -1,
+          maxYIdx = -1;
         for (let i = start; i < end; i++) {
           if (this.pool.unitIdx[i] !== index)
             throw new Error("Checkpoint unit range mismatch.");
           if (((this.pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
-          sx += this.pool.x[i] ?? 0;
-          sy += this.pool.y[i] ?? 0;
+          const mx = this.pool.x[i] ?? 0;
+          const my = this.pool.y[i] ?? 0;
+          const mrot = this.pool.rot[i] ?? 0;
+          sx += mx;
+          sy += my;
+          sinSum += Math.sin(mrot);
+          cosSum += Math.cos(mrot);
+          if (minXIdx < 0 || mx < (this.pool.x[minXIdx] ?? 0)) minXIdx = i;
+          if (maxXIdx < 0 || mx > (this.pool.x[maxXIdx] ?? 0)) maxXIdx = i;
+          if (minYIdx < 0 || my < (this.pool.y[minYIdx] ?? 0)) minYIdx = i;
+          if (maxYIdx < 0 || my > (this.pool.y[maxYIdx] ?? 0)) maxYIdx = i;
           alive++;
         }
         const at = alive > 0 ? { x: sx / alive, y: sy / alive } : null;
-        if (at)
-          sources.push({
-            anchor: at,
-            factionId: army.factionId,
-            radius: rules.detection(this.input.ctx, view) * CELL_FEET,
+        const rawFacing =
+          alive > 0 ? Math.round(Math.atan2(sinSum, cosSum) * 1000) / 1000 : undefined;
+        const facing =
+          rawFacing === 0 && defaultFacingByFaction.has(army.factionId)
+            ? defaultFacingByFaction.get(army.factionId)
+            : rawFacing;
+        const authored = authoredById.get(doc._id);
+        const visionMode = authored?.vision?.mode ?? "normal";
+
+        if (at) {
+          const baseRadius = rules.detection(this.input.ctx, view) * CELL_FEET;
+          let radius = baseRadius;
+          if (darkness > 0) {
+            if (visionMode === "darkvision") {
+              radius = Math.max(baseRadius, authored?.vision?.rangeFt ?? 60);
+            } else if (visionMode === "lowLight") {
+              radius = Math.max(CELL_FEET * 2, baseRadius * (1 - 0.25 * darkness));
+            } else {
+              radius = Math.max(CELL_FEET, baseRadius * (1 - 0.5 * darkness));
+            }
+          }
+          sources.push({ anchor: at, factionId: army.factionId, radius });
+          const fList = factionAnchors.get(army.factionId) ?? [];
+          fList.push({ pt: at, lowLight: visionMode === "lowLight" });
+          factionAnchors.set(army.factionId, fList);
+
+          if (this.input.armies.length <= 500) {
+            const edgeSeen = new Set<number>();
+            for (const idx of [minXIdx, maxXIdx, minYIdx, maxYIdx]) {
+              if (idx < 0 || edgeSeen.has(idx)) continue;
+              edgeSeen.add(idx);
+              const ex = this.pool.x[idx] ?? 0;
+              const ey = this.pool.y[idx] ?? 0;
+              if ((ex - at.x) ** 2 + (ey - at.y) ** 2 > (CELL_FEET * 2) ** 2) {
+                sources.push({
+                  anchor: { x: ex, y: ey },
+                  factionId: army.factionId,
+                  radius,
+                });
+              }
+            }
+          }
+        }
+
+        const unitRes = runtimeResources[doc._id] ?? baseResources[doc._id];
+        const ownSpells: OwnUnit["spells"] = [];
+        if (authored?.spells?.length) {
+          for (const sp of authored.spells) {
+            const cat = STRATEGIC_SPELL_CATALOG[sp.id];
+            const slots =
+              unitRes?.spells?.[sp.id] ??
+              (sp.id === "entangle" ? doc.stats.entangleSlots : undefined) ??
+              sp.slots;
+            ownSpells.push({
+              id: sp.id,
+              name: cat.name,
+              itemId: sp.itemId,
+              shape: cat.shape,
+              radius: cat.radius,
+              slots: Math.max(0, slots),
+            });
+          }
+        } else if (authored?.spellcasting) {
+          const slots =
+            unitRes?.spells?.entangle ??
+            doc.stats.entangleSlots ??
+            authored.spellcasting.entangleSlots;
+          ownSpells.push({
+            id: "entangle",
+            name: "Entangle",
+            itemId: authored.spellcasting.itemId,
+            shape: "circle",
+            radius: 40,
+            slots: Math.max(0, slots),
           });
-        const authored = scenario.commanders.flatMap((commander) => commander.units)
-          .find((candidate) => candidate.id === doc._id);
+        }
+
+        const ownItems: OwnUnit["items"] = (authored?.items ?? []).map((it) => ({
+          id: it.id,
+          name: it.name,
+          effect: it.effect,
+          charges: Math.max(0, unitRes?.items?.[it.id] ?? it.charges),
+        }));
+
+        const conditions = unitRes?.conditions ?? authored?.conditions;
+        const elev = unitElevationAt(scenario, at ?? authored?.anchor);
+
         const own: OwnUnit = {
           id: doc._id,
           name: doc.name,
+          factionId: army.factionId,
           at,
           alive,
           weapon: doc.stats.weaponIsRanged ? "shot" : "melee",
-          ...(authored?.spellcasting ? { spells: [{ id: "entangle" as const,
-            itemId: authored.spellcasting.itemId,
-            slots: Math.max(0, doc.stats.entangleSlots ?? 0) }] } : {}),
+          ...(facing !== undefined ? { facing } : {}),
+          ...(elev > 0 ? { elevation: elev } : {}),
+          ...(conditions?.length ? { conditions: [...conditions] } : {}),
+          statsSummary: {
+            ac: Math.round(doc.stats.ac ?? 16),
+            bab: Math.round(doc.stats.bab ?? 6),
+            hp: Math.round(doc.stats.hp ?? 10),
+            vision: visionMode,
+          },
+          ...(ownSpells.length ? { spells: ownSpells } : {}),
+          ...(ownItems.length ? { items: ownItems } : {}),
         };
         ownUnits.push(own);
-        this.units.set(doc._id, { index, view, army, doc, own });
+        this.units.set(doc._id, {
+          index,
+          view,
+          army,
+          doc,
+          own,
+          ...(authored ? { authored } : {}),
+          ...(authored?.badge ? { badge: authored.badge } : {}),
+        });
         index++;
       }
       const commander = army.commander[0] ?? "";
-      this.owners.set(commander, [...(this.owners.get(commander) ?? []), ...ownUnits]);
+      this.owners.set(commander, [
+        ...(this.owners.get(commander) ?? []),
+        ...ownUnits,
+      ]);
     }
     for (const army of this.input.armies) {
       const commander = army.commander[0] ?? "";
@@ -123,13 +349,66 @@ export class BattleView {
       if (granted !== undefined && granted !== null)
         this.control.set(commander, new Set(granted));
     }
-    const grid = new DetectionGrid(CELL_FEET);
-    grid.reseed(sources, scenario.bounds);
-    // Raw pool indices and sequential model ids never appear on the wire.
+
+    let detectionBounds = scenario.bounds;
+    let detectionCellFeet = CELL_FEET;
+    if (sources.length > 0) {
+      let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity;
+      for (const src of sources) {
+        const pad = src.radius + CELL_FEET * 2;
+        if (src.anchor.x - pad < minX) minX = src.anchor.x - pad;
+        if (src.anchor.y - pad < minY) minY = src.anchor.y - pad;
+        if (src.anchor.x + pad > maxX) maxX = src.anchor.x + pad;
+        if (src.anchor.y + pad > maxY) maxY = src.anchor.y + pad;
+      }
+      detectionBounds = {
+        minX: Math.max(scenario.bounds.minX, Math.floor(minX / CELL_FEET) * CELL_FEET),
+        minY: Math.max(scenario.bounds.minY, Math.floor(minY / CELL_FEET) * CELL_FEET),
+        maxX: Math.min(scenario.bounds.maxX, Math.ceil(maxX / CELL_FEET) * CELL_FEET),
+        maxY: Math.min(scenario.bounds.maxY, Math.ceil(maxY / CELL_FEET) * CELL_FEET),
+      };
+      const spanX = Math.max(CELL_FEET, detectionBounds.maxX - detectionBounds.minX);
+      const spanY = Math.max(CELL_FEET, detectionBounds.maxY - detectionBounds.minY);
+      const cells = (spanX / CELL_FEET) * (spanY / CELL_FEET);
+      if (cells > 4_000_000 && this.input.ctx.walls.x1.length === 0) {
+        detectionCellFeet =
+          Math.ceil(Math.max(spanX, spanY) / 2000 / CELL_FEET) * CELL_FEET;
+      }
+    }
+    this.grid = new DetectionGrid(detectionCellFeet);
+    this.grid.reseed(sources, detectionBounds, this.input.ctx.walls);
+
+    const isIlluminatedFor = (mx: number, my: number, factionId: string): boolean => {
+      if (activeLights.length === 0) return false;
+      const viewers = factionAnchors.get(factionId);
+      if (!viewers?.length) return false;
+      for (const light of activeLights) {
+        const baseR = Math.max(light.bright, light.dim);
+        if (baseR <= 0) continue;
+        const dLight = Math.hypot(mx - light.x, my - light.y);
+        if (dLight > baseR * 2) continue;
+        if (!hasLineOfEffect(light.x, light.y, mx, my, this.input.ctx.walls)) continue;
+        for (const viewer of viewers) {
+          const effRadius = viewer.lowLight ? baseR * 2 : baseR;
+          if (dLight > effRadius) continue;
+          if (Math.hypot(mx - viewer.pt.x, my - viewer.pt.y) > 120) continue;
+          if (hasLineOfEffect(viewer.pt.x, viewer.pt.y, mx, my, this.input.ctx.walls)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+
     const ids = new Map<number, string>();
     for (const factionId of [null, ...scenario.factions.map((f) => f.id)]) {
       const bitmap =
-        factionId === null ? null : grid.visibleModels(this.pool, factionId);
+        factionId === null
+          ? null
+          : this.grid.visibleModels(this.pool, factionId);
       const markers: UnitMarker[] = [];
       const regions = new Map<string, ModelMarker[]>();
       const visible = new Set<string>();
@@ -140,14 +419,15 @@ export class BattleView {
           count = 0;
         for (let i = start; i < end; i++) {
           if (((this.pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+          const x = this.pool.x[i] ?? 0,
+            y = this.pool.y[i] ?? 0;
           if (
             factionId !== null &&
             army.factionId !== factionId &&
-            !bitmap?.[i]
+            !bitmap?.[i] &&
+            !isIlluminatedFor(x, y, factionId)
           )
             continue;
-          const x = this.pool.x[i] ?? 0,
-            y = this.pool.y[i] ?? 0;
           if (!inBounds(scenario.bounds, x, y))
             throw new Error("Resolved models outside room bounds.");
           sx += x;
@@ -156,7 +436,7 @@ export class BattleView {
           const key = this.regionKey(x, y);
           let models = regions.get(key);
           if (!models) regions.set(key, (models = []));
-          if (models.length > MAX_REGION_MODELS) continue; // One overflow entry is enough to signal truncation.
+          if (models.length > MAX_REGION_MODELS) continue;
           let id = ids.get(i);
           if (!id) {
             id = createHmac("sha256", markerKey)
@@ -165,12 +445,16 @@ export class BattleView {
               .slice(0, 22);
             ids.set(i, id);
           }
+          const rawRot = this.pool.rot[i] ?? 0;
           models.push({
             id,
             unitId: doc._id,
             x,
             y,
-            rotation: this.pool.rot[i] ?? 0,
+            rotation:
+              rawRot === 0 && defaultFacingByFaction.has(army.factionId)
+                ? (defaultFacingByFaction.get(army.factionId) ?? 0)
+                : rawRot,
           });
         }
         if (count > 0) {
@@ -204,12 +488,299 @@ export class BattleView {
     return `${Math.floor((x - this.scenario.bounds.minX) / REGION_SIZE)},${Math.floor((y - this.scenario.bounds.minY) / REGION_SIZE)}`;
   }
 
-  private cohort(member: Member) {
-    const view = this.cohorts.get(
-      member.role === "GM" ? null : member.factionId,
+  private memberFactions(member: Member): string[] {
+    if (member.role === "GM") return [];
+    const ownUnits = this.own(member);
+    const seen = new Set<string>();
+    for (const u of ownUnits) {
+      if (u.factionId) seen.add(u.factionId);
+    }
+    if (seen.size === 0 && member.factionId) seen.add(member.factionId);
+    return this.scenario.factions
+      .map((f) => f.id)
+      .filter((id) => seen.has(id));
+  }
+
+  private cohort(member: Member): Cohort {
+    if (member.role === "GM") {
+      const gmView = this.cohorts.get(null);
+      if (!gmView) throw new Error("Missing authorized view.");
+      return gmView;
+    }
+    const fids = this.memberFactions(member);
+    if (fids.length <= 1) {
+      const view = this.cohorts.get(fids[0] ?? member.factionId);
+      if (!view) throw new Error("Missing authorized view.");
+      return view;
+    }
+    const visible = new Set<string>();
+    const markerById = new Map<string, UnitMarker>();
+    const regions = new Map<string, ModelMarker[]>();
+    const regionSeen = new Map<string, Set<string>>();
+    for (const fid of fids) {
+      const sub = this.cohorts.get(fid);
+      if (!sub) continue;
+      for (const id of sub.visible) visible.add(id);
+      for (const m of sub.markers) {
+        if (!markerById.has(m.id)) markerById.set(m.id, m);
+      }
+      for (const [key, list] of sub.regions) {
+        let out = regions.get(key);
+        let seen = regionSeen.get(key);
+        if (!out) regions.set(key, (out = []));
+        if (!seen) regionSeen.set(key, (seen = new Set()));
+        for (const model of list) {
+          if (seen.has(model.id) || out.length > MAX_REGION_MODELS) continue;
+          seen.add(model.id);
+          out.push(model);
+        }
+      }
+    }
+    const markers = [...this.units.keys()]
+      .map((id) => markerById.get(id))
+      .filter((m): m is UnitMarker => m !== undefined);
+    return {
+      markers,
+      packedMarkers: packMarkers(markers, this.scenario.factions),
+      changes: undefined,
+      visible,
+      regions,
+    };
+  }
+
+  private areaDetectedBy(
+    origin: Point,
+    radius: number,
+    factionIds: readonly string[],
+  ): boolean {
+    if (factionIds.length === 0) return false;
+    const minC = Math.max(
+      Math.floor(this.scenario.bounds.minX / CELL_FEET),
+      Math.floor((origin.x - radius) / CELL_FEET),
     );
-    if (!view) throw new Error("Missing authorized view.");
-    return view;
+    const maxC = Math.min(
+      Math.floor(this.scenario.bounds.maxX / CELL_FEET),
+      Math.floor((origin.x + radius) / CELL_FEET),
+    );
+    const minR = Math.max(
+      Math.floor(this.scenario.bounds.minY / CELL_FEET),
+      Math.floor((origin.y - radius) / CELL_FEET),
+    );
+    const maxR = Math.min(
+      Math.floor(this.scenario.bounds.maxY / CELL_FEET),
+      Math.floor((origin.y + radius) / CELL_FEET),
+    );
+    const r2 = radius * radius;
+    for (let r = minR; r <= maxR; r++) {
+      const sy = (r + 0.5) * CELL_FEET;
+      for (let c = minC; c <= maxC; c++) {
+        const sx = (c + 0.5) * CELL_FEET;
+        if ((sx - origin.x) ** 2 + (sy - origin.y) ** 2 > r2) continue;
+        if (this.grid.detectedAt(sx, sy, factionIds)) return true;
+      }
+    }
+    return false;
+  }
+
+  unitFactions(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [id, slot] of this.units) out[id] = slot.army.factionId;
+    return out;
+  }
+
+  effectiveWalls(): NonNullable<Baseline["walls"]> | undefined {
+    const list = effectiveWallsFor(this.scenario, this.live).list;
+    if (!list.length) return undefined;
+    return list.map((w) => ({
+      ...(w.id ? { id: w.id } : {}),
+      x1: w.x1,
+      y1: w.y1,
+      x2: w.x2,
+      y2: w.y2,
+      restriction: w.restriction,
+      ...(w.door !== undefined ? { door: w.door } : {}),
+    }));
+  }
+
+  doors(): Record<string, 0 | 1 | 2> | undefined {
+    const out: Record<string, 0 | 1 | 2> = {};
+    for (const w of this.scenario.walls ?? []) {
+      if (w.id && w.door !== undefined) {
+        out[w.id] =
+          this.live.doors && Object.hasOwn(this.live.doors, w.id)
+            ? (this.live.doors[w.id] ?? w.door)
+            : w.door;
+      }
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+
+  canToggleDoor(member: Member, wallId: string, nextDoor: 0 | 1 | 2): string | null {
+    const wall = (this.scenario.walls ?? []).find((w) => w.id === wallId);
+    if (!wall || wall.door === undefined) return "No such door on this battlefield.";
+    if (member.role === "GM") return null;
+    if (nextDoor === 2) return "Only the GM may lock doors.";
+    const curDoor =
+      this.live.doors && Object.hasOwn(this.live.doors, wallId)
+        ? (this.live.doors[wallId] ?? wall.door)
+        : wall.door;
+    if (curDoor === 2) return "Door is locked.";
+    const myUnits = this.own(member);
+    const near = myUnits.some(
+      (u) =>
+        u.alive > 0 &&
+        u.at !== null &&
+        pointToSegmentDist(u.at.x, u.at.y, wall.x1, wall.y1, wall.x2, wall.y2) <= 25,
+    );
+    if (!near) return "Move a controlled unit within 25 ft of the door to operate it.";
+    return null;
+  }
+
+  darkness(): number {
+    return this.live.darkness !== undefined
+      ? this.live.darkness
+      : (this.scenario.lighting?.darkness ?? 0);
+  }
+
+  private resolveLights(): HostedLight[] {
+    return (this.scenario.lighting?.lights ?? []).map((l): HostedLight => {
+      const hidden =
+        this.live.lightHidden && Object.hasOwn(this.live.lightHidden, l.id)
+          ? this.live.lightHidden[l.id]
+          : l.hidden;
+      const copy: HostedLight = {
+        id: l.id,
+        x: l.x,
+        y: l.y,
+        dim: l.dim,
+        bright: l.bright,
+        color: l.color,
+        alpha: l.alpha,
+      };
+      if (hidden !== undefined) copy.hidden = hidden;
+      return copy;
+    });
+  }
+
+  private activeLights(): HostedLight[] {
+    return this.resolveLights().filter((l) => !l.hidden);
+  }
+
+  lights(member: Member): HostedLight[] | undefined {
+    const raw = this.resolveLights();
+    const list = member.role === "GM" ? raw : raw.filter((l) => !l.hidden);
+    return list.length ? list : undefined;
+  }
+
+  templates(): HostedTemplate[] | undefined {
+    const list = this.live.templates ?? this.scenario.templates;
+    return list?.length ? list : undefined;
+  }
+
+  chat(member: Member): HostedChatEntry[] | undefined {
+    const all = this.live.chat;
+    if (!all?.length) return undefined;
+    if (member.role === "GM") return all;
+    const fids = this.memberFactions(member);
+    const filtered = all.filter(
+      (c) =>
+        c.scope === "public" ||
+        (c.scope === "faction" && c.factionId !== null && fids.includes(c.factionId)),
+    );
+    return filtered.length ? filtered : undefined;
+  }
+
+  content(member: Member): Baseline["content"] | undefined {
+    const src = this.scenario.content;
+    const fxCuesAll = this.state.extras?.fxCues ?? [];
+    const fids = this.memberFactions(member);
+    const fxCues =
+      member.role === "GM"
+        ? fxCuesAll
+        : fxCuesAll.filter((cue) => this.areaDetectedBy(cue.at, Math.max(10, cue.radius), fids));
+
+    const journals =
+      member.role === "GM"
+        ? src?.journals
+        : src?.journals?.filter((j) => j.visibility === "public");
+    const rollTables =
+      member.role === "GM"
+        ? src?.rollTables
+        : src?.rollTables?.filter((t) => t.visibility === "public");
+    const playlists = src?.playlists;
+    const macros = src?.macros;
+    const activeTrackId = this.live.activeTrackId ?? null;
+
+    if (
+      !journals?.length &&
+      !rollTables?.length &&
+      !playlists?.length &&
+      !macros?.length &&
+      !fxCues.length &&
+      activeTrackId === null
+    ) {
+      return undefined;
+    }
+    return {
+      ...(journals?.length ? { journals } : {}),
+      ...(rollTables?.length ? { rollTables } : {}),
+      ...(playlists?.length ? { playlists } : {}),
+      ...(playlists?.length || activeTrackId !== null ? { activeTrackId } : {}),
+      ...(macros?.length ? { macros } : {}),
+      ...(fxCues.length ? { fxCues } : {}),
+    };
+  }
+
+  areas(member: Member, turnId: number): NonNullable<Baseline["areas"]> {
+    const active = [
+      ...(this.scenario.hazards ?? []),
+      ...(this.state.hazards ?? []),
+    ].filter((hazard) => spellHazardActive(hazard, turnId));
+    const fids = this.memberFactions(member);
+    return active
+      .filter(
+        (hazard) =>
+          member.role === "GM" ||
+          (hazard.casterFactionId !== undefined &&
+            fids.includes(hazard.casterFactionId)) ||
+          this.areaDetectedBy(hazard.at, hazard.radius, fids),
+      )
+      .map((hazard) => ({
+        id: hazard.id,
+        spell: hazard.spell,
+        at: { ...hazard.at },
+        radius: hazard.radius,
+        ...(hazard.expiresAfterTurn !== undefined
+          ? { expiresAfterTurn: hazard.expiresAfterTurn }
+          : {}),
+      }));
+  }
+
+  actions(member: Member): ActionCard[] | undefined {
+    const all = this.state.actions;
+    if (!all?.length) return undefined;
+    if (member.role === "GM") return all;
+    const fids = this.memberFactions(member);
+    const view = this.cohort(member);
+    const filtered = all.filter((action) => {
+      const sourceUnit = this.units.get(action.source.name);
+      if (
+        sourceUnit &&
+        (fids.includes(sourceUnit.army.factionId) ||
+          view.visible.has(sourceUnit.doc._id))
+      ) {
+        return true;
+      }
+      if (action.area) {
+        return this.areaDetectedBy(
+          action.area.origin,
+          action.area.radius ?? 0,
+          fids,
+        );
+      }
+      return false;
+    });
+    return filtered.length ? filtered : undefined;
   }
 
   markers(member: Member): UnitMarker[] {
@@ -222,7 +793,6 @@ export class BattleView {
     return this.cohort(member).packedMarkers;
   }
 
-  /** Apply already-durable grants to a freshly built view (never during a publication). */
   applyControl(control: Control) {
     for (const [memberId, units] of Object.entries(control)) {
       if (units === null) this.control.delete(memberId);
@@ -238,90 +808,345 @@ export class BattleView {
     ).has(unitId);
   }
 
-  /** Only units this commander may currently order; a revoked grant disappears with the view. */
-  own(member: Member): OwnUnit[] {
+  own(member: Member, badgeUrls?: Readonly<Record<string, string>>): OwnUnit[] {
     if (member.role === "GM") return this.owners.get(member.id) ?? [];
-    const granted =
-      this.control.get(member.id) ?? this.defaultControl.get(member.id);
+    const explicit = this.control.get(member.id);
+    const granted = explicit ?? this.defaultControl.get(member.id);
     if (!granted) return [];
-    return (this.owners.get(member.id) ?? []).filter((unit) =>
-      granted.has(unit.id),
-    );
+    const list = explicit
+      ? [...this.units.values()]
+          .filter(({ own }) => granted.has(own.id))
+          .map(({ own }) => own)
+      : (this.owners.get(member.id) ?? []).filter((unit) => granted.has(unit.id));
+    if (!badgeUrls) return list;
+    return list.map((unit) => {
+      const hash = this.units.get(unit.id)?.badge;
+      const badgeUrl = hash ? badgeUrls[hash] : undefined;
+      return badgeUrl ? { ...unit, badgeUrl } : unit;
+    });
   }
+
+  unitFacings(member: Member): Record<string, number> | undefined {
+    const visible = this.cohort(member).visible;
+    if (visible.size > 500) return undefined;
+    const out: Record<string, number> = {};
+    let count = 0;
+    for (const id of visible) {
+      const facing = this.units.get(id)?.own.facing;
+      if (facing !== undefined && Math.abs(facing) >= 0.002) {
+        out[id] = facing;
+        count++;
+      }
+    }
+    return count > 0 ? out : undefined;
+  }
+
+  unitBadges(
+    member: Member,
+    badgeUrls: Readonly<Record<string, string>>,
+  ): Record<string, string> | undefined {
+    const visible = this.cohort(member).visible;
+    const out: Record<string, string> = {};
+    let count = 0;
+    for (const id of visible) {
+      const hash = this.units.get(id)?.badge;
+      const url = hash ? badgeUrls[hash] : undefined;
+      if (url) {
+        out[id] = url;
+        count++;
+      }
+    }
+    return count > 0 ? out : undefined;
+  }
+
   region(member: Member, key: string): ModelMarker[] {
     return this.cohort(member).regions.get(key) ?? [];
+  }
+
+  private hasFormationLineOfEffect(
+    attackerRange: readonly [number, number],
+    defenderRange: readonly [number, number],
+  ): boolean {
+    const walls = this.input.ctx.walls;
+    if (walls.x1.length === 0) return true;
+    for (let a = attackerRange[0]; a < attackerRange[1]; a++) {
+      if (((this.pool.status[a] ?? 0) & ModelStatus.dead) !== 0) continue;
+      const ax = this.pool.x[a] ?? 0;
+      const ay = this.pool.y[a] ?? 0;
+      for (let d = defenderRange[0]; d < defenderRange[1]; d++) {
+        if (((this.pool.status[d] ?? 0) & ModelStatus.dead) !== 0) continue;
+        if (
+          hasLineOfEffect(
+            ax,
+            ay,
+            this.pool.x[d] ?? 0,
+            this.pool.y[d] ?? 0,
+            walls,
+          )
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private activeHazardsForNextTurn(): SpellHazard[] {
+    const nextTurn = this.state.version + 1;
+    return [
+      ...(this.scenario.hazards ?? []),
+      ...(this.state.hazards ?? []),
+    ].filter((h) => spellHazardActive(h, nextTurn));
+  }
+
+  private findUnitSpell(unitSlot: UnitSlot, spellId: StrategicSpellId) {
+    const sp = unitSlot.authored?.spells?.find((s) => s.id === spellId);
+    if (sp) return sp;
+    if (spellId === "entangle" && unitSlot.authored?.spellcasting) {
+      return {
+        id: "entangle" as const,
+        itemId: unitSlot.authored.spellcasting.itemId,
+        casterLevel: unitSlot.authored.spellcasting.casterLevel,
+        castingAbilityMod: unitSlot.authored.spellcasting.castingAbilityMod,
+        slots: unitSlot.authored.spellcasting.entangleSlots,
+      };
+    }
+    return null;
   }
 
   validate(member: Member, edit: UnitEdit): string | null {
     const { unitId, order } = edit;
     const unit = this.units.get(unitId);
+    const explicitlyGranted = this.control.get(member.id)?.has(unitId) === true;
     if (
       !unit ||
-      unit.army.commander[0] !== member.id ||
+      (!explicitlyGranted && unit.army.commander[0] !== member.id) ||
       !this.allows(member.id, unitId) ||
-      !can(member, "order", unit.doc, "units", { parent: unit.army })
+      !can(
+        explicitlyGranted ? { ...member, factionId: unit.army.factionId } : member,
+        "order",
+        unit.doc,
+        "units",
+        {
+          parent: explicitlyGranted
+            ? {
+                ...unit.army,
+                commander: [member.id],
+                ownership: { ...unit.army.ownership, [member.id]: 3 },
+              }
+            : unit.army,
+        },
+      )
     ) {
       return "Unit is not assigned to this commander.";
     }
     if (!order) return null;
     const range = unit.view.modelRange;
     if (!range || unit.own.alive === 0) return "Unit has no living models.";
+    let firstLiving = -1;
+    for (let i = range[0]; i < range[1]; i++) {
+      if (((this.pool.status[i] ?? 0) & ModelStatus.dead) === 0) {
+        firstLiving = i;
+        break;
+      }
+    }
+    if (firstLiving < 0) return "Unit has no living models.";
+
     if (order.kind === "cast") {
-      const authored = this.scenario.commanders.flatMap((commander) => commander.units)
-        .find((candidate) => candidate.id === unitId);
-      const caster = authored?.spellcasting;
-      if (!caster || caster.itemId !== order.itemId)
+      const spellEntry = this.findUnitSpell(unit, order.spellId);
+      if (!spellEntry || spellEntry.itemId !== order.itemId)
         return "This unit does not have that projected PF1e spell item.";
-      if ((unit.view.stats.entangleSlots ?? 0) < 1)
-        return "Entangle has no remaining projected spell slot.";
+      const ownSpell = unit.own.spells?.find((s) => s.id === order.spellId);
+      if ((ownSpell?.slots ?? 0) < 1)
+        return `${STRATEGIC_SPELL_CATALOG[order.spellId].name} has no remaining projected spell slot.`;
       if (!inBounds(this.scenario.bounds, order.origin.x, order.origin.y))
         return "Spell origin is outside the battlefield.";
-      const from = { x: this.pool.x[range[0]] ?? 0, y: this.pool.y[range[0]] ?? 0 };
-      if (Math.hypot(order.origin.x - from.x, order.origin.y - from.y) >
-        400 + 40 * caster.casterLevel)
-        return "Entangle origin is beyond the regular PF1e long range.";
+      const cat = STRATEGIC_SPELL_CATALOG[order.spellId];
+      const from = {
+        x: this.pool.x[firstLiving] ?? 0,
+        y: this.pool.y[firstLiving] ?? 0,
+      };
+      if (cat.shape === "cone" || cat.shape === "line") {
+        if (!order.dir || Math.hypot(order.dir.x, order.dir.y) < 0.01) {
+          return `${cat.name} requires a non-zero aim direction.`;
+        }
+      } else {
+        const maxRange =
+          cat.range === "long"
+            ? 400 + 40 * spellEntry.casterLevel
+            : 100 + 10 * spellEntry.casterLevel;
+        if (Math.hypot(order.origin.x - from.x, order.origin.y - from.y) > maxRange) {
+          return `${cat.name} origin is beyond the regular PF1e ${cat.range} range.`;
+        }
+        if (
+          !hasLineOfEffect(
+            from.x,
+            from.y,
+            order.origin.x,
+            order.origin.y,
+            this.input.ctx.walls,
+          )
+        ) {
+          return "No line of effect to spell origin.";
+        }
+      }
       return null;
     }
-    const verdict = rules.validateOrder(this.input.ctx, unit.view, order);
+
+    if (order.kind === "useItem") {
+      const ownItem = unit.own.items?.find((it) => it.id === order.itemId);
+      if (!ownItem) return "This unit does not carry that projected PF1e item.";
+      if (ownItem.charges < 1) return `${ownItem.name} has no remaining charges.`;
+      const targetId = order.targetUnitId ?? unitId;
+      const targetSlot = this.units.get(targetId);
+      if (!targetSlot || targetSlot.army.factionId !== unit.army.factionId) {
+        return "Item target must be an allied unit.";
+      }
+      if (targetId !== unitId && unit.own.at && targetSlot.own.at) {
+        if (Math.hypot(targetSlot.own.at.x - unit.own.at.x, targetSlot.own.at.y - unit.own.at.y) > 60) {
+          return "Allied unit must be within 60 ft to receive item support.";
+        }
+      }
+      return null;
+    }
+
+    if (order.kind === "ready") {
+      if (order.response === "shot" && unit.own.weapon !== "shot") {
+        return "Only ranged formations can ready a volley.";
+      }
+      if (order.targetUnitId !== undefined) {
+        const target = this.units.get(order.targetUnitId);
+        if (
+          !target ||
+          target.army.factionId === unit.army.factionId ||
+          !this.cohort(member).visible.has(order.targetUnitId)
+        ) {
+          return "Readied target is not an available visible enemy.";
+        }
+      }
+      return null;
+    }
+
+    const verdict = rules.validateOrder(
+      this.input.ctx,
+      unit.view,
+      toRulesOrderForValidation(order),
+    );
     if (!verdict.ok) return verdict.error;
+
+    if (order.kind === "reform") {
+      const from = {
+        x: this.pool.x[firstLiving] ?? 0,
+        y: this.pool.y[firstLiving] ?? 0,
+      };
+      const infantry = rules.schema.unitTypes.infantry as { move: number };
+      const cond = applyUnitConditionsToStride(
+        { from, path: [from], pace: "march", movePoints: infantry.move, cellFeet: CELL_FEET },
+        this.pool,
+        unit.view,
+      );
+      if (cond.refusal) return cond.refusal;
+      return null;
+    }
+
     if (order.kind === "attack") {
       const target = this.units.get(order.targetUnitId);
-      // Do not distinguish a hidden, invalid or friendly target in the reply.
+      const unitCohort = this.cohorts.get(unit.army.factionId);
       if (
         !target ||
         target.army.factionId === unit.army.factionId ||
-        !this.cohort(member).visible.has(order.targetUnitId)
+        !this.cohort(member).visible.has(order.targetUnitId) ||
+        !unitCohort?.visible.has(order.targetUnitId)
       )
         return "Target is not an available enemy.";
       if (order.mode !== unit.own.weapon)
         return "This unit does not use that attack mode.";
+      const targetRange = target.view.modelRange;
+      if (
+        targetRange &&
+        !this.hasFormationLineOfEffect(range, targetRange)
+      ) {
+        return "No line of effect to target.";
+      }
     }
+
     if (order.kind === "move") {
       const bounds = this.scenario.bounds;
       if (order.path.some(({ x, y }) => !inBounds(bounds, x, y)))
         return "Destination is outside the battlefield.";
       const [start, end] = range;
-      const from = { x: this.pool.x[start] ?? 0, y: this.pool.y[start] ?? 0 };
-      const infantry = rules.schema.unitTypes.infantry as { move: number };
-      const stride = planPF1eStride({
+      const from = {
+        x: this.pool.x[firstLiving] ?? 0,
+        y: this.pool.y[firstLiving] ?? 0,
+      };
+      const typeKey = (unit.view.type as keyof typeof rules.schema.unitTypes) || "infantry";
+      const unitTypeBlock = (rules.schema.unitTypes[typeKey] ?? rules.schema.unitTypes.infantry) as { move: number };
+      const difficult = new Set<string>();
+      for (const cell of this.input.ctx.terrain?.difficultCells ?? [])
+        difficult.add(`${cell.col},${cell.row}`);
+      for (const hazard of this.activeHazardsForNextTurn()) {
+        const minC = Math.floor((hazard.at.x - hazard.radius) / CELL_FEET);
+        const maxC = Math.floor((hazard.at.x + hazard.radius) / CELL_FEET);
+        const minR = Math.floor((hazard.at.y - hazard.radius) / CELL_FEET);
+        const maxR = Math.floor((hazard.at.y + hazard.radius) / CELL_FEET);
+        for (let c = minC; c <= maxC; c++) {
+          for (let r = minR; r <= maxR; r++) {
+            if (
+              pointInSpellHazard(hazard, {
+                x: (c + 0.5) * CELL_FEET,
+                y: (r + 0.5) * CELL_FEET,
+              })
+            ) {
+              difficult.add(`${c},${r}`);
+            }
+          }
+        }
+      }
+      const rawStrideInput = {
         from,
         path: order.path,
         pace: order.pace,
-        movePoints: infantry.move,
+        movePoints: order.reform ? unitTypeBlock.move * 0.5 : unitTypeBlock.move,
         cellFeet: CELL_FEET,
-      });
+        difficult,
+        blockAt: (fx: number, fy: number, tx: number, ty: number) =>
+          firstMoveBlock(fx, fy, tx, ty, this.input.ctx.walls),
+        blockEpsilon: MOVE_BLOCK_EPSILON,
+      };
+      const cond = applyUnitConditionsToStride(
+        rawStrideInput,
+        this.pool,
+        unit.view,
+      );
+      if (cond.refusal) return cond.refusal;
+      const stride = planPF1eStride(cond.input);
       if (stride.refusal) return stride.refusal;
+      if (order.pace === "charge" && stride.hitWall)
+        return "charge: a charge requires a clear path unobstructed by walls (CRB p.188)";
       const dx = stride.to.x - from.x,
         dy = stride.to.y - from.y;
       for (let i = start; i < end; i++) {
-        const x = Math.fround((this.pool.x[i] ?? 0) + dx),
-          y = Math.fround((this.pool.y[i] ?? 0) + dy);
+        if (((this.pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+        const mx = this.pool.x[i] ?? 0,
+          my = this.pool.y[i] ?? 0;
+        const x = Math.fround(mx + dx),
+          y = Math.fround(my + dy);
         if (
           !simPositionFits(x, STRATEGIC_CODEC) ||
           !simPositionFits(y, STRATEGIC_CODEC) ||
           !inBounds(bounds, Math.round(x * 16) / 16, Math.round(y * 16) / 16)
         )
           return "Formation would extend outside the battlefield.";
+        if (order.pace === "charge") {
+          const fileStride = planPF1eStride({
+            ...cond.input,
+            from: { x: mx, y: my },
+            path: [{ x: mx + dx, y: my + dy }],
+          });
+          if (fileStride.refusal) return fileStride.refusal;
+          if (fileStride.hitWall)
+            return "charge: a charge requires a clear path unobstructed by walls (CRB p.188)";
+        }
       }
     }
     return null;

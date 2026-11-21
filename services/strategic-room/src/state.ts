@@ -1,8 +1,12 @@
 import {
   STRATEGIC_CODEC,
   type Head,
+  type HostedChatEntry,
+  type HostedFxCue,
+  type HostedTemplate,
   type ReportRow,
   type RoomOrder,
+  type StrategicItemEffect,
 } from "../../../src/core/strategicRoom/protocol";
 import { decodeSimSnapshot, poolFromSnapshot } from "../../../src/sim/codec";
 import { PF1E_MODEL_SCHEMA } from "../../../src/packages/pf1e/schema";
@@ -18,16 +22,19 @@ export type Member = {
   factionId: string | null;
   epoch: number;
 };
+
 export type FrozenOrder = {
   unitId: string;
   memberId: string;
   order: RoomOrder;
 };
+
 /**
  * Commander slot → the units that seat may order. A missing key or `null` means the seat's
  * own deployment; an empty array means explicitly no units. Frozen with each publication.
  */
 export type Control = Record<string, string[] | null>;
+
 export type MemberRecord = {
   id: string;
   name: string;
@@ -41,6 +48,37 @@ export type MemberRecord = {
   /** GM-only recoverable invite code, or null when no active invite can be resent. */
   invite: string | null;
 };
+
+export type UnitBuffState = {
+  effect: Exclude<StrategicItemEffect, "heal">;
+  expiresAfterTurn: number;
+};
+
+export type UnitRuntimeResources = {
+  /** Remaining slots by `StrategicSpellId`. */
+  spells?: Record<string, number>;
+  /** Remaining charges by `itemId`. */
+  items?: Record<string, number>;
+  /** Active condition labels on this unit. */
+  conditions?: string[];
+  /** Active temporary buffs on this unit. */
+  buffs?: UnitBuffState[];
+};
+
+export type VersionExtras = {
+  fxCues?: HostedFxCue[];
+  unitResources?: Record<string, UnitRuntimeResources>;
+};
+
+export type LiveRoomState = {
+  doors?: Record<string, 0 | 1 | 2>;
+  darkness?: number;
+  lightHidden?: Record<string, boolean>;
+  templates?: HostedTemplate[];
+  activeTrackId?: string | null;
+  chat?: HostedChatEntry[];
+};
+
 export type Published = {
   version: number;
   bytes: Uint8Array;
@@ -52,21 +90,27 @@ export type Published = {
   /** Bounded shared action evidence created by hosted authoritative resolution. */
   actions?: ActionCard[];
   control?: Control;
+  extras?: VersionExtras;
 };
+
 export type Frozen = {
   turnId: number;
   seed: number;
   orders: FrozenOrder[];
   start: Published;
   scenario: Scenario;
+  live?: LiveRoomState;
 };
+
 export type OutcomeRow = ReportRow & { memberId: string };
+
 export type Result = {
   state: Published;
   rows: OutcomeRow[];
   report: Uint8Array;
   metrics: { resolveMs: number; rulesMs: number; artifactMs: number };
 };
+
 export type RoomRecord = Head & { generation: number; members: number };
 
 export function checkpointPool(state: Published) {

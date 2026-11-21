@@ -22,6 +22,8 @@ export function screenToWorld(camera: Camera, sx: number, sy: number): { x: numb
   return { x: sx / camera.scale + camera.x, y: sy / camera.scale + camera.y };
 }
 
+export const LARGE_SCENE_ZOOM_LIMITS = { min: 0.002, max: 10 } as const;
+
 /**
  * Zoom keeping one screen point pinned (§14 pinch/scroll zoom): the world
  * coordinate under the cursor stays under the cursor.
@@ -45,12 +47,13 @@ export function fitRect(
   rect: { x: number; y: number; width: number; height: number },
   viewport: Viewport,
   padding = 32,
+  minScale = 0.002,
 ): Camera {
   const scale = Math.min(
-    (viewport.width - padding * 2) / rect.width,
-    (viewport.height - padding * 2) / rect.height,
+    (viewport.width - padding * 2) / Math.max(1, rect.width),
+    (viewport.height - padding * 2) / Math.max(1, rect.height),
   );
-  const clamped = Math.min(10, Math.max(0.1, scale));
+  const clamped = Math.min(10, Math.max(minScale, scale));
   return {
     scale: clamped,
     x: rect.x + rect.width / 2 - viewport.width / (2 * clamped),

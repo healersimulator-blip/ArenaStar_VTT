@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 import { digest, openInvite, sealInvite } from "./invite";
 import schema from "../schema.sql?raw";
 import pg, { type PoolClient } from "pg";
@@ -6,17 +6,20 @@ import {
   PAGE_ROWS,
   reject,
   type Command,
+  type HostedChatEntry,
   type OwnOrders,
   type Receipt,
   type ReportRow,
+  type RoomOrder,
   type UnitEdit,
 } from "../../../src/core/strategicRoom/protocol";
 import { turnSeed } from "../../../src/host/turnEngine";
-import { parseScenario, scenarioProjectionDigest, type Scenario, type UnitState } from "./scenario";
+import { MAX_UNITS_PER_COMMANDER, parseScenario, scenarioProjectionDigest, type Scenario, type UnitState } from "./scenario";
 import type {
   Control,
   Frozen,
   FrozenOrder,
+  LiveRoomState,
   Member,
   MemberRecord,
   Published,
@@ -27,7 +30,7 @@ import type {
 const columns = `turn_id AS "turnId", version, phase, deadline_ms AS "deadlineMs", generation, members_version AS "members"`;
 const memberColumns = `id, coalesce(name,id) AS "name", role, faction_id AS "factionId", epoch`;
 const publishedColumns =
-  'version, checkpoint AS bytes, hp_max AS "maxHpMax", pool_hash AS hash, units, hazards, actions, control';
+  'version, checkpoint AS bytes, hp_max AS "maxHpMax", pool_hash AS hash, units, hazards, actions, control, extras';
 type RoomRow = Omit<RoomRecord, "deadlineMs" | "members"> & {
   deadlineMs: string | null;
   members: number;
@@ -49,6 +52,33 @@ const roomRecord = ({
 });
 const secret = () => randomBytes(32).toString("base64url");
 const json = JSON.stringify;
+function evaluateHostRollFormula(
+  formula: string,
+): { formula: string; total: number; breakdown: string; provenance: "host" } | null {
+  const m = /^\s*(\d{1,2})d(\d{1,3})\s*(?:([+-])\s*(\d{1,3}))?\s*$/i.exec(formula);
+  if (!m) return null;
+  const count = Number(m[1]);
+  const sides = Number(m[2]);
+  if (count < 1 || count > 20 || sides < 2 || sides > 100) return null;
+  const sign = m[3] === "-" ? -1 : 1;
+  const mod = m[4] ? sign * Number(m[4]) : 0;
+  const rolls: number[] = [];
+  let sum = 0;
+  for (let i = 0; i < count; i++) {
+    const r = randomInt(1, sides + 1);
+    rolls.push(r);
+    sum += r;
+  }
+  const total = sum + mod;
+  const modLabel = mod === 0 ? "" : mod > 0 ? ` + ${mod}` : ` - ${Math.abs(mod)}`;
+  return {
+    formula: `${count}d${sides}${mod === 0 ? "" : mod > 0 ? `+${mod}` : `${mod}`}`,
+    total,
+    breakdown: `[${rolls.join(", ")}]${modLabel} = ${total}`,
+    provenance: "host",
+  };
+}
+
 export class StaleAuthority extends Error {}
 export type CommittedCommand = {
   receipt: Receipt;
@@ -56,12 +86,16 @@ export type CommittedCommand = {
   revoked?: string;
   /** A durable allowlist edit, or `null` when the seat returns to its deployment. */
   control?: { memberId: string; units: string[] | null };
+  /** Multi-seat durable allowlist updates applied atomically by `roster.assign`. */
+  controls?: Control;
   /** Accepted one-time invite codes, returned only to the GM's private receipt. */
   invites?: Record<string, string>;
   /** A live session the edge must drop, without revoking the seat. */
   kicked?: string;
   /** Durable authored allegiance change; authority rebuilds every projected cohort. */
   scenario?: Scenario;
+  /** Updated live interactive VTT state (doors, lights, templates, playlist, chat). */
+  live?: LiveRoomState;
 };
 
 /** The lease serializes admission across processes; the generation also fences late commits after lease loss. */
@@ -148,9 +182,9 @@ export class PostgresRoom {
         throw new Error("Another authority owns this room.");
       this.lease = lease;
       const { rows } = await lease.query<
-        RoomRow & { scenario: Scenario; key: Buffer }
+        RoomRow & { scenario: Scenario; key: Buffer; liveState: LiveRoomState | null }
       >(
-        `UPDATE strategic_rooms SET generation=generation+1 WHERE id=$1 AND rules_pin=$2 RETURNING ${columns}, scenario, projection_key AS key`,
+        `UPDATE strategic_rooms SET generation=generation+1 WHERE id=$1 AND rules_pin=$2 RETURNING ${columns}, scenario, projection_key AS key, live_state AS "liveState"`,
         [this.id, this.pin],
       );
       const row = rows[0];
@@ -160,7 +194,12 @@ export class PostgresRoom {
         );
       if (this.lease !== lease) throw new StaleAuthority("Room lease lost.");
       this.ownedGeneration = row.generation;
-      return { room: roomRecord(row), scenario: row.scenario, key: row.key };
+      return {
+        room: roomRecord(row),
+        scenario: row.scenario,
+        key: row.key,
+        live: row.liveState ?? {},
+      };
     } catch (error) {
       lease.off("error", lost);
       lease.off("end", lost);
@@ -338,6 +377,12 @@ export class PostgresRoom {
       ORDER BY m.id COLLATE "C"`,
       [this.id],
     );
+    const claimedBySeat = new Map<string, Set<string>>();
+    for (const row of rows) {
+      if (row.role === "PLAYER" && row.controlUnits) {
+        claimedBySeat.set(row.id, new Set(row.controlUnits));
+      }
+    }
     return rows.map((row) => {
       let code: string | null = null;
       if (row.hasInvite && row.inviteCipher) {
@@ -354,14 +399,28 @@ export class PostgresRoom {
       } else {
         this.inviteCache.delete(row.id);
       }
+      const initialDeployed = row.deployed ?? [];
+      const activeUnits = row.controlUnits ?? initialDeployed;
+      const claimedElsewhere = new Set<string>();
+      for (const [seatId, set] of claimedBySeat) {
+        if (seatId !== row.id) for (const uid of set) claimedElsewhere.add(uid);
+      }
+      const deployed = row.controlUnits
+        ? [
+            ...new Set([
+              ...initialDeployed.filter((uid) => !claimedElsewhere.has(uid)),
+              ...activeUnits,
+            ]),
+          ]
+        : initialDeployed;
       return {
         id: row.id,
         name: row.name,
         role: row.role,
         factionId: row.factionId,
         // SQL NULL is unrestricted; an empty JSON array is an explicit no-unit allowlist.
-        units: row.controlUnits ?? row.deployed ?? [],
-        deployed: row.deployed ?? [],
+        units: activeUnits,
+        deployed,
         claimed: row.claimed,
         invite:
           code && row.inviteHash && digest(code) === row.inviteHash
@@ -411,6 +470,7 @@ export class PostgresRoom {
     seed: number,
     validate: (edit: UnitEdit) => string | null,
     deployable: (memberId: string) => readonly string[],
+    validateDoor?: (wallId: string, door: 0 | 1 | 2) => string | null,
   ): Promise<CommittedCommand> {
     const generation = this.generation;
     const requestDigest = digest(json(cmd));
@@ -505,6 +565,232 @@ export class PostgresRoom {
         );
         return finish({ receipt: ok(room.turnId, revision) });
       }
+      if (
+        cmd.kind === "scene.door" ||
+        cmd.kind === "scene.light" ||
+        cmd.kind === "scene.template" ||
+        cmd.kind === "scene.playlist" ||
+        cmd.kind === "chat.send" ||
+        cmd.kind === "table.roll" ||
+        cmd.kind === "macro.exec"
+      ) {
+        if (
+          (cmd.kind === "scene.light" ||
+            cmd.kind === "scene.template" ||
+            cmd.kind === "scene.playlist") &&
+          member.role !== "GM"
+        ) {
+          return deny("forbidden", "Only the GM may use this scene control.");
+        }
+        const stateRow = (
+          await client.query<{ scenario: Scenario; liveState: LiveRoomState | null }>(
+            `SELECT scenario, live_state AS "liveState" FROM strategic_rooms WHERE id=$1 FOR UPDATE`,
+            [this.id],
+          )
+        ).rows[0];
+        if (!stateRow) throw new StaleAuthority("Room missing.");
+        const live: LiveRoomState = {
+          ...(stateRow.liveState ?? {}),
+          ...(stateRow.liveState?.doors ? { doors: { ...stateRow.liveState.doors } } : {}),
+          ...(stateRow.liveState?.lightHidden
+            ? { lightHidden: { ...stateRow.liveState.lightHidden } }
+            : {}),
+          ...(stateRow.liveState?.templates
+            ? { templates: [...stateRow.liveState.templates] }
+            : {}),
+          ...(stateRow.liveState?.chat ? { chat: [...stateRow.liveState.chat] } : {}),
+        };
+        const appendChat = (entry: HostedChatEntry) => {
+          const list = [...(live.chat ?? []), entry];
+          live.chat = list.slice(Math.max(0, list.length - 80));
+        };
+
+        if (cmd.kind === "scene.door") {
+          const reason = validateDoor
+            ? validateDoor(cmd.wallId, cmd.door)
+            : member.role === "GM"
+              ? null
+              : "Door control unavailable.";
+          if (reason) return deny("forbidden", reason);
+          const doors = live.doors ?? (live.doors = {});
+          doors[cmd.wallId] = cmd.door;
+        } else if (cmd.kind === "scene.light") {
+          if (cmd.darkness !== undefined) live.darkness = cmd.darkness;
+          if (cmd.lightId !== undefined && cmd.hidden !== undefined) {
+            const exists = (stateRow.scenario.lighting?.lights ?? []).some(
+              (l) => l.id === cmd.lightId,
+            );
+            if (!exists) return deny("invalid_order", "Unknown ambient light.");
+            const lightHidden = live.lightHidden ?? (live.lightHidden = {});
+            lightHidden[cmd.lightId] = cmd.hidden;
+          }
+        } else if (cmd.kind === "scene.template") {
+          const base = live.templates ?? [...(stateRow.scenario.templates ?? [])];
+          if (cmd.op === "delete") {
+            live.templates = base.filter((t) => t.id !== cmd.templateId);
+          } else if (cmd.template) {
+            const tpl = cmd.template;
+            const filtered = base.filter((t) => t.id !== tpl.id);
+            if (filtered.length >= 32) {
+              return deny("invalid_order", "At most 32 measured templates may be active.");
+            }
+            live.templates = [...filtered, tpl];
+          }
+        } else if (cmd.kind === "scene.playlist") {
+          if (cmd.trackId !== null) {
+            const validTrack = (stateRow.scenario.content?.playlists ?? []).some((p) =>
+              p.tracks.some((t) => t.id === cmd.trackId),
+            );
+            if (!validTrack) return deny("invalid_order", "Unknown playlist track.");
+          }
+          live.activeTrackId = cmd.trackId;
+        } else if (cmd.kind === "chat.send") {
+          const scope = cmd.scope ?? "public";
+          if (scope === "gm" && member.role !== "GM") {
+            return deny("forbidden", "Only the GM may post GM-only notes.");
+          }
+          let roll: HostedChatEntry["roll"];
+          if (cmd.rollFormula) {
+            const evaluated = evaluateHostRollFormula(cmd.rollFormula);
+            if (!evaluated) {
+              return deny("invalid_order", "Roll formula must use NdS or NdS+M (e.g. 1d20+6).");
+            }
+            roll = evaluated;
+          }
+          appendChat({
+            id: `chat-${admittedAt}-${randomBytes(4).toString("hex")}`,
+            senderId: member.id,
+            senderName: member.name ?? member.id,
+            factionId: member.factionId,
+            scope,
+            text: cmd.text,
+            ...(roll ? { roll } : {}),
+            createdAt: admittedAt,
+          });
+        } else if (cmd.kind === "table.roll") {
+          const table = (stateRow.scenario.content?.rollTables ?? []).find(
+            (t) => t.id === cmd.tableId,
+          );
+          if (!table) return deny("invalid_order", "Unknown roll table.");
+          if (table.visibility === "gm" && member.role !== "GM") {
+            return deny("forbidden", "That roll table is GM-only.");
+          }
+          const maxRoll = table.results.reduce(
+            (acc, r) => Math.max(acc, r.range[1]),
+            1,
+          );
+          const minRoll = table.results.reduce(
+            (acc, r) => Math.min(acc, r.range[0]),
+            maxRoll,
+          );
+          const pick = randomInt(minRoll, Math.max(minRoll + 1, maxRoll + 1));
+          const matched = table.results.find(
+            (r) => pick >= r.range[0] && pick <= r.range[1],
+          );
+          const chosen = matched?.text ?? table.results[0]?.text ?? "No result";
+          appendChat({
+            id: `table-${admittedAt}-${randomBytes(4).toString("hex")}`,
+            senderId: member.id,
+            senderName: member.name ?? member.id,
+            factionId: member.factionId,
+            scope: table.visibility === "gm" ? "gm" : "public",
+            text: `${table.name}: ${chosen}`,
+            roll: {
+              formula: table.formula,
+              total: pick,
+              breakdown: `[${pick}] -> ${chosen}`,
+              provenance: "host",
+            },
+            createdAt: admittedAt,
+          });
+        } else if (cmd.kind === "macro.exec") {
+          const macro = (stateRow.scenario.content?.macros ?? []).find(
+            (m) => m.id === cmd.macroId,
+          );
+          if (!macro) return deny("invalid_order", "Unknown macro.");
+          if (!macro.executable || macro.disabledReason || !macro.action) {
+            return deny(
+              "invalid_order",
+              macro.disabledReason ??
+                "Arbitrary script macros are disabled in hosted strategic rooms.",
+            );
+          }
+          if (macro.action.kind === "chat") {
+            let roll: HostedChatEntry["roll"];
+            if (macro.action.rollFormula) {
+              const evaluated = evaluateHostRollFormula(macro.action.rollFormula);
+              if (!evaluated) return deny("invalid_order", "Macro roll formula is invalid.");
+              roll = evaluated;
+            }
+            appendChat({
+              id: `macro-${admittedAt}-${randomBytes(4).toString("hex")}`,
+              senderId: member.id,
+              senderName: member.name ?? member.id,
+              factionId: member.factionId,
+              scope: "public",
+              text: `${macro.name}: ${macro.action.text}`,
+              ...(roll ? { roll } : {}),
+              createdAt: admittedAt,
+            });
+          } else if (macro.action.kind === "order") {
+            if (room.phase !== "orders") {
+              return deny("turn_closed", "Order macros can only run while orders are open.");
+            }
+            if (!cmd.unitId) {
+              return deny("invalid_order", "Select a controlled unit before running an order macro.");
+            }
+            const macroOrder: RoomOrder =
+              macro.action.orderKind === "reform"
+                ? { kind: "reform" }
+                : {
+                    kind: "hold",
+                    stance: macro.action.orderKind === "defend" ? "defend" : "hold",
+                  };
+            const reason = validate({ unitId: cmd.unitId, order: macroOrder });
+            if (reason) return deny("invalid_order", reason);
+            const revisionKey = [this.id, room.turnId, member.id];
+            const prevRev =
+              (
+                await client.query<{ revision: number }>(
+                  "SELECT revision FROM strategic_revisions WHERE room_id=$1 AND turn_id=$2 AND member_id=$3",
+                  revisionKey,
+                )
+              ).rows[0]?.revision ?? 0;
+            const nextRev = prevRev + 1;
+            await client.query(
+              "DELETE FROM strategic_orders WHERE room_id=$1 AND turn_id=$2 AND member_id=$3 AND unit_id=$4",
+              [...revisionKey, cmd.unitId],
+            );
+            await client.query(
+              "INSERT INTO strategic_orders(room_id,turn_id,member_id,unit_id,payload) VALUES($1,$2,$3,$4,$5::jsonb)",
+              [...revisionKey, cmd.unitId, json(macroOrder)],
+            );
+            await client.query(
+              `INSERT INTO strategic_revisions VALUES($1,$2,$3,$4)
+               ON CONFLICT (room_id,turn_id,member_id) DO UPDATE SET revision=EXCLUDED.revision`,
+              [...revisionKey, nextRev],
+            );
+            await client.query("UPDATE strategic_rooms SET live_state=$2::jsonb WHERE id=$1", [
+              this.id,
+              json(live),
+            ]);
+            return finish({
+              receipt: ok(room.turnId, nextRev),
+              live,
+              room: await this.setMembers(client),
+            });
+          }
+        }
+        await client.query("UPDATE strategic_rooms SET live_state=$2::jsonb WHERE id=$1", [
+          this.id,
+          json(live),
+        ]);
+        return finish({
+          receipt: ok(room.turnId),
+          live,
+          room: await this.setMembers(client),
+        });
+      }
       if (member.role !== "GM")
         return deny("forbidden", "Only the GM may use this command.");
       if (cmd.kind === "unit.faction") {
@@ -528,20 +814,206 @@ export class PostgresRoom {
             }),
           })),
         };
-        if (candidate.projection) {
-          const payload = { ...candidate };
-          delete payload.projection;
-          candidate.projection = { ...candidate.projection,
-            digest: scenarioProjectionDigest(payload) };
-        }
-        const next = parseScenario(candidate);
         if (!found) return deny("invalid_order", "Unknown battlefield unit.");
+        const { projection, ...withoutProjection } = candidate;
+        const canonical = parseScenario(withoutProjection);
+        const next = projection
+          ? parseScenario({
+              ...canonical,
+              projection: {
+                ...projection,
+                digest: scenarioProjectionDigest(canonical),
+              },
+            })
+          : canonical;
         await client.query("UPDATE strategic_rooms SET scenario=$2::jsonb WHERE id=$1", [this.id, json(next)]);
         // Existing orders were validated against the former friend/enemy graph. Clear them
         // rather than allowing an attack on a new ally to resolve silently.
         await client.query("DELETE FROM strategic_orders WHERE room_id=$1 AND turn_id=$2", [this.id, room.turnId]);
         await client.query("UPDATE strategic_revisions SET revision=revision+1 WHERE room_id=$1 AND turn_id=$2", [this.id, room.turnId]);
         return finish({ receipt: ok(room.turnId), scenario: next, room: await this.setMembers(client) });
+      }
+      if (cmd.kind === "roster.assign") {
+        if (room.phase !== "orders")
+          return deny("wrong_phase", "Team and unit assignments can only change while orders are open.");
+        const row = (
+          await client.query<{ scenario: Scenario }>(
+            "SELECT scenario FROM strategic_rooms WHERE id=$1 FOR UPDATE",
+            [this.id],
+          )
+        ).rows[0];
+        if (!row) throw new StaleAuthority("Room missing.");
+        const factionIds = new Set(row.scenario.factions.map((f) => f.id));
+        const allUnits = new Map<string, string>();
+        const initialBySeat = new Map<string, string[]>();
+        for (const c of row.scenario.commanders) {
+          initialBySeat.set(c.id, c.units.map((u) => u.id));
+          for (const u of c.units) allUnits.set(u.id, u.factionId ?? c.factionId);
+        }
+        const memberRows = (
+          await client.query<{
+            id: string;
+            factionId: string | null;
+            controlUnits: string[] | null;
+          }>(
+            `SELECT id, faction_id AS "factionId", control_units AS "controlUnits"
+             FROM strategic_members WHERE room_id=$1 AND role='PLAYER' AND active FOR UPDATE`,
+            [this.id],
+          )
+        ).rows;
+        const activeById = new Map(memberRows.map((m) => [m.id, m]));
+        for (const a of cmd.assignments) {
+          if (!activeById.has(a.memberId))
+            return deny("forbidden", `No active commander with slot ID ${a.memberId}.`);
+          if (a.factionId !== undefined && !factionIds.has(a.factionId))
+            return deny("invalid_order", "Unknown battlefield faction.");
+          if (a.units !== undefined) {
+            if (a.units.length > MAX_UNITS_PER_COMMANDER)
+              return deny("invalid_order", `A commander may control at most ${MAX_UNITS_PER_COMMANDER} units.`);
+            for (const uid of a.units) {
+              if (!allUnits.has(uid))
+                return deny("invalid_order", `Unknown battlefield unit ${uid}.`);
+            }
+          }
+        }
+        const commanderBySeat = new Map(row.scenario.commanders.map((c) => [c.id, c]));
+        const nextFaction = new Map<string, string>();
+        const effectiveUnits = new Map<string, string[]>();
+        const touchedControl = new Set<string>();
+        for (const m of memberRows) {
+          const fallbackFaction =
+            m.factionId ??
+            commanderBySeat.get(m.id)?.factionId ??
+            row.scenario.factions[0]?.id ??
+            "";
+          nextFaction.set(m.id, fallbackFaction);
+          effectiveUnits.set(m.id, [...(m.controlUnits ?? initialBySeat.get(m.id) ?? [])]);
+        }
+        const claimed = new Map<string, string>();
+        for (const a of cmd.assignments) {
+          if (a.units !== undefined) {
+            for (const uid of a.units) claimed.set(uid, a.memberId);
+          }
+        }
+        if (claimed.size > 0) {
+          for (const [seatId, list] of effectiveUnits) {
+            const filtered = list.filter((uid) => {
+              const owner = claimed.get(uid);
+              return owner === undefined || owner === seatId;
+            });
+            if (filtered.length !== list.length) {
+              effectiveUnits.set(seatId, filtered);
+              touchedControl.add(seatId);
+            }
+          }
+        }
+        const touchedFaction = new Set<string>();
+        for (const a of cmd.assignments) {
+          if (a.factionId !== undefined && a.factionId !== nextFaction.get(a.memberId)) {
+            nextFaction.set(a.memberId, a.factionId);
+            touchedFaction.add(a.memberId);
+          }
+          if (a.units !== undefined) {
+            effectiveUnits.set(a.memberId, [...a.units]);
+            touchedControl.add(a.memberId);
+          }
+        }
+        const nextUnitFaction = new Map(allUnits);
+        for (const seatId of new Set([...touchedFaction, ...touchedControl])) {
+          const fid = nextFaction.get(seatId);
+          if (!fid) continue;
+          for (const uid of effectiveUnits.get(seatId) ?? []) {
+            nextUnitFaction.set(uid, fid);
+          }
+        }
+        if (new Set(nextUnitFaction.values()).size !== 2) {
+          return deny(
+            "invalid_order",
+            "Both factions must retain at least one unit on the battlefield.",
+          );
+        }
+        const candidate: Scenario = {
+          ...row.scenario,
+          commanders: row.scenario.commanders.map((commander) => ({
+            ...commander,
+            units: commander.units.map((unit) => {
+              const fid = nextUnitFaction.get(unit.id) ?? unit.factionId ?? commander.factionId;
+              return { ...unit, factionId: fid };
+            }),
+          })),
+        };
+        const { projection, ...withoutProjection } = candidate;
+        const canonical = parseScenario(withoutProjection);
+        const next = projection
+          ? parseScenario({
+              ...canonical,
+              projection: {
+                ...projection,
+                digest: scenarioProjectionDigest(canonical),
+              },
+            })
+          : canonical;
+        await client.query(
+          "UPDATE strategic_rooms SET scenario=$2::jsonb WHERE id=$1",
+          [this.id, json(next)],
+        );
+        if (touchedFaction.size > 0) {
+          const seatIds = [...touchedFaction];
+          const factionVals = seatIds.map((seatId) => nextFaction.get(seatId) ?? "");
+          await client.query(
+            `UPDATE strategic_members AS m SET faction_id=u.fid
+             FROM unnest($2::text[], $3::text[]) AS u(id, fid)
+             WHERE m.room_id=$1 AND m.id=u.id`,
+            [this.id, seatIds, factionVals],
+          );
+        }
+        const controls: Control = {};
+        if (touchedControl.size > 0) {
+          const seatIds = [...touchedControl];
+          const unitJsonVals: string[] = [];
+          const pairSeats: string[] = [];
+          const pairUnits: string[] = [];
+          for (const seatId of seatIds) {
+            const units = effectiveUnits.get(seatId) ?? [];
+            controls[seatId] = units;
+            unitJsonVals.push(json(units));
+            for (const uid of units) {
+              pairSeats.push(seatId);
+              pairUnits.push(uid);
+            }
+          }
+          await client.query(
+            `UPDATE strategic_members AS m SET control_units=u.units::jsonb
+             FROM unnest($2::text[], $3::text[]) AS u(id, units)
+             WHERE m.room_id=$1 AND m.id=u.id`,
+            [this.id, seatIds, unitJsonVals],
+          );
+          await client.query(
+            "DELETE FROM strategic_control WHERE room_id=$1 AND member_id=ANY($2::text[])",
+            [this.id, seatIds],
+          );
+          if (pairSeats.length > 0) {
+            await client.query(
+              `INSERT INTO strategic_control(room_id,member_id,unit_id)
+               SELECT $1, m_id, u_id FROM unnest($2::text[], $3::text[]) AS p(m_id, u_id)`,
+              [this.id, pairSeats, pairUnits],
+            );
+          }
+        }
+        await client.query(
+          "DELETE FROM strategic_orders WHERE room_id=$1 AND turn_id=$2",
+          [this.id, room.turnId],
+        );
+        await client.query(
+          "UPDATE strategic_revisions SET revision=revision+1 WHERE room_id=$1 AND turn_id=$2",
+          [this.id, room.turnId],
+        );
+        return finish({
+          receipt: ok(room.turnId),
+          scenario: next,
+          ...(Object.keys(controls).length ? { controls } : {}),
+          room: await this.setMembers(client),
+        });
       }
       if (cmd.kind === "member.update") {
         const target = (
@@ -739,19 +1211,30 @@ export class PostgresRoom {
     room: RoomRecord,
     seed: number,
   ): Promise<RoomRecord> {
-    // Start state and scenario are immutable references. Everything mutable the resolver reads is copied here.
+    // Start state, control and scenario are immutable per turn: copy scenario and control at freeze
+    // time so later `unit.faction`, `member.update` or `roster.assign` mutations never rewrite past turns.
+    const rawControl = await this.currentControl(client);
+    const controlSnapshot: Control = Object.fromEntries(
+      Object.entries(rawControl).filter(
+        (entry): entry is [string, string[]] => entry[1] !== null,
+      ),
+    );
     await client.query(
-      `INSERT INTO strategic_frozen(room_id,turn_id,start_version,rules_pin,seed,orders,revisions)
+      `INSERT INTO strategic_frozen(room_id,turn_id,start_version,rules_pin,seed,orders,revisions,scenario,control,extras)
       VALUES($1,$2,$3,$4,$5,
         (SELECT coalesce(jsonb_agg(jsonb_build_object('unitId',unit_id,'memberId',member_id,'order',payload) ORDER BY unit_id COLLATE "C"),'[]')
           FROM strategic_orders WHERE room_id=$1 AND turn_id=$2),
-        (SELECT coalesce(jsonb_object_agg(member_id,revision),'{}') FROM strategic_revisions WHERE room_id=$1 AND turn_id=$2))`,
+        (SELECT coalesce(jsonb_object_agg(member_id,revision),'{}') FROM strategic_revisions WHERE room_id=$1 AND turn_id=$2),
+        (SELECT scenario FROM strategic_rooms WHERE id=$1),
+        $6::jsonb,
+        (SELECT live_state FROM strategic_rooms WHERE id=$1))`,
       [
         this.id,
         room.turnId,
         room.version,
         this.pin,
         turnSeed(seed, room.turnId),
+        json(controlSnapshot),
       ],
     );
     return this.setPhase(client, "resolution");
@@ -792,19 +1275,38 @@ export class PostgresRoom {
       start: number;
       seed: string;
       orders: FrozenOrder[];
+      scenario: unknown;
+      control: Control | null;
+      extras: LiveRoomState | null;
     }>(
-      `SELECT start_version AS start,seed,orders FROM strategic_frozen
+      `SELECT start_version AS start,seed,orders,scenario,control,extras FROM strategic_frozen
       WHERE room_id=$1 AND turn_id=$2 AND rules_pin=$3`,
       [this.id, turnId, this.pin],
     );
     const row = rows[0];
     if (!row) throw new Error("Frozen job missing or incompatible.");
+    const startState = await this.version(row.start);
+    let frozenScenario = scenario;
+    if (row.scenario && typeof row.scenario === "object") {
+      const { projection, ...withoutProjection } = row.scenario as Scenario;
+      const canonical = parseScenario(withoutProjection);
+      frozenScenario = projection
+        ? parseScenario({
+            ...canonical,
+            projection: {
+              ...projection,
+              digest: scenarioProjectionDigest(canonical),
+            },
+          })
+        : canonical;
+    }
     return {
       turnId,
       seed: Number(row.seed),
       orders: row.orders,
-      start: await this.version(row.start),
-      scenario,
+      start: row.control ? { ...startState, control: row.control } : startState,
+      scenario: frozenScenario,
+      ...(row.extras ? { live: row.extras } : {}),
     };
   }
 
@@ -822,8 +1324,8 @@ export class PostgresRoom {
     );
     await client.query(
       `INSERT INTO strategic_versions
-        (room_id,version,checkpoint,hp_max,pool_hash,units,raw_report,control,hazards,actions)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        (room_id,version,checkpoint,hp_max,pool_hash,units,raw_report,control,hazards,actions,extras)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [
         this.id,
         state.version,
@@ -839,6 +1341,7 @@ export class PostgresRoom {
         json(snapshot),
         json(state.hazards ?? []),
         json(state.actions ?? []),
+        json(state.extras ?? {}),
       ],
     );
   }
@@ -895,16 +1398,17 @@ export class PostgresRoom {
 
   async privateState(
     member: Member,
-  ): Promise<{ room: RoomRecord; orders: OwnOrders } | null> {
+  ): Promise<{ room: RoomRecord; orders: OwnOrders; factionId: string | null } | null> {
     const { rows } = await this.pool.query<
-      RoomRow & { revision: number; edits: UnitEdit[] }
+      RoomRow & { revision: number; edits: UnitEdit[]; factionId: string | null }
     >(
-      `SELECT ${columns},
+      `SELECT ${columns}, m.faction_id AS "factionId",
       coalesce((SELECT revision FROM strategic_revisions WHERE room_id=r.id AND turn_id=r.turn_id AND member_id=$2), 0) AS revision,
       coalesce((SELECT jsonb_agg(jsonb_build_object('unitId',unit_id,'order',payload) ORDER BY unit_id COLLATE "C") FROM strategic_orders
         WHERE room_id=r.id AND turn_id=r.turn_id AND member_id=$2), '[]') AS edits
-      FROM strategic_rooms r WHERE r.id=$1 AND r.generation=$4
-      AND EXISTS (SELECT 1 FROM strategic_members m WHERE m.room_id=r.id AND m.id=$2 AND m.epoch=$3 AND m.active)`,
+      FROM strategic_rooms r
+      JOIN strategic_members m ON m.room_id=r.id AND m.id=$2 AND m.epoch=$3 AND m.active
+      WHERE r.id=$1 AND r.generation=$4`,
       [this.id, member.id, member.epoch, this.generation],
     );
     const row = rows[0];
@@ -912,6 +1416,7 @@ export class PostgresRoom {
       ? {
           room: roomRecord(row),
           orders: { revision: row.revision, edits: row.edits },
+          factionId: row.factionId,
         }
       : null;
   }
@@ -944,22 +1449,29 @@ export class PostgresRoom {
     report: Uint8Array | null;
     scenario: Scenario;
     pin: string;
+    live: LiveRoomState;
   }> {
     const { rows } = await this.pool.query<
-      Published & { report: Buffer | null; scenario: Scenario; pin: string }
+      Published & {
+        report: Buffer | null;
+        scenario: Scenario;
+        pin: string;
+        liveState: LiveRoomState | null;
+      }
     >(
-      `SELECT v.version,v.checkpoint AS bytes,v.hp_max AS "maxHpMax",v.pool_hash AS hash,v.units,v.hazards,v.actions,v.control,v.raw_report AS report,r.scenario,r.rules_pin AS pin
+      `SELECT v.version,v.checkpoint AS bytes,v.hp_max AS "maxHpMax",v.pool_hash AS hash,v.units,v.hazards,v.actions,v.control,v.extras,v.raw_report AS report,r.scenario,r.rules_pin AS pin,r.live_state AS "liveState"
        FROM strategic_rooms r JOIN strategic_versions v ON v.room_id=r.id AND v.version=r.version WHERE r.id=$1`,
       [this.id],
     );
     const row = rows[0];
     if (!row) throw new Error("No committed checkpoint.");
-    const { report, scenario, pin, ...state } = row;
+    const { report, scenario, pin, liveState, ...state } = row;
     return {
       state: { ...state, units: state.units as UnitState[] },
       report,
       scenario,
       pin,
+      live: liveState ?? {},
     };
   }
 }

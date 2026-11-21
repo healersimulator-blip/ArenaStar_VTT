@@ -386,11 +386,22 @@ test("the hosted service does not silently accept remaining reference-only mecha
       expectedRevision: 0,
       unitEdits: [{ unitId: "blue", order }],
     });
-  expect(submit({ kind: "hold", stance: "hold" })).not.toBeNull();
+  for (const valid of [
+    { kind: "hold", stance: "hold" },
+    { kind: "hold", stance: "defend" },
+    { kind: "reform" },
+    { kind: "move", pace: "march", path: [{ x: 20, y: 20 }], reform: true },
+    { kind: "move", pace: "charge", path: [{ x: 20, y: 20 }] },
+    { kind: "attack", targetUnitId: "red", mode: "melee", envelop: true },
+  ])
+    expect(submit(valid)).not.toBeNull();
   for (const order of [
     { kind: "formation", formation: "column" },
-    { kind: "reform" },
     { kind: "envelop" },
+    { kind: "reform", extra: true },
+    { kind: "move", pace: "charge", path: [{ x: 20, y: 20 }], reform: true },
+    { kind: "move", pace: "charge", path: [{ x: 10, y: 10 }, { x: 20, y: 20 }] },
+    { kind: "attack", targetUnitId: "red", mode: "shot", envelop: true },
     { kind: "custom", type: "avoidHazard" },
   ])
     expect(submit(order)).toBeNull();

@@ -39,19 +39,25 @@ critical confirmation, ranged increments, cover, AC types, DR, conditions, attac
 flanking/envelopment, walls, casualties, and deterministic substreams. Hazard conditions are inputs
 to that same engine rather than a parallel simplified attack routine.
 
-## Current integration gap—not a product boundary
+## End-to-end PF1e spell & hazard integration (implemented)
 
-The normal VTT already aims and resolves the regular 40-foot Entangle spread, verifies affected token
-footprints host-side, applies saves/conditions, consumes resources and owns persistent FX. Hosted
-hazard state is the dense, replay-safe representation of that same result; it is not intended to be a
-second strategic-only spell definition or a scenario-authored substitute.
+Shared PF1e spell projection (`src/core/strategicRoom/pf1eActionProjection.ts`) and campaign
+actor/spellbook projection (`src/core/strategicRoom/campaignScene.ts`) now connect authored PF1e
+actors, prepared/spontaneous spell slots, validated `ActionArea` geometry, host-owned saving throw
+DCs, action cards, `HostedFxCue`s, persistent hazards, and campaign slot write-back end to end
+across 7 shared PF1e spells (`STRATEGIC_SPELL_CATALOG`):
 
-The missing adapter must carry the regular PF1e caster, item, slot/resource expenditure, validated
-`ActionArea`, duration, action card, condition provenance and FX binding into the frozen hosted turn,
-then enumerate affected models instead of tactical token footprints. Hosted controls and authority
-must expose that ordinary cast. Campaign launch currently freezing scenario hazard rows and hosted
-orders exposing only hold/march/attack are pilot limitations to remove.
+- **Persistent area hazards:** `entangle` (circle 40 ft, 1 min/level), `burning-entanglement`
+  (circle 40 ft, fire tick + Reflex save), and `black-tentacles` (circle 20 ft, CMB `CL + 5` vs
+  CMD grapple + `1d6+4` constriction).
+- **Instantaneous formation blasts:** `fireball` (circle 20 ft, `min(CL, 10)d6` fire, Reflex half),
+  `burning-hands` (15-ft cone, `min(CL, 5)d4` fire, Reflex half), `lightning-bolt` (120-ft line,
+  `min(CL, 10)d6` electricity, Reflex half), and `cone-of-cold` (60-ft cone, `min(CL, 15)d6` cold,
+  Reflex half).
 
-Keep this gap visible in capability reports until a browser can cast regular PF1e Entangle in hosted
-strategic play end to end. Do not describe the gap as intended scope or solve it by maintaining
-parallel tactical and strategic spell semantics.
+Commanders select projected spells on their unit card, preview the circle/cone/line template on the
+strategic canvas, submit `cast` orders validated for control, range, line-of-effect (including live
+door states), and remaining slots, see unit-level `ActionCard`s and FX cues on publish, and
+reconcile expended spell slots back to the campaign `ActorDocument` on battle finish (with
+single-step GM undo).
+

@@ -27,6 +27,11 @@ import {
 } from "./pf1e/combatEngine";
 import { markPF1eFlanking } from "./pf1e/envelopment";
 import {
+  applyFormationReform,
+  applyPerimeterEnvelopment,
+  type PerimeterEnvelopResult,
+} from "./pf1e/formationSlots";
+import {
   cellAt,
   cellsAlongSegment,
   footprintCells,
@@ -43,7 +48,13 @@ import {
 import type { PF1eCell } from "./pf1e/targeting";
 import { StrategicThreatIndex } from "./pf1e/strategicThreat";
 import { resolvePF1eAOESpell } from "./pf1e/spells";
-import { planPF1eStride, type PF1eStridePace, type PF1eStrideInput, type PF1eStrideResult } from "./pf1e/stride";
+import {
+  applyUnitConditionsToStride,
+  planPF1eStride,
+  type PF1eStridePace,
+  type PF1eStrideInput,
+  type PF1eStrideResult,
+} from "./pf1e/stride";
 import {
   parsePackSpellOrder,
   PF1E_PACK_MASS_SPELL_MIRRORS,
@@ -157,6 +168,22 @@ export interface MassBattlePf1eOptions {
   resolvedTurns?: number;
   /** Optional turn-scoped occupancy policy, applied before reactions or translation. */
   simultaneousStride?: (input: PF1eStrideInput, pool: ModelPool, unit: UnitView) => PF1eStrideResult;
+  /** Optional occupancy-aware local-file reform hook (hosted `MarchReservation`). */
+  reformUnit?: (
+    pool: ModelPool,
+    unit: UnitView,
+    stepBudgetFeet: number,
+  ) => { reformedModels: number; ranksClosed: number };
+  /** Optional occupancy-aware perimeter envelopment hook (hosted `MarchReservation`). */
+  envelopUnit?: (input: {
+    pool: ModelPool;
+    attacker: UnitView;
+    defender: UnitView;
+    attackerAnchor: { x: number; y: number };
+    defenderAnchor: { x: number; y: number };
+    reachFt: number;
+    cellFeet: number;
+  }) => PerimeterEnvelopResult;
   /** Replay-frozen persistent spell areas supplied by the hosted battle checkpoint. */
   spellHazards?: readonly SpellHazard[];
 }
@@ -295,6 +322,10 @@ export function createMassBattlePf1e(
             return err(
               `move: a ${order.pace} is a straight line (CRB p.188) — the order names ${order.path.length} destinations`,
             );
+          if (order.reform === true && order.pace !== "march")
+            return err(
+              "move: reform front requires march pace (half speed advance + half speed gap-closing)",
+            );
           return ok;
         }
         case "attack": {
@@ -306,6 +337,8 @@ export function createMassBattlePf1e(
             return err(
               `attack: this module resolves no "${order.mode}" attack mode (it routes on the unit's weapon: melee, or shot when the profile is ranged)`,
             );
+          if (order.envelop === true && order.mode === "shot")
+            return err("attack: ranged volleys cannot envelop a target");
           return ok;
         }
         case "hold":
@@ -322,6 +355,7 @@ export function createMassBattlePf1e(
             `${order.kind}: the PF1e mass-battle module resolves no ${order.kind} orders (frontage is set at deploy; supply is not simulated at this scale)`,
           );
         case "custom": {
+          if (order.type === "reform") return ok;
           if (order.type !== "spell_aoe")
             return err(
               `custom: no "${order.type}" order in this module — the PF1e mass battles execute spell_aoe casts`,
@@ -414,6 +448,24 @@ export function createMassBattlePf1e(
       // retains last turn's grapple long enough to constrict before attempting a new CMB check.
       const activeHazards = (opts.spellHazards ?? []).filter((hazard) =>
         spellHazardActive(hazard, strategicTurn));
+      for (const hazard of activeHazards) {
+        const minCol = Math.floor((hazard.at.x - hazard.radius) / cellFeet);
+        const maxCol = Math.floor((hazard.at.x + hazard.radius) / cellFeet);
+        const minRow = Math.floor((hazard.at.y - hazard.radius) / cellFeet);
+        const maxRow = Math.floor((hazard.at.y + hazard.radius) / cellFeet);
+        for (let row = minRow; row <= maxRow; row++) {
+          for (let col = minCol; col <= maxCol; col++) {
+            if (
+              pointInSpellHazard(hazard, {
+                x: (col + 0.5) * cellFeet,
+                y: (row + 0.5) * cellFeet,
+              })
+            ) {
+              difficultCells.add(`${col},${row}`);
+            }
+          }
+        }
+      }
       const conditions = pool.sys.pfCondition;
       if (conditions) {
         const previous = new Uint32Array(pool.count);
@@ -423,7 +475,13 @@ export function createMassBattlePf1e(
         }
         const damage = (index: number, amount: number): void => {
           pool.hp[index] = Math.max(0, (pool.hp[index] ?? 0) - amount);
-          if ((pool.hp[index] ?? 0) <= 0) pool.status[index] = (pool.status[index] ?? 0) | ModelStatus.dead;
+          if ((pool.hp[index] ?? 0) <= 0) {
+            pool.status[index] = (pool.status[index] ?? 0) | ModelStatus.dead;
+            conditions[index] =
+              ((conditions[index] ?? 0) &
+                ~(PF1eCondition.ENTANGLED | PF1eCondition.HAZARD_GRAPPLED)) |
+              PF1eCondition.DEAD;
+          }
         };
         const hazardHash = (id: string): number => {
           let hash = 2166136261;
@@ -904,6 +962,20 @@ export function createMassBattlePf1e(
       };
 
 
+      const runReformForUnit = (
+        unit: UnitView,
+        stepBudgetFeet: number,
+      ): { reformedModels: number; ranksClosed: number } => {
+        if (opts.reformUnit) return opts.reformUnit(pool, unit, stepBudgetFeet);
+        return applyFormationReform({
+          pool,
+          range: unit.modelRange ?? [0, 0],
+          cellFeet,
+          stepBudgetFeet,
+          blockAt: (fx, fy, tx, ty) => firstMoveBlock(fx, fy, tx, ty, ctx.walls),
+        });
+      };
+
       if (simultaneous) {
         // F02 — simultaneous movement: every unit computes its translation from
         // the starting layout, then all translations are applied together. No
@@ -925,6 +997,7 @@ export function createMassBattlePf1e(
           terrainExtra: number;
           paceLabel: string;
           verb: string;
+          reformBudgetFeet: number;
         }> = [];
         for (const unit of units) {
           const queue = orders.get(unit.id);
@@ -954,17 +1027,36 @@ export function createMassBattlePf1e(
           // what they cost to cross), so no rule is escapable by choosing a turn mode.
           const pace: PF1eStridePace =
             order.kind === "retreat" ? "withdraw" : order.pace;
-          const input: PF1eStrideInput = {
+          const wantsReform =
+            order.kind === "move" && pace === "march" && order.reform === true;
+          const baseStridePoints = wantsReform ? movePoints * 0.5 : movePoints;
+          const rawInput: PF1eStrideInput = {
             from: { x: anchorX, y: anchorY },
             path: order.kind === "retreat" ? [order.toward] : order.path,
             pace,
-            movePoints,
+            movePoints: baseStridePoints,
             cellFeet,
             difficult: difficultCells,
             blockAt: (fx, fy, tx, ty) => firstMoveBlock(fx, fy, tx, ty, ctx.walls),
             blockEpsilon: MOVE_BLOCK_EPSILON,
           };
-          const stride = opts.simultaneousStride?.(input, pool, unit) ?? planPF1eStride(input);
+          const condProbe = applyUnitConditionsToStride(rawInput, pool, unit);
+          let stride: PF1eStrideResult;
+          if (opts.simultaneousStride) {
+            stride = opts.simultaneousStride(rawInput, pool, unit);
+          } else if (condProbe.refusal !== null) {
+            stride = {
+              to: { x: anchorX, y: anchorY },
+              traveled: 0,
+              terrainExtra: 0,
+              terrainSquares: 0,
+              hitWall: false,
+              refusal: condProbe.refusal,
+              legs: order.kind === "retreat" ? 1 : order.path.length,
+            };
+          } else {
+            stride = planPF1eStride(condProbe.input);
+          }
           if (stride.refusal !== null) {
             emit({
               subPhase: "move",
@@ -982,7 +1074,10 @@ export function createMassBattlePf1e(
           const dy = cy - anchorY;
           const hitWall = stride.hitWall;
           const traveled = stride.traveled;
-          if (dx === 0 && dy === 0 && !hitWall) continue;
+          const reformBudgetFeet = wantsReform
+            ? movePoints * 0.5 * condProbe.speedScale * cellFeet
+            : 0;
+          if (dx === 0 && dy === 0 && !hitWall && reformBudgetFeet <= 0) continue;
           const paceLabel = order.kind === "retreat" ? "retreat" : order.pace;
           const verb =
             order.kind === "retreat"
@@ -1005,6 +1100,7 @@ export function createMassBattlePf1e(
             terrainExtra: stride.terrainExtra,
             paceLabel,
             verb,
+            reformBudgetFeet,
           });
         }
         // M05 — a simultaneous round still provokes: every march starts from the layout at the
@@ -1012,6 +1108,7 @@ export function createMassBattlePf1e(
         // reactions resolve before any translation is applied (P06/D-184's ordering rule,
         // which the stepwise path already honoured — the asymmetry was a mode bug, not a design).
         for (const m of pendingMoves) {
+          if (m.dx === 0 && m.dy === 0) continue;
           marchOpportunities({
             mover: m.unit,
             from: { x: m.cx - m.dx, y: m.cy - m.dy },
@@ -1021,6 +1118,7 @@ export function createMassBattlePf1e(
             withdraw: m.paceLabel === "retreat",
           });
         }
+        const reformStats = new Map<string, { reformedModels: number; ranksClosed: number }>();
         for (const m of pendingMoves) {
           const [start, end] = m.unit.modelRange ?? [0, 0];
           for (let i = start; i < end && i < pool.count; i++) {
@@ -1032,23 +1130,44 @@ export function createMassBattlePf1e(
             if (o?.kind === "move" && o.facing !== undefined)
               pool.rot[i] = o.facing;
           }
+          if (m.reformBudgetFeet > 0) {
+            reformStats.set(m.unit.id, runReformForUnit(m.unit, m.reformBudgetFeet));
+          }
         }
         // Emit after translation so the log reads in initiative order later (events
         // themselves are emitted in initiative order for the report, but move events
         // have no initiative — they are emitted in unit array order, which is
         // deterministic and matches the report's subPhase ordering).
         for (const m of pendingMoves) {
+          const ref = reformStats.get(m.unit.id);
+          if (
+            m.dx === 0 &&
+            m.dy === 0 &&
+            !m.hitWall &&
+            (!ref || ref.reformedModels === 0)
+          ) {
+            continue;
+          }
           emit({
             subPhase: "move",
             type: "arrive",
             unitId: m.unit.id,
             at: { x: m.cx, y: m.cy },
-            text: `${m.unit.name} ${m.verb} to (${m.cx.toFixed(1)}, ${m.cy.toFixed(1)})`,
+            text:
+              ref && ref.reformedModels > 0
+                ? `${m.unit.name} ${m.verb} to (${m.cx.toFixed(1)}, ${m.cy.toFixed(1)}) and closes ${ref.reformedModels} front gap(s)`
+                : `${m.unit.name} ${m.verb} to (${m.cx.toFixed(1)}, ${m.cy.toFixed(1)})`,
             data: {
               pace: m.paceLabel,
               distance: Math.round(m.traveled * 100) / 100,
               anchorX: m.cx,
               anchorY: m.cy,
+              ...(ref && ref.reformedModels > 0
+                ? {
+                    reformedModels: ref.reformedModels,
+                    ranksClosed: ref.ranksClosed,
+                  }
+                : {}),
               ...(m.terrainSquares > 0
                 ? {
                     terrainSquares: m.terrainSquares,
@@ -1060,21 +1179,7 @@ export function createMassBattlePf1e(
           });
         }
       } else {
-        // ── move sub-phase (M05, D-173/D-175). A unit with a move or retreat order spends
-        // its turn moving as a formation: the anchor (first living model) walks the ordered
-        // waypoint path up to its movement budget, and every other living model is
-        // translated by the same delta — the §12 reference package's model, which keeps
-        // model spacing and unit membership intact. Dead models stay where they fell.
-        // Budget = the unit type's move points × one grid cell (scene grid distance, per
-        // P01's "use scene metadata, not constants") × the pace multiplier. SRD (R02,
-        // CRB "Movement in Combat"/"Run"/"Charge"): a round's move covers your speed,
-        // "up to double your speed" when charging, "up to four times your speed in a
-        // straight line" when running (d20pfsrd Combat). Retreat is SRD Withdraw: "When
-        // you withdraw, you can move up to double your speed" — the destination is the
-        // order's rally point. Charge's attack requirements and Run's straight-line
-        // restriction are combat-mechanic concerns of later M05 slices; this slice
-        // executes only the distances. Terrain, obstacles and movement-triggered AoOs
-        // likewise follow in later slices.
+        // ── move sub-phase (M05, D-173/D-175).
         for (const unit of units) {
           const queue = orders.get(unit.id);
           const order = queue?.active ?? queue?.pending[0];
@@ -1089,27 +1194,35 @@ export function createMassBattlePf1e(
           const anchor = anchorPosition(pool, unit);
           if (anchor === null) continue; // a unit with no living models cannot move
 
-          // M05 — priced by `planPF1eStride`: the pace's straight-line and 10-ft rules, the
-          // charge bar against difficult terrain, and the doubled cost of every rough square
-          // entered, on top of D-174's wall clipping (which the stride applies first, so a
-          // blocked march never gets to spend budget on a leg it cannot reach). The stride is
-          // shared with the simultaneous path, so no movement rule depends on the turn mode.
           const pace: PF1eStridePace =
             order.kind === "retreat" ? "withdraw" : order.pace;
-          const stride = planPF1eStride({
+          const wantsReform =
+            order.kind === "move" && pace === "march" && order.reform === true;
+          const rawInput: PF1eStrideInput = {
             from: { x: anchor.x, y: anchor.y },
             path: order.kind === "retreat" ? [order.toward] : order.path,
             pace,
-            movePoints,
+            movePoints: wantsReform ? movePoints * 0.5 : movePoints,
             cellFeet,
             difficult: difficultCells,
             blockAt: (fx, fy, tx, ty) =>
               firstMoveBlock(fx, fy, tx, ty, ctx.walls),
             blockEpsilon: MOVE_BLOCK_EPSILON,
-          });
+          };
+          const condProbe = applyUnitConditionsToStride(rawInput, pool, unit);
+          const stride: PF1eStrideResult =
+            condProbe.refusal !== null
+              ? {
+                  to: { x: anchor.x, y: anchor.y },
+                  traveled: 0,
+                  terrainExtra: 0,
+                  terrainSquares: 0,
+                  hitWall: false,
+                  refusal: condProbe.refusal,
+                  legs: order.kind === "retreat" ? 1 : order.path.length,
+                }
+              : planPF1eStride(condProbe.input);
           if (stride.refusal !== null) {
-            // The pace was illegal, so nobody moves — and the report says why, rather than a
-            // queue that silently does nothing for a turn.
             emit({
               subPhase: "move",
               type: "move-refused",
@@ -1128,22 +1241,23 @@ export function createMassBattlePf1e(
           const dy = cy - startY;
           const hitWall = stride.hitWall;
           const traveled = stride.traveled;
+          const reformBudgetFeet = wantsReform
+            ? movePoints * 0.5 * condProbe.speedScale * cellFeet
+            : 0;
           if (pace === "charge") chargedUnits.add(unit.id);
-          // A wall-blocked unit reports even a zero-distance attempt, so the GM sees why
-          // the march went nowhere; otherwise a no-op move stays silent.
-          if (dx === 0 && dy === 0 && !hitWall) continue;
+          if (dx === 0 && dy === 0 && !hitWall && reformBudgetFeet <= 0) continue;
 
-          marchOpportunities({
-            mover: unit,
-            from: { x: startX, y: startY },
-            to: { x: cx, y: cy },
-            dx,
-            dy,
-            withdraw: order.kind === "retreat",
-          });
+          if (dx !== 0 || dy !== 0) {
+            marchOpportunities({
+              mover: unit,
+              from: { x: startX, y: startY },
+              to: { x: cx, y: cy },
+              dx,
+              dy,
+              withdraw: order.kind === "retreat",
+            });
+          }
 
-          // The march is committed after the reactions resolve (P06/D-184's ordering: the
-          // opportunity happens in the square that was left, before the rest of the move).
           {
             const [start, end] = unit.modelRange ?? [0, 0];
             for (let i = start; i < end && i < pool.count; i++) {
@@ -1153,6 +1267,17 @@ export function createMassBattlePf1e(
               if (order.kind === "move" && order.facing !== undefined)
                 pool.rot[i] = order.facing;
             }
+          }
+
+          const ref =
+            reformBudgetFeet > 0 ? runReformForUnit(unit, reformBudgetFeet) : null;
+          if (
+            dx === 0 &&
+            dy === 0 &&
+            !hitWall &&
+            (!ref || ref.reformedModels === 0)
+          ) {
+            continue;
           }
 
           const movedUnit = unitById.get(unit.id);
@@ -1172,26 +1297,90 @@ export function createMassBattlePf1e(
             type: "arrive",
             unitId: unit.id,
             at: { x: cx, y: cy },
-            text: `${unit.name} ${verb} to (${cx.toFixed(1)}, ${cy.toFixed(1)})`,
+            text:
+              ref && ref.reformedModels > 0
+                ? `${unit.name} ${verb} to (${cx.toFixed(1)}, ${cy.toFixed(1)}) and closes ${ref.reformedModels} front gap(s)`
+                : `${unit.name} ${verb} to (${cx.toFixed(1)}, ${cy.toFixed(1)})`,
             data: {
               pace: paceLabel,
               distance: Math.round(traveled * 100) / 100,
               anchorX: cx,
               anchorY: cy,
-              // Observable to the GM: what the ground cost. A march across rough squares
-              // covers fewer feet for the same budget, and the report says so (M05).
+              ...(ref && ref.reformedModels > 0
+                ? {
+                    reformedModels: ref.reformedModels,
+                    ranksClosed: ref.ranksClosed,
+                  }
+                : {}),
               ...(stride.terrainSquares > 0
                 ? {
                     terrainSquares: stride.terrainSquares,
                     terrainExtraFeet: Math.round(stride.terrainExtra * 100) / 100,
                   }
                 : {}),
-              // Observable to the GM: the march ended at a movement-blocking wall, not at
-              // the path's end or the budget's limit.
               ...(hitWall ? { blockedByWall: true } : {}),
             },
           });
         }
+      }
+
+      // C3 stationary `reform` orders: spend the unit's full march budget closing
+      // vacated front-rank slots along each file without advancing the anchor.
+      for (const unit of units) {
+        const queue = orders.get(unit.id);
+        const order = queue?.active ?? queue?.pending[0];
+        if (!order || order.kind !== "custom" || order.type !== "reform") continue;
+        const typeStats =
+          PF1E_UNIT_TYPE_STATS[unit.type as keyof typeof PF1E_UNIT_TYPE_STATS];
+        const movePoints = typeStats?.move ?? 0;
+        if (movePoints <= 0) continue;
+        const anchor = anchorPosition(pool, unit);
+        if (anchor === null) continue;
+        const condProbe = applyUnitConditionsToStride(
+          {
+            from: anchor,
+            path: [anchor],
+            pace: "march",
+            movePoints,
+            cellFeet,
+          },
+          pool,
+          unit,
+        );
+        if (condProbe.refusal !== null) {
+          emit({
+            subPhase: "move",
+            type: "move-refused",
+            unitId: unit.id,
+            at: { x: anchor.x, y: anchor.y },
+            text: `${unit.name} cannot reform — ${condProbe.refusal}`,
+            data: { kind: "reform", refusal: condProbe.refusal },
+          });
+          continue;
+        }
+        const res = runReformForUnit(
+          unit,
+          movePoints * condProbe.speedScale * cellFeet,
+        );
+        if (res.reformedModels > 0) {
+          const movedUnit = unitById.get(unit.id);
+          if (movedUnit) movePhase.threatIndex?.refresh(movedUnit.index);
+        }
+        emit({
+          subPhase: "move",
+          type: "reform",
+          unitId: unit.id,
+          at: { x: anchor.x, y: anchor.y },
+          text:
+            res.reformedModels > 0
+              ? `${unit.name} reforms its front (${res.reformedModels} soldier(s) close ${res.ranksClosed} rank gap(s))`
+              : `${unit.name} holds a dressed front (no gaps to close)`,
+          data: {
+            kind: "reform",
+            reformedModels: res.reformedModels,
+            ranksClosed: res.ranksClosed,
+          },
+        });
       }
 
       // M05 — the charge's other half. CRB p.183: "you take a –2 penalty to your Armor Class
@@ -1324,137 +1513,68 @@ export function createMassBattlePf1e(
       // action, distance-uncapped — the reference wraps these same models with
       // their per-model move after the formation's march, and our rigid
       // translation has no per-model remainder to spend.
-      if (
+      const doctrineEnvelopEnabled =
         doctrineMode &&
         (ctx.worldSettings as Record<string, unknown>)?.strategicEnvelop !==
-          false
-      ) {
-        for (let ui = 0; ui < units.length; ui++) {
-          const unit = units[ui];
-          if (!unit || unit.envelop === false) continue;
-          const queue = orders.get(unit.id);
-          const order = queue?.active ?? queue?.pending[0];
-          if (order?.kind !== "attack" || !order.targetUnitId) continue;
-          const target = unitById.get(order.targetUnitId)?.unit;
-          if (!target) continue;
-          const anchorA = anchorPosition(pool, unit);
-          const anchorB = anchorPosition(pool, target);
-          if (anchorA === null || anchorB === null) continue;
-          const dirLen = Math.hypot(
-            anchorB.x - anchorA.x,
-            anchorB.y - anchorA.y,
-          );
-          if (dirLen === 0) continue;
-          const ux = (anchorB.x - anchorA.x) / dirLen;
-          const uy = (anchorB.y - anchorA.y) / dirLen;
-          const px = -uy;
-          const py = ux;
-          const latOf = (i: number) =>
-            (pool.x[i] ?? 0) * px + (pool.y[i] ?? 0) * py;
-          const aliveOf = (u: UnitView, out: number[]): number[] => {
-            const [s, e] = u.modelRange ?? [0, 0];
-            for (let i = s; i < e && i < pool.count; i++) {
-              if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0) out.push(i);
-            }
-            return out;
-          };
-          const ownLiving = aliveOf(unit, []);
-          const foeLiving = aliveOf(target, []);
-          if (ownLiving.length === 0 || foeLiving.length === 0) continue;
-          const reachFt = reachFeetByUnitIdx[ui] ?? cellFeet;
-          // C6 gate: engaged = at least one own model inside the reach-band it
-          // wrapped through (its own reach plus a square of give).
-          let engaged = false;
-          // V07: squared distance in the O(own × foe) envelopment contact scan, with the reach
-          // band squared once per unit pair instead of taking a root per model pair. Both the
-          // `dMinPair` minimum and the `d <= band` gate compare identically under √.
-          let dMinPair2 = Infinity;
-          const engageBandFt = reachFt + cellFeet;
-          const engageBand2 = engageBandFt * engageBandFt;
-          for (const a of ownLiving) {
-            const ax = pool.x[a] ?? 0;
-            const ay = pool.y[a] ?? 0;
-            for (const b of foeLiving) {
-              const dx = (pool.x[b] ?? 0) - ax;
-              const dy = (pool.y[b] ?? 0) - ay;
-              const d2 = dx * dx + dy * dy;
-              if (d2 < dMinPair2) dMinPair2 = d2;
-              if (d2 <= engageBand2) {
-                engaged = true;
-                break;
-              }
-            }
-            if (engaged) break;
-          }
-          const dMinPair = Number.isFinite(dMinPair2) ? Math.sqrt(dMinPair2) : Infinity;
-          if (!engaged) continue;
-          let foeMin = Infinity;
-          let foeMax = -Infinity;
-          for (const b of foeLiving) {
-            const l = latOf(b);
-            if (l < foeMin) foeMin = l;
-            if (l > foeMax) foeMax = l;
-          }
-          let ownMin = Infinity;
-          let ownMax = -Infinity;
-          for (const a of ownLiving) {
-            const l = latOf(a);
-            if (l < ownMin) ownMin = l;
-            if (l > ownMax) ownMax = l;
-          }
-          if (!(ownMax - ownMin > foeMax - foeMin + cellFeet)) continue;
-          let wrapped = 0;
-          for (const side of [1, -1] as const) {
-            // The defender's outermost living model on this side — the corner
-            // the wrap is anchored on (the reference recomputes it every turn;
-            // the wrap ratchets outward as corner models fall).
-            let cornerIdx = -1;
-            let cornerLat = -Infinity;
-            let cornerDepth = Infinity;
-            for (const b of foeLiving) {
-              const l = latOf(b) * side;
-              const depth = (pool.x[b] ?? 0) * ux + (pool.y[b] ?? 0) * uy;
-              if (l > cornerLat || (l === cornerLat && depth < cornerDepth)) {
-                cornerLat = l;
-                cornerDepth = depth;
-                cornerIdx = b;
-              }
-            }
-            if (cornerIdx < 0) continue;
-            const foeEdge = side === 1 ? foeMax : foeMin;
-            const excess = ownLiving
-              .filter((a) => side * (latOf(a) - foeEdge) > cellFeet * 0.5)
-              // Fold from the edge outward: the nearest overhang takes the hinge;
-              // farther files continue along the defender toward its rear.
-              .sort((a, b) => side * (latOf(a) - latOf(b)) || a - b);
-            const cx = pool.x[cornerIdx] ?? 0;
-            const cy = pool.y[cornerIdx] ?? 0;
-            for (let k = 0; k < excess.length; k++) {
-              const m = excess[k];
-              if (m === undefined) continue;
-              // Slot k: at own reach beside the corner, stepped down the
-              // enemy's side toward its rear by one square per wrap rank.
-              pool.x[m] = cx + px * side * reachFt + ux * (k * cellFeet);
-              pool.y[m] = cy + py * side * reachFt + uy * (k * cellFeet);
-              wrapped++;
-            }
-          }
-          if (wrapped > 0) {
-            grid.rebuild(pool);
-            emit({
-              subPhase: "move",
-              type: "envelop",
-              unitId: unit.id,
-              targetUnitId: target.id,
-              at: { x: anchorA.x, y: anchorA.y },
-              text: `${unit.name} wraps ${wrapped} model${wrapped === 1 ? "" : "s"} around ${target.name}'s flank (envelop)`,
-              data: {
-                kind: "envelop",
-                wrapped,
-                distance: Math.round(dMinPair * 100) / 100,
-              },
+          false;
+      let anyWrapped = false;
+      for (let ui = 0; ui < units.length; ui++) {
+        const unit = units[ui];
+        if (!unit) continue;
+        const queue = orders.get(unit.id);
+        const order = queue?.active ?? queue?.pending[0];
+        if (order?.kind !== "attack" || !order.targetUnitId) continue;
+        const explicitEnvelop = order.envelop === true && order.mode !== "shot";
+        const wantsEnvelop =
+          explicitEnvelop || (doctrineEnvelopEnabled && unit.envelop !== false);
+        if (!wantsEnvelop) continue;
+        const target = unitById.get(order.targetUnitId)?.unit;
+        if (!target) continue;
+        const anchorA = anchorPosition(pool, unit);
+        const anchorB = anchorPosition(pool, target);
+        if (anchorA === null || anchorB === null) continue;
+        const reachFt = reachFeetByUnitIdx[ui] ?? cellFeet;
+        const wrapRes = opts.envelopUnit
+          ? opts.envelopUnit({
+              pool,
+              attacker: unit,
+              defender: target,
+              attackerAnchor: anchorA,
+              defenderAnchor: anchorB,
+              reachFt,
+              cellFeet,
+            })
+          : applyPerimeterEnvelopment({
+              pool,
+              attackerRange: unit.modelRange ?? [0, 0],
+              defenderRange: target.modelRange ?? [0, 0],
+              attackerAnchor: anchorA,
+              defenderAnchor: anchorB,
+              reachFt,
+              cellFeet,
+              ...(ctx.walls.x1.length > 0
+                ? {
+                    blockAt: (fx, fy, tx, ty) =>
+                      firstMoveBlock(fx, fy, tx, ty, ctx.walls),
+                  }
+                : {}),
             });
-          }
+        if (wrapRes.wrapped > 0) {
+          anyWrapped = true;
+          grid.rebuild(pool);
+          emit({
+            subPhase: "move",
+            type: "envelop",
+            unitId: unit.id,
+            targetUnitId: target.id,
+            at: { x: anchorA.x, y: anchorA.y },
+            text: `${unit.name} wraps ${wrapRes.wrapped} model${wrapRes.wrapped === 1 ? "" : "s"} around ${target.name}'s flank (envelop)`,
+            data: {
+              kind: "envelop",
+              wrapped: wrapRes.wrapped,
+              distance: wrapRes.distance,
+            },
+          });
         }
       }
 
@@ -1469,14 +1589,15 @@ export function createMassBattlePf1e(
       // F02 — faithful simultaneous reading: flanking/cover computed from pre-move positions
       // for the whole phase (a unit that moves out of cover still benefits from cover for
       // shots exchanged that phase). Sequential keeps post-move geometry.
-      // G-04/D-223 override: in doctrine mode the reference judges the CURRENT per-soldier
-      // placement (there is no snapshot concept in combat_resolver_5), so the pass reads
-      // post-wrap positions in both modes.
+      // G-04/D-223 override: in doctrine mode (or whenever an explicit `envelop` order wrapped
+      // outer files this turn) the pass reads post-wrap positions so wrapped flankers grant
+      // PF1e's +2 flanking bonus in the melee phase.
       if (
         simultaneous &&
         simultaneousStartXs &&
         simultaneousStartYs &&
-        !doctrineMode
+        !doctrineMode &&
+        !anyWrapped
       ) {
         // Save post-move, swap to pre-move for the flanking pass, then restore
         const postXs = pool.x;
@@ -1518,15 +1639,61 @@ export function createMassBattlePf1e(
       // reproducing the reference's whole-army half: every unit of the winning
       // army resolves before the losing army's first return fire. Within an
       // army the per-unit effectiveInitiative still orders.
+      // C23b / PF1e CRB p.188: "After moving, you may make a single melee attack. You get
+      // a +2 bonus on the attack roll". Identify any charging unit whose post-charge ranks
+      // reached melee range of an enemy unit so it resolves its charge impact strike.
+      const chargeTargetByUnitId = new Map<string, string>();
+      if (chargedUnits.size > 0) {
+        const enemyAllySet = new Map<string, Set<string>>();
+        for (const f of ctx.factions) {
+          enemyAllySet.set(f._id, new Set([f._id, ...f.allies]));
+        }
+        for (let ui = 0; ui < units.length; ui++) {
+          const charger = units[ui];
+          if (!charger || !chargedUnits.has(charger.id)) continue;
+          const reachFt = reachFeetByUnitIdx[ui] ?? cellFeet;
+          const reach2 = reachFt * reachFt;
+          const [aStart, aEnd] = charger.modelRange ?? [0, 0];
+          const friendly =
+            enemyAllySet.get(charger.factionId) ?? new Set([charger.factionId]);
+          let bestTargetId: string | null = null;
+          let bestDist2 = Infinity;
+          for (const foe of units) {
+            if (friendly.has(foe.factionId)) continue;
+            const [dStart, dEnd] = foe.modelRange ?? [0, 0];
+            for (let a = aStart; a < aEnd && a < pool.count; a++) {
+              if (((pool.status[a] ?? 0) & ModelStatus.dead) !== 0) continue;
+              const ax = pool.x[a] ?? 0;
+              const ay = pool.y[a] ?? 0;
+              for (let d = dStart; d < dEnd && d < pool.count; d++) {
+                if (((pool.status[d] ?? 0) & ModelStatus.dead) !== 0) continue;
+                const dx = (pool.x[d] ?? 0) - ax;
+                const dy = (pool.y[d] ?? 0) - ay;
+                const d2 = dx * dx + dy * dy;
+                if (d2 <= reach2 && d2 < bestDist2) {
+                  bestDist2 = d2;
+                  bestTargetId = foe.id;
+                }
+              }
+            }
+          }
+          if (bestTargetId !== null) {
+            chargeTargetByUnitId.set(charger.id, bestTargetId);
+          }
+        }
+      }
+
+      const engagesThisTurn = (u: UnitView): boolean => {
+        if (chargeTargetByUnitId.has(u.id)) return true;
+        const q = orders.get(u.id);
+        const o = q?.active ?? q?.pending[0];
+        return o?.kind === "attack" && !!o.targetUnitId;
+      };
       const meleeUnits =
         simultaneous || armyRank !== null
           ? [...units]
               .map((u) => ({ unit: u, init: effectiveInitiativeOf(u) }))
-              .filter(({ unit }) => {
-                const q = orders.get(unit.id);
-                const o = q?.active ?? q?.pending[0];
-                return o?.kind === "attack" && !!o.targetUnitId;
-              })
+              .filter(({ unit }) => engagesThisTurn(unit))
               .sort(
                 (a, b) =>
                   (armyRank?.get(a.unit.armyId) ?? 0) -
@@ -1537,11 +1704,7 @@ export function createMassBattlePf1e(
               .map(({ unit }) => unit)
               .concat(
                 // Units without attack orders keep array order (they don't fight)
-                [...units].filter((u) => {
-                  const q = orders.get(u.id);
-                  const o = q?.active ?? q?.pending[0];
-                  return !(o?.kind === "attack" && !!o.targetUnitId);
-                }),
+                [...units].filter((u) => !engagesThisTurn(u)),
               )
           : units;
       // M05 — `hold: defend` (CRB p.185 Defensive Combat). Applied after movement, so a
@@ -1587,16 +1750,27 @@ export function createMassBattlePf1e(
       // maths in the melee phase, which is why the declared `shoot` sub-phase had no executor.
       for (const unit of meleeUnits) {
         const queue = orders.get(unit.id);
-        const order = queue?.active ?? queue?.pending[0];
-        if (!order || order.kind !== "attack" || !order.targetUnitId) continue;
+        const rawOrder = queue?.active ?? queue?.pending[0];
+        const chargeTargetId = chargeTargetByUnitId.get(unit.id);
+        const isChargeImpact =
+          chargeTargetId !== undefined &&
+          (!rawOrder || rawOrder.kind !== "attack");
+        const order: Extract<Order, { kind: "attack" }> | null =
+          rawOrder?.kind === "attack" && rawOrder.targetUnitId
+            ? rawOrder
+            : chargeTargetId
+              ? { kind: "attack", targetUnitId: chargeTargetId, mode: "melee" }
+              : null;
+        if (!order || !order.targetUnitId) continue;
 
         const target = unitById.get(order.targetUnitId);
         if (!target) continue;
         const { unit: targetUnit, index: targetUnitIdx } = target;
         const engageProfile = profiles.byUnitId.get(unit.id);
         const shoots =
-          order.mode === "shot" ||
-          (order.mode !== "melee" && (engageProfile?.isRanged ?? false));
+          !isChargeImpact &&
+          (order.mode === "shot" ||
+            (order.mode !== "melee" && (engageProfile?.isRanged ?? false)));
         const engSubPhase = shoots ? "shoot" : "melee";
 
         // Collect attacker and defender model indices
@@ -1656,10 +1830,11 @@ export function createMassBattlePf1e(
           registry,
           rng: forkRng(rng, unitIndex(unit), 1),
           isRanged: shoots,
-          // The charge's +2 (CRB p.183) rides the routine it was declared for. A unit that
-          // both charged and braced cannot exist: charging is a move, bracing is a hold, and a
-          // unit has one order per turn — so the two modifiers never stack.
-          ...(chargedUnits.has(unit.id) ? { circumstanceMod: 2 } : {}),
+          // CRB p.188: "After moving, you may make a single melee attack. You get a +2 bonus
+          // on the attack roll."
+          ...(chargedUnits.has(unit.id)
+            ? { circumstanceMod: 2, ...(isChargeImpact ? { maxIterativeAttacks: 1 } : {}) }
+            : {}),
         });
 
         // Hero Cleave (D-178). Once per hero *unit* per engagement, SRD Cleave grants

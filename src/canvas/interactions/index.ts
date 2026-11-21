@@ -26,7 +26,7 @@ import {
   type NaturalSize,
   type BackgroundSnap,
 } from "../../core/backgroundTransform";
-import { screenToWorld, zoomAt } from "../camera";
+import { LARGE_SCENE_ZOOM_LIMITS, screenToWorld, zoomAt } from "../camera";
 import type { GridSpec } from "../grid";
 import { snapPoint, snapTokenCenter } from "../grid";
 import { marqueeRect, tokenInMarquee, tokenRect } from "../tokens";
@@ -703,7 +703,7 @@ export class CanvasController {
     ev.preventDefault();
     const factor = Math.exp(-ev.deltaY * 0.0015);
     this.options.stage.setCamera(
-      zoomAt(this.options.stage.camera, ev.x, ev.y, factor),
+      zoomAt(this.options.stage.camera, ev.x, ev.y, factor, LARGE_SCENE_ZOOM_LIMITS),
     );
     this.options.onCameraInput?.();
   }

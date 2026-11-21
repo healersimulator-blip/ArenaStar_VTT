@@ -22,7 +22,7 @@
   import { parseInvite } from "./hostShare";
   import { createStage, type Stage } from "../canvas/stage";
   import type { RollHighlightRect } from "../canvas/layers/RollHighlightLayer";
-  import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
+  import { LARGE_SCENE_ZOOM_LIMITS, screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
   import CrosshairOverlay from "../ui/macros/CrosshairOverlay.svelte";
   import { resolveCrosshairPick, summonCrosshairOptions,
     type CrosshairPickOptions } from "../ui/macros/crosshairPicker";
@@ -497,6 +497,7 @@
             (host?.width ?? 0) / 2,
             (host?.height ?? 0) / 2,
             action === "zoom-in" ? 1.25 : 1 / 1.25,
+            LARGE_SCENE_ZOOM_LIMITS,
           ),
         );
         break;

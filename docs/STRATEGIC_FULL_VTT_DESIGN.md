@@ -143,10 +143,43 @@ the hosted authority:
 Performance qualification must include these enabled features. A schematic or generated-room load
 test is useful infrastructure evidence but cannot qualify the product workflow.
 
-## 9. Current pilot status
+## 9. Implementation status (Phases A–E implemented and verified)
 
-The current hosted room is a narrow vertical slice. Its allowlisted scenario, standardized profiles,
-limited order vocabulary, omitted scene graph, and aggregate-only finish are known gaps against this
-design. Keep their operational documentation accurate, but do not describe them as deliberate final
-scope. New work should shrink these gaps by extending the shared projection and adapters, not by
-adding parallel strategic-only rules or content.
+Phases A through E of the Full-VTT Strategic Design are now implemented end-to-end across campaign
+projection (`src/core/strategicRoom/{campaignScene,pf1eActionProjection,reconcile,scenario,protocol}.ts`),
+authoritative PostgreSQL room & worker (`services/strategic-room/src/{postgres,authority,battle,resolve,server,campaign}.ts`),
+and Svelte 5 campaign/hosted UI (`src/ui/strategicRoom/{CampaignBattle,HostedRoom,HostedMap,HostedRoster}.svelte`):
+
+- **Phase A (Battle Projection Foundation & Geometry):** `arenastar-battle-projection-v1` carries
+  per-dependency SHA-256 digests (`scenes`, `armies`, `actors`, `factions`, `journals`, `rollTables`,
+  `playlists`, `macros`) using canonical launch normalization (`normalizedSceneForLaunchCheck`),
+  plus explicit `unsupported` diagnostics (e.g., `macro.script` under sandbox policy). Scene walls,
+  interactive doors (`closed` / `open` / `locked` with open/closed restriction masks), difficult
+  terrain, global darkness, point lights, token/actor vision (`normal` / `lowLight` / `darkvision`),
+  elevated `raised` / `stairs` regions, and measured templates project into the hosted room and
+  feed both live fog-of-war (`BattleView`) and frozen turn resolution (`resolveFrozen`).
+- **Phase B (Actors, Items, Conditions & Active Effects):** Participating units project full PF1e
+  combat statistics derived through `deriveFromDocuments` and `readTacticalEffect` (AC breakdown,
+  touch/flat-footed AC, BAB, CMB/CMD, Fort/Ref/Will saves, HP, speed, weapon damage/crit/range,
+  conditions, and active effects), 7 shared PF1e spells (`entangle`, `burning-entanglement`,
+  `black-tentacles`, `fireball`, `burning-hands`, `lightning-bolt`, `cone-of-cold`), and consumable
+  items (`heal`, `bless`, `haste`, `shield`).
+- **Phase C (Shared PF1e Spells, Consumables & Readied Reactions):** Generalized `cast`, `useItem`,
+  and `ready` (`enemyEntersReach`, `enemyCasts`, `allyAttacked` → `melee`, `shot`, `countermarch`)
+  orders validate range, slots/charges, and control, resolve deterministically through shared PF1e
+  spell/save/damage/hazard projection (`resolveStrategicSpellCard`), emit unit-level `ActionCard`s
+  and `HostedFxCue`s without per-model card floods, and track durable `unitResources` across turns.
+- **Phase D (Live VTT Controls, Chat, Dice, Content & Entitlements):** Live WebSocket commands
+  (`scene.door`, `scene.light`, `scene.template`, `scene.playlist`, `chat.send`, `table.roll`,
+  `macro.exec`) persist in `strategic_rooms.live_state`, immediately rebuild LOS/illumination/door
+  blockers, enforce faction/GM chat & `<secret>` journal stripping, produce host-provenanced dice
+  rolls (`provenance: "host"`), roll shared `RollTable`s, and execute vetted declarative macros
+  while surfacing disabled reasons on `script` macros.
+- **Phase E (Conflict-Aware Preview, Atomic Campaign Reconciliation & Single-Step Undo):**
+  `/api/campaign/launch` supports non-destructive `previewOnly: true` and `finish` reconciliation
+  payloads (`BattleReconciliationPayload`), `analyzeBattleReconciliation` detects post-launch
+  campaign document edits via dependency digests (`skipConflicted`), and
+  `HostSync.commitBattleReconciliation` commits casualties, anchors/facings, expended spell slots,
+  remaining item charges, conditions, door states, and darkness as a single atomic `OpLog`
+  envelope with full single-step `undo()` / `redo()` support.
+

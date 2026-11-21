@@ -156,8 +156,15 @@ export function strategicHeroMark(unit: UnitDocument): boolean {
 }
 
 /** M10 — a hero melee order against a named enemy unit (direct targeting, B §4.1). */
-export function directAttackOrder(targetUnitId: string): Order {
-  return { kind: "attack", targetUnitId };
+export function directAttackOrder(
+  targetUnitId: string,
+  opts?: { envelop?: boolean },
+): Order {
+  return {
+    kind: "attack",
+    targetUnitId,
+    ...(opts?.envelop ? { envelop: true } : {}),
+  };
 }
 
 /** A built order, or the named reason the control cannot build one yet. */
@@ -251,14 +258,15 @@ export function orderLabel(
 ): string {
   switch (order.kind) {
     case "move":
-      return `move → ${order.path.length} wp (${order.pace})`;
+      return `move → ${order.path.length} wp (${order.pace}${order.reform ? ", reform" : ""})`;
     case "attack":
-      return `attack → ${nameOf(order.targetUnitId)}`;
+      return `attack → ${nameOf(order.targetUnitId)}${order.envelop ? " (envelop)" : ""}`;
     case "retreat":
       return `retreat → (${round3(order.toward.x)}, ${round3(order.toward.y)})`;
     case "hold":
       return `hold (${order.stance})`;
     case "custom": {
+      if (order.type === "reform") return "reform front";
       if (order.type !== "spell_aoe") return `custom (${order.type})`;
       const data =
         typeof order.data === "object" && order.data !== null

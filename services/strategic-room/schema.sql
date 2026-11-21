@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS strategic_members (
 -- Upgrade a room created by an earlier service build. Additive and idempotent.
 ALTER TABLE strategic_members ADD COLUMN IF NOT EXISTS name text;
 ALTER TABLE strategic_rooms ADD COLUMN IF NOT EXISTS members_version integer NOT NULL DEFAULT 0;
+ALTER TABLE strategic_rooms ADD COLUMN IF NOT EXISTS live_state jsonb NOT NULL DEFAULT '{}'::jsonb;
 -- Canonical per-seat control: SQL NULL means the seat's own deployment; [] means no units.
 -- `strategic_control` remains as a legacy mirror for readers of older exports.
 ALTER TABLE strategic_members ADD COLUMN IF NOT EXISTS control_units jsonb;
@@ -81,6 +82,7 @@ ALTER TABLE strategic_versions ALTER COLUMN control SET NOT NULL;
 -- Persistent spell areas created by hosted actions are publication state, not mutable scenario input.
 ALTER TABLE strategic_versions ADD COLUMN IF NOT EXISTS hazards jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE strategic_versions ADD COLUMN IF NOT EXISTS actions jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE strategic_versions ADD COLUMN IF NOT EXISTS extras jsonb NOT NULL DEFAULT '{}'::jsonb;
 CREATE TABLE IF NOT EXISTS strategic_frozen (
   room_id text NOT NULL REFERENCES strategic_rooms(id) ON DELETE CASCADE,
   turn_id integer NOT NULL,
@@ -92,6 +94,10 @@ CREATE TABLE IF NOT EXISTS strategic_frozen (
   PRIMARY KEY (room_id, turn_id),
   FOREIGN KEY (room_id, start_version) REFERENCES strategic_versions(room_id, version) ON DELETE CASCADE
 );
+-- Freeze each turn's scenario and control snapshots so later edits do not rewrite past turns.
+ALTER TABLE strategic_frozen ADD COLUMN IF NOT EXISTS scenario jsonb;
+ALTER TABLE strategic_frozen ADD COLUMN IF NOT EXISTS control jsonb;
+ALTER TABLE strategic_frozen ADD COLUMN IF NOT EXISTS extras jsonb;
 CREATE TABLE IF NOT EXISTS strategic_orders (
   room_id text NOT NULL,
   turn_id integer NOT NULL,

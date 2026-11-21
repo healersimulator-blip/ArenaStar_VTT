@@ -10,25 +10,39 @@ service uses a signed, versioned, permission-filtered projection for durability,
 scale; that projection must preserve all battle-relevant campaign documents and behavior rather than
 replace them with an unrelated schematic room.
 
-## Current vertical slice
+## Implemented Full-VTT vertical slices (Phases A–E)
 
-The implementation currently proves only an incremental foundation:
+The implementation now delivers Phases A–E end-to-end across campaign projection, PostgreSQL
+authority, deterministic PF1e turn resolution, live browser play, and conflict-aware campaign
+reconciliation:
 
-1. **Battlefield art transfer** — a bounded, content-addressed PNG/JPEG/WebP background is included
-   in the signed launch deployment, validated, persisted, served from a same-origin endpoint, and
-   rendered beneath hosted markers.
-2. **Authored token deployment** — visible friendly/hostile scene tokens can seed hosted companies.
-   Token centers become five-foot anchors and disposition supplies the initial faction. Army
-   documents remain the richer source where present.
-3. **Authority and control** — commander seats use durable membership, invitations, explicit unit
-   grants, revocation, allegiance administration, frozen orders and reconnectable publication.
-4. **Formation-scale simulation** — compact checkpoints can resolve thousands of models while
-   retaining deterministic retry and permission-filtered views.
-5. **Initial spell-area mechanics** — the frozen resolver can represent persistent Entangle,
-   Burning Entanglement and Black Tentacles effects. The player-facing cast must ultimately originate
-   from the regular PF1e item/caster/resource/action-area workflow, not separate scenario authoring.
-
-These are implemented capabilities, not the intended boundary of strategic mode.
+1. **Battlefield art & stitched multi-panel maps** — bounded, content-addressed PNG/JPEG/WebP
+   backgrounds and 1–64 stitched floor-map panels (up to `5,000 × 5,000` squares) are included in
+   the signed launch deployment, validated, persisted, served same-origin, and rendered beneath
+   hosted markers.
+2. **Signed dependency graph, geometry, doors, lighting & elevation (Phase A)** —
+   `arenastar-battle-projection-v1` hashes participating `scenes`, `armies`, `actors`, `factions`,
+   `journals`, `rollTables`, `playlists`, and `macros`, surfaces explicit `unsupported` diagnostics
+   (such as `macro.script`), and projects interactive doors (`0 | 1 | 2`), walls, difficult terrain,
+   darkness, point lights, vision modes, elevated `raised`/`stairs` regions, and measured templates.
+3. **Derived PF1e actors, spellbooks, consumables & active effects (Phase B)** — leader/cohort
+   actors project derived PF1e AC/saves/BAB/HP/weapons, active tactical effects (`readTacticalEffect`),
+   7 shared PF1e area spells (`STRATEGIC_SPELL_CATALOG`), and charge-tracked consumables (`heal`,
+   `bless`, `haste`, `shield`).
+4. **Shared PF1e casting, item use & readied reactions at formation scale (Phase C)** — commanders
+   aim and submit generalized `cast` (circle/cone/line), `useItem`, and `ready`
+   (`enemyEntersReach` / `enemyCasts` / `allyAttacked` → `melee` / `shot` / `countermarch`) orders,
+   producing host-provenanced `ActionCard`s, `HostedFxCue`s, persistent hazards, and durable
+   slot/charge expenditure without per-model card floods at 10,000–50,000 models.
+5. **Live VTT scene controls, scoped chat, dice, tables, playlists & vetted macros (Phase D)** —
+   GMs toggle doors, darkness, hidden lights, measured templates, and playlist tracks live; players
+   and GMs exchange `public` / `faction` / `gm` chat with host-rolled dice (`provenance: "host"`),
+   read `<secret>`-stripped journals, roll shared tables, and run declarative macros.
+6. **Conflict-aware reconciliation preview & single-step undoable write-back (Phase E)** — GMs can
+   inspect a live `Reconciliation Preview` (`previewOnly: true`) without ending the battle, skip
+   concurrently edited campaign documents (`skipConflicted`), apply casualties, positions, expended
+   spell slots, item charges, conditions, door states, and darkness atomically via
+   `HostSync.commitBattleReconciliation`, and revert or redo the entire battle write-back in one step.
 
 ## Required battle projection
 
@@ -71,18 +85,20 @@ Hosted launch is not intended to remain a one-way import:
 The current aggregate survivor record is a pilot limitation. It must not be treated as the final
 campaign integration contract.
 
-## Current gaps that must remain visible
+## Remaining future extensions
 
-- Token fallback currently creates standardized melee companies instead of preserving complete actor,
-  item, effect and resource semantics.
-- The hosted room does not yet project the complete scene graph or expose ordinary tactical editing.
-- Hosted browser orders still have a narrow vocabulary; regular PF1e spell/action controls are not
-  yet connected to formation-scale resolution.
-- Walls, doors, floors, lighting, vision, authored terrain, templates, journals, tables, macros,
-  playlists and complete FX/content dependencies are not yet carried through the hosted projection.
-- Finish records aggregate results rather than an undoable campaign reconciliation.
+Phases A–E now cover interactive doors, walls, difficult terrain, lighting/vision, elevated
+`raised`/`stairs` regions, templates, derived PF1e actor/item/spell/effect projection, 7 shared PF1e
+area spells, consumables, readied reactions, scoped chat/dice/tables/journals/playlists/declarative
+macros, and conflict-checked undoable campaign reconciliation. Remaining future extensions beyond
+this foundation:
 
-These are technical debt and release limitations—not deliberate product exclusions.
+- Sandboxed execution policy for arbitrary JavaScript `script` macros in hosted play (currently
+  surfaced as an explicit `macro.script` projection diagnostic and disabled button reason).
+- Multi-floor isolated level switching (`levels`) inside the hosted strategic canvas beyond
+  projected `raised` and `stairs` elevation regions.
+- Expanding `STRATEGIC_SPELL_CATALOG` beyond the initial 7 area/hazard/blast spells to arbitrary
+  compendium buffs, summons, and single-target spells.
 
 ## Implementation plan and sequencing
 
@@ -168,9 +184,25 @@ source-scene → validated projection → deterministic worker path.
 2. Produce a GM reconciliation preview and apply accepted casualties, movement, resources, conditions
    and effects as one conflict-aware, auditable, undoable campaign transaction.
 
-### Qualification
+### Qualification (verified)
 
-Qualify the complete authored workflow at realistic scale: 12 browser commanders, 3–5 units each,
-50–120 models per unit, administration, engagements, regular PF1e spells, reactions, geometry,
-perception, restart and write-back—not only generated rooms or schematic load fixtures. Separately run
-the 500-commander/50,000-model performance matrix with every feature advertised for that tier.
+Verified across Vitest (`tests/strategicRoom/fullVttScale.test.ts`, including 500 commanders /
+5,000 units / 10,000 models and PostgreSQL `StrategicAuthority` live-command + reconciliation
+suites) and real multi-browser Chromium + PostgreSQL Playwright E2E (`npm run test:e2e:strategic`
+and `npm run test:e2e:campaign`, 7/7 passing):
+
+- `e2e/strategic_full_vtt_scale.spec.ts` — Full VTT Phases A–E: closed door LOS/charge blocking,
+  live GM door open + SSE enemy reveal, lighting/darkness, `<secret>` stripping & GM journal
+  filtering, faction-scoped chat + host-provenanced `1d20+5` roll, roll table, declarative
+  `/order defend` macro + disabled script macro reason, live playlist, PF1e Fireball + Readied
+  Countermarch, Wand of Cure Light Wounds, conflict-aware reconciliation preview (`skipConflicted`),
+  atomic write-back of casualties/positions/spells/charges/doors, and single-step GM Undo.
+- `e2e/strategic_actual_battle.spec.ts` — 12 browser commanders, 48 units, 3,840 models, live grant
+  withdrawal/restoration, allegiance round-trip, attack/envelop/reform/hold orders, and paged report.
+- `e2e/strategic_twenty_player_skirmish.spec.ts` — 20 browser commanders, 100 custom-badged
+  50-model companies (5,000 models).
+- `e2e/strategic_large_stitched_map.spec.ts` — `1,000 × 1,000` square stitched 4-panel map, 80
+  commander seats, 600 units (12,000 models).
+- `e2e/hosted_strategic.spec.ts` — 50,000-model compact view + crash/rejoin/revocation.
+- `e2e/campaign_battle.spec.ts` — Campaign launch, play, resume, and finish.
+

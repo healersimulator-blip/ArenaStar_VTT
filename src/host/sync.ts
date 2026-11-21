@@ -4098,10 +4098,22 @@ export class HostSync {
 
   /** Only the host-side campaign coordinator may release an existing scene binding. */
   private readonly battleWrites = new WeakSet<Op>();
+  private reconcilingBattle = false;
   commitBattleScene(scene: string, diff: import("../core/ops").FlatDiff) {
     const op: Op = { kind: "update", ref: { coll: "scenes", id: scene }, diff };
     this.battleWrites.add(op);
     return this.commitSystem([op]);
+  }
+  commitBattleReconciliation(ops: Op[], label = "Reconcile strategic battle") {
+    const marked = ops.map((op) => ({ ...op }));
+    for (const op of marked) this.battleWrites.add(op);
+    const audit: ActionAudit = { id: `battle-reconcile-${randomId()}`, label };
+    this.reconcilingBattle = true;
+    try {
+      return this.commitOps(marked, this.systemUserId, `sys-${randomId()}`, true, audit);
+    } finally {
+      this.reconcilingBattle = false;
+    }
   }
 
   private commitOps(
@@ -4269,22 +4281,26 @@ export class HostSync {
       ops,
       txId,
     };
-    for (const op of ops) {
-      if (this.battleWrites.has(op)) continue;
-      if (op.kind === "create" && op.coll === "scenes" && battleOf(op.data as SceneDocument, this.store.meta.worldId))
-        return { ok: false, error: "Launch a hosted battle through its scene controls." };
-      if (op.kind === "update" && op.ref.coll === "scenes" && Object.keys(op.diff).some(k => k === "flags" || k.startsWith("flags."))) {
-        const before = this.store.get("scenes", op.ref.id);
-        if (before) {
-          const after = applyDiff(before, op.diff);
-          if (after.ok && battleOf(after.value, this.store.meta.worldId)) return { ok: false, error: "Hosted battle binding is managed by the scene controls." };
+    if (!restoring) {
+      for (const op of ops) {
+        if (this.battleWrites.has(op)) continue;
+        if (op.kind === "create" && op.coll === "scenes" && battleOf(op.data as SceneDocument, this.store.meta.worldId))
+          return { ok: false, error: "Launch a hosted battle through its scene controls." };
+        if (op.kind === "update" && op.ref.coll === "scenes" && Object.keys(op.diff).some(k => k === "flags" || k.startsWith("flags."))) {
+          const before = this.store.get("scenes", op.ref.id);
+          if (before) {
+            const after = applyDiff(before, op.diff);
+            if (after.ok && battleOf(after.value, this.store.meta.worldId)) return { ok: false, error: "Hosted battle binding is managed by the scene controls." };
+          }
         }
       }
-    }
-    for (const scene of this.store.getAll("scenes")) {
-      const bound = battleOf(scene, this.store.meta.worldId);
-      if (bound && ops.some(op => !this.battleWrites.has(op) && battleBlocks(bound, op)))
-        return { ok: false, error: "Hosted battle owns this scene and its armies. Finish the battle before editing." };
+      if (!this.reconcilingBattle) {
+        for (const scene of this.store.getAll("scenes")) {
+          const bound = battleOf(scene, this.store.meta.worldId);
+          if (bound && ops.some(op => !this.battleWrites.has(op) && battleBlocks(bound, op)))
+            return { ok: false, error: "Hosted battle owns this scene and its armies. Finish the battle before editing." };
+        }
+      }
     }
     const applied = this.store.applyEnvelope(envelope);
     if (!applied.ok) return { ok: false, error: applied.error };

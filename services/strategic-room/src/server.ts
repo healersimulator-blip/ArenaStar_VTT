@@ -28,18 +28,19 @@ import {
   type RegionPatch,
   type ReportPage,
   type ServerMessage,
+  type StoreMedia,
   type UnitMarker,
 } from "../../../src/core/strategicRoom/protocol";
 import { BulkReads } from "./bulkReads";
 import { StrategicAuthority } from "./authority";
-import { diffRegion } from "./battle";
+import { BattleView, diffRegion } from "./battle";
 import { PostgresRoom } from "./postgres";
 import { MAX_COMMANDERS } from "./scenario";
 import { publicHead, type Member } from "./state";
 import { viewPrefix } from "./viewEncoding";
 
-const SESSION_BYTES = 64 * 1024;
-const ROOM_BYTES = 8 * 1024 * 1024;
+const SESSION_BYTES = 256 * 1024;
+const ROOM_BYTES = 16 * 1024 * 1024;
 const BULK_CONCURRENCY = 64;
 const AUTH_CONCURRENCY = 64;
 const MAX_SCENE_MEDIA = 24 * 1024 * 1024;
@@ -49,6 +50,7 @@ const secret = () => randomBytes(32).toString("base64url");
 
 type Session = {
   deliveredMarkersVersion?: number;
+  deliveredBattle?: BattleView;
   socket: WebSocket;
   member: Member;
   bearer: string;
@@ -122,25 +124,70 @@ function reply(res: ServerResponse, status: number, body: unknown) {
   });
   res.end(text);
 }
+export const extForMime = (mime: string): string =>
+  mime === "image/png"
+    ? "png"
+    : mime === "image/jpeg"
+      ? "jpg"
+      : mime === "image/gif"
+        ? "gif"
+        : mime === "image/avif"
+          ? "avif"
+          : mime === "image/svg+xml"
+            ? "svg"
+            : "webp";
+
+export function buildGmMedia(
+  media: ReadonlyArray<{ hash: string; data: Uint8Array; mime: string }>,
+  backgroundHash?: string,
+  excludeHashes?: ReadonlySet<string>,
+): StoreMedia[] {
+  return media
+    .filter(({ hash }) => hash !== backgroundHash && !excludeHashes?.has(hash))
+    .map(({ hash, data, mime }) => ({
+      hash,
+      name: `scene-${hash.slice(0, 12)}.${extForMime(mime)}`,
+      mime,
+      size: data.byteLength,
+      // Relative to the campaign battle path, which the in-process edge rewrites.
+      url: `${STRATEGIC_API.replace(/^\//, "")}/scene/${hash}.${extForMime(mime)}`,
+    }));
+}
+
 /** GM roster with live presence; players never reach this branch. */
 async function roster(
   db: PostgresRoom,
   sessions: ReadonlyMap<string, Session>,
+  unitFactions: Readonly<Record<string, string>>,
 ): Promise<MemberRow[]> {
   const rows = await db.roster();
   return rows
     .filter((row) => row.role === "PLAYER")
-    .map((row) => ({
-      id: row.id,
-      name: row.name,
-      role: row.role,
-      factionId: row.factionId,
-      units: row.units,
-      deployed: row.deployed,
-      claimed: row.claimed,
-      invite: row.invite,
-      online: sessions.has(row.id),
-    }));
+    .map((row) => {
+      const overrides = row.deployed.filter(
+        (id) => typeof unitFactions[id] === "string" && unitFactions[id] !== row.factionId,
+      );
+      return {
+        id: row.id,
+        name: row.name,
+        role: row.role,
+        factionId: row.factionId,
+        units: row.units,
+        deployed: row.deployed,
+        ...(overrides.length > 0
+          ? {
+              unitFactions: Object.fromEntries(
+                row.deployed
+                  .map((id) => [id, unitFactions[id]])
+                  .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+              ),
+            }
+          : {}),
+        claimed: row.claimed,
+        invite: row.invite,
+        online: sessions.has(row.id),
+      };
+    });
 }
 
 /** Optional preloaded battle art: `scene.webp` / `scene/<slot>.webp` beside the service web build. */
@@ -359,6 +406,47 @@ export async function serve(
     media.push(asset);
     mediaByHash.set(asset.hash, asset);
   }
+  const excludedMediaHashes = new Set<string>();
+  const badgeUrls: Record<string, string> = {};
+  const authoredBadges = authority.battle.scenario.badges;
+  if (authoredBadges) {
+    for (const badge of Object.values(authoredBadges)) {
+      const data = Buffer.from(badge.data, "base64url");
+      const asset = { data, mime: badge.mime, hash: badge.hash };
+      excludedMediaHashes.add(asset.hash);
+      if (!mediaByHash.has(asset.hash)) {
+        mediaByHash.set(asset.hash, asset);
+      }
+      badgeUrls[badge.hash] = `${STRATEGIC_API.replace(/^\//, "")}/scene/${badge.hash}.${extForMime(badge.mime)}`;
+    }
+  }
+  const authoredTileAssets = authority.battle.scenario.backgroundAssets;
+  const authoredBackgroundTiles =
+    authority.battle.scenario.backgroundTiles && authoredTileAssets
+      ? authority.battle.scenario.backgroundTiles.flatMap((tile) => {
+          const panel = authoredTileAssets[tile.hash];
+          if (!panel) return [];
+          excludedMediaHashes.add(panel.hash);
+          if (!mediaByHash.has(panel.hash)) {
+            mediaByHash.set(panel.hash, {
+              data: Buffer.from(panel.data, "base64url"),
+              mime: panel.mime,
+              hash: panel.hash,
+            });
+          }
+          return [
+            {
+              hash: tile.hash,
+              url: `${STRATEGIC_API.replace(/^\//, "")}/scene/${panel.hash}.${extForMime(panel.mime)}`,
+              x: tile.x,
+              y: tile.y,
+              width: tile.width,
+              height: tile.height,
+              ...(tile.rotation !== undefined ? { rotation: tile.rotation } : {}),
+            },
+          ];
+        })
+      : undefined;
 
   wss.on("connection", (socket, req: IncomingMessage) => {
     socket.on("error", () => socket.terminate());
@@ -522,7 +610,7 @@ export async function serve(
     }
     const path = url.pathname.slice(STRATEGIC_API.length);
     const sceneMedia = (name: string) => {
-      const hash = name.replace(/\.(?:png|jpe?g|webp)$/, "");
+      const hash = name.replace(/\.(?:png|jpe?g|webp|gif|avif|svg)$/, "");
       if (!/^[0-9a-f]{64}$/.test(hash)) return undefined;
       return mediaByHash.get(hash);
     };
@@ -632,7 +720,11 @@ export async function serve(
       return;
     }
     const current = authority.battle;
-    const { room, orders } = privateState;
+    const { room, orders, factionId } = privateState;
+    if (session.member.role === "PLAYER" && session.member.factionId !== factionId) {
+      session.member = { ...session.member, factionId };
+      session.region = null;
+    }
     // If a DB commit and the in-memory install straddle the read, ask for a clean baseline.
     if (
       current.state.version !== room.version ||
@@ -645,11 +737,25 @@ export async function serve(
     if (path === "/view") {
       // A roster read can finish after the session was dropped by a kick, revoke or disconnect.
       const members =
-        session.member.role === "GM" ? await roster(db, sessions) : undefined;
+        session.member.role === "GM"
+          ? await roster(db, sessions, current.unitFactions())
+          : undefined;
       if (!live(session) || res.destroyed) {
         reply(res, 401, { error: "not_admitted" });
         return;
       }
+      const authorizedActions = current.actions(session.member);
+      const unitFacings = current.unitFacings(session.member);
+      const unitBadges = Object.keys(badgeUrls).length
+        ? current.unitBadges(session.member, badgeUrls)
+        : undefined;
+      const effectiveWalls = current.effectiveWalls();
+      const doors = current.doors();
+      const darkness = current.darkness();
+      const lights = current.lights(session.member);
+      const templates = current.templates();
+      const chat = current.chat(session.member);
+      const content = current.content(session.member);
       const data: BaselineMeta = {
         epoch: session.epoch,
         head: publicHead(room),
@@ -658,16 +764,23 @@ export async function serve(
         role: session.member.role,
         factionId: session.member.factionId,
         factions: current.scenario.factions,
-        own: current.own(session.member),
+        own: current.own(session.member, badgeUrls),
         orders,
-        ...(current.state.actions?.length ? { actions: current.state.actions } : {}),
-        areas: [...(current.scenario.hazards ?? []), ...(current.state.hazards ?? [])]
-          .filter((hazard) => (hazard.startsTurn ?? 0) <= room.turnId &&
-            (hazard.expiresAfterTurn ?? Number.MAX_SAFE_INTEGER) >= room.turnId)
-          .map((hazard) => ({ id: hazard.id, spell: hazard.spell, at: { ...hazard.at },
-            radius: hazard.radius,
-            ...(hazard.expiresAfterTurn !== undefined
-              ? { expiresAfterTurn: hazard.expiresAfterTurn } : {}) })),
+        ...(unitFacings ? { unitFacings } : {}),
+        ...(unitBadges ? { unitBadges } : {}),
+        ...(effectiveWalls ? { walls: effectiveWalls } : {}),
+        ...(doors ? { doors } : {}),
+        ...(darkness > 0 || current.scenario.lighting ? { darkness } : {}),
+        ...(lights ? { lights } : {}),
+        ...(current.scenario.regions?.length ? { regions: current.scenario.regions } : {}),
+        ...(templates ? { templates } : {}),
+        ...(chat ? { chat } : {}),
+        ...(content ? { content } : {}),
+        ...(current.scenario.terrain?.difficultCells.length
+          ? { difficultCells: current.scenario.terrain.difficultCells }
+          : {}),
+        ...(authorizedActions ? { actions: authorizedActions } : {}),
+        areas: current.areas(session.member, room.turnId),
         ...(authoredBackground
           ? {
               background: {
@@ -675,26 +788,24 @@ export async function serve(
                 name: `battlefield-${authoredBackground.hash.slice(0, 12)}`,
                 mime: authoredBackground.mime,
                 size: authoredBackground.size,
-                url: `${STRATEGIC_API.replace(/^\//, "")}/scene/${authoredBackground.hash}.${authoredBackground.mime === "image/png" ? "png" : authoredBackground.mime === "image/jpeg" ? "jpg" : "webp"}`,
+                url: `${STRATEGIC_API.replace(/^\//, "")}/scene/${authoredBackground.hash}.${extForMime(authoredBackground.mime)}`,
               },
             }
+          : {}),
+        ...(authoredBackgroundTiles?.length
+          ? { backgroundTiles: authoredBackgroundTiles }
           : {}),
         ...(members
           ? {
               members,
-              media: media.map(({ hash, data }) => ({
-                hash,
-                name: `scene-${hash.slice(0, 12)}.webp`,
-                mime: "image/webp",
-                size: data.byteLength,
-                // Relative to the campaign battle path, which the in-process edge rewrites.
-                url: `${STRATEGIC_API.replace(/^\//, "")}/scene/${hash}.webp`,
-              })),
+              media: buildGmMedia(media, authoredBackground?.hash, excludedMediaHashes),
             }
           : {}),
       };
       // The version is only a bandwidth hint; select data by the admitted member.
       const known = numeric(url.searchParams.get("markersVersion"));
+      const sameMarkers =
+        known === room.version && session.deliveredBattle === current;
       const changes =
         req.headers.accept === STRATEGIC_PATCH_TYPE &&
         session.deliveredMarkersVersion === known &&
@@ -702,18 +813,21 @@ export async function serve(
           ? current.markerChanges(session.member)
           : undefined;
       res.once("finish", () => {
-        if (res.statusCode === 200 && known !== room.version)
-          session.deliveredMarkersVersion = Math.max(
-            session.deliveredMarkersVersion ?? -1,
-            room.version,
-          );
+        if (res.statusCode === 200) {
+          session.deliveredBattle = current;
+          if (!sameMarkers)
+            session.deliveredMarkersVersion = Math.max(
+              session.deliveredMarkersVersion ?? -1,
+              room.version,
+            );
+        }
       });
       replyView(
         req,
         res,
         data,
         current.markers(session.member),
-        known === room.version
+        sameMarkers
           ? undefined
           : (changes ?? current.packedMarkers(session.member)),
         changes !== undefined,

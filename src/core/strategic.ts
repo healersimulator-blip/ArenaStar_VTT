@@ -30,10 +30,23 @@ export interface UnitStats {
   [key: string]: number;
 }
 
-/** Order union (§4A) — verbatim from the spec. */
+/** Order union (§4A) — verbatim from the spec, extended with formation reform & envelopment flags. */
 export type Order =
-  | { kind: "move"; path: Vec2[]; pace: "march" | "run" | "charge"; facing?: number }
-  | { kind: "attack"; targetUnitId: DocId; mode?: string }
+  | {
+      kind: "move";
+      path: Vec2[];
+      pace: "march" | "run" | "charge";
+      facing?: number;
+      /** C3: advance at half speed and spend the reserved half closing vacated front-rank file slots. */
+      reform?: boolean;
+    }
+  | {
+      kind: "attack";
+      targetUnitId: DocId;
+      mode?: string;
+      /** C2/C18: wrap unengaged excess outer files around the engaged target's flanks & rear. */
+      envelop?: boolean;
+    }
   | { kind: "hold"; stance: string }
   | { kind: "formation"; formation: string }
   | { kind: "retreat"; toward: Vec2 }

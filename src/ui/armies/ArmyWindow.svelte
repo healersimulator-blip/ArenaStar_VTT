@@ -431,13 +431,16 @@
   }
 
   /** M10 — direct targeting (B §4.1): the selected units attack the named enemy unit. */
-  function issueHeroAttack(): void {
+  function issueHeroAttack(envelop = false): void {
     const row = heroTargetRow();
     if (row === null) {
       heroNotice = "pick an enemy target first";
       return;
     }
-    issueChecked(() => ({ ok: true, order: directAttackOrder(row.unitId) }));
+    issueChecked(() => ({
+      ok: true,
+      order: directAttackOrder(row.unitId, { envelop }),
+    }));
   }
 
   /** M10 — cast the selected pack spell at the aim point (burst) or toward it (cone/line). */
@@ -851,9 +854,14 @@
               </select>
             </label>
             <button
-              onclick={issueHeroAttack}
+              onclick={() => issueHeroAttack(false)}
               disabled={selectedUnits().length === 0 || heroTargetRow() === null}
               data-hero-attack>Attack target</button
+            >
+            <button
+              onclick={() => issueHeroAttack(true)}
+              disabled={selectedUnits().length === 0 || heroTargetRow() === null}
+              data-hero-attack-envelop>Attack &amp; envelop</button
             >
             {#if heroTargetRow()?.hero}
               <p class="dim" data-hero-target-hero>
@@ -928,6 +936,29 @@
             {tpl.label}
           </button>
         {/each}
+        {#if heroCaps.directAttack}
+          <button
+            onclick={() =>
+              issue(() => ({ kind: "custom", type: "reform", data: null }))}
+            disabled={selectedUnits().length === 0}
+            data-template="reform"
+          >
+            Reform front
+          </button>
+          <button
+            onclick={() =>
+              issue((unit) => ({
+                kind: "move",
+                path: [{ x: +(anchorOf(unit).x + 10).toFixed(3), y: anchorOf(unit).y }],
+                pace: "march",
+                reform: true,
+              }))}
+            disabled={selectedUnits().length === 0}
+            data-template="marchReform"
+          >
+            Advance &amp; reform
+          </button>
+        {/if}
       </div>
     </div>
   {:else if tab === "analysis"}

@@ -88,6 +88,7 @@
     resolveAsset = null,
     backgroundNatural = null,
     onOpenBackground = null,
+    onOpenCampaignBattle = null,
     presence = null,
   }: {
     /** D-465: live connections + kick/ban (host shell only); the roster shows who is online. */
@@ -96,6 +97,7 @@
     backgroundNatural?: NaturalSize | null;
     /** D-465: Scene settings → "Measure the map's squares" opens the Map & background panel. */
     onOpenBackground?: (() => void) | null;
+    onOpenCampaignBattle?: ((sceneId: string) => void) | null;
     saves?: SaveCoordinator | null;
     cloud?: CloudBackupController | null;
     onBackup?: (() => Promise<void>) | null;
@@ -328,7 +330,7 @@
             listCompendia={isGM && packages ? () => packages.compendia() : null} activeSceneId={sceneId}
             {onPickSummon} {onPickAnchor} {onPreviewFx} {onStopFxPreview} />
         {:else if win.kind === "scene-settings"}
-          <SceneSettingsPanel {client} {bus} sceneId={win.data?.sceneId ?? null} activeSceneId={sceneId} {backgroundNatural} {onOpenBackground} />
+          <SceneSettingsPanel {client} {bus} sceneId={win.data?.sceneId ?? null} activeSceneId={sceneId} {backgroundNatural} {onOpenBackground} {onOpenCampaignBattle} />
         {:else if win.kind === "settings"}
           <SettingsPanel
             saves={isGM ? saves : null}
