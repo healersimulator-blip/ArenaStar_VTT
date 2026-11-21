@@ -134,7 +134,8 @@ export function planImageAction(input: ImageActionPlanInput): ImageActionPlan {
     }
     case "tileNatural":
     case "tileFit":
-    case "tileGrid": {
+    case "tileGrid":
+    case "stitchBackground": {
       const scene = requireScene(input.scene, input.action);
       const imageSize = { width: size.width, height: size.height };
       const sceneSize = { width: scene.width, height: scene.height };
@@ -211,6 +212,7 @@ function requireScene(scene: SceneDocument | null, action: ImageAction): SceneDo
 function actionLabel(action: ImageAction): string {
   switch (action) {
     case "replaceBackground": return "Replace background";
+    case "stitchBackground": return "Stitch images as map grid";
     case "replaceForeground": return "Replace foreground";
     case "tileNatural": return "Tile at natural size";
     case "tileFit": return "Fit tile to scene";

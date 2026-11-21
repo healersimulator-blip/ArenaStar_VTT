@@ -128,7 +128,7 @@ import { summarizeMedia, summarizeSkips } from "../core/fxDelivery";
   import { verifyCommitRoll } from "../dice/commitReveal";
   import { PoolInterpolator } from "../sim/interpolate";
   import { TrustedModuleHost } from "../packages/trustedModule";
-  import { screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
+  import { LARGE_SCENE_ZOOM_LIMITS, screenToWorld, worldToScreen, zoomAt } from "../canvas/camera";
   import CrosshairOverlay from "../ui/macros/CrosshairOverlay.svelte";
   import { resolveCrosshairPick, summonCrosshairOptions, type CrosshairPickOptions } from "../ui/macros/crosshairPicker";
   import type { RequestSummonPick, SummonPickOptions, SummonPickPoint } from "../ui/macros/summonPicker";
@@ -713,6 +713,18 @@ const WALL_PICK_RADIUS = 12;
     try { await app.gm.client.submitAndWait([{ kind: "update", ref: { coll: "tokens", id: token._id, parent: { coll: "scenes", id: scene._id } }, diff: { elevation: z } }]); }
     catch (error) { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; }
   }
+  async function setTokensDisposition(ids: readonly string[], disposition: "friendly" | "neutral" | "hostile"): Promise<void> {
+    const scene = activeScene();
+    if (!scene || !app || !ids.length) return;
+    try {
+      await app.gm.client.submitAndWait(ids.map((id) => ({
+        kind: "update" as const,
+        ref: { coll: "tokens", id, parent: { coll: "scenes", id: scene._id } },
+        diff: { disposition },
+      })));
+      closeTokenMenu();
+    } catch (error) { notifyLog = [...notifyLog.slice(-49), { message: error instanceof Error ? error.message : String(error), level: "warn" }]; }
+  }
   const floorRosterRows = $derived.by(() => { void storeVersion; const scene = levelPreviewScene; return scene?.levels?.length ? floorRoster(scene, isPlayerCharacter) : []; });
   let fogResetBusy = $state(false), fogResetMessage = $state("");
   async function resetPreviewFog() {
@@ -1028,7 +1040,7 @@ const WALL_PICK_RADIUS = 12;
         };
         fxPlayer?.cancelCamera(); // an explicit zoom button is user input too
         view.setCamera(
-          zoomAt(view.camera, centre.x, centre.y, action === "zoom-in" ? 1.25 : 1 / 1.25),
+          zoomAt(view.camera, centre.x, centre.y, action === "zoom-in" ? 1.25 : 1 / 1.25, LARGE_SCENE_ZOOM_LIMITS),
         );
         break;
       }
@@ -3082,8 +3094,8 @@ const WALL_PICK_RADIUS = 12;
           system: {},
           active: false,
           img: null,
-          width: strategic ? 5000 : scene?.width ?? 2000,
-          height: strategic ? 5000 : 1500,
+          width: strategic ? 12000 : scene?.width ?? 2000,
+          height: strategic ? 12000 : 1500,
           darkness: 0,
           grid: (!strategic ? scene?.grid : undefined) ?? {
             type: "square",
@@ -6194,6 +6206,21 @@ const WALL_PICK_RADIUS = 12;
                 <label class="token-menu-static" style="display:flex;gap:4px;align-items:center">Feet Z
                   <input type="number" aria-label="Token feet elevation" style="width:64px" value={menuToken.elevation ?? 0}
                     onchange={(e) => setTokenElevation(menuToken, Number(e.currentTarget.value))} /></label>
+                {#if !viewingAs}
+                  {@const sideTargets = floorMenuTargets(menuToken._id)}
+                  <div class="token-menu-static" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+                    <span>Side:</span>
+                    {#each ["friendly", "neutral", "hostile"] as const as disp (disp)}
+                      <button
+                        type="button"
+                        role="menuitem"
+                        data-token-disposition={disp}
+                        disabled={sideTargets.every((id) => menuScene.tokens.find((t) => t._id === id)?.disposition === disp)}
+                        onclick={() => void setTokensDisposition(sideTargets, disp)}
+                      >{disp[0]?.toUpperCase()}{disp.slice(1)}</button>
+                    {/each}
+                  </div>
+                {/if}
                 {#if elevationOffer?.tokenId === menuToken._id}
                   <span class="token-menu-static" data-token-elevation-offer>That height is on {elevationOffer.name}{elevationOffer.blockedBy ? `; ${elevationOffer.blockedBy} is solid in the way` : ""}.</span>
                   <button type="button" role="menuitem" onclick={() => elevationOffer && moveTokensToFloor([menuToken._id], elevationOffer.levelId, elevationOffer.z)}>{elevationOffer.blockedBy ? `Move to ${elevationOffer.name} anyway` : `Move to ${elevationOffer.name}`}</button>
@@ -6347,6 +6374,19 @@ const WALL_PICK_RADIUS = 12;
         <WindowHost
           backgroundNatural={backgroundNatural}
           onOpenBackground={() => { canvasLayer = "map"; backgroundPanelOpen = true; }}
+          onOpenCampaignBattle={(id) => {
+            if (activeScene()?._id !== id && app) {
+              const ops = (app.gm.client.store.getAll("scenes") as readonly SceneDocument[]).map((sc) => ({
+                kind: "update" as const,
+                ref: { coll: "scenes" as const, id: sc._id },
+                diff: { active: sc._id === id },
+              }));
+              void app.gm.client.submitAndWait(ops).then(() => { battlePanel = id; });
+            } else {
+              battlePanel = id;
+            }
+            wm.close("scene-settings");
+          }}
           presence={playerPresence}
           manager={wm}
           windows={wmWindows}

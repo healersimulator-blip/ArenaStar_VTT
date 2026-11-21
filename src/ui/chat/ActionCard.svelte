@@ -137,8 +137,12 @@
               <span>{target.check.saveType ? target.check.saveType.toUpperCase() : target.check.kind}</span>
               <code>{target.check.formula}</code>
               {#if target.check.dc !== null}<span>vs DC {target.check.dc}</span>{/if}
-              {#if target.check.status === "resolved" && target.check.total !== null}
-                <span class="total" data-action-total>{target.check.total}</span>
+              {#if target.check.status === "resolved"}
+                {#if target.check.total !== null}
+                  <span class="total" data-action-total>{target.check.total}</span>
+                {:else}
+                  <span class="muted" data-action-resolved>resolved</span>
+                {/if}
               {:else if target.check.status === "expired"}
                 <span class="muted">roll expired</span>
               {:else}

@@ -620,4 +620,124 @@ describe.skipIf(!url)("real PostgreSQL hosted order/turn authority", () => {
       (await f.db.roster()).find((m) => m.id === "commander-1")?.units,
     ).toEqual(["unit-1-1"]);
   });
+
+  test("restricted unit grants gate turn reports and frozen turns snapshot unit.faction", async () => {
+    const f = await fixture();
+    let captured: Frozen | undefined;
+    const hold = async (job: Frozen): Promise<Result> => {
+      captured = job;
+      await new Promise((r) => setTimeout(r, 80));
+      return resolveFrozen(job);
+    };
+    const a = await StrategicAuthority.open(f.db, signal(), hold);
+    authorities.push(a);
+    const gm = await member(f.db, f.members.gm);
+    const blue = await member(f.db, f.members["commander-1"]);
+    expect(
+      await a.submit(gm, {
+        kind: "member.update",
+        requestId: id(),
+        memberId: "commander-1",
+        units: ["unit-1-1"],
+      }),
+    ).toMatchObject({ status: "accepted" });
+    expect(await a.submit(gm, close(1))).toMatchObject({ status: "accepted" });
+    await vi.waitFor(() => expect(captured).toBeDefined());
+    await vi.waitFor(() => expect(a.room.phase).toBe("report"));
+    expect((await f.db.report(blue, 1, 0)).map((r) => r.unitId)).toEqual([
+      "unit-1-1",
+    ]);
+    expect(
+      await a.submit(gm, {
+        kind: "turn.next",
+        requestId: id(),
+        turnId: 1,
+        durationMs: null,
+      }),
+    ).toMatchObject({ status: "accepted" });
+    expect(
+      await a.submit(gm, {
+        kind: "unit.faction",
+        requestId: id(),
+        unitId: "unit-1-1",
+        factionId: "red",
+      }),
+    ).toMatchObject({ status: "accepted" });
+    const frozenTurn1 = await f.db.pool.query<{ scenario: Frozen["scenario"] }>(
+      "SELECT scenario FROM strategic_frozen WHERE room_id=$1 AND turn_id=1",
+      [f.room],
+    );
+    expect(
+      frozenTurn1.rows[0]?.scenario.commanders
+        .find((c) => c.id === "commander-1")
+        ?.units.find((u) => u.id === "unit-1-1")?.factionId,
+    ).toBeUndefined();
+    expect(a.battle.unitFactions()["unit-1-1"]).toBe("red");
+  });
+
+  test("GM roster.assign swaps commander teams and transfers 5-unit commands atomically", async () => {
+    const f = await fixture();
+    const a = await StrategicAuthority.open(f.db, signal(), later);
+    authorities.push(a);
+    const gm = await member(f.db, f.members.gm);
+    expect(
+      await a.submit(gm, {
+        kind: "roster.assign",
+        requestId: id(),
+        assignments: [
+          {
+            memberId: "commander-1",
+            factionId: "red",
+            units: ["unit-2-1", "unit-2-2", "unit-2-3", "unit-2-4", "unit-2-5"],
+          },
+          {
+            memberId: "commander-2",
+            factionId: "blue",
+            units: ["unit-1-1", "unit-1-2", "unit-1-3", "unit-1-4", "unit-1-5"],
+          },
+        ],
+      }),
+    ).toMatchObject({ status: "accepted" });
+    const swappedOne = await member(f.db, f.members["commander-1"]);
+    const swappedTwo = await member(f.db, f.members["commander-2"]);
+    expect(swappedOne.factionId).toBe("red");
+    expect(swappedTwo.factionId).toBe("blue");
+    expect(a.battle.own(swappedOne).map((u) => u.id)).toEqual([
+      "unit-2-1",
+      "unit-2-2",
+      "unit-2-3",
+      "unit-2-4",
+      "unit-2-5",
+    ]);
+    expect(a.battle.own(swappedTwo).map((u) => u.id)).toEqual([
+      "unit-1-1",
+      "unit-1-2",
+      "unit-1-3",
+      "unit-1-4",
+      "unit-1-5",
+    ]);
+    expect(
+      await a.submit(swappedOne, {
+        kind: "orders.submit",
+        requestId: id(),
+        turnId: 1,
+        expectedRevision: 0,
+        unitEdits: [
+          {
+            unitId: "unit-2-1",
+            order: { kind: "attack", targetUnitId: "unit-1-1", mode: "melee" },
+          },
+        ],
+      }),
+    ).toMatchObject({ status: "accepted", revision: 1 });
+    expect(await a.submit(gm, close(1))).toMatchObject({ status: "accepted" });
+    await vi.waitFor(() => expect(a.room.phase).toBe("report"));
+    expect((await f.db.report(swappedOne, 1, 0)).map((r) => r.unitId)).toEqual([
+      "unit-2-1",
+      "unit-2-2",
+      "unit-2-3",
+      "unit-2-4",
+      "unit-2-5",
+    ]);
+  });
 });

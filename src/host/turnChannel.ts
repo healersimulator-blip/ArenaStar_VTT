@@ -329,6 +329,7 @@ export class TurnChannel {
       // SRD 5-ft square (`sceneCellFeet`), never to the old generic 4-ft spacing.
       const deployed = deploySnapshot(units, this.factions(), this.sys, {
         spacing: this.cellFeet(),
+        assignRankFile: true,
       });
       if (deployed.ranges.some(([, r]) => r !== null)) {
         init = { bytes: deployed.bytes, maxHpMax: deployed.maxHpMax };

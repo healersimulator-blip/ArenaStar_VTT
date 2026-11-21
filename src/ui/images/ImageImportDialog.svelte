@@ -11,6 +11,13 @@
   import { imageString } from "./strings";
   import { planImageAction } from "../../core/imageActions";
   import { VIDEO_SOURCE_ACTIONS } from "../../core/imageHandling";
+  import {
+    MAX_SCENE_DIMENSION_PX,
+    defaultStitchColumns,
+    mergeStitchedSceneTiles,
+    planStitchedMapTiles,
+    type StitchPanelInput,
+  } from "../../core/mapStitching";
   import type { ImageSource } from "./imageSources";
 
   const CORS_FALLBACK = "The browser couldn't read or load this image (it may be blocked by CORS). Save the image to your computer and drop the file here.";
@@ -107,6 +114,8 @@
   let gridWarning = $state("");
   /** New scene only: match the scene to the image, or keep the chosen size and fit the image into it (§6.3). */
   let sceneSizeMode = $state<"matchImage" | "fitImage">("matchImage");
+  let stitchCols = $state(defaultStitchColumns(untrack(() => sources.length)));
+  let stitchMode = $state<"fitScene" | "resizeScene">("fitScene");
   let offsetX = $state(initialDialogState.offsetX);
   let offsetY = $state(initialDialogState.offsetY);
   let backgroundScale = $state(initialDialogState.backgroundScale);
@@ -132,7 +141,7 @@
     if (videoBlocks(selectedAction)) return false;
     if (selectedAction === "showPlayers") return canShare && (!restrictedPlayerMode || canWriteDocuments);
     if (canWriteDocuments) {
-      if (["replaceBackground", "replaceForeground", "tileNatural", "tileFit", "tileGrid", "tokenArt"].includes(selectedAction) && !scene) return false;
+      if (["replaceBackground", "stitchBackground", "replaceForeground", "tileNatural", "tileFit", "tileGrid", "tokenArt"].includes(selectedAction) && !scene) return false;
       if (selectedAction === "tileGrid" && gridType === "gridless") return false;
       if (selectedAction === "tokenArt" && selectedTokenIds.length === 0) return false;
       return true;
@@ -423,7 +432,7 @@
     if (videoBlocks(action)) return false;
     if (action === "showPlayers") return canShare && (!restrictedPlayerMode || canWriteDocuments);
     if (!canWriteDocuments) return false;
-    if (["replaceBackground", "replaceForeground", "tileNatural", "tileFit", "tileGrid", "tokenArt"].includes(action) && !scene) return false;
+    if (["replaceBackground", "stitchBackground", "replaceForeground", "tileNatural", "tileFit", "tileGrid", "tokenArt"].includes(action) && !scene) return false;
     if (action === "tileGrid" && gridType === "gridless") return false;
     if (action === "tokenArt" && selectedTokenIds.length === 0) return false;
     return true;
@@ -582,12 +591,12 @@
     if (!nameDraft.trim()) throw new Error("Enter a name for this image.");
     if (folderDraft.length > 240) throw new Error("Logical folders are limited to 240 characters.");
     if (action === "newScene" || action === "replaceBackground") {
-      if (![sceneWidth, sceneHeight].every((value) => Number.isSafeInteger(value) && value > 0 && value <= 100000))
-        throw new Error("Scene width and height must be whole pixels from 1 to 100,000.");
-      if (gridType !== "gridless" && (!Number.isSafeInteger(gridSize) || gridSize < 50 || gridSize > 1000))
-        throw new Error("Grid size must be an integer from 50 to 1,000 pixels.");
-      if (!Number.isFinite(backgroundScale) || backgroundScale < 0.1 || backgroundScale > 10)
-        throw new Error("Background scale must be between 0.1 and 10.");
+      if (![sceneWidth, sceneHeight].every((value) => Number.isSafeInteger(value) && value > 0 && value <= MAX_SCENE_DIMENSION_PX))
+        throw new Error("Scene width and height must be whole pixels from 1 to 200,000.");
+      if (gridType !== "gridless" && (!Number.isSafeInteger(gridSize) || gridSize < 10 || gridSize > 1000))
+        throw new Error("Grid size must be an integer from 10 to 1,000 pixels.");
+      if (!Number.isFinite(backgroundScale) || backgroundScale < 0.05 || backgroundScale > 50)
+        throw new Error("Background scale must be between 0.05 and 50.");
       if (!Number.isFinite(padding) || padding < 0 || padding > 1)
         throw new Error("Background padding must be from 0 to 100 percent.");
     }
@@ -612,6 +621,60 @@
     progress = "";
     continuationAll = all;
     const action = selectedAction;
+    if (action === "stitchBackground") {
+      try {
+        if (!scene) throw new Error("Choose an active scene to stitch background images onto.");
+        if (!canUpload) throw new Error("Persistent image uploads require GM permission.");
+        const panels: StitchPanelInput[] = [];
+        for (let i = 0; i < sources.length; i++) {
+          const item = sources[i];
+          if (!item) continue;
+          progress = `Preparing ${i + 1} of ${sources.length}…`;
+          const cur = i === currentIndex && prepared ? prepared : await loadSource(i);
+          if (isVideoMime(cur.mime)) throw new Error(imageString("videoOnlyBackground"));
+          progress = `Uploading ${i + 1} of ${sources.length}…`;
+          const uploaded = await client.uploadImageAsset(cur.bytes, {
+            name: item.name,
+            displayName: normalizeImageName(item.name),
+            folder: normalizeLogicalFolder(folderDraft),
+            sourceKind: item.kind === "url" ? "url" : sourceOrigin === "paste" ? "paste" : "file",
+            collisionBehavior: "reuse",
+            convertToWebp: prefs.webpConvert,
+            webpQuality: prefs.webpQuality,
+          });
+          panels.push({
+            id: `tile-${crypto.randomUUID().slice(0, 12)}`,
+            name: normalizeImageName(item.name),
+            image: uploaded.hash,
+            width: cur.width,
+            height: cur.height,
+          });
+        }
+        const plan = planStitchedMapTiles(panels, {
+          columns: stitchCols,
+          mode: stitchMode,
+          sceneSize: { width: scene.width, height: scene.height },
+          gridSize: scene.grid.size,
+        });
+        progress = "Saving stitched map grid…";
+        await client.submitAndWait([{
+          kind: "update",
+          ref: { coll: "scenes", id: scene._id },
+          diff: {
+            width: plan.width,
+            height: plan.height,
+            tiles: mergeStitchedSceneTiles(scene.tiles, plan.tiles),
+          },
+        }]);
+        rememberSuccess(action, folderDraft);
+        onClose();
+      } catch (error) {
+        importError = error instanceof Error ? error.message : String(error);
+      } finally {
+        running = false;
+      }
+      return;
+    }
     const end = all ? sources.length : Math.min(sources.length, currentIndex + 1);
     try {
       for (let i = currentIndex; i < end; i++) {
@@ -678,6 +741,7 @@
     return ({
       newScene: "New scene",
       replaceBackground: "Replace scene background",
+      stitchBackground: "Stitch images as map grid",
       replaceForeground: "Replace scene foreground",
       tileNatural: "Centered tile at natural size",
       tileFit: "Centered tile fitted to scene",
@@ -793,7 +857,21 @@
             <fieldset class="geometry">
               <legend>{selectedAction === "newScene" ? "New scene size and grid" : "Background placement and grid"}</legend>
               {#if keepsSceneSize()}
-                <p class="hint">The scene stays {sceneWidth.toLocaleString()} × {sceneHeight.toLocaleString()} px. The image is placed at its native size; the offset and scale below adjust it.</p>
+                <div class="row tight">
+                  <p class="hint">The scene stays {sceneWidth.toLocaleString()} × {sceneHeight.toLocaleString()} px. The image is placed at its native size; the offset and scale below adjust it.</p>
+                  <button
+                    type="button"
+                    data-fit-background-to-scene
+                    disabled={running || !prepared}
+                    onclick={() => {
+                      if (!prepared) return;
+                      const fitted = fitImageToScene(prepared, { width: sceneWidth, height: sceneHeight });
+                      backgroundScale = Math.round(fitted.scale * 1000) / 1000;
+                      offsetX = fitted.offset.x;
+                      offsetY = fitted.offset.y;
+                    }}>Fit image to scene</button
+                  >
+                </div>
               {:else}
                 <div class="row">
                   <label>Scene size
@@ -804,8 +882,8 @@
                   </label>
                 </div>
                 <div class="row">
-                  <label>Width<input type="number" min="1" max="100000" step="1" value={sceneWidth} disabled={running} oninput={(event) => changeWidth(Number(event.currentTarget.value))} /></label>
-                  <label>Height<input type="number" min="1" max="100000" step="1" value={sceneHeight} disabled={running} oninput={(event) => changeHeight(Number(event.currentTarget.value))} /></label>
+                  <label>Width<input type="number" min="1" max={MAX_SCENE_DIMENSION_PX} step="1" value={sceneWidth} disabled={running} oninput={(event) => changeWidth(Number(event.currentTarget.value))} /></label>
+                  <label>Height<input type="number" min="1" max={MAX_SCENE_DIMENSION_PX} step="1" value={sceneHeight} disabled={running} oninput={(event) => changeHeight(Number(event.currentTarget.value))} /></label>
                 </div>
                 <div class="row tight">
                   {#if sceneSizeMode === "matchImage"}
@@ -821,10 +899,10 @@
                   <select bind:value={gridType} disabled={running}><option value="square">Square</option><option value="hex">Hex</option><option value="gridless">Gridless</option></select>
                 </label>
                 <label>Grid size (px)
-                  <input type="number" min="50" max="1000" step="1" bind:value={gridSize} disabled={running || gridType === "gridless"} />
+                  <input type="number" min="10" max="1000" step="1" bind:value={gridSize} disabled={running || gridType === "gridless"} />
                 </label>
               </div>
-              <div class="suggestions">{#each [70, 100, 140, 200] as size (size)}<button type="button" disabled={running || gridType === "gridless"} onclick={() => (gridSize = size)}>{size}</button>{/each}</div>
+              <div class="suggestions">{#each [20, 70, 100, 140, 200] as size (size)}<button type="button" disabled={running || gridType === "gridless"} onclick={() => (gridSize = size)}>{size}</button>{/each}</div>
               <div class="row grid-from">
                 <label>Squares across<input type="number" min="1" step="1" bind:value={squareColumns} disabled={running} /></label>
                 <button type="button" disabled={running || !prepared} onclick={suggestGrid}>Grid from image</button>
@@ -835,7 +913,7 @@
                 <label>Background offset Y (px)<input type="number" step="1" bind:value={offsetY} disabled={running} /></label>
               </div>
               <div class="row">
-                <label>Background scale<input type="number" min="0.1" max="10" step="0.05" bind:value={backgroundScale} disabled={running} /></label>
+                <label>Background scale<input type="number" min="0.05" max="50" step="0.05" bind:value={backgroundScale} disabled={running} /></label>
                 <label>Padding (%)<input type="number" min="0" max="100" step="1" value={padding * 100} disabled={running} oninput={(event) => (padding = Math.max(0, Math.min(1, Number(event.currentTarget.value) / 100)))} /></label>
               </div>
               <label>Background colour <span class="color"><input type="color" bind:value={backgroundColor} disabled={running} /><input value={backgroundColor} pattern="#[0-9a-fA-F]{6}" maxlength="7" disabled={running} oninput={(event) => { if (/^#[0-9a-f]{6}$/i.test(event.currentTarget.value)) backgroundColor = event.currentTarget.value; }} /></span></label>
@@ -853,6 +931,21 @@
             </fieldset>
           {/if}
 
+          {#if selectedAction === "stitchBackground"}
+            <fieldset class="geometry">
+              <legend>Stitch {sources.length} image{sources.length === 1 ? "" : "s"} into map grid</legend>
+              <div class="row">
+                <label>Grid columns<input data-stitch-dialog-cols type="number" min="1" max="64" step="1" bind:value={stitchCols} disabled={running} /></label>
+                <label>Scene sizing
+                  <select data-stitch-dialog-mode bind:value={stitchMode} disabled={running}>
+                    <option value="fitScene">Fit stitched grid into active scene</option>
+                    <option value="resizeScene">Resize active scene to stitched panels</option>
+                  </select>
+                </label>
+              </div>
+              <p class="hint">Places all {sources.length} selected image{sources.length === 1 ? "" : "s"} edge-to-edge as background map tiles.</p>
+            </fieldset>
+          {/if}
           {#if selectedAction === "tileGrid"}
             <label>Asset Grid Size (pixels per image square)
               <input type="number" min="50" step="1" bind:value={assetGridSize} disabled={running} />

@@ -69,6 +69,7 @@
     return ({
       newScene: "New scene",
       replaceBackground: "Replace background",
+      stitchBackground: "Stitch images as map grid",
       replaceForeground: "Replace foreground",
       tileNatural: "Centered tile · natural size",
       tileFit: "Centered tile · fit scene",

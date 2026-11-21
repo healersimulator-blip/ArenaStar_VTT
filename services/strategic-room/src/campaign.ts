@@ -7,14 +7,18 @@ import {
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { verifyText } from "../../../src/net/identity";
+import { ModelStatus } from "../../../src/core/strategic";
 import {
   record,
   isPublicKey,
   campaignProof,
+  type BattleReconciliationPayload,
+  type ReconciledUnitSummary,
 } from "../../../src/core/strategicRoom/protocol";
-import { parseScenario, deploy } from "./scenario";
+import { parseScenario, deploy, initialUnitResources, type Scenario, type UnitState } from "./scenario";
 import { digest, openInvite, sealInvite } from "./invite";
 import { PostgresRoom } from "./postgres";
+import { checkpointPool, type LiveRoomState, type Published, type VersionExtras } from "./state";
 import { serve } from "./server";
 
 const uuid =
@@ -27,6 +31,133 @@ const json = (res: ServerResponse, status: number, data: unknown) => {
   });
   res.end(JSON.stringify(data));
 };
+
+export function buildReconciliationPayload(
+  id: string,
+  scenario: Scenario,
+  state: Published,
+  live: LiveRoomState,
+  surviving: number,
+  lost: number,
+  previewOnly?: boolean,
+): BattleReconciliationPayload {
+  const pool = checkpointPool(state);
+  const baseRes = initialUnitResources(scenario);
+  const curRes = state.extras?.unitResources ?? {};
+  const units: ReconciledUnitSummary[] = [];
+  const allUnits = scenario.commanders.flatMap((c) =>
+    c.units.map((u) => ({ u, factionId: u.factionId ?? c.factionId })),
+  );
+
+  allUnits.forEach(({ u, factionId }, idx) => {
+    const unitState = state.units[idx];
+    const [start, end] = unitState?.range ?? [0, 0];
+    let sx = 0,
+      sy = 0,
+      sinSum = 0,
+      cosSum = 0,
+      alive = 0;
+    for (let i = start; i < end && i < pool.count; i++) {
+      if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+      sx += pool.x[i] ?? 0;
+      sy += pool.y[i] ?? 0;
+      const rot = pool.rot[i] ?? 0;
+      sinSum += Math.sin(rot);
+      cosSum += Math.cos(rot);
+      alive++;
+    }
+    const at =
+      alive > 0
+        ? {
+            x: Math.round((sx / alive) * 10) / 10,
+            y: Math.round((sy / alive) * 10) / 10,
+          }
+        : null;
+    const facing =
+      alive > 0 ? Math.round(Math.atan2(sinSum, cosSum) * 1000) / 1000 : undefined;
+
+    const spellsSpent: Record<string, number> = {};
+    if (u.spells?.length) {
+      for (const sp of u.spells) {
+        const rem =
+          curRes[u.id]?.spells?.[sp.id] ??
+          (sp.id === "entangle" ? unitState?.stats.entangleSlots : undefined) ??
+          baseRes[u.id]?.spells?.[sp.id] ??
+          sp.slots;
+        const spent = Math.max(0, sp.slots - rem);
+        if (spent > 0) spellsSpent[sp.id] = (spellsSpent[sp.id] ?? 0) + spent;
+      }
+    } else if (u.spellcasting) {
+      const rem =
+        curRes[u.id]?.spells?.entangle ??
+        unitState?.stats.entangleSlots ??
+        u.spellcasting.entangleSlots;
+      const spent = Math.max(0, u.spellcasting.entangleSlots - rem);
+      if (spent > 0) {
+        spellsSpent.entangle = (spellsSpent.entangle ?? 0) + spent;
+      }
+    }
+
+    const itemsSpent: Record<string, number> = {};
+    for (const it of u.items ?? []) {
+      const rem = curRes[u.id]?.items?.[it.id] ?? baseRes[u.id]?.items?.[it.id] ?? it.charges;
+      const spent = Math.max(0, it.charges - rem);
+      if (spent > 0) itemsSpent[it.id] = (itemsSpent[it.id] ?? 0) + spent;
+    }
+
+    const conditions = curRes[u.id]?.conditions ?? u.conditions ?? [];
+    units.push({
+      id: u.id,
+      name: u.name,
+      factionId,
+      ...(u.source ? { source: u.source } : {}),
+      initialStrength: u.strength,
+      alive,
+      lost: Math.max(0, u.strength - alive),
+      at,
+      ...(facing !== undefined ? { facing } : {}),
+      ...(Object.keys(spellsSpent).length ? { spellsSpent } : {}),
+      ...(Object.keys(itemsSpent).length ? { itemsSpent } : {}),
+      ...(conditions.length ? { conditions: [...conditions] } : {}),
+    });
+  });
+
+  const doorStates: Record<string, 0 | 1 | 2> = {};
+  for (const w of scenario.walls ?? []) {
+    if (w.id && w.door !== undefined) {
+      doorStates[w.id] =
+        live.doors && Object.hasOwn(live.doors, w.id)
+          ? (live.doors[w.id] ?? w.door)
+          : w.door;
+    }
+  }
+  const darkness =
+    live.darkness !== undefined ? live.darkness : scenario.lighting?.darkness;
+
+  return {
+    id,
+    version: state.version,
+    ...(previewOnly ? { previewOnly: true } : {}),
+    surviving,
+    lost,
+    units,
+    ...(Object.keys(doorStates).length ? { doorStates } : {}),
+    ...(darkness !== undefined ? { darkness } : {}),
+    ...(scenario.projection
+      ? {
+          projection: {
+            worldId: scenario.projection.worldId,
+            sceneId: scenario.projection.sceneId,
+            sourceSeq: scenario.projection.sourceSeq,
+            digest: scenario.projection.digest,
+            ...(scenario.projection.dependencies
+              ? { dependencies: scenario.projection.dependencies }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
 export async function serveCampaign(
   url: string,
   slot: string,
@@ -118,7 +249,7 @@ export async function serveCampaign(
       let length = 0;
       for await (const chunk of req) {
         length += chunk.length;
-        if (length > 2 * 1024 * 1024)
+        if (length > 24 * 1024 * 1024)
           return json(res, 413, { error: "Deployment too large" });
         chunks.push(chunk);
       }
@@ -137,14 +268,21 @@ export async function serveCampaign(
         return json(res, 400, { error: "Invalid battle identity" });
       const { id, publicKey } = body;
       createdInvites = {};
-      const action = req.url === "/api/campaign/finish" ? "finish" : "launch";
-      if (
-        typeof body.at !== "number" ||
-        !Number.isSafeInteger(body.at) ||
-        Math.abs(Date.now() - body.at) > 60000 ||
-        typeof body.signature !== "string" ||
-        body.signature.length > 256 ||
-        !(await verifyText(
+      const previewOnly =
+        req.url === "/api/campaign/finish" && body.previewOnly === true;
+      const action =
+        req.url === "/api/campaign/finish"
+          ? previewOnly
+            ? "preview"
+            : "finish"
+          : "launch";
+      const validSig =
+        typeof body.at === "number" &&
+        Number.isSafeInteger(body.at) &&
+        Math.abs(Date.now() - body.at) <= 60000 &&
+        typeof body.signature === "string" &&
+        body.signature.length <= 256 &&
+        ((await verifyText(
           publicKey,
           body.signature,
           campaignProof(
@@ -154,8 +292,20 @@ export async function serveCampaign(
             body.at,
             body.scenario,
           ),
-        ))
-      )
+        )) ||
+          (previewOnly &&
+            (await verifyText(
+              publicKey,
+              body.signature,
+              campaignProof(
+                "finish",
+                req.headers.origin ?? "",
+                id,
+                body.at,
+                body.scenario,
+              ),
+            ))));
+      if (!validSig)
         return json(res, 403, {
           error: "Invalid or expired GM identity proof.",
         });
@@ -177,7 +327,7 @@ export async function serveCampaign(
             unprovisioned: true,
             error: "No such battle",
           });
-        if (!existing.ended) {
+        if (!previewOnly && !existing.ended) {
           if (live?.id !== id) await attach(id);
           const closing = live;
           live = null;
@@ -188,12 +338,30 @@ export async function serveCampaign(
           );
         }
         const row = (
-          await registry.pool.query<{ version: number }>(
-            "SELECT version FROM strategic_rooms WHERE id=$1",
+          await registry.pool.query<{
+            version: number;
+            scenario: Scenario;
+            liveState: LiveRoomState | null;
+          }>(
+            `SELECT version, scenario, live_state AS "liveState" FROM strategic_rooms WHERE id=$1`,
             [id],
           )
         ).rows[0];
         if (!row) throw new Error("Missing committed battle");
+        const verRow = (
+          await registry.pool.query<{
+            version: number;
+            bytes: Buffer;
+            maxHpMax: number;
+            hash: string;
+            units: UnitState[];
+            extras: VersionExtras | null;
+          }>(
+            `SELECT version, checkpoint AS bytes, hp_max AS "maxHpMax", pool_hash AS hash, units, extras
+             FROM strategic_versions WHERE room_id=$1 AND version=$2`,
+            [id, row.version],
+          )
+        ).rows[0];
         const totals = (
           await registry.pool.query<{ surviving: number; lost: number }>(
             `SELECT coalesce(sum((row->>'alive')::int),0)::int AS surviving, coalesce(sum((row->>'lost')::int),0)::int AS lost FROM strategic_report_rows WHERE room_id=$1 AND version=$2`,
@@ -201,10 +369,36 @@ export async function serveCampaign(
           )
         ).rows[0];
         if (!totals) throw new Error("Missing battle totals");
+        let reconciliation: BattleReconciliationPayload | undefined;
+        if (verRow) {
+          const initialTotal = row.scenario.commanders
+            .flatMap((c) => c.units)
+            .reduce((acc, u) => acc + u.strength, 0);
+          const published: Published = {
+            version: verRow.version,
+            bytes: verRow.bytes,
+            maxHpMax: verRow.maxHpMax,
+            hash: verRow.hash,
+            units: verRow.units,
+            ...(verRow.extras ? { extras: verRow.extras } : {}),
+          };
+          const built = buildReconciliationPayload(
+            id,
+            row.scenario,
+            published,
+            row.liveState ?? {},
+            row.version > 0 ? totals.surviving : initialTotal,
+            row.version > 0 ? totals.lost : 0,
+            previewOnly,
+          );
+          reconciliation = built;
+        }
         return json(res, 200, {
           id,
           version: row.version,
+          previewOnly,
           ...(row.version > 0 ? totals : {}),
+          ...(reconciliation ? { reconciliation } : {}),
         });
       }
       if (existing?.ended || (live && live.id !== id))
@@ -226,6 +420,24 @@ export async function serveCampaign(
               bytes.byteLength !== scenario.background.size ||
               createHash("sha256").update(bytes).digest("hex") !== scenario.background.hash
             ) throw new Error("Battlefield background hash or size mismatch.");
+          }
+          if (scenario.backgroundAssets) {
+            for (const panel of Object.values(scenario.backgroundAssets)) {
+              const bytes = Buffer.from(panel.data, "base64url");
+              if (
+                bytes.byteLength !== panel.size ||
+                createHash("sha256").update(bytes).digest("hex") !== panel.hash
+              ) throw new Error("Stitched map panel hash or size mismatch.");
+            }
+          }
+          if (scenario.badges) {
+            for (const badge of Object.values(scenario.badges)) {
+              const bytes = Buffer.from(badge.data, "base64url");
+              if (
+                bytes.byteLength !== badge.size ||
+                createHash("sha256").update(bytes).digest("hex") !== badge.hash
+              ) throw new Error("Unit badge hash or size mismatch.");
+            }
           }
           state = deploy(scenario);
         } catch (e) {

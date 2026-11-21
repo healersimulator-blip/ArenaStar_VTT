@@ -26,6 +26,8 @@ export interface DeployModelPos {
   x: number;
   y: number;
   facing: number;
+  rank?: number;
+  file?: number;
 }
 
 export interface DeployUnitPlan {
@@ -64,6 +66,8 @@ export interface DeployOptions {
   maxTotal?: number;
   /** Legacy is the default; hosted deployment explicitly selects the wide codec. */
   codecVersion?: SimCodecVersion;
+  /** Populate `ModelPool.rank` and `ModelPool.file` slots for per-file reform & envelopment. */
+  assignRankFile?: boolean;
 }
 
 const DEFAULT_MAX_TOTAL = 100_000;
@@ -92,7 +96,12 @@ export function formationOffsets(
     while (placed < count) {
       const inRow = Math.min(count - placed, row + 1);
       for (let i = 0; i < inRow; i++) {
-        out.push({ x: 0 - row * spacing, y: (i - (inRow - 1) / 2) * spacing, facing: 0 });
+        out.push({
+          x: 0 - row * spacing,
+          y: (i - (inRow - 1) / 2) * spacing,
+          facing: 0,
+          ...(opts.assignRankFile ? { rank: row, file: i } : {}),
+        });
       }
       placed += inRow;
       row++;
@@ -108,6 +117,7 @@ export function formationOffsets(
       x: 0 - rank * spacing,
       y: (file - (Math.min(count, width) - 1) / 2) * spacing,
       facing: 0,
+      ...(opts.assignRankFile ? { rank, file } : {}),
     });
   }
   return out;
@@ -192,6 +202,12 @@ export function deploySnapshot(
         hpMax: 1,
         status: 0,
         facing: 64,
+        ...(opts.assignRankFile
+          ? {
+              rank: Math.min(255, pos.rank ?? 0),
+              file: Math.min(255, pos.file ?? 0),
+            }
+          : {}),
         sys: sys.ammo !== undefined ? { ammo: 6 } : {},
       });
     }

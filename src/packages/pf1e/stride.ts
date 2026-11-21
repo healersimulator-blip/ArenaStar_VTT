@@ -30,6 +30,9 @@
  * plain Euclidean walk the strategic sim has always used, bit for bit — which is what lets
  * this land without rewriting the seeded-replay goldens.
  */
+import type { UnitView } from "../../core/rules";
+import { ModelStatus, type ModelPool } from "../../core/strategic";
+import { PF1eCondition } from "./schema";
 import { cellsAlongSegment } from "./geometry";
 
 /** The paces a formation march is priced at, in feet-per-cell multiples (CRB p.188). */
@@ -345,3 +348,50 @@ export function planPF1eStride(input: PF1eStrideInput, onWalkedLeg?: (x: number,
     legs,
   };
 }
+
+/**
+ * Shared living-model PF1e condition gate for strategic formation movement
+ * (Combat Resolver 5 C5/C13 + CRB p.567):
+ *  - Dead models (`ModelStatus.dead`) are ignored so fallen soldiers left in a
+ *    hazard never immobilize or slow surviving ranks.
+ *  - `HAZARD_GRAPPLED` (Black Tentacles) bars formation movement until escaped.
+ *  - `ENTANGLED` halves speed and bars `run` and `charge` ("An entangled
+ *    creature moves at half speed, cannot run or charge", CRB p.567).
+ */
+export function applyUnitConditionsToStride(
+  input: PF1eStrideInput,
+  pool: ModelPool,
+  unit: Pick<UnitView, "modelRange">,
+): { input: PF1eStrideInput; refusal: string | null; speedScale: number } {
+  const conditions = pool.sys.pfCondition;
+  if (!conditions) return { input, refusal: null, speedScale: 1 };
+  const [start, end] = unit.modelRange ?? [0, 0];
+  let entangled = false;
+  for (let i = start; i < end && i < pool.count; i++) {
+    if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+    const cond = conditions[i] ?? 0;
+    if ((cond & PF1eCondition.HAZARD_GRAPPLED) !== 0) {
+      return {
+        input,
+        refusal:
+          "Black Tentacles still grapple the formation; it must escape before fleeing",
+        speedScale: 0,
+      };
+    }
+    if ((cond & PF1eCondition.ENTANGLED) !== 0) entangled = true;
+  }
+  if (!entangled) return { input, refusal: null, speedScale: 1 };
+  if (input.pace === "run" || input.pace === "charge") {
+    return {
+      input,
+      refusal: `${input.pace}: an entangled unit cannot ${input.pace} (CRB p.567)`,
+      speedScale: 0,
+    };
+  }
+  return {
+    input: { ...input, movePoints: input.movePoints * 0.5 },
+    refusal: null,
+    speedScale: 0.5,
+  };
+}
+

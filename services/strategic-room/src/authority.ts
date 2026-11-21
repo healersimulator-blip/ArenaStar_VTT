@@ -7,7 +7,7 @@ import {
 import { BattleView } from "./battle";
 import { PostgresRoom, StaleAuthority } from "./postgres";
 import type { Scenario } from "./scenario";
-import type { Control, Frozen, Member, Result, RoomRecord } from "./state";
+import type { Control, Frozen, LiveRoomState, Member, Result, RoomRecord } from "./state";
 
 export const COMMAND_BACKLOG = 1024;
 const WORKER_LIMIT_MS = 30_000;
@@ -110,6 +110,7 @@ export class StrategicAuthority {
     public battle: BattleView,
     /** Grants installed with `battle`; re-applied only after a durable change commits. */
     private control: Control,
+    private live: LiveRoomState,
     private readonly notify: Notify,
     private readonly resolveJob: ResolveJob,
     private readonly clock: () => number,
@@ -122,14 +123,14 @@ export class StrategicAuthority {
     clock = Date.now,
   ) {
     const lease = { authority: undefined as StrategicAuthority | undefined };
-    const { room, scenario, key } = await db.acquire(() => {
+    const { room, scenario, key, live } = await db.acquire(() => {
       lease.authority?.lose();
       notify.lost();
     });
     const published = await db.version(room.version);
     // The live view uses today's canonical seat grants, not an older publication's snapshot.
     const control = await db.liveControl();
-    const battle = new BattleView(scenario, published, key);
+    const battle = new BattleView(scenario, published, key, undefined, live);
     battle.applyControl(control);
     if (db.generation !== room.generation)
       throw new StaleAuthority("Lease lost during startup.");
@@ -140,6 +141,7 @@ export class StrategicAuthority {
       key,
       battle,
       control,
+      live,
       notify,
       resolveJob,
       clock,
@@ -172,17 +174,49 @@ export class StrategicAuthority {
         admittedAt,
         this.scenario.seed,
         (edit) => this.battle.validate(member, edit),
-        (id) =>
-          this.scenario.commanders
-            .find((c) => c.id === id)
-            ?.units.map((u) => u.id) ?? [],
+        (id) => [
+          ...new Set([
+            ...(this.scenario.commanders
+              .find((c) => c.id === id)
+              ?.units.map((u) => u.id) ?? []),
+            ...(this.control[id] ?? []),
+          ]),
+        ],
+        (wallId, door) => this.battle.canToggleDoor(member, wallId, door),
       );
       if (result.revoked) this.notify.revoke(result.revoked);
       if (result.kicked) this.notify.kick?.(result.kicked);
+      if (result.controls) {
+        for (const [memberId, units] of Object.entries(result.controls)) {
+          this.control[memberId] = units;
+        }
+        this.battle.applyControl(result.controls);
+      }
       if (result.scenario) {
         this.scenario = result.scenario;
-        this.battle = new BattleView(this.scenario, this.battle.state, this.projectionKey, this.battle);
+        this.battle = new BattleView(
+          this.scenario,
+          this.battle.state,
+          this.projectionKey,
+          this.battle,
+          this.live,
+        );
         this.battle.applyControl(this.control);
+      }
+      if (result.live) {
+        this.live = result.live;
+        if (cmd.kind === "scene.door" || cmd.kind === "scene.light") {
+          this.battle = new BattleView(
+            this.scenario,
+            this.battle.state,
+            this.projectionKey,
+            undefined,
+            this.live,
+          );
+          this.battle.applyControl(this.control);
+        } else {
+          this.battle.live = this.live;
+        }
       }
       if (result.control) {
         // Grants are durable already; install them on the live view so the next GET and the
@@ -293,6 +327,7 @@ export class StrategicAuthority {
           { ...result.state, control },
           this.projectionKey,
           this.battle,
+          this.live,
         );
         const projected = performance.now();
         const beforeCommit = performance.now();

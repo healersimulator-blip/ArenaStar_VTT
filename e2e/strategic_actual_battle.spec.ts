@@ -173,6 +173,8 @@ test("GM authors a strategic scene and twelve commanders play a hosted skirmish"
     // Each player controls a four-company command. Exercise every company rather than treating
     // one browser as one token: attack where opposition is visible and hold the remaining ranks.
     let attacks = 0;
+    let envelops = 0;
+    let reforms = 0;
     let holds = 0;
     for (let i = 0; i < players.length; i++) {
       const commander = players[i];
@@ -184,8 +186,18 @@ test("GM authors a strategic scene and twelve commanders play a hosted skirmish"
         await expect(enemies).toBeEnabled();
         if (unitIndex < 2 && await enemies.locator("option").count() > 1) {
           await enemies.selectOption({ index: 1 });
+          const envelopBox = commander.locator("[data-order-envelop]");
+          if (unitIndex === 0 && await envelopBox.isVisible()) {
+            await envelopBox.check();
+            envelops++;
+          } else if (await envelopBox.isVisible()) {
+            await envelopBox.uncheck();
+          }
           await commander.getByRole("button", { name: /Draft (melee|ranged) attack/ }).click();
           attacks++;
+        } else if (unitIndex === 2) {
+          await commander.locator("[data-order-reform]").click();
+          reforms++;
         } else {
           await commander.getByRole("button", { name: "Draft hold" }).click();
           holds++;
@@ -195,7 +207,7 @@ test("GM authors a strategic scene and twelve commanders play a hosted skirmish"
       await expect.poll(async () => Number(await commander.locator("[data-revision]").textContent())).toBeGreaterThan(0);
     }
     expect(attacks).toBeGreaterThan(0);
-    expect(attacks + holds).toBe(48);
+    expect(attacks + reforms + holds).toBe(48);
     const resolveStarted = Date.now();
     await frame.getByRole("button", { name: "Close and resolve" }).click();
     await expect(frame.locator('[data-version="1"]')).toBeVisible({ timeout: 30_000 });
@@ -213,13 +225,14 @@ test("GM authors a strategic scene and twelve commanders play a hosted skirmish"
       campaign: { mapUploaded: true, campaignTokensCreated: 48, scale: "strategic" },
       hosted: { commanders: 12, unitsPerCommander: 4, units: 48, modelsPerUnit: 80, models: 3840,
         explicitGrantRoundTrip: true, liveGrantProjectionVerified: true, allegianceRoundTrip: true,
-        submittedBatches: 12, submittedUnitOrders: attacks + holds,
-        attackOrders: attacks, holdOrders: holds, publishedVersion: 1, reportRows: rows.length },
+        submittedBatches: 12, submittedUnitOrders: attacks + reforms + holds,
+        attackOrders: attacks, envelopOrders: envelops, reformOrders: reforms, holdOrders: holds,
+        publishedVersion: 1, reportRows: rows.length },
       formationCapabilities: {
-        ranksAndFiles: "exercised by 80-model companies",
-        reforming: "unsupported by hosted order protocol",
-        enveloping: "unsupported by hosted order protocol",
-        hazardAvoidance: "service-tested for active Entangle and Black Tentacles zones; browser spell casting does not yet create persistent hosted zones",
+        ranksAndFiles: "exercised by 80-model companies with persisted rank/file slots",
+        reforming: "supported in hosted and local strategic protocols (in-place reform and half-speed march reform)",
+        enveloping: "supported in hosted and local strategic protocols (flank hinge wrap + rear perimeter fold)",
+        hazardAvoidance: "supported for active Entangle, Burning Entanglement, and Black Tentacles zones with fog-of-war filtering",
       },
       timingsMs: { total: Date.now() - started, resolve: Date.now() - resolveStarted },
       boundary: "Authored scene art and visible friendly/hostile tokens drive the hosted board. Token conversion remains a fallback when no authored Army documents exist.",

@@ -26,6 +26,15 @@
     normalizeGridCount,
     type GridCount,
   } from "../../core/sceneFit";
+  import {
+    MAX_SCENE_DIMENSION_PX,
+    defaultStitchColumns,
+    isStitchedMapTile,
+    mergeStitchedSceneTiles,
+    planStitchedMapTiles,
+    type StitchPanelInput,
+  } from "../../core/mapStitching";
+  import { sniffMedia } from "../../core/imageSizing";
   import { DEFAULT_GRID_COLOR_CSS, DEFAULT_GRID_STYLE } from "../../canvas/grid";
 
   let {
@@ -35,6 +44,7 @@
     backgroundNatural = null,
     activeSceneId = null,
     onOpenBackground = null,
+    onOpenCampaignBattle = null,
   }: {
     client: ClientSync;
     bus: EventBus<ClientEvents>;
@@ -45,12 +55,18 @@
     activeSceneId?: string | null;
     /** Opens the Map & background panel (grid detection lives there). */
     onOpenBackground?: (() => void) | null;
+    /** Opens the Multiplayer strategic battle panel for this scene. */
+    onOpenCampaignBattle?: ((sceneId: string) => void) | null;
   } = $props();
 
   let scene = $state<SceneDocument | null>(null);
   let missing = $state(false);
   let countDraft = $state<GridCount | null>(null);
   let fitNotice = $state<string>("");
+  let stitchCols = $state(2);
+  let stitchMode = $state<"fitScene" | "resizeScene">("fitScene");
+  let stitchBusy = $state(false);
+  let stitchNotice = $state("");
 
   function refresh(): void {
     const scenes = client.store.getAll("scenes") as readonly SceneDocument[];
@@ -127,6 +143,115 @@
   function setSize(width: number, height: number): void {
     submit({ width: Math.round(width), height: Math.round(height) });
   }
+  function setSquareSize(cols: number, rows: number): void {
+    const step = grid?.size ?? 20;
+    setSize(
+      Math.min(MAX_SCENE_DIMENSION_PX, Math.max(100, Math.round(cols) * step)),
+      Math.min(MAX_SCENE_DIMENSION_PX, Math.max(100, Math.round(rows) * step)),
+    );
+  }
+  const stitchedTiles = $derived((scene?.tiles ?? []).filter(isStitchedMapTile));
+  async function stitchSelectedFiles(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = "";
+    if (!scene || !files.length || stitchBusy) return;
+    stitchBusy = true;
+    stitchNotice = "";
+    try {
+      const targetScene = scene;
+      const panels: StitchPanelInput[] = [];
+      for (const file of files) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const sniffed = sniffMedia(bytes);
+        if (sniffed.kind !== "image") throw new Error("Only raster images can be stitched into a map.");
+        const blob = new Blob([bytes.slice().buffer as ArrayBuffer], { type: sniffed.mime });
+        let width = 1000;
+        let height = 1000;
+        const url = URL.createObjectURL(blob);
+        try {
+          if (typeof createImageBitmap === "function") {
+            const bmp = await createImageBitmap(blob);
+            width = bmp.width;
+            height = bmp.height;
+            bmp.close();
+          } else {
+            const img = new Image();
+            img.src = url;
+            await img.decode();
+            width = img.naturalWidth;
+            height = img.naturalHeight;
+          }
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+        const uploaded = await client.uploadImageAsset(bytes, {
+          name: file.name || `panel-${panels.length + 1}.png`,
+          displayName: file.name || `Map panel ${panels.length + 1}`,
+          folder: "Scenes/Stitched",
+          sourceKind: "file",
+          collisionBehavior: "reuse",
+          convertToWebp: false,
+          webpQuality: 0.9,
+        });
+        panels.push({
+          id: `tile-${crypto.randomUUID().slice(0, 12)}`,
+          name: file.name || `Panel ${panels.length + 1}`,
+          image: uploaded.hash,
+          width,
+          height,
+        });
+      }
+      const cols = Math.max(1, Math.min(64, Math.round(stitchCols || defaultStitchColumns(panels.length))));
+      const plan = planStitchedMapTiles(panels, {
+        columns: cols,
+        mode: stitchMode,
+        sceneSize: { width: targetScene.width, height: targetScene.height },
+        gridSize: targetScene.grid.size,
+      });
+      await client.submitAndWait([{
+        kind: "update",
+        ref: { coll: "scenes", id: targetScene._id },
+        diff: {
+          width: plan.width,
+          height: plan.height,
+          tiles: mergeStitchedSceneTiles(targetScene.tiles, plan.tiles),
+        },
+      }]);
+      stitchNotice = `Stitched ${panels.length} map panels (${plan.columns} × ${plan.rows}) across ${plan.width} × ${plan.height} px.`;
+    } catch (err) {
+      stitchNotice = err instanceof Error ? err.message : String(err);
+    } finally {
+      stitchBusy = false;
+    }
+  }
+  function restitchExistingPanels(): void {
+    if (!scene || !stitchedTiles.length) return;
+    const panels: StitchPanelInput[] = stitchedTiles.map((tile) => ({
+      id: tile._id,
+      name: tile.name,
+      image: tile.img,
+      width: tile.width,
+      height: tile.height,
+    }));
+    const plan = planStitchedMapTiles(panels, {
+      columns: stitchCols,
+      mode: stitchMode,
+      sceneSize: { width: scene.width, height: scene.height },
+      gridSize: scene.grid.size,
+    });
+    submit({
+      width: plan.width,
+      height: plan.height,
+      tiles: mergeStitchedSceneTiles(scene.tiles, plan.tiles),
+    });
+    stitchNotice = `Restitched ${panels.length} map panels (${plan.columns} × ${plan.rows}).`;
+  }
+  function clearStitchedPanels(): void {
+    if (!scene || !stitchedTiles.length) return;
+    submit({ tiles: scene.tiles.filter((tile) => !isStitchedMapTile(tile)) });
+    stitchNotice = "Cleared stitched map panels.";
+  }
   /** The scene becomes exactly the background as drawn (no empty margin, nothing cut off). */
   function fitSizeToBackground(): void {
     if (!scene || !natural) return;
@@ -185,7 +310,26 @@
           <input data-scene-bg-color type="color" value={scene.background?.color ?? "#000000"}
             onchange={(e) => submit({ background: { ...(scene?.background ?? {}), color: (e.target as HTMLInputElement).value } })} />
         </label>
+        <label>
+          Scale
+          <select
+            data-scene-settings-scale
+            value={scene.flags?.core?.scale === "strategic" ? "strategic" : "tactical"}
+            onchange={(e) =>
+              submit({
+                "flags.core.scale": (e.target as HTMLSelectElement).value,
+              })}
+          >
+            <option value="tactical">Tactical</option>
+            <option value="strategic">Strategic (mass battle)</option>
+          </select>
+        </label>
       </div>
+      {#if scene.flags?.core?.scale === "strategic" && onOpenCampaignBattle}
+        <div class="row">
+          <button type="button" data-scene-open-campaign onclick={() => scene && onOpenCampaignBattle(scene._id)}>Multiplayer battle…</button>
+        </div>
+      {/if}
       <label class="slider">
         Darkness <span class="value">{Math.round((scene.darkness ?? 0) * 100)}%</span>
         <input data-scene-darkness type="range" min="0" max="1" step="0.05" value={scene.darkness ?? 0}
@@ -198,18 +342,35 @@
       <div class="row">
         <label>
           Width (px)
-          <input data-scene-width type="number" min="100" max="40000" step="1" value={scene.width}
-            onchange={(e) => setSize(number(e, scene?.width ?? 1000, 100, 40000), scene?.height ?? 1000)} />
+          <input data-scene-width type="number" min="100" max={MAX_SCENE_DIMENSION_PX} step="1" value={scene.width}
+            onchange={(e) => setSize(number(e, scene?.width ?? 1000, 100, MAX_SCENE_DIMENSION_PX), scene?.height ?? 1000)} />
         </label>
         <label>
           Height (px)
-          <input data-scene-height type="number" min="100" max="40000" step="1" value={scene.height}
-            onchange={(e) => setSize(scene?.width ?? 1000, number(e, scene?.height ?? 1000, 100, 40000))} />
+          <input data-scene-height type="number" min="100" max={MAX_SCENE_DIMENSION_PX} step="1" value={scene.height}
+            onchange={(e) => setSize(scene?.width ?? 1000, number(e, scene?.height ?? 1000, 100, MAX_SCENE_DIMENSION_PX))} />
         </label>
         {#if cells}
-          <p class="readout" data-scene-cells>= {cells.columns} × {cells.rows} cells of {grid.size} px</p>
+          <label>
+            Cols (sq)
+            <input data-scene-cols type="number" min="1" max="10000" step="1" value={Math.round(cells.columns)}
+              onchange={(e) => setSquareSize(number(e, Math.round(cells.columns), 1, 10000), Math.round(cells.rows))} />
+          </label>
+          <label>
+            Rows (sq)
+            <input data-scene-rows type="number" min="1" max="10000" step="1" value={Math.round(cells.rows)}
+              onchange={(e) => setSquareSize(Math.round(cells.columns), number(e, Math.round(cells.rows), 1, 10000))} />
+          </label>
+          <p class="readout" data-scene-cells>= {cells.columns} × {cells.rows} cells of {grid.size} px ({Math.round(cells.columns * 5)} × {Math.round(cells.rows * 5)} ft)</p>
         {/if}
       </div>
+      {#if scene.flags?.core?.scale === "strategic" && cells}
+        <div class="row">
+          {#each [600, 1000, 2000] as sq (sq)}
+            <button type="button" data-scene-preset={sq} onclick={() => setSquareSize(sq, sq)}>{sq}×{sq} squares</button>
+          {/each}
+        </div>
+      {/if}
       {#if natural}
         <div class="row">
           <button type="button" data-scene-fit-background onclick={fitSizeToBackground}>Size scene to the background ({Math.round(natural.width * backgroundTransformOf(scene.background).scaleX)} × {Math.round(natural.height * backgroundTransformOf(scene.background).scaleY)} px)</button>
@@ -322,6 +483,35 @@
         </div>
         {#if fitNotice}<p class="ok" data-scene-fit-notice aria-live="polite">{fitNotice}</p>{/if}
       {/if}
+    </section>
+
+    <section data-scene-stitch-section>
+      <h4>Stitched map panels ({stitchedTiles.length})</h4>
+      <p class="hint">Combine multiple background images edge-to-edge into one unified map grid.</p>
+      <div class="row">
+        <label>
+          Columns
+          <input data-scene-stitch-cols type="number" min="1" max="64" step="1" bind:value={stitchCols} disabled={stitchBusy} />
+        </label>
+        <label>
+          Sizing
+          <select data-scene-stitch-mode bind:value={stitchMode} disabled={stitchBusy}>
+            <option value="fitScene">Fit stitched grid to scene</option>
+            <option value="resizeScene">Resize scene to stitched grid</option>
+          </select>
+        </label>
+        <label>
+          Add map images
+          <input data-scene-stitch-files type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={stitchBusy} onchange={stitchSelectedFiles} />
+        </label>
+      </div>
+      {#if stitchedTiles.length > 0}
+        <div class="row">
+          <button type="button" data-scene-restitch disabled={stitchBusy} onclick={restitchExistingPanels}>Restitch {stitchedTiles.length} panels</button>
+          <button type="button" data-scene-stitch-clear disabled={stitchBusy} onclick={clearStitchedPanels}>Clear stitched panels</button>
+        </div>
+      {/if}
+      {#if stitchNotice}<p class="ok" data-scene-stitch-notice aria-live="polite">{stitchNotice}</p>{/if}
     </section>
   {/if}
 </div>

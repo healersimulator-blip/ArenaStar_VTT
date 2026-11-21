@@ -4,6 +4,7 @@ import type { AssetManifest, AssetManifestEntry, Json, SceneGrid } from "./docum
 export type ImageAction =
   | "newScene"
   | "replaceBackground"
+  | "stitchBackground"
   | "replaceForeground"
   | "tileNatural"
   | "tileFit"
@@ -68,6 +69,7 @@ export const DEFAULT_IMAGE_HANDLING_PREFERENCES: Readonly<ImageHandlingPreferenc
 export const IMAGE_ACTIONS: readonly ImageAction[] = [
   "newScene",
   "replaceBackground",
+  "stitchBackground",
   "replaceForeground",
   "tileNatural",
   "tileFit",

@@ -1,10 +1,16 @@
 # What the strategic battle actually does — local verification, 2026-11-19
 
-> **Historical verification report.** Statements below describe the tested build on that date, not
-> strategic mode's intended product boundary. **Strategic mode should be the full VTT operating at
-> formation scale, not a reduced battle service.** See
-> [STRATEGIC_FULL_VTT_DESIGN.md](STRATEGIC_FULL_VTT_DESIGN.md). Later work added frozen hosted spell
-> hazards; regular PF1e casting and the complete campaign projection remain integration gaps.
+> **Historical verification report (2026-11-19) + 2026-11-21 Full-VTT update.** Statements in the
+> 2026-11-19 sections below record measurements on that build. As of **2026-11-21**, Phases A–E of
+> [STRATEGIC_FULL_VTT_DESIGN.md](STRATEGIC_FULL_VTT_DESIGN.md) are implemented and verified end to
+> end: interactive doors/walls, lighting/darkness/vision, elevated regions, measured templates,
+> derived PF1e actor/item/spell/effect projection, 7 shared PF1e spells (`entangle`,
+> `burning-entanglement`, `black-tentacles`, `fireball`, `burning-hands`, `lightning-bolt`,
+> `cone-of-cold`), consumables, readied reactions, live scoped chat/dice/tables/journals/playlists/macros,
+> conflict-checked campaign reconciliation with single-step undo, and stitched maps up to
+> `5,000 × 5,000` squares (`tests/strategicRoom/fullVttScale.test.ts` and
+> `e2e/strategic_full_vtt_scale.spec.ts`, 468/468 Vitest suites / 6,128 tests + 7/7 Chromium +
+> PostgreSQL strategic/campaign E2E tests passing).
 
 ## Follow-up: publication latency at 500 players
 

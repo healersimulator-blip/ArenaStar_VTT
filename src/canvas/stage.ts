@@ -1019,13 +1019,16 @@ export async function createStage(options: StageOptions): Promise<Stage> {
           view.label = `token:${token._id}`;
           const body = new Graphics();
           body.label = "body";
-          const label = new Text({
-            text: token.name,
-            style: { fontSize: 12, fill: 0xffffff },
-          });
-          label.anchor.set(0.5);
-          label.y = rect.height / 2 + 10;
-          view.addChild(body, label);
+          view.addChild(body);
+          if (tokens.length <= 150) {
+            const label = new Text({
+              text: token.name,
+              style: { fontSize: 12, fill: 0xffffff },
+            });
+            label.anchor.set(0.5);
+            label.y = rect.height / 2 + 10;
+            view.addChild(label);
+          }
           tokenLayer.addChild(view);
           tokenViews.set(token._id, view);
           tokenArtwork.set(token._id, { image: null, revision: 0, sprite: null, loading: false });
@@ -1406,7 +1409,10 @@ export async function createStage(options: StageOptions): Promise<Stage> {
       return;
     }
     const square: SquareGrid = grid;
-    const lines = squareGridLines(square, world);
+    const cellPx = square.size * cam.scale;
+    const lodStep = cellPx < 0.7 ? 50 : cellPx < 3.5 ? 10 : 1;
+    const effectiveGrid: SquareGrid = lodStep > 1 ? { ...square, size: square.size * lodStep } : square;
+    const lines = squareGridLines(effectiveGrid, world);
     gridGraphics.setStrokeStyle({
       width: 1 / cam.scale,
       color: gridStyle.color,
