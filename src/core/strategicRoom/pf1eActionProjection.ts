@@ -118,11 +118,19 @@ export function frozenSpellHazardAction(input: FrozenSpellHazardInput): ActionCa
   };
 }
 
-/** Route a frozen hosted cast through the same ActionCard adapter as ordinary PF1e play. */
-export function projectFrozenEntangleCast(input: FrozenEntangleCastInput): SpellHazard {
+/**
+ * Route a frozen hosted cast through the same ActionCard adapter as ordinary PF1e play.
+ * The frozen scenario coordinates are feet and the area origin is already in feet, so the
+ * grid is explicit (and overridable) here rather than hardcoded; the caller that knows the
+ * frozen scene's scale should pass its own.
+ */
+export function projectFrozenEntangleCast(
+  input: FrozenEntangleCastInput,
+  grid: StrategicSceneScale = { size: 1, distance: 1, units: "ft" },
+): SpellHazard {
   return projectEntangleAction({
     action: frozenEntangleAction(input),
-    grid: { size: 5, distance: 5, units: "ft" },
+    grid,
     startsTurn: input.startsTurn,
     casterLevel: input.casterLevel,
     casterFactionId: input.casterFactionId,
@@ -157,7 +165,7 @@ export function projectSpellHazardAction(input: EntangleProjectionInput): SpellH
     !Number.isFinite(grid.size) ||
     grid.size <= 0 ||
     !Number.isFinite(grid.distance) ||
-    grid.distance !== 5 ||
+    grid.distance <= 0 ||
     !Number.isInteger(input.startsTurn) ||
     input.startsTurn < 0 ||
     !Number.isInteger(input.casterLevel) ||

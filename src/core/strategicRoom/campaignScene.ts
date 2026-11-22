@@ -965,9 +965,10 @@ export function sceneDeployment(
                     },
                   }
                 : {}),
+              // Token x/y is the CENTER (tokenRect); anchor is the unit's centre in ft.
               anchor: {
-                x: ((token.x + token.width / 2) / scene.grid.size) * 5,
-                y: ((token.y + token.height / 2) / scene.grid.size) * 5,
+                x: (token.x / scene.grid.size) * 5,
+                y: (token.y / scene.grid.size) * 5,
               },
             };
             return projectActorIntoUnit(baseUnit, token, actor, leaderActors);

@@ -22,6 +22,8 @@ export function screenToWorld(camera: Camera, sx: number, sy: number): { x: numb
   return { x: sx / camera.scale + camera.x, y: sy / camera.scale + camera.y };
 }
 
+/** Zoom-out floor and zoom-in ceiling for large formation-scale maps (5,000×5,000 sq).
+ * The zoom control, the campaign canvas, and the hosted map all share this limit. */
 export const LARGE_SCENE_ZOOM_LIMITS = { min: 0.002, max: 10 } as const;
 
 /**
