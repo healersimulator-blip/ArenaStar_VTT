@@ -344,7 +344,8 @@ export function resolveFrozen(job: Frozen): Result {
       });
       const hazard = projectSpellHazardAction({
         action,
-        grid: { size: 5, distance: 5, units: "ft" },
+        // Frozen-scenario coordinates are feet and the area origin is already in feet.
+        grid: { size: 1, distance: 1, units: "ft" },
         startsTurn: job.turnId,
         casterLevel: caster.casterLevel,
         casterFactionId,

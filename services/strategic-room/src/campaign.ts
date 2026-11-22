@@ -105,7 +105,9 @@ export function buildReconciliationPayload(
       if (spent > 0) itemsSpent[it.id] = (itemsSpent[it.id] ?? 0) + spent;
     }
 
+    const launchConditions = baseRes[u.id]?.conditions ?? [];
     const conditions = curRes[u.id]?.conditions ?? u.conditions ?? [];
+    const conditionsAdded = conditions.filter((c) => !launchConditions.includes(c));
     units.push({
       id: u.id,
       name: u.name,
@@ -119,6 +121,7 @@ export function buildReconciliationPayload(
       ...(Object.keys(spellsSpent).length ? { spellsSpent } : {}),
       ...(Object.keys(itemsSpent).length ? { itemsSpent } : {}),
       ...(conditions.length ? { conditions: [...conditions] } : {}),
+      ...(conditionsAdded.length ? { conditionsAdded } : {}),
     });
   });
 

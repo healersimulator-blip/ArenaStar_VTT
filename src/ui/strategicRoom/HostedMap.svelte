@@ -3,6 +3,7 @@
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import {
     fitRect,
+    LARGE_SCENE_ZOOM_LIMITS,
     screenToWorld,
     worldToScreen,
     zoomAt,
@@ -129,7 +130,7 @@
         },
         viewport,
         24,
-        0.002,
+        LARGE_SCENE_ZOOM_LIMITS.min,
       );
   }
 
@@ -266,7 +267,7 @@
     x = viewport.width / 2,
     y = viewport.height / 2,
   ) {
-    camera = zoomAt(camera, x, y, delta, { min: 0.002, max: 12 });
+    camera = zoomAt(camera, x, y, delta, LARGE_SCENE_ZOOM_LIMITS);
     trackRegion();
   }
 

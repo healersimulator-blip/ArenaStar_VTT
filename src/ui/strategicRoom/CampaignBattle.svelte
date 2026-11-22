@@ -99,6 +99,9 @@
     actionCardPolicyInitialized = true;
   });
 
+  // Warnings raised while preparing the launch scenario; echoed into the notice
+  // once the launch response is in (withBackground/withBackgroundTiles).
+  let launchNotices: string[] = [];
   let invites = $state.raw<Record<string, string>>({}),
     showSetup = $state(true),
     preloadStatus = $state(""),
@@ -277,6 +280,27 @@
       const centerXFt = neededWidthFt / 2;
       const centerYFt = neededHeightFt / 2;
 
+      // Destructive deploy: it replaces the scene's tokens and resizes/re-grids the
+      // scene, so confirm before issuing the update.
+      const tokCount = stored.tokens?.length ?? 0;
+      const willResize = widthPx !== stored.width || heightPx !== stored.height || gridSize !== stored.grid.size;
+      if (tokCount > 0 || willResize) {
+        const warning = [
+          tokCount > 0 ? `replace all ${tokCount} existing scene token${tokCount === 1 ? "" : "s"}` : "",
+          willResize ? `resize the scene to ${neededWidthFt}×${neededHeightFt} ft (${Math.round(neededWidthFt / 5)}×${Math.round(neededHeightFt / 5)} squares)` : "",
+        ]
+          .filter(Boolean)
+          .join(" and ");
+        if (
+          !window.confirm(
+            `Deploying ${nBlue} ${blueName} + ${nRed} ${redName} units will ${warning}. Continue?`,
+          )
+        ) {
+          notice = "Deployment cancelled.";
+          return;
+        }
+      }
+
       const tokens: TokenDocument[] = [];
       const buildSide = (
         count: number,
@@ -300,8 +324,9 @@
               ? centerXFt - gapFt / 2 - lineIdx * colStepFt
               : centerXFt + gapFt / 2 + (ranks - 1) * 5 + lineIdx * colStepFt;
           const anchorYFt = centerYFt + (rowIdx - (inLineCount - 1) / 2) * rowStepFt;
-          const pxX = Math.round((anchorXFt / 5) * gridSize - gridSize);
-          const pxY = Math.round((anchorYFt / 5) * gridSize - gridSize);
+          // makeToken treats x/y as the token CENTER (tokenRect): anchor_ft/5*gridSize.
+          const pxX = Math.round((anchorXFt / 5) * gridSize);
+          const pxY = Math.round((anchorYFt / 5) * gridSize);
           const base = makeToken(`${teamLabel} ${isShot ? "Archers" : "Guard"} ${i + 1}`, pxX, pxY);
           tokens.push({
             ...base,
@@ -420,11 +445,13 @@
     const manifest = await app.assets.manifest();
     const entry = manifest[hash];
     if (!entry || !["image/png", "image/jpeg", "image/webp"].includes(entry.mime)) {
-      notice = "Battlefield launched without its background: use PNG, JPEG or WebP.";
+      launchNotices.push("Battlefield launched without its background: use PNG, JPEG or WebP.");
       return scenario;
     }
     if (entry.size > MAX_SCENARIO_BACKGROUND_BYTES) {
-      notice = `Battlefield launched without its background: map exceeds ${MAX_SCENARIO_BACKGROUND_BYTES / 1024 / 1024} MiB hosted-art limit.`;
+      launchNotices.push(
+        `Battlefield launched without its background: map exceeds ${MAX_SCENARIO_BACKGROUND_BYTES / 1024 / 1024} MiB hosted-art limit.`,
+      );
       return scenario;
     }
     const bytes = await app.assets.get(hash);
@@ -491,25 +518,39 @@
     const assets: Record<string, ScenarioBackground> = {};
     const hashRemap = new SvelteMap<string, string>();
     const placed: ScenarioBackgroundTile[] = [];
+    const dropped: string[] = [];
     let totalBytes = 0;
     const ftPerPx = 5 / Math.max(1, current.grid.size);
+    const tileLabel = (tile: (typeof floorTiles)[number]) => tile.name?.trim() || tile._id;
 
     for (const tile of floorTiles) {
       const rawHash = tile.img;
-      if (!/^[0-9a-f]{64}$/.test(rawHash)) continue;
+      if (!/^[0-9a-f]{64}$/.test(rawHash)) {
+        dropped.push(tileLabel(tile));
+        continue;
+      }
       let finalHash = hashRemap.get(rawHash);
       if (!finalHash) {
         const entry = manifest[rawHash];
-        if (!entry || !["image/png", "image/jpeg", "image/webp"].includes(entry.mime)) continue;
+        if (!entry || !["image/png", "image/jpeg", "image/webp"].includes(entry.mime)) {
+          dropped.push(tileLabel(tile));
+          continue;
+        }
         const rawBytes = await app.assets.get(rawHash);
-        if (!rawBytes) continue;
+        if (!rawBytes) {
+          dropped.push(tileLabel(tile));
+          continue;
+        }
         const prepared = await compressPanelIfOversized(
           rawBytes,
           entry.mime as "image/png" | "image/jpeg" | "image/webp",
           entry.width ?? tile.width,
           entry.height ?? tile.height,
         );
-        if (!prepared || totalBytes + prepared.bytes.byteLength > MAX_SCENARIO_STITCHED_BYTES) continue;
+        if (!prepared || totalBytes + prepared.bytes.byteLength > MAX_SCENARIO_STITCHED_BYTES) {
+          dropped.push(tileLabel(tile));
+          continue;
+        }
         totalBytes += prepared.bytes.byteLength;
         finalHash = prepared.hash;
         hashRemap.set(rawHash, finalHash);
@@ -530,6 +571,12 @@
         height: Math.max(0.5, Math.round(tile.height * ftPerPx * 100) / 100),
         ...(tile.rotation ? { rotation: tile.rotation } : {}),
       });
+    }
+    if (dropped.length > 0) {
+      const shown = dropped.slice(0, 6).join(", ");
+      launchNotices.push(
+        `${dropped.length} stitched map panel${dropped.length === 1 ? "" : "s"} not projected${dropped.length > 6 ? ` (${shown} and ${dropped.length - 6} more)` : ` (${shown})`} — oversized or unreadable in the hosted battle.`,
+      );
     }
     return withScenarioBackgroundTiles(scenario, placed, assets);
   }
@@ -600,6 +647,7 @@
       let b = battleOf(stored, app.worldId);
       if (!b && (finish || !app.gm.channel.canLaunchHosted))
         throw new Error("Launch from setup, before starting local simulation.");
+      launchNotices = [];
       const seed = b?.seed ?? crypto.getRandomValues(new Uint32Array(1))[0] ?? 1;
       let scenario = finish
         ? undefined
@@ -729,9 +777,12 @@
         invites = data.invites;
         showSetup = false;
         const diagCount = scenario?.projection?.unsupported?.length ?? 0;
-        notice = diagCount
+        const readyMessage = diagCount
           ? `Battle ready (${diagCount} projection diagnostic${diagCount === 1 ? "" : "s"}).`
           : "Battle ready.";
+        notice = launchNotices.length
+          ? `${readyMessage} ${launchNotices.join(" ")}`
+          : readyMessage;
       }
     } catch (e) {
       if (fresh && !sent) release();

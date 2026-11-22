@@ -584,7 +584,10 @@ export type ReconciledUnitSummary = {
   facing?: number;
   spellsSpent?: Record<string, number>;
   itemsSpent?: Record<string, number>;
+  /** Current (launch + battle-added) condition labels — informational. */
   conditions?: string[];
+  /** Battle-added conditions only (launch baseline removed), when known. */
+  conditionsAdded?: string[];
 };
 
 export type BattleReconciliationPayload = {

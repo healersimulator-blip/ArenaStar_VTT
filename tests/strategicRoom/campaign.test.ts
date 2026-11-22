@@ -91,7 +91,8 @@ test("visible friendly and hostile scene tokens become authored hosted companies
   const scenario = sceneDeployment(store, scene, 7, 2, 8);
   expect(scenario.commanders).toHaveLength(2);
   expect(scenario.commanders.map((c) => c.factionId)).toEqual(["friendly", "hostile"]);
-  expect(scenario.commanders.map((c) => c.units[0]?.anchor)).toEqual([{ x: 17.5, y: 22.5 }, { x: 77.5, y: 32.5 }]);
+  // Token x/y is the CENTER (tokenRect), so the anchor is the token center in ft: 300px/100px*5 = 15 ft.
+  expect(scenario.commanders.map((c) => c.units[0]?.anchor)).toEqual([{ x: 15, y: 20 }, { x: 75, y: 30 }]);
   expect(scenario.commanders.every((c) => c.units[0]?.strength === 8)).toBe(true);
   expect(scenario.projection).toMatchObject({ format: "arenastar-battle-projection-v1",
     worldId: "w", sceneId: "field", sourceSeq: 0, systemId: "pf1e", systemVersion: "1" });

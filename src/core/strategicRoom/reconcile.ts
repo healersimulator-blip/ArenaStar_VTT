@@ -1,5 +1,5 @@
 import { actionDocHash } from "../actionRevert";
-import type { ActorDocument, BaseDocument, Json, SceneDocument } from "../documents";
+import type { ActorDocument, BaseDocument, CollectionName, Json, SceneDocument } from "../documents";
 import type { FlatDiff, Op } from "../ops";
 import type { DocumentStore } from "../store";
 import {
@@ -15,6 +15,8 @@ export interface ReconciliationConflict {
   id: string;
   name: string;
   reason: string;
+  /** "edit" = document changed since launch; "missing" = deleted since launch. */
+  kind: "edit" | "missing";
 }
 
 export interface ReconciliationAnalysis {
@@ -42,9 +44,9 @@ export function analyzeBattleReconciliation(
 ): ReconciliationAnalysis {
   const conflicts: ReconciliationConflict[] = [];
   for (const dep of payload.projection?.dependencies ?? []) {
-    if (!["scenes", "armies", "factions", "actors"].includes(dep.coll)) continue;
+    // Every coll the launch signed (scenes/armies/factions/actors + content docs).
     const current = store.get(
-      dep.coll as "scenes" | "armies" | "factions" | "actors",
+      dep.coll as CollectionName,
       dep.id,
     ) as BaseDocument | undefined;
     if (!current) {
@@ -53,6 +55,7 @@ export function analyzeBattleReconciliation(
         id: dep.id,
         name: dep.id,
         reason: "Document was deleted in the campaign after battle launch.",
+        kind: "missing",
       });
       continue;
     }
@@ -66,6 +69,7 @@ export function analyzeBattleReconciliation(
           id: dep.id,
           name: current.name || dep.id,
           reason: "Scene was modified in the campaign after battle launch.",
+          kind: "edit",
         });
       }
       continue;
@@ -77,19 +81,85 @@ export function analyzeBattleReconciliation(
         id: dep.id,
         name: current.name || dep.id,
         reason: `${dep.coll.slice(0, -1)} was modified in the campaign after battle launch (seq > ${payload.projection?.sourceSeq ?? 0}).`,
+        kind: "edit",
       });
     }
   }
 
+  // Missing deployment pieces (not an edit-after-launch conflict — the doc is gone):
+  // units reference armies and scene tokens; record a conflict per missing piece so
+  // the preview and the reconciliation audit can show why those writes cannot happen.
+  const missingRecordKeys = new Set<string>();
+  for (const u of payload.units ?? []) {
+    const src = u.source;
+    if (!src) continue;
+    if (src.kind === "armyUnit" && src.armyId) {
+      const army = store.get("armies", src.armyId);
+      if (!army) {
+        const key = `armies:${src.armyId}`;
+        if (!missingRecordKeys.has(key)) {
+          missingRecordKeys.add(key);
+          conflicts.push({
+            coll: "armies",
+            id: src.armyId,
+            name: src.armyId,
+            reason: "Army was deleted in the campaign after battle launch.",
+            kind: "missing",
+          });
+        }
+      } else if (src.unitId && !army.units.some((cand) => cand._id === src.unitId)) {
+        const key = `armies:${src.armyId}:${src.unitId}`;
+        if (!missingRecordKeys.has(key)) {
+          missingRecordKeys.add(key);
+          conflicts.push({
+            coll: "armies",
+            id: src.armyId,
+            name: src.unitId,
+            reason: `Army unit "${src.unitId}" was deleted in the campaign after battle launch.`,
+            kind: "missing",
+          });
+        }
+      }
+    }
+    if (src.tokenId) {
+      const scene = store.get("scenes", sceneId);
+      if (scene && !scene.tokens.some((t) => t._id === src.tokenId)) {
+        const key = `tokens:${src.tokenId}`;
+        if (!missingRecordKeys.has(key)) {
+          missingRecordKeys.add(key);
+          conflicts.push({
+            coll: "tokens",
+            id: src.tokenId,
+            name: src.tokenId,
+            reason: "Token was deleted in the campaign after battle launch.",
+            kind: "missing",
+          });
+        }
+      }
+    }
+  }
+
+  // Count real deltas, not "any living unit": a unit "changed" only when the battle
+  // removed models or consumed resources. Conditions are only recounted when the
+  // payload carries the launch-to-finish delta (`conditionsAdded`); a raw
+  // `conditions` list is launch-time truth and can't distinguish a battle-added
+  // condition from a pre-battle one, so it never counts as a change by itself.
   let unitChanges = 0;
   let actorResourceChanges = 0;
   for (const u of payload.units ?? []) {
-    if (u.lost > 0 || u.at !== null || (u.conditions?.length ?? 0) > 0) unitChanges++;
+    const spellsSpentTotal = Object.values(u.spellsSpent ?? {}).reduce((sum, n) => sum + n, 0);
+    const itemsSpentTotal = Object.values(u.itemsSpent ?? {}).reduce((sum, n) => sum + n, 0);
+    const conditionsAdded = u.conditionsAdded?.length ?? 0;
     if (
-      Object.values(u.spellsSpent ?? {}).some((n) => n > 0) ||
-      Object.values(u.itemsSpent ?? {}).some((n) => n > 0) ||
-      (u.conditions?.length ?? 0) > 0
+      u.lost > 0 ||
+      u.alive !== u.initialStrength ||
+      spellsSpentTotal > 0 ||
+      itemsSpentTotal > 0 ||
+      conditionsAdded > 0
     ) {
+      unitChanges++;
+    }
+    if (spellsSpentTotal > 0 || itemsSpentTotal > 0 || conditionsAdded > 0) {
       actorResourceChanges++;
     }
   }
@@ -103,7 +173,11 @@ export function analyzeBattleReconciliation(
 /**
  * Build a single atomic, undoable `Op[]` envelope reconciling accepted battle mutations
  * back into the campaign `DocumentStore`. By default (`skipConflicted: true`), any document
- * edited independently since launch is skipped rather than overwritten.
+ * edited independently since launch is skipped rather than overwritten — for an army branch
+ * that includes the unit, its scene token, and its actor's spell/item/condition write-back.
+ * Missing deployment pieces (army/unit/token deleted since launch) raise a conflict record and
+ * are skipped as well; `skippedConflicts` counts per-piece missing skips and per-unit blocked
+ * skips.
  */
 export function buildBattleReconciliationOps(
   store: DocumentStore,
@@ -113,7 +187,11 @@ export function buildBattleReconciliationOps(
 ): { ops: Op[]; reconciledUnits: number; skippedConflicts: number } {
   const skipConflicted = options.skipConflicted ?? true;
   const analysis = analyzeBattleReconciliation(store, sceneId, payload);
-  const conflictedKeys = new Set(analysis.conflicts.map((c) => `${c.coll}:${c.id}`));
+  // Only edit-after-launch conflicts gate ops; "missing" conflicts are handled
+  // by explicit existence checks below (nothing exists to write there).
+  const conflictedKeys = new Set(
+    analysis.conflicts.filter((c) => c.kind === "edit").map((c) => `${c.coll}:${c.id}`),
+  );
   const isBlocked = (coll: string, id: string) => skipConflicted && conflictedKeys.has(`${coll}:${id}`);
 
   const scene = store.get("scenes", sceneId);
@@ -128,15 +206,34 @@ export function buildBattleReconciliationOps(
   const actorItemSpent = new Map<string, Map<string, number>>();
   const actorConditions = new Map<string, Set<string>>();
 
+  // Pieces that existed but cannot be written (missing army/unit/token) raise a
+  // skipped-conflict bump keyed by the piece; missing pieces never reach the ops list.
+  const missingPieceBumps = new Set<string>();
+  const bumpMissing = (key: string) => {
+    if (missingPieceBumps.has(key)) return;
+    missingPieceBumps.add(key);
+    skippedConflicts++;
+  };
+
   for (const u of payload.units ?? []) {
     const src = u.source;
+    // skipUnit: the army branch was skipped (edit-after-launch conflict, or the
+    // army/unit no longer exists) — skip unit + token + actor write-back for it.
+    let skipUnit = false;
     if (src?.kind === "armyUnit" && src.armyId && src.unitId) {
       if (isBlocked("armies", src.armyId)) {
         skippedConflicts++;
+        skipUnit = true;
       } else {
         const army = store.get("armies", src.armyId);
         const armyUnit = army?.units.find((cand) => cand._id === src.unitId);
-        if (army && armyUnit) {
+        if (!army) {
+          bumpMissing(`army:${src.armyId}`);
+          skipUnit = true;
+        } else if (!armyUnit) {
+          bumpMissing(`unit:${src.armyId}:${src.unitId}`);
+          skipUnit = true;
+        } else {
           const unitDiff: FlatDiff = {
             "stats.strength": Math.max(0, u.alive),
           };
@@ -160,7 +257,12 @@ export function buildBattleReconciliationOps(
       }
     }
 
-    if (src?.tokenId && !isBlocked("scenes", sceneId)) {
+    // A token that does not exist in the scene is a missing piece: record it once.
+    if (src?.tokenId && !scene.tokens.some((t) => t._id === src.tokenId)) {
+      bumpMissing(`token:${src.tokenId}`);
+    }
+
+    if (!skipUnit && src?.tokenId && !isBlocked("scenes", sceneId)) {
       const token = scene.tokens.find((t) => t._id === src.tokenId);
       if (token) {
         const tokDiff: FlatDiff = record(token.flags?.core)
@@ -169,8 +271,9 @@ export function buildBattleReconciliationOps(
         if (u.alive <= 0) {
           tokDiff.hidden = true;
         } else if (u.at) {
-          tokDiff.x = Math.round((u.at.x / 5) * gridSize - token.width / 2);
-          tokDiff.y = Math.round((u.at.y / 5) * gridSize - token.height / 2);
+          // Token x/y is the CENTER: anchor_ft/5*gridSize, never a half-token offset.
+          tokDiff.x = Math.round((u.at.x / 5) * gridSize);
+          tokDiff.y = Math.round((u.at.y / 5) * gridSize);
           if (u.facing !== undefined && Number.isFinite(u.facing)) {
             const deg = ((Math.round((u.facing * 180) / Math.PI) % 360) + 360) % 360;
             tokDiff.rotation = deg;
@@ -185,8 +288,11 @@ export function buildBattleReconciliationOps(
       }
     }
 
+    // Actor write-back is gated on the unit branch too: a conflicted army (or a
+    // missing army/unit) skips the unit + token + actor; a missing token skips only the
+    // token, and the missed piece is recorded as a conflict. The audit records provenance.
     const actorId = src?.actorId;
-    if (actorId) {
+    if (!skipUnit && actorId) {
       for (const [spellId, count] of Object.entries(u.spellsSpent ?? {})) {
         if (count <= 0 || !(spellId in STRATEGIC_SPELL_CATALOG)) continue;
         let map = actorSpellSpent.get(actorId);
@@ -200,10 +306,13 @@ export function buildBattleReconciliationOps(
         if (!map) actorItemSpent.set(actorId, (map = new Map()));
         map.set(itemId, (map.get(itemId) ?? 0) + count);
       }
-      if (u.conditions?.length) {
+      // Use conditions added since launch when the payload provides it; fall back
+      // to the raw list for older/hand-built payloads (a superset — still idempotent).
+      const conds = u.conditionsAdded ?? u.conditions ?? [];
+      if (conds.length) {
         let set = actorConditions.get(actorId);
         if (!set) actorConditions.set(actorId, (set = new Set()));
-        for (const c of u.conditions) set.add(c);
+        for (const c of conds) set.add(c);
       }
     }
   }

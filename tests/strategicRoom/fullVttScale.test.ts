@@ -706,6 +706,7 @@ describe("Full VTT at Formation Scale (Phases A–E)", () => {
           spellsSpent: { fireball: 1 },
           itemsSpent: { "wand-clw": 1 },
           conditions: ["Blessed"],
+          conditionsAdded: ["Blessed"],
         },
         {
           id: "u-red",
@@ -718,13 +719,18 @@ describe("Full VTT at Formation Scale (Phases A–E)", () => {
           at: { x: 42.5, y: 22.5 },
           facing: Math.PI,
           conditions: ["Entangled"],
+          conditionsAdded: ["Entangled"],
         },
       ],
     };
 
-    // Clean analysis: zero conflicts before concurrent campaign edits
+    // Clean analysis: zero conflicts before concurrent campaign edits; the preview
+    // counts real deltas (casualties, spell/item spends, battle-added conditions).
     const cleanAnalysis = analyzeBattleReconciliation(store, scene._id, payload);
     expect(cleanAnalysis.conflicts).toHaveLength(0);
+    expect(cleanAnalysis.unitChanges).toBe(2);
+    expect(cleanAnalysis.actorResourceChanges).toBe(2);
+    expect(cleanAnalysis.sceneChanges).toBe(2); // door + darkness
 
     // Simulate a concurrent edit to Red's army while battle was hosted -> flagged & skipped when skipConflicted=true
     const undo = new UndoStack();
@@ -789,6 +795,34 @@ describe("Full VTT at Formation Scale (Phases A–E)", () => {
       (updatedCap.items.find((i) => i._id === "wand-clw")?.system.pf1e as { charges: number }).charges,
     ).toBe(3);
 
+    // Tokens are written at the unit's surviving position (token x/y is the CENTER):
+    // blue at (25 ft, 22.5 ft) -> (500 px, 450 px) on a 100 px grid; red is skipped
+    // (its army is conflicted) and must stay exactly where it was.
+    const blueTokenAfter = must(
+      must(store.get("scenes", scene._id), "sceneAfter").tokens.find((t) => t._id === "tok-blue"),
+      "blueTokenAfter",
+    );
+    expect(blueTokenAfter.x).toBe(500);
+    expect(blueTokenAfter.y).toBe(450);
+    expect(blueTokenAfter.rotation).toBe(0); // facing 0 rad -> 0 deg
+    const redTokenAfter = must(
+      store.get("scenes", scene._id)?.tokens.find((t) => t._id === "tok-red"),
+      "redTokenAfter",
+    );
+    expect(redTokenAfter.x).toBe(900);
+    expect(redTokenAfter.y).toBe(400);
+    // Blue token records the battle strength in its core flags.
+    const blueCore = (blueTokenAfter.flags?.core ?? {}) as Record<string, unknown>;
+    expect(blueCore.strategicStrength).toBe(10);
+
+    // The conflicted Red army's actor is NOT written either: no Entangled condition,
+    // and its items/spells stay untouched. The blue actor gets its battle-added condition.
+    const redWarlordAfter = must(store.get("actors", "act-red-warlord"), "redWarlordAfter");
+    const redPf1e = redWarlordAfter.system?.pf1e ?? {};
+    expect((redPf1e as { conditions?: string[] }).conditions ?? []).not.toContain("Entangled");
+    const bluePf1e = updatedCap.system.pf1e as { conditions?: string[] };
+    expect(bluePf1e.conditions ?? []).toContain("Blessed");
+
     // Single-step Undo restores every single reconciled document atomically, and Redo re-applies cleanly!
     expect(undo.canUndo).toBe(true);
     const undone = host.undo();
@@ -806,6 +840,92 @@ describe("Full VTT at Formation Scale (Phases A–E)", () => {
     expect(store.get("armies", "army-blue")?.units[0]?.stats.strength).toBe(10);
     expect(store.get("scenes", scene._id)?.walls[0]?.door).toBe(1);
     expect(store.get("scenes", scene._id)?.darkness).toBe(0.3);
+  });
+
+  test("Phase E: missing army/unit/token pieces raise conflict records and skip write-backs (no silent drops)", () => {
+    const { store, scene } = createRichCampaignFixture();
+
+    const payload = {
+      id: "11111111-2222-4333-8444-555555555555",
+      version: 2,
+      surviving: 10,
+      lost: 4,
+      projection: {
+        worldId: "w-full-vtt",
+        sceneId: scene._id,
+        sourceSeq: 0,
+        digest: "0".repeat(64),
+        dependencies: [],
+      },
+      units: [
+        // Army deleted since launch -> unit, token and actor write-backs all skipped.
+        {
+          id: "u-ghost",
+          name: "Ghost Guard",
+          factionId: "fac-blue",
+          source: {
+            kind: "armyUnit" as const,
+            armyId: "army-ghost",
+            unitId: "u-ghost",
+            tokenId: "tok-ghost",
+            actorId: "act-red-warlord",
+          },
+          initialStrength: 10,
+          alive: 5,
+          lost: 5,
+          at: { x: 10, y: 10 },
+          spellsSpent: { fireball: 1 },
+          conditionsAdded: ["Entangled"],
+        },
+        // Unit deleted from an existing army -> unit + token skipped, actor kept
+        // (this fixture unit has no actorId, so no actor op is expected).
+        {
+          id: "u-missing-unit",
+          name: "Missing Unit",
+          factionId: "fac-red",
+          source: { kind: "armyUnit" as const, armyId: "army-red", unitId: "u-ghost", tokenId: "tok-red" },
+          initialStrength: 10,
+          alive: 5,
+          lost: 5,
+          at: { x: 30, y: 10 },
+        },
+        // Army + unit exist but the unit's token was deleted -> unit write proceeds,
+        // token write is skipped. No actor provenance in this fixture unit.
+        {
+          id: "u-blue",
+          name: "Valeria Guard",
+          factionId: "fac-blue",
+          source: { kind: "armyUnit" as const, armyId: "army-blue", unitId: "u-blue", tokenId: "tok-missing" },
+          initialStrength: 12,
+          alive: 9,
+          lost: 3,
+          at: { x: 25, y: 22.5 },
+        },
+      ],
+    };
+
+    const analysis = analyzeBattleReconciliation(store, scene._id, payload);
+    const missing = analysis.conflicts.filter((c) => c.kind === "missing");
+    expect(missing.map((c) => `${c.coll}:${c.id}:${c.name}`).sort()).toEqual([
+      "armies:army-ghost:army-ghost",
+      "armies:army-red:u-ghost",
+      "tokens:tok-ghost:tok-ghost",
+      "tokens:tok-missing:tok-missing",
+    ]);
+    // Deltas are counted from real changes: 3 casualties on unit 3, 5 on units 1–2.
+    expect(analysis.unitChanges).toBe(3);
+
+    const plan = buildBattleReconciliationOps(store, scene._id, payload, { skipConflicted: true });
+    expect(plan.skippedConflicts).toBe(4); // ghost army + ghost token + missing unit + missing token
+    expect(plan.reconciledUnits).toBe(1); // only the living unit 3 writes back
+    // Types of ops are the only write-backs: no token/actor/items for ghost or missing pieces.
+    const updateOps = plan.ops.filter((op) => op.kind === "update");
+    const colls = new Set(updateOps.map((op) => op.ref.coll));
+    expect(colls.has("tokens")).toBe(false);
+    expect(colls.has("actors")).toBe(false);
+    expect(colls.has("items")).toBe(false);
+    const unitRefs = updateOps.filter((op) => op.ref.coll === "units");
+    expect(unitRefs.map((op) => op.ref.id)).toEqual(["u-blue"]);
   });
 
   test("Scale & Boundedness (§8 Gates): 500 commanders, 5,000 units, and 10,000 models resolve Full-VTT doors, lighting, elevation, spells & reactions without per-model action-card floods", () => {
