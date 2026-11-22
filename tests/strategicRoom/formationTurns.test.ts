@@ -476,7 +476,7 @@ test("waypoint legs cannot tunnel through a blocker and return to a clear endpoi
   expect(positions[0]?.x).toBe(9);
 });
 
-test("checks outlying files, not only the anchor path", () => {
+test("checks outlying files, not only the anchor path: unblocked files flow past a lone blocker while the obstructed file halts", () => {
   const scenario = field(10, 10),
     foe = scenario.commanders[1]?.units[0];
   if (!foe) throw Error("missing defender");
@@ -500,7 +500,7 @@ test("checks outlying files, not only the anchor path", () => {
     models(state)
       .slice(0, 10)
       .map((m) => m.x),
-  ).toEqual(Array(10).fill(9));
+  ).toEqual([...Array(9).fill(20), 9]);
 });
 test("a clear multi-leg route around the defender can use its full budget", () => {
   const { positions, blocked } = marches(1, 5, [

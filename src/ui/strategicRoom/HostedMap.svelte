@@ -16,6 +16,12 @@
     type Point,
     type RoomOrder,
   } from "../../core/strategicRoom/protocol";
+  import {
+    isSpellOrItemPreset,
+    planStrategicViewportFx,
+    type PlannedVisualFxCue,
+  } from "../../core/strategicRoom/strategicFx";
+  import { StrategicFxSynth } from "../../client/strategicFxAudio";
   import type { detailRenderer } from "./detailRenderer";
 
   let {
@@ -26,6 +32,8 @@
     target = "",
     aim = null,
     spellPreview = null,
+    zoomOutUnitToken = false,
+    muteFxSound = false,
     region,
     onRegion,
     onPoint,
@@ -40,6 +48,8 @@
     target?: string;
     aim?: Point | null;
     spellPreview?: { shape: "circle" | "cone" | "line"; radius: number } | null;
+    zoomOutUnitToken?: boolean;
+    muteFxSound?: boolean;
     region: { x: number; y: number } | null;
     onRegion: (tile: { x: number; y: number } | null) => void;
     onPoint: (point: Point) => void;
@@ -61,7 +71,14 @@
   let badgeTick = $state(0);
   let tileTick = $state(0);
   const badgeCache = new SvelteMap<string, HTMLImageElement>();
+  const tokenStampCache = new SvelteMap<string, HTMLCanvasElement>();
   const tileCache = new SvelteMap<string, HTMLImageElement>();
+  const fxSynth = new StrategicFxSynth();
+  const FX_BURST_MS = 1650;
+  let fxBurstStartAt = $state(0);
+  let fxBurstPhase = $state(1);
+  let lastSeenFxVersion = -1;
+  let lastPlayedAudioVersion = -1;
   let pan: { x: number; y: number; origin: Camera; moved: boolean } | undefined;
 
   const colors = $derived(new Map(view.factions.map((f) => [f.id, f.color])));
@@ -94,13 +111,14 @@
     }
     for (const href of urls) {
       if (badgeCache.has(href)) continue;
-      const img = new Image();
-      img.decoding = "async";
-      img.onload = () => {
-        badgeCache.set(href, img);
+      const badgeImg = new Image();
+      badgeImg.decoding = "async";
+      badgeImg.onload = () => {
+        badgeCache.set(href, badgeImg);
+        tokenStampCache.clear();
         badgeTick++;
       };
-      img.src = href;
+      badgeImg.src = href;
     }
   });
 
@@ -226,7 +244,7 @@
         const mp = worldToScreen(camera, m.at.x, m.at.y);
         const dist = Math.hypot(mp.x - sx, mp.y - sy);
         if (dist < bestDist) {
-          if (ownMap.has(m.id) && onSelectUnit) {
+          if ((ownMap.has(m.id) || view.role === "GM") && onSelectUnit) {
             bestDist = dist;
             hitId = m.id;
             hitEnemy = false;
@@ -311,6 +329,64 @@
     return () => {
       observer.disconnect();
       canvas.removeEventListener("wheel", wheel);
+      fxSynth.destroy();
+    };
+  });
+
+  // Trigger animated VFX burst + viewport-culled spatial audio when a newly resolved turn arrives
+  $effect(() => {
+    const ver = view.head.version;
+    const cues = view.content?.fxCues ?? [];
+    if (ver <= 0 || cues.length === 0) return;
+    const hasCurrentTurnCue = cues.some((q) => q.turnId === ver);
+    if (!hasCurrentTurnCue) return;
+    if (ver === lastSeenFxVersion) return;
+    lastSeenFxVersion = ver;
+    fxBurstStartAt = performance.now();
+    fxBurstPhase = 0;
+
+    if (ver !== lastPlayedAudioVersion && !untrack(() => muteFxSound)) {
+      lastPlayedAudioVersion = ver;
+      const curCam = untrack(() => camera);
+      const curVp = untrack(() => viewport);
+      if (curVp.width > 16 && curVp.height > 16) {
+        const fxCoalescence = view.content?.fxCoalescence;
+        const plan = planStrategicViewportFx({
+          cues,
+          turnId: ver,
+          camera: curCam,
+          viewport: curVp,
+          ...(fxCoalescence ? { coalescence: fxCoalescence } : {}),
+          muteSound: false,
+        });
+        fxSynth.playVoices(plan.voices);
+      }
+    }
+  });
+
+  // Independent rAF loop driven ONLY by `fxBurstStartAt` (without reading `view`), so async `/region`
+  // or head updates arriving mid-burst NEVER tear down and cancel the 1,650 ms combat VFX animation!
+  $effect(() => {
+    const startAt = fxBurstStartAt;
+    if (startAt <= 0) return;
+    let animHandle = 0;
+    let timerHandle: ReturnType<typeof setTimeout> | null = null;
+    let alive = true;
+    const step = (now: number) => {
+      if (!alive) return;
+      const p = Math.min(1, Math.max(0, (now - startAt) / FX_BURST_MS));
+      fxBurstPhase = p;
+      if (p < 1) {
+        timerHandle = setTimeout(() => {
+          if (alive) animHandle = requestAnimationFrame(step);
+        }, 0);
+      }
+    };
+    animHandle = requestAnimationFrame(step);
+    return () => {
+      alive = false;
+      if (timerHandle) clearTimeout(timerHandle);
+      if (animHandle) cancelAnimationFrame(animHandle);
     };
   });
 
@@ -363,9 +439,179 @@
     ctx.fill();
   }
 
+  function drawStrategicFxCue(
+    ctx: CanvasRenderingContext2D,
+    cam: Camera,
+    vis: PlannedVisualFxCue,
+    phase: number,
+  ) {
+    const { cue, alpha, radiusScale, mergedCount, lodTier } = vis;
+    const isSpell = isSpellOrItemPreset(cue.preset);
+    // Transient combat FX fade out smoothly after burst completion; spells leave a subtle turn-report residue
+    const burstFade =
+      phase < 1
+        ? Math.sin(Math.min(1, phase * 1.15) * Math.PI * 0.92) + 0.12
+        : isSpell
+          ? 0.34
+          : 0;
+    const effAlpha = Math.max(0, Math.min(1, alpha * burstFade));
+    if (effAlpha <= 0.015) return;
+
+    const cp = worldToScreen(cam, cue.at.x, cue.at.y);
+    const baseRad = Math.max(isSpell ? 7 : 4.5, cue.radius * cam.scale * radiusScale);
+    ctx.save();
+    ctx.globalAlpha = effAlpha;
+
+    if (cue.preset === "volley") {
+      const fp = cue.from ? worldToScreen(cam, cue.from.x, cue.from.y) : null;
+      ctx.strokeStyle = "#ffd98e";
+      ctx.fillStyle = "#ffe8b3";
+      if (fp && Math.hypot(cp.x - fp.x, cp.y - fp.y) > 8) {
+        const dx = cp.x - fp.x;
+        const dy = cp.y - fp.y;
+        const dist = Math.hypot(dx, dy);
+        const arcLift = Math.min(42, dist * 0.2);
+        const mx = (fp.x + cp.x) * 0.5;
+        const my = (fp.y + cp.y) * 0.5 - arcLift;
+        // Parabolic volley arc
+        ctx.lineWidth = lodTier === 0 ? 1.8 : 1.3;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(fp.x, fp.y);
+        ctx.quadraticCurveTo(mx, my, cp.x, cp.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (phase < 1) {
+          const bolts = lodTier === 0 ? Math.min(5, 2 + Math.floor(Math.log2(mergedCount + 1))) : 2;
+          for (let bIdx = 0; bIdx < bolts; bIdx++) {
+            const t = Math.min(1, Math.max(0, phase * 1.25 - bIdx * 0.1));
+            if (t <= 0 || t >= 1) continue;
+            const omt = 1 - t;
+            const bx = omt * omt * fp.x + 2 * omt * t * mx + t * t * cp.x;
+            const by = omt * omt * fp.y + 2 * omt * t * my + t * t * cp.y;
+            ctx.beginPath();
+            ctx.arc(bx, by, lodTier === 0 ? 2.4 : 1.8, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+      // Impact scatter ring
+      const impR = baseRad * (0.45 + 0.55 * Math.min(1, phase * 1.3));
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(cp.x, cp.y, impR, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
+    if (cue.preset === "melee" || cue.preset === "charge") {
+      if (cue.preset === "charge" && cue.from) {
+        const fp = worldToScreen(cam, cue.from.x, cue.from.y);
+        ctx.strokeStyle = "#ffb86c99";
+        ctx.lineWidth = Math.max(2, 5 * cam.scale);
+        ctx.beginPath();
+        ctx.moveTo(fp.x, fp.y);
+        ctx.lineTo(cp.x, cp.y);
+        ctx.stroke();
+      }
+      const slashR = Math.max(5, Math.min(34, baseRad * (0.6 + 0.4 * phase)));
+      ctx.strokeStyle = cue.preset === "charge" ? "#ffbe6b" : "#fff0cc";
+      ctx.lineWidth = lodTier === 0 ? 2.2 : 1.5;
+      ctx.beginPath();
+      // Crossed steel clash slashes at close/operational zoom
+      ctx.moveTo(cp.x - slashR * 0.7, cp.y - slashR * 0.7);
+      ctx.lineTo(cp.x + slashR * 0.7, cp.y + slashR * 0.7);
+      ctx.moveTo(cp.x + slashR * 0.7, cp.y - slashR * 0.7);
+      ctx.lineTo(cp.x - slashR * 0.7, cp.y + slashR * 0.7);
+      ctx.stroke();
+      if (lodTier === 0) {
+        ctx.strokeStyle = "#ff7b47aa";
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        ctx.arc(cp.x, cp.y, slashR * (0.5 + 0.6 * phase), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+      return;
+    }
+
+    // Spells & consumables (`fireball`, `cone-of-cold`, `lightning-bolt`, `entangle`, `heal`, `buff`, etc.)
+    const fxColor =
+      cue.preset === "fireball" || cue.preset === "burning-hands" || cue.preset === "burning-entanglement"
+        ? "#ff7838"
+        : cue.preset === "lightning-bolt" || cue.preset === "cone-of-cold"
+          ? "#6fd6ff"
+          : cue.preset === "heal"
+            ? "#7cf29c"
+            : cue.preset === "buff"
+              ? "#ffe17d"
+              : "#a97cf2";
+    const expand = phase < 1 ? 0.35 + 0.65 * Math.pow(phase, 0.55) : 1;
+    const rad = baseRad * expand;
+    ctx.strokeStyle = fxColor;
+    ctx.fillStyle = `${fxColor}36`;
+    ctx.lineWidth = mergedCount > 1 ? 2.6 : 2;
+    ctx.beginPath();
+    if (cue.dir && (cue.preset === "burning-hands" || cue.preset === "cone-of-cold")) {
+      const ang = Math.atan2(cue.dir.y, cue.dir.x);
+      ctx.moveTo(cp.x, cp.y);
+      ctx.arc(cp.x, cp.y, rad, ang - Math.PI / 4, ang + Math.PI / 4);
+      ctx.closePath();
+    } else if (cue.dir && cue.preset === "lightning-bolt") {
+      const ang = Math.atan2(cue.dir.y, cue.dir.x);
+      ctx.save();
+      ctx.translate(cp.x, cp.y);
+      ctx.rotate(ang);
+      const hw = Math.max(2.2, 2.8 * cam.scale);
+      ctx.rect(0, -hw, rad, hw * 2);
+      ctx.fill();
+      ctx.stroke();
+      if (lodTier <= 1 && phase < 1) {
+        // Jagged lightning core bolt
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        const segs = 6;
+        for (let s = 1; s <= segs; s++) {
+          const lx = (rad * s) / segs;
+          const ly = s === segs ? 0 : (s % 2 === 0 ? 1 : -1) * hw * 0.85;
+          ctx.lineTo(lx, ly);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+      ctx.restore();
+      return;
+    } else {
+      ctx.arc(cp.x, cp.y, rad, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.stroke();
+
+    // Secondary shockwave ring + coalesced multi-cast badge (e.g. `×500` when 500 fireballs hit one spot!)
+    if (phase < 1 && !cue.dir) {
+      ctx.strokeStyle = "#ffffffaa";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(cp.x, cp.y, baseRad * Math.min(1.12, phase * 1.25), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    if (mergedCount > 1 && lodTier <= 1 && rad >= 12) {
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "700 10px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(`×${mergedCount}`, cp.x, cp.y);
+    }
+    ctx.restore();
+  }
+
   $effect(() => {
     void badgeTick;
     void tileTick;
+    const burstP = fxBurstPhase;
     const v = view,
       c = { ...camera },
       { width, height } = viewport;
@@ -376,6 +622,7 @@
       tgtId = target,
       aimPt = aim,
       spPrev = spellPreview,
+      bigUnitTok = zoomOutUnitToken,
       palette = colors,
       ownUnits = ownMap,
       art = backgroundImage,
@@ -558,6 +805,9 @@
       for (const area of v.areas ?? []) {
         const p = worldToScreen(c, area.at.x, area.at.y);
         const radius = area.radius * c.scale;
+        if (p.x + radius < 0 || p.x - radius > width || p.y + radius < 0 || p.y - radius > height)
+          continue;
+        ctx.save();
         ctx.beginPath();
         ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
         ctx.fillStyle =
@@ -575,6 +825,20 @@
               : "#80d58a";
         ctx.lineWidth = 1.6;
         ctx.stroke();
+        // Close-up vine/tentacle hazard texture when zoomed in
+        if (c.scale >= 0.8 && radius >= 14) {
+          ctx.globalAlpha = Math.min(0.65, (c.scale - 0.6) * 0.5);
+          ctx.lineWidth = 1.1;
+          const rings = area.spell === "blackTentacles" ? 3 : 2;
+          for (let ri = 1; ri <= rings; ri++) {
+            ctx.beginPath();
+            ctx.setLineDash([5, 5]);
+            ctx.arc(p.x, p.y, (radius * ri) / (rings + 1), ri * 0.7, ri * 0.7 + Math.PI * 1.65);
+            ctx.stroke();
+          }
+          ctx.setLineDash([]);
+        }
+        ctx.restore();
       }
 
       if (v.walls?.length) {
@@ -622,42 +886,23 @@
         ctx.restore();
       }
 
-      // Resolved turn FX cues
-      for (const cue of v.content?.fxCues ?? []) {
-        if (cue.turnId !== v.head.version) continue;
-        const cp = worldToScreen(c, cue.at.x, cue.at.y);
-        const rad = Math.max(8, cue.radius * c.scale);
-        ctx.save();
-        const fxColor =
-          cue.preset === "fireball" || cue.preset === "burning-hands" || cue.preset === "burning-entanglement"
-            ? "#ff7838"
-            : cue.preset === "lightning-bolt" || cue.preset === "cone-of-cold"
-              ? "#6fd6ff"
-              : cue.preset === "heal"
-                ? "#7cf29c"
-                : cue.preset === "buff"
-                  ? "#ffe17d"
-                  : "#a97cf2";
-        ctx.strokeStyle = fxColor;
-        ctx.fillStyle = `${fxColor}30`;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        if (cue.dir && (cue.preset === "burning-hands" || cue.preset === "cone-of-cold")) {
-          const ang = Math.atan2(cue.dir.y, cue.dir.x);
-          ctx.moveTo(cp.x, cp.y);
-          ctx.arc(cp.x, cp.y, rad, ang - Math.PI / 4, ang + Math.PI / 4);
-          ctx.closePath();
-        } else if (cue.dir && cue.preset === "lightning-bolt") {
-          const ang = Math.atan2(cue.dir.y, cue.dir.x);
-          ctx.translate(cp.x, cp.y);
-          ctx.rotate(ang);
-          ctx.rect(0, -Math.max(2, 2.5 * c.scale), rad, Math.max(4, 5 * c.scale));
-        } else {
-          ctx.arc(cp.x, cp.y, rad, 0, Math.PI * 2);
+      // Viewport-culled, zoom-attenuated, spatially-deduplicated spell/area FX under formations
+      const rawFxCues = v.content?.fxCues;
+      const fxCoalescence = v.content?.fxCoalescence;
+      const fxPlan = rawFxCues?.length
+        ? planStrategicViewportFx({
+            cues: rawFxCues,
+            turnId: v.head.version,
+            camera: c,
+            viewport: { width, height },
+            ...(fxCoalescence ? { coalescence: fxCoalescence } : {}),
+            muteSound: true,
+          })
+        : null;
+      if (fxPlan) {
+        for (const vis of fxPlan.visuals) {
+          if (isSpellOrItemPreset(vis.cue.preset)) drawStrategicFxCue(ctx, c, vis, burstP);
         }
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
       }
 
       if (r) {
@@ -713,12 +958,18 @@
           ? 48 * c.scale
           : Math.max(13, Math.min(180, 48 * c.scale));
 
+        // Uploaded token badge emblem at formation center (unit-sized when `zoomOutUnitToken` is enabled!)
+        const rawBadge = v.unitBadges?.[u.id] ?? ownUnit?.badgeUrl;
+        const badgeHref = rawBadge ? new URL(rawBadge, location.href).href : null;
+        const badgeImg = badgeHref ? badgeCache.get(badgeHref) : undefined;
+        const useBigToken = bigUnitTok && Boolean(badgeImg) && !isDetailed;
+
         ctx.save();
         ctx.translate(p.x, p.y);
         ctx.rotate(facing);
 
-        if (isDetailed) {
-          // Subtle formation footprint under individual soldiers when zoomed in
+        if (isDetailed || useBigToken) {
+          // Subtle formation footprint under individual soldiers (or under unit-sized token)
           ctx.fillStyle = `${baseColor}1c`;
           ctx.strokeStyle = isSelected ? "#ffe08a" : `${baseColor}88`;
           ctx.lineWidth = isSelected ? 2.2 : 1.2;
@@ -755,12 +1006,10 @@
         }
         ctx.restore();
 
-        // Uploaded token badge emblem at formation center
-        const rawBadge = v.unitBadges?.[u.id] ?? ownUnit?.badgeUrl;
-        const badgeHref = rawBadge ? new URL(rawBadge, location.href).href : null;
-        const badgeImg = badgeHref ? badgeCache.get(badgeHref) : undefined;
         if (badgeImg && !detailedUnits.has(u.id)) {
-          const rMed = Math.max(5.5, Math.min(16, Math.min(depthPx, frontPx) * 0.46));
+          const rMed = useBigToken
+            ? Math.max(12, Math.min(68, Math.max(depthPx, frontPx) * 0.52))
+            : Math.max(5.5, Math.min(16, Math.min(depthPx, frontPx) * 0.46));
           ctx.save();
           ctx.beginPath();
           ctx.arc(p.x, p.y, rMed, 0, Math.PI * 2);
@@ -770,9 +1019,25 @@
           ctx.restore();
           ctx.beginPath();
           ctx.arc(p.x, p.y, rMed, 0, Math.PI * 2);
-          ctx.strokeStyle = isOwn ? "#ffe08a" : "#101820";
-          ctx.lineWidth = 1.2;
+          ctx.strokeStyle = isSelected ? "#ffe08a" : useBigToken ? baseColor : isOwn ? "#ffe08a" : "#101820";
+          ctx.lineWidth = useBigToken ? 2.4 : 1.2;
           ctx.stroke();
+          if (useBigToken) {
+            // Facing chevron on the unit-sized token rim
+            const chX = p.x + Math.cos(facing) * (rMed + 2.5);
+            const chY = p.y + Math.sin(facing) * (rMed + 2.5);
+            const px = -Math.sin(facing);
+            const py = Math.cos(facing);
+            const bx = p.x + Math.cos(facing) * (rMed - 2.5);
+            const by = p.y + Math.sin(facing) * (rMed - 2.5);
+            ctx.beginPath();
+            ctx.moveTo(chX, chY);
+            ctx.lineTo(bx + px * 4, by + py * 4);
+            ctx.lineTo(bx - px * 4, by - py * 4);
+            ctx.closePath();
+            ctx.fillStyle = "#ffffff";
+            ctx.fill();
+          }
         }
 
         // Enemy target reticle
@@ -814,36 +1079,87 @@
         }
       }
 
-      // Zoomed-in individual soldier rendering (crisp faction-colored circular bases + facing ticks)
+      // Zoomed-in individual soldier rendering (`combat_resolver_5` SL6/SL7 round VTT tokens):
+      // Every soldier in a unit wears that unit's round VTT token (circular clipped portrait/emblem
+      // + faction/gold bezel + facing chevron), baked once per unit into an offscreen stamp.
       if (subset.size > 0 && c.scale > 1.7) {
-        const modelRadius = Math.max(2.2, Math.min(9, 2.0 * c.scale));
+        const modelRadius = Math.max(2.4, Math.min(11, 2.25 * c.scale));
+        const stampSize = 40;
+        const getUnitStamp = (
+          unitId: string,
+          fill: string,
+          isOwnModel: boolean,
+        ): HTMLCanvasElement => {
+          const rawBadge = v.unitBadges?.[unitId] ?? ownUnits.get(unitId)?.badgeUrl;
+          const badgeHref = rawBadge ? new URL(rawBadge, location.href).href : "";
+          const img = badgeHref ? badgeCache.get(badgeHref) : undefined;
+          const key = `${unitId}|${fill}|${isOwnModel ? 1 : 0}|${img ? badgeHref : ""}`;
+          let stamp = tokenStampCache.get(key);
+          if (stamp) return stamp;
+          stamp = document.createElement("canvas");
+          stamp.width = stampSize;
+          stamp.height = stampSize;
+          const sctx = stamp.getContext("2d");
+          if (sctx) {
+            const half = stampSize / 2;
+            const r = half - 4;
+            sctx.beginPath();
+            sctx.arc(half, half, r, 0, Math.PI * 2);
+            sctx.fillStyle = fill;
+            sctx.fill();
+            if (img) {
+              sctx.save();
+              sctx.beginPath();
+              sctx.arc(half, half, r - 1.5, 0, Math.PI * 2);
+              sctx.clip();
+              sctx.drawImage(img, half - r + 1.5, half - r + 1.5, (r - 1.5) * 2, (r - 1.5) * 2);
+              sctx.restore();
+            } else {
+              sctx.beginPath();
+              sctx.arc(half, half, r * 0.48, 0, Math.PI * 2);
+              sctx.strokeStyle = "rgba(255,255,255,0.45)";
+              sctx.lineWidth = 1.6;
+              sctx.stroke();
+            }
+            sctx.beginPath();
+            sctx.arc(half, half, r, 0, Math.PI * 2);
+            sctx.strokeStyle = isOwnModel ? "#ffe08a" : "#101820";
+            sctx.lineWidth = isOwnModel ? 2.6 : 2.2;
+            sctx.stroke();
+            // Front facing chevron (+x)
+            sctx.beginPath();
+            sctx.moveTo(half + r + 3.2, half);
+            sctx.lineTo(half + r - 2.6, half - 3.6);
+            sctx.lineTo(half + r - 2.6, half + 3.6);
+            sctx.closePath();
+            sctx.fillStyle = isOwnModel ? "#ffe89e" : "#ffffff";
+            sctx.fill();
+            sctx.strokeStyle = "#0d141a";
+            sctx.lineWidth = 1;
+            sctx.stroke();
+          }
+          if (tokenStampCache.size > 512) tokenStampCache.clear();
+          tokenStampCache.set(key, stamp);
+          return stamp;
+        };
+
+        const drawSize = modelRadius * 2.35;
         for (const m of subset.values()) {
           const p = worldToScreen(c, m.x, m.y);
-          if (p.x < -12 || p.x > width + 12 || p.y < -12 || p.y > height + 12)
+          if (p.x < -16 || p.x > width + 16 || p.y < -16 || p.y > height + 16)
             continue;
           const fid = unitFactionMap.get(m.unitId);
           const fill = (fid ? palette.get(fid) : undefined) ?? "#dce6f2";
-          const isOwnModel = ownUnits.has(m.unitId);
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, modelRadius, 0, Math.PI * 2);
-          ctx.fillStyle = fill;
-          ctx.fill();
-          ctx.strokeStyle = isOwnModel ? "#ffe08a" : "#0d141a";
-          ctx.lineWidth = isOwnModel ? 1.2 : 0.9;
-          ctx.stroke();
-
-          // Facing spear tick
-          const tx = p.x + Math.cos(m.rotation) * (modelRadius * 1.45);
-          const ty = p.y + Math.sin(m.rotation) * (modelRadius * 1.45);
-          ctx.beginPath();
-          ctx.moveTo(p.x, p.y);
-          ctx.lineTo(tx, ty);
-          ctx.strokeStyle = "#ffffffd8";
-          ctx.lineWidth = Math.max(1, modelRadius * 0.34);
-          ctx.stroke();
+          const stamp = getUnitStamp(m.unitId, fill, ownUnits.has(m.unitId));
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(m.rotation);
+          ctx.drawImage(stamp, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+          ctx.restore();
         }
+      } else if (d && c.scale > 1.7) {
+        d.draw(v, subset, c, { width, height }, bigUnitTok);
       }
-      if (d && c.scale > 1.7) d.draw(v, subset, c, { width, height });
 
       // Command vectors with arrowheads for own units' drafted/accepted orders
       if (activeOrders.size > 0) {
@@ -863,23 +1179,23 @@
             ctx.beginPath();
             ctx.moveTo(from.x, from.y);
             let prev = from;
+            const prevWp = ord.path[ord.path.length - 1];
+            const leadDx = (own.leadAt?.x ?? own.at.x) - own.at.x;
+            const leadDy = (own.leadAt?.y ?? own.at.y) - own.at.y;
             for (const wp of ord.path) {
-              const p = worldToScreen(c, wp.x, wp.y);
+              const p = worldToScreen(c, wp.x - leadDx, wp.y - leadDy);
               ctx.lineTo(p.x, p.y);
               prev = p;
             }
             ctx.stroke();
             ctx.setLineDash([]);
-            if (ord.path.length > 0) {
-              const prevWp =
-                ord.path.length > 1
-                  ? worldToScreen(
-                      c,
-                      ord.path[ord.path.length - 2]?.x ?? own.at.x,
-                      ord.path[ord.path.length - 2]?.y ?? own.at.y,
-                    )
+            if (ord.path.length > 0 && prevWp) {
+              const penult = ord.path[ord.path.length - 2];
+              const prevScreen =
+                ord.path.length > 1 && penult
+                  ? worldToScreen(c, penult.x - leadDx, penult.y - leadDy)
                   : from;
-              drawArrowHead(ctx, prevWp.x, prevWp.y, prev.x, prev.y, 8);
+              drawArrowHead(ctx, prevScreen.x, prevScreen.y, prev.x, prev.y, 8);
             }
           } else if (ord.kind === "attack") {
             const tgt = markerAt.get(ord.targetUnitId);
@@ -912,6 +1228,13 @@
         ctx.restore();
       }
 
+      // Viewport-culled, zoom-attenuated tactical combat FX (arrow volleys, steel clashes, charges) above formations
+      if (fxPlan) {
+        for (const vis of fxPlan.visuals) {
+          if (!isSpellOrItemPreset(vis.cue.preset)) drawStrategicFxCue(ctx, c, vis, burstP);
+        }
+      }
+
       // Live Aim Reticle where player clicked on the map
       if (aimPt && Number.isFinite(aimPt.x) && Number.isFinite(aimPt.y)) {
         const ap = worldToScreen(c, aimPt.x, aimPt.y);
@@ -927,7 +1250,9 @@
         ctx.stroke();
         const selOwn = ownUnits.get(sel);
         if (selOwn?.at) {
+          const castBase = selOwn.leadAt ?? selOwn.at;
           const fp = worldToScreen(c, selOwn.at.x, selOwn.at.y);
+          const cfp = worldToScreen(c, castBase.x, castBase.y);
           ctx.strokeStyle = "#ffe08a66";
           ctx.setLineDash([3, 4]);
           ctx.beginPath();
@@ -943,15 +1268,15 @@
             if (spPrev.shape === "circle") {
               ctx.arc(ap.x, ap.y, spPrev.radius * c.scale, 0, Math.PI * 2);
             } else if (spPrev.shape === "cone") {
-              const ang = Math.atan2(aimPt.y - selOwn.at.y, aimPt.x - selOwn.at.x);
-              ctx.moveTo(fp.x, fp.y);
-              ctx.arc(fp.x, fp.y, spPrev.radius * c.scale, ang - Math.PI / 4, ang + Math.PI / 4);
+              const ang = Math.atan2(aimPt.y - castBase.y, aimPt.x - castBase.x);
+              ctx.moveTo(cfp.x, cfp.y);
+              ctx.arc(cfp.x, cfp.y, spPrev.radius * c.scale, ang - Math.PI / 4, ang + Math.PI / 4);
               ctx.closePath();
             } else {
-              const ang = Math.atan2(aimPt.y - selOwn.at.y, aimPt.x - selOwn.at.x);
+              const ang = Math.atan2(aimPt.y - castBase.y, aimPt.x - castBase.x);
               const hw = Math.max(2, 2.5 * c.scale);
               ctx.save();
-              ctx.translate(fp.x, fp.y);
+              ctx.translate(cfp.x, cfp.y);
               ctx.rotate(ang);
               ctx.rect(0, -hw, spPrev.radius * c.scale, hw * 2);
               ctx.restore();

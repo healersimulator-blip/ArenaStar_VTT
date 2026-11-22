@@ -197,7 +197,11 @@ export class HostedRoomClient {
           busy: false,
           notice: message.status === "accepted" ? "Connected" : message.detail,
         });
-        if (message.status === "accepted" && command.kind === "orders.submit") {
+        if (
+          message.status === "accepted" &&
+          (command.kind === "orders.submit" ||
+            (command.kind === "macro.exec" && message.revision !== undefined))
+        ) {
           const view = this.state.view;
           if (
             view &&
@@ -205,7 +209,10 @@ export class HostedRoomClient {
             message.revision !== undefined &&
             message.revision > view.orders.revision
           ) {
-            if (view.orders.revision === command.expectedRevision) {
+            if (
+              command.kind === "orders.submit" &&
+              view.orders.revision === command.expectedRevision
+            ) {
               // The private durable ACK is the delta; don't reload the battlefield per order.
               const orders = new Map(
                 view.orders.edits.map((edit) => [edit.unitId, edit]),

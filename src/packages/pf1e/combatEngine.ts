@@ -33,11 +33,24 @@ export interface PF1eCombatMetrics {
   cmbSuccesses: number;
 }
 
+export interface PF1eModelStatsObserver {
+  onAttackRoll?(attackerModelId: number, hit: boolean, critConfirmed: boolean): void;
+  onDamage?(
+    attackerModelId: number | null,
+    defenderModelId: number,
+    netDamage: number,
+    drAbsorbed: number,
+    killed: boolean,
+  ): void;
+  onHeal?(modelId: number, healedHp: number): void;
+}
+
 export interface PF1eCombatOptions {
   pool: ModelPool;
   attackers: number[];
   defenders: number[];
   registry: PF1eProfileRegistry;
+  modelStatsObserver?: PF1eModelStatsObserver;
   /**
    * Dice source. Production callers MUST pass a fork of the turn's injected PRNG
    * (`pf1eRngFromPrng(rng.fork(unitIndex))`) so PF1e resolves identically under
@@ -70,6 +83,18 @@ export interface PF1eCombatOptions {
    * extra attack at full BAB rather than a whole second full-attack routine.
    */
   maxIterativeAttacks?: number;
+  /**
+   * Optional per-swing target selector (`combat_resolver_5` spatial melee reach & G2b volley
+   * target distribution). When supplied, overrides sequential `defIdxPtr` target selection:
+   * returning `< 0` skips the swing (e.g., no living foe within weapon reach or range).
+   */
+  pickTarget?: (atkIdx: number, swingIndex: number) => number;
+  /** Optional per-attacker iterative attack cap override (e.g., `1` after >5 ft movement, full routine after 5-ft step). */
+  maxIterativesForAttacker?: (atkIdx: number) => number | undefined;
+  /** Optional per-(attacker, target) situational attack modifier (e.g., `-4` firing into melee). */
+  extraAttackMod?: (atkIdx: number, targetIdx: number) => number;
+  /** Optional per-(attacker, target) situational AC bonus (e.g., `+4` soft cover from intervening ranks). */
+  extraTargetAc?: (atkIdx: number, targetIdx: number) => number;
 }
 
 export interface PF1eCombatResult {
@@ -253,20 +278,36 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
     if (!profile) continue;
 
     let attacksTaken = 0;
-    const routineCap = opts.maxIterativeAttacks !== undefined || staggeredCap !== undefined
-      ? Math.min(opts.maxIterativeAttacks ?? Number.MAX_SAFE_INTEGER, staggeredCap ?? Number.MAX_SAFE_INTEGER)
-      : undefined;
+    const perAtkCap = opts.maxIterativesForAttacker?.(atkIdx);
+    const routineCap =
+      opts.maxIterativeAttacks !== undefined ||
+      staggeredCap !== undefined ||
+      perAtkCap !== undefined
+        ? Math.min(
+            opts.maxIterativeAttacks ?? Number.MAX_SAFE_INTEGER,
+            staggeredCap ?? Number.MAX_SAFE_INTEGER,
+            perAtkCap ?? Number.MAX_SAFE_INTEGER,
+          )
+        : undefined;
     for (const attackBonus of profile.iteratives) {
       if (routineCap !== undefined && attacksTaken >= routineCap) break;
-      if (defIdxPtr >= defenders.length) break;
-      let targetIdx = defenders[defIdxPtr] ?? 0;
+      let targetIdx: number;
+      if (opts.pickTarget) {
+        targetIdx = opts.pickTarget(atkIdx, attacksTaken);
+        if (targetIdx < 0 || ((pool.status[targetIdx] ?? 0) & ModelStatus.dead) !== 0) {
+          break;
+        }
+      } else {
+        if (defIdxPtr >= defenders.length) break;
+        targetIdx = defenders[defIdxPtr] ?? 0;
 
-      // Skip dead defenders
-      while (defIdxPtr < defenders.length && ((pool.status[targetIdx] ?? 0) & ModelStatus.dead) !== 0) {
-        defIdxPtr++;
-        if (defIdxPtr < defenders.length) targetIdx = defenders[defIdxPtr] ?? 0;
+        // Skip dead defenders
+        while (defIdxPtr < defenders.length && ((pool.status[targetIdx] ?? 0) & ModelStatus.dead) !== 0) {
+          defIdxPtr++;
+          if (defIdxPtr < defenders.length) targetIdx = defenders[defIdxPtr] ?? 0;
+        }
+        if (defIdxPtr >= defenders.length) break;
       }
-      if (defIdxPtr >= defenders.length) break;
 
       const defPf = (pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined)?.[targetIdx] ?? 0;
 
@@ -307,7 +348,9 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       // roll**, and nothing else — it does not reduce the defender's AC. Applying it to both
       // sides double-counted the bonus (Gap List §2.2).
       const isDefenderFlanked = isFlanked || (defPf & PF1eCondition.FLANKED) !== 0;
-      let targetAc = resolveTargetAc(pool, defProfile, targetIdx, effectiveAcType);
+      let targetAc =
+        resolveTargetAc(pool, defProfile, targetIdx, effectiveAcType) +
+        (opts.extraTargetAc ? opts.extraTargetAc(atkIdx, targetIdx) : 0);
 
       if (highFidelity) {
         // Prone AC modifier: -4 vs Melee, +4 vs Ranged
@@ -331,6 +374,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         const loaded = ammoCol ? (ammoCol[atkIdx] ?? 0) : 1;
         if (loaded <= 0) {
           metrics.misses++;
+          opts.modelStatsObserver?.onAttackRoll?.(pool.id[atkIdx] ?? atkIdx, false, false);
           continue;
         }
       }
@@ -345,6 +389,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
       if (highFidelity && profile.isFirearm && d20 !== 20 && d20 <= effectiveMisfireMin && effectiveMisfireMin > 0) {
         metrics.misfiresCount++;
         metrics.misses++;
+        opts.modelStatsObserver?.onAttackRoll?.(pool.id[atkIdx] ?? atkIdx, false, false);
         {
           const pfCol = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
           if (pfCol) pfCol[atkIdx] = (pfCol[atkIdx] ?? 0) | PF1eCondition.MISFIRED | PF1eCondition.BROKEN;
@@ -371,7 +416,8 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         (isDefenderFlanked ? 2 : 0) +
         profile.enhancementBonus -
         rangePenalty +
-        (opts.circumstanceMod ?? 0);
+        (opts.circumstanceMod ?? 0) +
+        (opts.extraAttackMod ? opts.extraAttackMod(atkIdx, targetIdx) : 0);
       if (highFidelity) {
         if ((atkPf & PF1eCondition.SHAKEN) !== 0) attackMod -= 2;
         if ((atkPf & PF1eCondition.SICKENED) !== 0) attackMod -= 2;
@@ -391,6 +437,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
 
       if (!isHit) {
         metrics.misses++;
+        opts.modelStatsObserver?.onAttackRoll?.(pool.id[atkIdx] ?? atkIdx, false, false);
         continue;
       }
 
@@ -398,6 +445,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
 
       // Check Critical Threat
       let mult = 1;
+      let critConfirmedNow = false;
       if (d20 >= profile.critThreatMin) {
         metrics.critThreats++;
         const confirmD20 = rng.d(20);
@@ -405,8 +453,10 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         if (confirmD20 === 20 || (confirmD20 !== 1 && confirmTotal >= targetAc)) {
           metrics.critsConfirmed++;
           mult = profile.critMultiplier;
+          critConfirmedNow = true;
         }
       }
+      opts.modelStatsObserver?.onAttackRoll?.(pool.id[atkIdx] ?? atkIdx, true, critConfirmedNow);
 
       // §2.4 — Multiplying Damage: a critical hit multiplies only the weapon's *base* dice and
       // static bonuses (Strength, enhancement, morale, penalties); bonus dice — energy (flaming)
@@ -512,6 +562,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
         ((profile.elementalType | profile.bonusDamageTypeFlags) &
           (targetProfile?.regenerationSuppressFlags ?? 0)) !== 0;
 
+      let killedNow = false;
       if (highFidelity && isRegenMonster) {
         if (isLethalType) {
           // Fire / Acid damage deals LETHAL damage to regenerating creature!
@@ -529,6 +580,7 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
               if (pfCol3) pfCol3[targetIdx] = (pfCol3[targetIdx] ?? 0) | PF1eCondition.DEAD;
             }
             metrics.killsCount++;
+            killedNow = true;
             defIdxPtr++; // Permanent Death!
           }
         } else {
@@ -556,9 +608,17 @@ export function resolvePF1eAttacks(opts: PF1eCombatOptions): PF1eCombatResult {
             if (pfCol4) pfCol4[targetIdx] = (pfCol4[targetIdx] ?? 0) | PF1eCondition.DEAD;
           }
           metrics.killsCount++;
+          killedNow = true;
           defIdxPtr++; // Target slain
         }
       }
+      opts.modelStatsObserver?.onDamage?.(
+        pool.id[atkIdx] ?? atkIdx,
+        pool.id[targetIdx] ?? targetIdx,
+        netDamage,
+        effectiveDr,
+        killedNow,
+      );
     }
   }
 
@@ -592,7 +652,7 @@ export function resolvePF1eHealing(
   pool: ModelPool,
   modelIndices: number[],
   registry: PF1eProfileRegistry,
-  opts?: { suppressed?: ReadonlySet<number> }
+  opts?: { suppressed?: ReadonlySet<number>; modelStatsObserver?: PF1eModelStatsObserver }
 ): { totalHealed: number; revivedCount: number } {
   let totalHealed = 0;
   let revivedCount = 0;
@@ -630,6 +690,9 @@ export function resolvePF1eHealing(
       pool.hp[idx] = r.hp;
       if (pool.sys["nonlethal"]) pool.sys["nonlethal"][idx] = r.nonlethalDamage;
       totalHealed += r.healedHp;
+      if (r.healedHp > 0) {
+        opts?.modelStatsObserver?.onHeal?.(pool.id[idx] ?? idx, r.healedHp);
+      }
       if (beforeHp === 0 && (r.hp ?? 0) > 0) {
         {
           const pfCol6 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
@@ -764,7 +827,8 @@ export function resolvePF1eAoO(
   provokingModelIdx: number,
   adjacentEnemies: number[],
   registry: PF1eProfileRegistry,
-  rng: PF1eRng
+  rng: PF1eRng,
+  modelStatsObserver?: PF1eModelStatsObserver,
 ): { executed: number; hits: number; totalDamage: number } {
   let executed = 0;
   let hits = 0;
@@ -793,15 +857,26 @@ export function resolvePF1eAoO(
 
     if (roll === 20 || (roll !== 1 && totalAttack >= targetAc)) {
       hits++;
+      modelStatsObserver?.onAttackRoll?.(pool.id[enemyIdx] ?? enemyIdx, true, false);
       let damage = profile.damageDiceCount * rng.d(profile.damageDiceSides) + profile.damageMod;
       damage = Math.max(1, damage);
 
       const currentHp = pool.hp[provokingModelIdx] ?? 0;
       pool.hp[provokingModelIdx] = Math.max(0, currentHp - damage);
-      if (pool.hp[provokingModelIdx] === 0) {
+      const killed = pool.hp[provokingModelIdx] === 0;
+      if (killed) {
         pool.status[provokingModelIdx] = (pool.status[provokingModelIdx] ?? 0) | ModelStatus.dead;
       }
       totalDamage += damage;
+      modelStatsObserver?.onDamage?.(
+        pool.id[enemyIdx] ?? enemyIdx,
+        pool.id[provokingModelIdx] ?? provokingModelIdx,
+        damage,
+        0,
+        killed,
+      );
+    } else {
+      modelStatsObserver?.onAttackRoll?.(pool.id[enemyIdx] ?? enemyIdx, false, false);
     }
   }
 

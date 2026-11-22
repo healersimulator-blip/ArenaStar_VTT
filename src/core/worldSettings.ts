@@ -40,6 +40,16 @@ export interface CoreWorldSettings {
   clockSeconds?: number;
   /** F02 — when true, strategic turns use simultaneous phasing (movement batch + initiative-ordered damage). */
   strategicSimultaneous?: boolean;
+  /** Strategic Mode per-model spatial combat (`combat_resolver_5` reach, 5-ft step, stride + AoO, G2b volley). */
+  strategicSpatialCombat?: boolean;
+  /** GM global autonomous AI toggle for units without explicit player/GM orders. */
+  strategicAutonomyGlobal?: boolean;
+  /** Per-faction autonomous AI toggles (`factionId -> boolean`), overriding `strategicAutonomyGlobal`. */
+  strategicAutonomyFactions?: Record<string, boolean>;
+  /** Per-unit autonomous AI overrides (`unitId -> "advance" | "hold" | "off"`), overriding faction/global. */
+  strategicAutonomyUnits?: Record<string, "advance" | "hold" | "off">;
+  /** When zoomed out in Strategic Mode, show one unit-sized round VTT token portrait per unit (when `tokenImg` is set). */
+  strategicUnitZoomOutTokens?: boolean;
   /** F01 — how long the tactical roll-card area outline stays visible (1–10 s, default 4 s). */
   rollHighlightFadeSec?: number;
   /** F03 — how player reaction rolls are deferred: auto = host rolls instantly, savesChecksAuto = only attack/AoO/parry pending, manual = all pending. */
@@ -276,12 +286,38 @@ export function validateWorldSettingsPatch(patch: Record<string, unknown>): {
     if (
       key === "strategicDoctrine" ||
       key === "strategicEnvelop" ||
-      key === "strategicArmyInitiative"
+      key === "strategicArmyInitiative" ||
+      key === "strategicSpatialCombat" ||
+      key === "strategicAutonomyGlobal" ||
+      key === "strategicUnitZoomOutTokens"
     ) {
       if (typeof value !== "boolean") {
         return {
           ok: false,
           error: `${key} must be a boolean`,
+          clean: {},
+        };
+      }
+    }
+    if (key === "strategicAutonomyFactions") {
+      const rec = asRecord(value);
+      if (!rec || Object.values(rec).some((v) => typeof v !== "boolean")) {
+        return {
+          ok: false,
+          error: "strategicAutonomyFactions must map faction IDs to booleans",
+          clean: {},
+        };
+      }
+    }
+    if (key === "strategicAutonomyUnits") {
+      const rec = asRecord(value);
+      if (
+        !rec ||
+        Object.values(rec).some((v) => v !== "advance" && v !== "hold" && v !== "off")
+      ) {
+        return {
+          ok: false,
+          error: "strategicAutonomyUnits must map unit IDs to advance, hold, or off",
           clean: {},
         };
       }

@@ -6,7 +6,7 @@ export const STRATEGIC_CODEC = 2;
 export const STRATEGIC_PROTOCOL = "arenastar.strategic.v1.pos2";
 export const STRATEGIC_API = "/api/strategic";
 export const MAX_FRAME = 128 * 1024;
-export const MAX_EDITS = 25;
+export const MAX_EDITS = 100;
 export const MAX_WAYPOINTS = 12;
 export const REGION_SIZE = 120;
 export const MAX_REGION_MODELS = 1200;
@@ -242,13 +242,40 @@ export type HostedMacro = {
     | { kind: "order"; orderKind: "hold" | "defend" | "reform" };
 };
 
+export type HostedFxPreset =
+  | "fireball"
+  | "burning-hands"
+  | "lightning-bolt"
+  | "cone-of-cold"
+  | "entangle"
+  | "burning-entanglement"
+  | "black-tentacles"
+  | "heal"
+  | "buff"
+  | "melee"
+  | "volley"
+  | "charge";
+
+export type StrategicFxCoalescence =
+  | "none"
+  | "low"
+  | "balanced"
+  | "high"
+  | "extreme";
+
 export type HostedFxCue = {
   id: string;
   turnId: number;
-  preset: "fireball" | "burning-hands" | "lightning-bolt" | "cone-of-cold" | "entangle" | "burning-entanglement" | "black-tentacles" | "heal" | "buff";
+  preset: HostedFxPreset;
   at: Point;
+  /** Optional launch origin for projectile volleys or charge trails. */
+  from?: Point;
   dir?: Point;
   radius: number;
+  /** Number of coalesced raw events/attacks/casts represented by this cue (>= 1). */
+  count?: number;
+  /** Normalized intensity [0.15 .. 3] derived from coalesced damage/kills/count. */
+  intensity?: number;
   soundCue?: string;
 };
 
@@ -260,6 +287,15 @@ export type OrdersSubmit = {
   expectedRevision: number;
   unitEdits: UnitEdit[];
 };
+export type StrategicAutonomyMode = "advance" | "hold" | "off";
+
+export type StrategicAutonomyConfig = {
+  global?: boolean;
+  factions?: Record<string, boolean>;
+  units?: Record<string, StrategicAutonomyMode>;
+  spatialCombat?: boolean;
+};
+
 export type Command =
   | OrdersSubmit
   | { kind: "turn.close" | "turn.retry"; requestId: string; turnId: number }
@@ -272,6 +308,14 @@ export type Command =
   | { kind: "member.revoke"; requestId: string; memberId: string }
   | { kind: "member.kick"; requestId: string; memberId: string }
   | { kind: "unit.faction"; requestId: string; unitId: string; factionId: string }
+  | {
+      kind: "autonomy.configure";
+      requestId: string;
+      global?: boolean;
+      factions?: Record<string, boolean | null>;
+      units?: Record<string, StrategicAutonomyMode | null>;
+      spatialCombat?: boolean;
+    }
   | {
       kind: "member.invite";
       requestId: string;
@@ -395,11 +439,38 @@ export type UnitMarker = {
   factionId: string;
   at: Point;
 };
+/** Per-soldier combat record (C45 / combat_resolver_5), carried across turns & battles when enabled. */
+export type StrategicModelStats = {
+  kills: number;
+  damageDealt: number;
+  damageTaken?: number;
+  damageReduced?: number;
+  healed?: number;
+  hits?: number;
+  misses?: number;
+  crits?: number;
+};
+
+export type UnitModelStatsSummary = {
+  kills: number;
+  damageDealt: number;
+  damageTaken: number;
+  damageReduced: number;
+  healed: number;
+  hits: number;
+  misses: number;
+  crits: number;
+  veteranCount: number;
+  topVeteran?: { slot: number; kills: number; damageDealt: number };
+};
+
 export type OwnUnit = {
   id: string;
   name: string;
   factionId?: string;
   at: Point | null;
+  /** First living model's world coordinates (the formation's stride reference point). */
+  leadAt?: Point | null;
   alive: number;
   weapon: "melee" | "shot";
   facing?: number;
@@ -412,6 +483,8 @@ export type OwnUnit = {
     hp: number;
     vision: "normal" | "lowLight" | "darkvision";
   };
+  /** Cumulative combat record for this unit's living soldiers when scene model stats are enabled. */
+  modelStatsSummary?: UnitModelStatsSummary;
   spells?: Array<{
     id: StrategicSpellId;
     name?: string;
@@ -519,6 +592,7 @@ export type Baseline = {
     activeTrackId?: string | null;
     macros?: HostedMacro[];
     fxCues?: HostedFxCue[];
+    fxCoalescence?: StrategicFxCoalescence;
   };
   /** GM-only additional service-hosted art, prefetched into the browser cache on view. */
   media?: StoreMedia[];
@@ -526,6 +600,8 @@ export type Baseline = {
   unitFacings?: Record<string, number>;
   /** Authorized visible unit token art URLs (`unitId -> url`). */
   unitBadges?: Record<string, string>;
+  /** Authoritative GM autonomy & spatial combat configuration. */
+  autonomy?: StrategicAutonomyConfig;
   markers: UnitMarker[];
   own: OwnUnit[];
   orders: OwnOrders;
@@ -537,6 +613,7 @@ export type ModelMarker = Point & {
   id: string;
   unitId: string;
   rotation: number;
+  stats?: StrategicModelStats;
 };
 export type RegionPatch = {
   epoch: string;
@@ -588,6 +665,10 @@ export type ReconciledUnitSummary = {
   conditions?: string[];
   /** Battle-added conditions only (launch baseline removed), when known. */
   conditionsAdded?: string[];
+  /** Surviving soldiers' cumulative C45 combat records, ordered by surviving formation slot. */
+  modelStats?: StrategicModelStats[];
+  /** Aggregate C45 combat summary across this unit's surviving soldiers. */
+  modelStatsSummary?: UnitModelStatsSummary;
 };
 
 export type BattleReconciliationPayload = {
@@ -947,6 +1028,39 @@ export function parseCommand(v: unknown): Command | null {
     isId(v.tableId)
   ) {
     return { kind: "table.roll", requestId, tableId: v.tableId };
+  }
+  if (
+    v.kind === "autonomy.configure" &&
+    only(v, "kind", "requestId", "global", "factions", "units", "spatialCombat") &&
+    (v.global === undefined || typeof v.global === "boolean") &&
+    (v.spatialCombat === undefined || typeof v.spatialCombat === "boolean") &&
+    (v.factions === undefined ||
+      (record(v.factions) &&
+        Object.entries(v.factions).every(
+          ([k, val]) => isId(k) && (typeof val === "boolean" || val === null),
+        ))) &&
+    (v.units === undefined ||
+      (record(v.units) &&
+        Object.entries(v.units).every(
+          ([k, val]) =>
+            isId(k) &&
+            (val === "advance" || val === "hold" || val === "off" || val === null),
+        )))
+  ) {
+    return {
+      kind: "autonomy.configure",
+      requestId,
+      ...(typeof v.global === "boolean" ? { global: v.global } : {}),
+      ...(typeof v.spatialCombat === "boolean"
+        ? { spatialCombat: v.spatialCombat }
+        : {}),
+      ...(record(v.factions)
+        ? { factions: v.factions as Record<string, boolean | null> }
+        : {}),
+      ...(record(v.units)
+        ? { units: v.units as Record<string, StrategicAutonomyMode | null> }
+        : {}),
+    };
   }
   if (
     v.kind === "macro.exec" &&

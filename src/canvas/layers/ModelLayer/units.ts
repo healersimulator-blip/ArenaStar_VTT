@@ -14,6 +14,8 @@ export interface DrawableUnit {
   type: string;
   /** Parsed faction color (fallback grey). */
   color: number;
+  /** Optional unit/leader VTT token image URL shared by all models in the unit. */
+  tokenImg?: string;
   modelRange: readonly [number, number] | null;
 }
 
@@ -36,12 +38,23 @@ export function parseHexColor(hex: string, fallback = 0x9aa0a8): number {
 export function drawableUnits(
   armies: readonly ArmyDocument[],
   factions: readonly FactionDocument[],
+  options?: {
+    /** Optional per-unit or leader token image resolver. */
+    resolveTokenImg?: (unit: ArmyDocument["units"][number]) => string | undefined;
+  },
 ): DrawableUnit[] {
   const colors = new Map<string, number>();
   for (const f of factions) colors.set(f._id, parseHexColor(f.color));
   const out: DrawableUnit[] = [];
   for (const army of armies) {
     for (const unit of army.units) {
+      const profileImg =
+        typeof unit.profile["img"] === "string" && unit.profile["img"].length > 0
+          ? unit.profile["img"]
+          : typeof unit.profile["tokenImg"] === "string" && unit.profile["tokenImg"].length > 0
+            ? unit.profile["tokenImg"]
+            : undefined;
+      const tokenImg = options?.resolveTokenImg?.(unit) ?? profileImg;
       out.push({
         id: unit._id,
         armyId: army._id,
@@ -50,6 +63,7 @@ export function drawableUnits(
         name: unit.name,
         type: unit.type,
         color: colors.get(army.factionId) ?? 0x9aa0a8,
+        ...(tokenImg ? { tokenImg } : {}),
         modelRange: unit.modelRange ?? null,
       });
     }

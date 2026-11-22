@@ -6,7 +6,12 @@ import { ModelStatus } from "../../core/strategic";
 import type { SpatialGrid } from "../../core/spatialGrid";
 import type { RulesWallsContext } from "../../core/rules";
 import { hasLineOfEffect } from "../../core/detection";
-import { pf1eRngFromSeed, resolvePF1eAoO, type PF1eRng } from "./combatEngine";
+import {
+  pf1eRngFromSeed,
+  resolvePF1eAoO,
+  type PF1eModelStatsObserver,
+  type PF1eRng,
+} from "./combatEngine";
 import { spellResistanceCheck } from "./casting";
 import type { PF1eProfileRegistry } from "./schema";
 
@@ -90,6 +95,7 @@ export interface PF1eSpellOptions {
    * battle clears the set at the top of every turn.
    */
   srRoundCache?: Set<string>;
+  modelStatsObserver?: PF1eModelStatsObserver;
 }
 
 export interface PF1eSpellResult {
@@ -156,7 +162,14 @@ export function resolvePF1eAOESpell(opts: PF1eSpellOptions): PF1eSpellResult {
     } else {
       metrics.concentrationFailed++;
       // Failed defensive casting: provokes Attacks of Opportunity from adjacent enemies!
-      const aooResult = resolvePF1eAoO(pool, spell.casterIdx, casterAdjacentEnemies, registry, rng);
+      const aooResult = resolvePF1eAoO(
+        pool,
+        spell.casterIdx,
+        casterAdjacentEnemies,
+        registry,
+        rng,
+        opts.modelStatsObserver,
+      );
       metrics.aooExecuted += aooResult.executed;
       metrics.aooHits += aooResult.hits;
       if (aooResult.totalDamage > 0) {
@@ -305,6 +318,13 @@ export function resolvePF1eAOESpell(opts: PF1eSpellOptions): PF1eSpellResult {
       pool.status[idx] = (pool.status[idx] ?? 0) | ModelStatus.dead;
       metrics.killsCount++;
     }
+    opts.modelStatsObserver?.onDamage?.(
+      spell.casterIdx !== undefined ? (pool.id[spell.casterIdx] ?? spell.casterIdx) : null,
+      pool.id[idx] ?? idx,
+      damage,
+      0,
+      killed,
+    );
 
     perModel.push({ idx, damageDealt: damage, killed, savePassed });
   }

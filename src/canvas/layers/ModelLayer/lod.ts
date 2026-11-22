@@ -83,6 +83,9 @@ export function chooseUnitLods(
   const out = new Map<string, LodLevel>();
   let lod0Models = 0;
   const lod0Candidates: Array<{ unit: LodUnit; models: number }> = [];
+  const statusArr = pool?.status;
+  const poolCount = pool?.count ?? 0;
+  const deadOrHidden = ModelStatus.dead | ModelStatus.hidden;
   for (const unit of units) {
     const range = unit.modelRange;
     if (!range) {
@@ -94,13 +97,12 @@ export function chooseUnitLods(
     const applied = hysteresisAdjust(prev, desired, zoom, thresholds);
     state.levels.set(unit.id, applied);
     out.set(unit.id, applied);
-    if (applied === 0 && pool) {
+    if (applied === 0 && statusArr) {
       // drawable models only — dead/hidden cost nothing at LOD0
-      const end = Math.min(range[1], pool.count);
+      const end = Math.min(range[1], poolCount);
       let models = 0;
       for (let i = range[0]; i < end; i++) {
-        const status = pool.status[i] ?? 0;
-        if ((status & (ModelStatus.dead | ModelStatus.hidden)) !== 0) continue;
+        if (((statusArr[i] ?? 0) & deadOrHidden) !== 0) continue;
         models++;
       }
       lod0Models += models;
@@ -144,15 +146,18 @@ export function bboxIntersects(a: BBox, rect: WorldRect): boolean {
 export function unitBBox(pool: ModelPool, range: readonly [number, number] | null): BBox | null {
   if (!range) return null;
   const end = Math.min(range[1], pool.count);
+  const statusArr = pool.status;
+  const xs = pool.x;
+  const ys = pool.y;
+  const deadOrHidden = ModelStatus.dead | ModelStatus.hidden;
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
   for (let i = range[0]; i < end; i++) {
-    const status = pool.status[i] ?? 0;
-    if ((status & (ModelStatus.dead | ModelStatus.hidden)) !== 0) continue;
-    const x = pool.x[i] ?? 0;
-    const y = pool.y[i] ?? 0;
+    if (((statusArr[i] ?? 0) & deadOrHidden) !== 0) continue;
+    const x = xs[i] ?? 0;
+    const y = ys[i] ?? 0;
     if (x < minX) minX = x;
     if (x > maxX) maxX = x;
     if (y < minY) minY = y;
@@ -166,11 +171,13 @@ export function unitBBox(pool: ModelPool, range: readonly [number, number] | nul
 export function strengthFraction(pool: ModelPool, range: readonly [number, number] | null): number {
   if (!range || range[1] <= range[0]) return 0;
   const end = Math.min(range[1], pool.count);
+  const statusArr = pool.status;
+  const hpArr = pool.hp;
+  const deadOrHidden = ModelStatus.dead | ModelStatus.hidden;
   let alive = 0;
   for (let i = range[0]; i < end; i++) {
-    const status = pool.status[i] ?? 0;
-    if ((status & (ModelStatus.dead | ModelStatus.hidden)) !== 0) continue;
-    if ((pool.hp[i] ?? 0) > 0) alive++;
+    if (((statusArr[i] ?? 0) & deadOrHidden) !== 0) continue;
+    if ((hpArr[i] ?? 0) > 0) alive++;
   }
   return alive / (range[1] - range[0]);
 }
@@ -187,16 +194,29 @@ export function drawableModelIndices(
 ): number {
   if (!range) return 0;
   const end = Math.min(range[1], pool.count);
+  const statusArr = pool.status;
+  const xs = pool.x;
+  const ys = pool.y;
+  const deadOrHidden = ModelStatus.dead | ModelStatus.hidden;
   const added0 = out.length;
-  for (let i = range[0]; i < end; i++) {
-    const status = pool.status[i] ?? 0;
-    if ((status & (ModelStatus.dead | ModelStatus.hidden)) !== 0) continue;
-    if (rect) {
-      const x = pool.x[i] ?? 0;
-      const y = pool.y[i] ?? 0;
-      if (x < rect.x || x > rect.x + rect.width || y < rect.y || y > rect.y + rect.height) continue;
+  if (rect) {
+    const minX = rect.x;
+    const maxX = rect.x + rect.width;
+    const minY = rect.y;
+    const maxY = rect.y + rect.height;
+    for (let i = range[0]; i < end; i++) {
+      if (((statusArr[i] ?? 0) & deadOrHidden) !== 0) continue;
+      const x = xs[i] ?? 0;
+      if (x < minX || x > maxX) continue;
+      const y = ys[i] ?? 0;
+      if (y < minY || y > maxY) continue;
+      out.push(i);
     }
-    out.push(i);
+  } else {
+    for (let i = range[0]; i < end; i++) {
+      if (((statusArr[i] ?? 0) & deadOrHidden) !== 0) continue;
+      out.push(i);
+    }
   }
   return out.length - added0;
 }

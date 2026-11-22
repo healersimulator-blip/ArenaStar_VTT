@@ -16,6 +16,7 @@ import {
   Particle,
   ParticleContainer,
   Rectangle,
+  Sprite,
   Text,
   Texture,
 } from "pixi.js";
@@ -48,6 +49,8 @@ export interface ModelLayerOptions {
   thresholds?: LodThresholds;
   /** Spatial-hash cell size (default 5, matches DetectionGrid §5A). */
   cellSize?: number;
+  /** Optional: when zoomed out (LOD1), show a unit-sized round token portrait if `unit.tokenImg` is set. */
+  zoomOutUnitToken?: boolean;
 }
 
 export interface ModelSyncStats {
@@ -62,6 +65,7 @@ export interface ModelSyncStats {
 interface UnitBlockView {
   box: Graphics;
   banner: Text;
+  portrait?: Sprite;
   /** Redraw key: bbox/strength/color/selection/zoom-bucket. */
   key: string;
   bbox: BBox;
@@ -97,6 +101,9 @@ export class ModelLayer {
   private readonly keyAtlas = new Map<string, string>();
   /** Bound atlas ids in LRU order (oldest first). */
   private boundAtlasIds: string[] = [];
+  /** Cached round VTT portrait textures keyed by `${tokenImg}|${palette}` (for units with tokenImg). */
+  private readonly portraitTextures = new Map<string, Texture | "loading" | "failed">();
+  private zoomOutUnitToken = false;
   private selection = new Set<string>();
   /** Reused per-unit index scratch (no per-model allocation). */
   private readonly scratch: number[] = [];
@@ -107,6 +114,7 @@ export class ModelLayer {
     this.app = app;
     this.modelSize = options.modelSize ?? 0.75;
     this.thresholds = options.thresholds ?? DEFAULT_LOD_THRESHOLDS;
+    this.zoomOutUnitToken = options.zoomOutUnitToken === true;
     this.hash = new ModelSpatialHash(options.cellSize ?? 5);
     this.container.label = "models";
     this.particles = new ParticleContainer({
@@ -116,16 +124,21 @@ export class ModelLayer {
     this.standTexture = this.makeStandTexture();
   }
 
-  /** Directional "stand" marker: tintable body + brighter head (facing +x). */
+  /** Round VTT token disc (`combat_resolver_5` SL6/SL7): tintable disc + bezel + front chevron (+x). */
   private makeStandTexture(): Texture {
     try {
       const g = new Graphics();
-      const w = 16;
-      const h = 10;
-      g.roundRect(0, 0, w - 5, h, 2)
-        .fill({ color: 0xe8e8ec })
-        .stroke({ width: 1, color: 0x1c1f24, alpha: 0.55 });
-      g.rect(w - 5, 1.5, 5, h - 3).fill(0xffffff); // head: full-bright, survives tint
+      const s = 24;
+      const r = 10;
+      g.circle(s / 2, s / 2, r)
+        .fill({ color: 0xe8ebf0 })
+        .stroke({ width: 1.8, color: 0x181c22, alpha: 0.85 });
+      g.circle(s / 2, s / 2, r - 2.2).stroke({ width: 0.9, color: 0xffffff, alpha: 0.35 });
+      g.moveTo(s / 2 + r + 1.5, s / 2)
+        .lineTo(s / 2 + r - 3.5, s / 2 - 2.8)
+        .lineTo(s / 2 + r - 3.5, s / 2 + 2.8)
+        .closePath()
+        .fill(0xffffff);
       const tex = this.app.renderer.generateTexture(g);
       g.destroy();
       return tex;
@@ -137,6 +150,11 @@ export class ModelLayer {
   /** Select units (rings drawn on next sync). */
   setSelection(ids: ReadonlySet<string>): void {
     this.selection = new Set(ids);
+  }
+
+  /** Toggle zoomed-out unit-sized token portraits for units with `tokenImg`. */
+  setZoomOutUnitToken(enabled: boolean): void {
+    this.zoomOutUnitToken = enabled;
   }
 
   /** §7 readback: bound atlas textures + distinct frame keys. */
@@ -202,52 +220,49 @@ export class ModelLayer {
     }
   }
 
-  /** Procedural stand glyph per unit type with the faction palette baked in. */
+  /** Procedural round VTT token glyph per unit type with the faction palette baked in (`combat_resolver_5` SL6/SL7). */
   private drawGlyph(
     g: Graphics,
     entry: AtlasEntry,
     rect: { x: number; y: number; width: number; height: number },
   ): void {
-    const { x, y } = rect;
-    const w = rect.width;
-    const h = rect.height;
+    const cx = rect.x + rect.width / 2;
+    const cy = rect.y + rect.height / 2;
+    const r = Math.min(rect.width, rect.height) / 2 - 1.5;
     const ink = 0x14171c;
-    const body = { color: entry.palette, alpha: 0.95 };
-    const edge = { width: 1, color: ink, alpha: 0.8 };
+    g.circle(cx, cy, r)
+      .fill({ color: entry.palette, alpha: 0.95 })
+      .stroke({ width: 1.2, color: ink, alpha: 0.85 });
     switch (entry.unitType) {
       case "cavalry":
-        g.moveTo(x + 2, y + h - 2.5)
-          .lineTo(x + w - 2, y + h / 2)
-          .lineTo(x + 2, y + 2.5)
+        g.moveTo(cx - r * 0.45, cy - r * 0.45)
+          .lineTo(cx + r * 0.55, cy)
+          .lineTo(cx - r * 0.45, cy + r * 0.45)
           .closePath()
-          .fill(body)
-          .stroke(edge);
+          .fill({ color: 0xffffff, alpha: 0.85 });
         break;
       case "artillery":
-        g.circle(x + w / 2, y + h / 2, Math.min(w, h) / 2 - 2.5)
-          .fill(body)
-          .stroke(edge)
-          .rect(x + w / 2 - 1, y + 1, 2, h - 2)
-          .fill(ink);
+        g.circle(cx, cy, r * 0.35).fill(ink);
         break;
       case "archer":
       case "skirmish":
-        g.moveTo(x + w / 2, y + 1.5)
-          .lineTo(x + w - 2, y + h / 2)
-          .lineTo(x + w / 2, y + h - 1.5)
-          .lineTo(x + 2, y + h / 2)
+        g.moveTo(cx, cy - r * 0.5)
+          .lineTo(cx + r * 0.5, cy)
+          .lineTo(cx, cy + r * 0.5)
+          .lineTo(cx - r * 0.5, cy)
           .closePath()
-          .fill(body)
-          .stroke(edge);
+          .fill({ color: 0xffffff, alpha: 0.78 });
         break;
-      default: // infantry & unknown types: directional stand marker
-        g.roundRect(x + 1, y + 2, w - 5, h - 4, 2)
-          .fill(body)
-          .stroke(edge)
-          .rect(x + w - 5, y + 2.5, 4, h - 5)
-          .fill(0xffffff, 0.9);
+      default:
+        g.circle(cx, cy, r * 0.42).stroke({ width: 1, color: 0xffffff, alpha: 0.55 });
         break;
     }
+    // Front facing chevron (+x)
+    g.moveTo(cx + r + 1, cy)
+      .lineTo(cx + r - 2.4, cy - 2)
+      .lineTo(cx + r - 2.4, cy + 2)
+      .closePath()
+      .fill(0xffffff);
     void ATLAS_FRAME;
   }
 
@@ -344,6 +359,68 @@ export class ModelLayer {
   }
 
   /** Write one unit's visible models into the shared particle pool. */
+  private resolvePortraitTexture(tokenImg: string, color: number): Texture | null {
+    const cacheKey = `${tokenImg}|${color}`;
+    const existing = this.portraitTextures.get(cacheKey);
+    if (existing && existing !== "loading" && existing !== "failed") return existing;
+    if (existing === "loading" || existing === "failed") return null;
+    if (
+      typeof document === "undefined" ||
+      typeof HTMLImageElement === "undefined"
+    ) {
+      this.portraitTextures.set(cacheKey, "failed");
+      return null;
+    }
+    this.portraitTextures.set(cacheKey, "loading");
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const s = 32;
+        const r = 13;
+        const canvas = document.createElement("canvas");
+        canvas.width = s;
+        canvas.height = s;
+        const ctx2d = canvas.getContext("2d");
+        if (!ctx2d) {
+          this.portraitTextures.set(cacheKey, "failed");
+          return;
+        }
+        const hex = `#${color.toString(16).padStart(6, "0")}`;
+        ctx2d.beginPath();
+        ctx2d.arc(s / 2, s / 2, r, 0, Math.PI * 2);
+        ctx2d.fillStyle = "#14171c";
+        ctx2d.fill();
+        ctx2d.save();
+        ctx2d.beginPath();
+        ctx2d.arc(s / 2, s / 2, r - 1.5, 0, Math.PI * 2);
+        ctx2d.clip();
+        ctx2d.drawImage(img, s / 2 - r, s / 2 - r, r * 2, r * 2);
+        ctx2d.restore();
+        ctx2d.beginPath();
+        ctx2d.arc(s / 2, s / 2, r - 0.8, 0, Math.PI * 2);
+        ctx2d.strokeStyle = hex;
+        ctx2d.lineWidth = 2.2;
+        ctx2d.stroke();
+        ctx2d.beginPath();
+        ctx2d.moveTo(s / 2 + r + 2.2, s / 2);
+        ctx2d.lineTo(s / 2 + r - 3, s / 2 - 3);
+        ctx2d.lineTo(s / 2 + r - 3, s / 2 + 3);
+        ctx2d.closePath();
+        ctx2d.fillStyle = "#ffffff";
+        ctx2d.fill();
+        this.portraitTextures.set(cacheKey, Texture.from(canvas));
+      } catch {
+        this.portraitTextures.set(cacheKey, "failed");
+      }
+    };
+    img.onerror = () => {
+      this.portraitTextures.set(cacheKey, "failed");
+    };
+    img.src = tokenImg;
+    return null;
+  }
+
   private writeParticles(
     pool: ModelPool,
     unit: DrawableUnit,
@@ -351,10 +428,15 @@ export class ModelLayer {
     start: number,
     list: IParticle[],
   ): number {
-    // §7: atlas frame (palette baked) beats the tinted stand marker
-    const atlasTexture = this.unitTextures.get(
-      atlasKey({ unitType: unit.type, palette: unit.color }),
-    );
+    // §7: unit portrait VTT token disc beats atlas frame, which beats tinted stand marker
+    const portraitTexture = unit.tokenImg
+      ? this.resolvePortraitTexture(unit.tokenImg, unit.color)
+      : null;
+    const atlasTexture =
+      portraitTexture ??
+      this.unitTextures.get(
+        atlasKey({ unitType: unit.type, palette: unit.color }),
+      );
     const texture = atlasTexture ?? this.standTexture;
     const scale = this.modelSize / texture.width;
     let n = start;
@@ -400,6 +482,10 @@ export class ModelLayer {
       if (!bbox) continue;
       const frac = strengthFraction(pool, unit.modelRange);
       const zoomBucket = Math.max(1, Math.round(4 / camera.scale));
+      const portraitTex =
+        this.zoomOutUnitToken && unit.tokenImg
+          ? this.resolvePortraitTexture(unit.tokenImg, unit.color)
+          : null;
       const key = [
         Math.round(bbox.minX * 4),
         Math.round(bbox.minY * 4),
@@ -409,6 +495,7 @@ export class ModelLayer {
         unit.color,
         this.selection.has(unit.id) ? 1 : 0,
         zoomBucket,
+        portraitTex ? unit.tokenImg : "",
       ].join("|");
       let view = this.blocks.get(unit.id);
       if (!view) {
@@ -420,36 +507,68 @@ export class ModelLayer {
         this.blocks.set(unit.id, view);
       }
       view.bbox = bbox;
-      if (view.key !== key) this.drawBlock(view, unit, frac, camera);
+      if (view.key !== key) {
+        view.key = key;
+        this.drawBlock(view, unit, frac, camera, portraitTex);
+      }
     }
     for (const [id, view] of this.blocks) {
       if (!seen.has(id)) {
         this.blocks.delete(id);
+        view.portrait?.destroy();
         view.box.destroy();
         view.banner.destroy();
       }
     }
   }
 
-  private drawBlock(view: UnitBlockView, unit: DrawableUnit, frac: number, camera: Camera): void {
+  private drawBlock(
+    view: UnitBlockView,
+    unit: DrawableUnit,
+    frac: number,
+    camera: Camera,
+    portraitTex: Texture | null,
+  ): void {
     const { minX, minY, maxX, maxY } = view.bbox;
     const pad = 0.6;
     const selected = this.selection.has(unit.id);
     const barH = Math.max(0.35, 1.6 / camera.scale);
+    const w = maxX - minX + pad * 2;
+    const h = maxY - minY + pad * 2;
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
     view.box
       .clear()
-      .roundRect(minX - pad, minY - pad, maxX - minX + pad * 2, maxY - minY + pad * 2, 0.8)
-      .fill({ color: unit.color, alpha: 0.28 })
+      .roundRect(minX - pad, minY - pad, w, h, 0.8)
+      .fill({ color: unit.color, alpha: portraitTex ? 0.14 : 0.28 })
       .stroke({
         width: (selected ? 2.5 : 1.2) / camera.scale,
         color: unit.color,
         alpha: selected ? 1 : 0.9,
       });
+    if (portraitTex) {
+      if (!view.portrait) {
+        view.portrait = new Sprite(portraitTex);
+        view.portrait.anchor.set(0.5);
+        this.blocksLayer.addChild(view.portrait);
+      } else {
+        view.portrait.texture = portraitTex;
+        view.portrait.visible = true;
+      }
+      const unitDiam = Math.max(4, Math.min(Math.max(w, h) * 0.95, Math.min(w, h) * 1.35));
+      const minScreenWorld = 24 / camera.scale;
+      const diam = Math.max(unitDiam, minScreenWorld);
+      view.portrait.position.set(cx, cy);
+      view.portrait.width = diam;
+      view.portrait.height = diam;
+    } else if (view.portrait) {
+      view.portrait.visible = false;
+    }
     // strength bar: green → red by alive fraction
     const green = Math.round(0xff * Math.min(1, frac * 2));
     const red = Math.round(0xff * Math.max(0, frac * 2 - 1));
     const barColor = (red << 16) | (green << 8);
-    const barW = maxX - minX + pad * 2;
+    const barW = w;
     view.box
       .rect(minX - pad, minY - pad - barH * 1.8, barW * Math.max(0, Math.min(1, frac)), barH)
       .fill(barColor)
@@ -580,6 +699,10 @@ export class ModelLayer {
   }
 
   destroy(): void {
+    for (const tex of this.portraitTextures.values()) {
+      if (tex !== "loading" && tex !== "failed") tex.destroy(true);
+    }
+    this.portraitTextures.clear();
     for (const base of this.atlasBases.values()) base.destroy(true);
     this.atlasBases.clear();
     this.unitTextures.clear();

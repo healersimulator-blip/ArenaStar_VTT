@@ -22,7 +22,9 @@ import {
   type HostedRegion,
   type HostedRollTable,
   type HostedTemplate,
+  type StrategicFxCoalescence,
   type StrategicItemEffect,
+  type StrategicModelStats,
   type StrategicSpellId,
 } from "./protocol";
 import { assertBattleScene, extractScenario } from "./worldExtract";
@@ -223,8 +225,17 @@ function projectActorIntoUnit(
         }
       : {}),
     ...(unit.weapon === "shot" || primaryAttack?.ranged
-      ? { weaponIsRanged: 1, weaponRangeIncrement: 60, weaponMaxIncrements: 10 }
-      : {}),
+      ? {
+          weaponIsRanged: 1,
+          weaponRangeIncrement: 60,
+          weaponMaxIncrements: 10,
+          ...((parsed.value.feats ?? []).some((f) => /precise\s+shot/i.test(f))
+            ? { preciseShot: 1 }
+            : {}),
+        }
+      : primaryAttack && primaryAttack.reachSquares > derived.sizeEntry.reachSquares
+        ? { weaponReachFt: primaryAttack.reachSquares * 5 }
+        : {}),
   };
 
   // Vision traits from actor if not already darkvision from token
@@ -645,6 +656,60 @@ function projectCampaignContent(
   };
 }
 
+function readStoredModelStats(
+  raw: unknown,
+  maxCount: number,
+): StrategicModelStats[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const out: StrategicModelStats[] = [];
+  for (const item of raw.slice(0, Math.min(120, Math.max(0, maxCount)))) {
+    if (
+      !record(item) ||
+      typeof item.kills !== "number" ||
+      !Number.isInteger(item.kills) ||
+      item.kills < 0 ||
+      typeof item.damageDealt !== "number" ||
+      !Number.isInteger(item.damageDealt) ||
+      item.damageDealt < 0
+    ) {
+      out.push({ kills: 0, damageDealt: 0 });
+      continue;
+    }
+    const num = (v: unknown) =>
+      typeof v === "number" && Number.isInteger(v) && v > 0 ? v : undefined;
+    const damageTaken = num(item.damageTaken);
+    const damageReduced = num(item.damageReduced);
+    const healed = num(item.healed);
+    const hits = num(item.hits);
+    const misses = num(item.misses);
+    const crits = num(item.crits);
+    out.push({
+      kills: Math.min(1_000_000, item.kills),
+      damageDealt: Math.min(100_000_000, item.damageDealt),
+      ...(damageTaken !== undefined ? { damageTaken: Math.min(100_000_000, damageTaken) } : {}),
+      ...(damageReduced !== undefined
+        ? { damageReduced: Math.min(100_000_000, damageReduced) }
+        : {}),
+      ...(healed !== undefined ? { healed: Math.min(100_000_000, healed) } : {}),
+      ...(hits !== undefined ? { hits: Math.min(10_000_000, hits) } : {}),
+      ...(misses !== undefined ? { misses: Math.min(10_000_000, misses) } : {}),
+      ...(crits !== undefined ? { crits: Math.min(10_000_000, crits) } : {}),
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+export function strategicModelStatsEnabled(scene: SceneDocument): boolean {
+  return Boolean(record(scene.flags?.core) && scene.flags.core.strategicModelStats === true);
+}
+
+export function strategicFxCoalescenceOf(scene: SceneDocument): StrategicFxCoalescence {
+  const raw = record(scene.flags?.core) ? scene.flags.core.strategicFxCoalescence : undefined;
+  return raw === "none" || raw === "low" || raw === "balanced" || raw === "high"
+    ? raw
+    : "extreme";
+}
+
 function projectArmyActorsAndProvenance(
   store: DocumentStore,
   scene: SceneDocument,
@@ -652,6 +717,7 @@ function projectArmyActorsAndProvenance(
   leaderActorsOut: Record<string, Record<string, unknown>>,
   actorIdsOut: Set<string>,
 ): Scenario {
+  const trackModelStats = strategicModelStatsEnabled(scene);
   const armies = sourceArmies(store, scene._id);
   const byUnit = new Map(
     armies.flatMap((army) =>
@@ -668,11 +734,19 @@ function projectArmyActorsAndProvenance(
         : undefined;
       const actor = token?.actorId ? store.get("actors", token.actorId) : undefined;
       if (actor) actorIdsOut.add(actor._id);
+      const storedModelStats = trackModelStats
+        ? readStoredModelStats(
+            sourceUnit?.profile.modelStats ??
+              (record(token?.flags?.core) ? token.flags.core.strategicModelStats : undefined),
+            unit.strength,
+          )
+        : undefined;
       const unitWithProv: ScenarioUnit = {
         ...unit,
         ...(sourceUnit && ["infantry", "cavalry", "artillery", "hero"].includes(sourceUnit.type)
           ? { unitType: sourceUnit.type as NonNullable<ScenarioUnit["unitType"]> }
           : {}),
+        ...(storedModelStats ? { modelStats: storedModelStats } : {}),
         ...(found
           ? {
               source: {
@@ -695,6 +769,8 @@ export function normalizedSceneForLaunchCheck(scene: SceneDocument): SceneDocume
   const core = record(scene.flags?.core) ? { ...scene.flags.core } : {};
   delete core.campaignBattle;
   delete core.strategicActionCards;
+  delete core.strategicModelStats;
+  delete core.strategicFxCoalescence;
   delete core.lastHostedBattle;
   const next: SceneDocument = {
     ...scene,
@@ -826,11 +902,14 @@ export function sceneDeployment(
   };
 
   const projected = (input: unknown): Scenario => {
+    const fxCoalescence = strategicFxCoalescenceOf(scene);
     const payload = parseScenario({
       ...(input as object),
       ...(Object.keys(leaderActors).length ? { leaderActors } : {}),
       ...(content ? { content } : {}),
       actionCards: strategicActionCardPolicy(scene),
+      ...(strategicModelStatsEnabled(scene) ? { trackModelStats: true } : {}),
+      ...(fxCoalescence !== "extreme" ? { fxCoalescence } : {}),
     });
     const digest = scenarioProjectionDigest(payload);
     const dependencies = buildDependencies();
@@ -949,11 +1028,15 @@ export function sceneDeployment(
             const unitWeapon = tokCore?.strategicWeapon === "shot" ? ("shot" as const) : ("melee" as const);
             const actor = token.actorId ? store.get("actors", token.actorId) : undefined;
             if (actor) referencedActorIds.add(actor._id);
+            const storedModelStats = strategicModelStatsEnabled(scene)
+              ? readStoredModelStats(tokCore?.strategicModelStats, unitStrength)
+              : undefined;
             const baseUnit: ScenarioUnit = {
               id: `unit-${index + 1}`,
               name: token.name,
               strength: unitStrength,
               weapon: unitWeapon,
+              ...(storedModelStats ? { modelStats: storedModelStats } : {}),
               ...( /^[A-Za-z0-9_-]{1,64}$/.test(token._id)
                 ? {
                     source: {

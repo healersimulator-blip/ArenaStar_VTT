@@ -1,6 +1,6 @@
 import { randomBytes, randomInt } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { digest, openInvite, sealInvite } from "./invite";
-import schema from "../schema.sql?raw";
 import pg, { type PoolClient } from "pg";
 import {
   PAGE_ROWS,
@@ -52,14 +52,14 @@ const roomRecord = ({
 });
 const secret = () => randomBytes(32).toString("base64url");
 const json = JSON.stringify;
-function evaluateHostRollFormula(
+export function evaluateHostRollFormula(
   formula: string,
 ): { formula: string; total: number; breakdown: string; provenance: "host" } | null {
   const m = /^\s*(\d{1,2})d(\d{1,3})\s*(?:([+-])\s*(\d{1,3}))?\s*$/i.exec(formula);
   if (!m) return null;
   const count = Number(m[1]);
   const sides = Number(m[2]);
-  if (count < 1 || count > 20 || sides < 2 || sides > 100) return null;
+  if (count < 1 || count > 20 || sides < 1 || sides > 100) return null;
   const sign = m[3] === "-" ? -1 : 1;
   const mod = m[4] ? sign * Number(m[4]) : 0;
   const rolls: number[] = [];
@@ -136,7 +136,15 @@ export class PostgresRoom {
   }
 
   async migrate() {
-    await this.pool.query(schema);
+    let sqlPath = new URL("../schema.sql", import.meta.url);
+    let sql: string;
+    try {
+      sql = await readFile(sqlPath, "utf8");
+    } catch {
+      sqlPath = new URL("../../schema.sql", import.meta.url);
+      sql = await readFile(sqlPath, "utf8");
+    }
+    await this.pool.query(sql);
   }
 
   async tx<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -570,6 +578,7 @@ export class PostgresRoom {
         cmd.kind === "scene.light" ||
         cmd.kind === "scene.template" ||
         cmd.kind === "scene.playlist" ||
+        cmd.kind === "autonomy.configure" ||
         cmd.kind === "chat.send" ||
         cmd.kind === "table.roll" ||
         cmd.kind === "macro.exec"
@@ -577,7 +586,8 @@ export class PostgresRoom {
         if (
           (cmd.kind === "scene.light" ||
             cmd.kind === "scene.template" ||
-            cmd.kind === "scene.playlist") &&
+            cmd.kind === "scene.playlist" ||
+            cmd.kind === "autonomy.configure") &&
           member.role !== "GM"
         ) {
           return deny("forbidden", "Only the GM may use this scene control.");
@@ -644,6 +654,50 @@ export class PostgresRoom {
             if (!validTrack) return deny("invalid_order", "Unknown playlist track.");
           }
           live.activeTrackId = cmd.trackId;
+        } else if (cmd.kind === "autonomy.configure") {
+          const prev = live.autonomy ?? {};
+          const nextAuto: NonNullable<LiveRoomState["autonomy"]> = {
+            ...(prev.global !== undefined ? { global: prev.global } : {}),
+            ...(prev.spatialCombat !== undefined
+              ? { spatialCombat: prev.spatialCombat }
+              : {}),
+            ...(prev.factions ? { factions: { ...prev.factions } } : {}),
+            ...(prev.units ? { units: { ...prev.units } } : {}),
+          };
+          if (cmd.global !== undefined) nextAuto.global = cmd.global;
+          if (cmd.spatialCombat !== undefined)
+            nextAuto.spatialCombat = cmd.spatialCombat;
+          if (cmd.factions) {
+            const validFactions = new Set(stateRow.scenario.factions.map((f) => f.id));
+            const nextFacs: Record<string, boolean> = { ...(nextAuto.factions ?? {}) };
+            for (const [fid, val] of Object.entries(cmd.factions)) {
+              if (!validFactions.has(fid)) {
+                return deny("invalid_order", `Unknown faction '${fid}'.`);
+              }
+              if (val !== null) nextFacs[fid] = val;
+            }
+            nextAuto.factions = Object.fromEntries(
+              Object.entries(nextFacs).filter(([fid]) => cmd.factions?.[fid] !== null),
+            );
+          }
+          if (cmd.units) {
+            const validUnits = new Set(
+              stateRow.scenario.commanders.flatMap((c) => c.units.map((u) => u.id)),
+            );
+            const nextUnits: NonNullable<typeof nextAuto.units> = {
+              ...(nextAuto.units ?? {}),
+            };
+            for (const [uid, val] of Object.entries(cmd.units)) {
+              if (!validUnits.has(uid)) {
+                return deny("invalid_order", `Unknown unit '${uid}'.`);
+              }
+              if (val !== null) nextUnits[uid] = val;
+            }
+            nextAuto.units = Object.fromEntries(
+              Object.entries(nextUnits).filter(([uid]) => cmd.units?.[uid] !== null),
+            );
+          }
+          live.autonomy = nextAuto;
         } else if (cmd.kind === "chat.send") {
           const scope = cmd.scope ?? "public";
           if (scope === "gm" && member.role !== "GM") {
@@ -675,19 +729,31 @@ export class PostgresRoom {
           if (table.visibility === "gm" && member.role !== "GM") {
             return deny("forbidden", "That roll table is GM-only.");
           }
-          const maxRoll = table.results.reduce(
-            (acc, r) => Math.max(acc, r.range[1]),
-            1,
-          );
-          const minRoll = table.results.reduce(
-            (acc, r) => Math.min(acc, r.range[0]),
-            maxRoll,
-          );
-          const pick = randomInt(minRoll, Math.max(minRoll + 1, maxRoll + 1));
+          const evaluated = evaluateHostRollFormula(table.formula);
+          let pick: number;
+          let formulaLabel: string;
+          let breakdownPrefix: string;
+          if (evaluated) {
+            pick = evaluated.total;
+            formulaLabel = evaluated.formula;
+            breakdownPrefix = evaluated.breakdown;
+          } else {
+            const maxRoll = table.results.reduce(
+              (acc, r) => Math.max(acc, r.range[1]),
+              1,
+            );
+            const minRoll = table.results.reduce(
+              (acc, r) => Math.min(acc, r.range[0]),
+              maxRoll,
+            );
+            pick = randomInt(minRoll, Math.max(minRoll + 1, maxRoll + 1));
+            formulaLabel = table.formula;
+            breakdownPrefix = `[${pick}]`;
+          }
           const matched = table.results.find(
             (r) => pick >= r.range[0] && pick <= r.range[1],
           );
-          const chosen = matched?.text ?? table.results[0]?.text ?? "No result";
+          const chosen = matched?.text ?? "No matching table result";
           appendChat({
             id: `table-${admittedAt}-${randomBytes(4).toString("hex")}`,
             senderId: member.id,
@@ -696,9 +762,9 @@ export class PostgresRoom {
             scope: table.visibility === "gm" ? "gm" : "public",
             text: `${table.name}: ${chosen}`,
             roll: {
-              formula: table.formula,
+              formula: formulaLabel,
               total: pick,
-              breakdown: `[${pick}] -> ${chosen}`,
+              breakdown: `${breakdownPrefix} -> ${chosen}`,
               provenance: "host",
             },
             createdAt: admittedAt,
@@ -770,14 +836,8 @@ export class PostgresRoom {
                ON CONFLICT (room_id,turn_id,member_id) DO UPDATE SET revision=EXCLUDED.revision`,
               [...revisionKey, nextRev],
             );
-            await client.query("UPDATE strategic_rooms SET live_state=$2::jsonb WHERE id=$1", [
-              this.id,
-              json(live),
-            ]);
             return finish({
               receipt: ok(room.turnId, nextRev),
-              live,
-              room: await this.setMembers(client),
             });
           }
         }

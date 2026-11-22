@@ -17,6 +17,9 @@ export function detailLayer(
     list.push(model);
   }
   const markers = new Map(view.markers.map((u) => [u.id, u]));
+  const ownBadges = new Map(
+    view.own.flatMap((u) => (u.badgeUrl ? [[u.id, u.badgeUrl] as const] : [])),
+  );
   const colors = new Map(view.factions.map((f) => [f.id, f.color]));
   const pool = createModelPool(models.size);
   const units: DrawableUnit[] = [];
@@ -32,6 +35,7 @@ export function detailLayer(
         y: model.y,
         rot: model.rotation,
       });
+    const badgeUrl = view.unitBadges?.[id] ?? ownBadges.get(id);
     units.push({
       id,
       armyId: u.factionId,
@@ -40,6 +44,7 @@ export function detailLayer(
       name: u.name,
       type: "infantry",
       color: parseHexColor(colors.get(u.factionId) ?? ""),
+      ...(badgeUrl ? { tokenImg: badgeUrl } : {}),
       modelRange: [start, pool.count],
     });
   }

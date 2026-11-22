@@ -62,7 +62,11 @@
   let GMduration = $state<number | undefined>();
   let revokeSlot = $state("");
   let rosterOpen = $state(false);
+  let zoomOutUnitToken = $state(false);
+  let muteFxSound = $state(false);
   let region = $state<{ x: number; y: number } | null>(null);
+  let aimFromMap = $state(false);
+  let pendingOrdersRequestId = "";
   let turn = 0;
   let handled = "";
   let reportTicket = 0;
@@ -123,7 +127,6 @@
     }
     return sliced;
   });
-  const entangle = $derived(unit?.spells?.find((spell) => spell.id === "entangle"));
   const chosenSpell = $derived(
     unit?.spells?.find((sp) => sp.id === selectedSpellId) ?? unit?.spells?.[0],
   );
@@ -213,7 +216,10 @@
               next.receipt.requestId !== handled
             ) {
               handled = next.receipt.requestId;
-              if (next.receipt.revision !== undefined) draft.clear();
+              if (next.receipt.requestId === pendingOrdersRequestId) {
+                pendingOrdersRequestId = "";
+                draft.clear();
+              }
             }
             if (!next.view.own.some((u) => u.id === selected))
               selected = next.view.own[0]?.id ?? "";
@@ -266,6 +272,23 @@
       if (u.alive > 0) draft.set(u.id, { kind: "hold", stance });
     }
   }
+  function marchWaypointForUnit(
+    u: { at: { x: number; y: number } | null; leadAt?: { x: number; y: number } | null } | undefined,
+    destX: number,
+    destY: number,
+    relativeToCenter: boolean,
+  ): { x: number; y: number } {
+    if (!relativeToCenter || !u?.at || !u.leadAt || !view) {
+      return { x: destX, y: destY };
+    }
+    const b = view.bounds;
+    const rawX = Math.round((destX + (u.leadAt.x - u.at.x)) * 16) / 16;
+    const rawY = Math.round((destY + (u.leadAt.y - u.at.y)) * 16) / 16;
+    return {
+      x: Math.min(b.maxX, Math.max(b.minX, rawX)),
+      y: Math.min(b.maxY, Math.max(b.minY, rawY)),
+    };
+  }
   function draftBrigadeMarch() {
     if (!view || !allowed || aimX === undefined || aimY === undefined) return;
     const living = view.own.filter((u) => u.alive > 0 && u.at !== null);
@@ -278,26 +301,28 @@
     const margin = 35;
     for (const u of living) {
       if (!u.at) continue;
-      const wx = Math.round(Math.min(b.maxX - margin, Math.max(b.minX + margin, u.at.x + dx)) * 16) / 16;
-      const wy = Math.round(Math.min(b.maxY - margin, Math.max(b.minY + margin, u.at.y + dy)) * 16) / 16;
+      const targetCenterX = Math.min(b.maxX - margin, Math.max(b.minX + margin, u.at.x + dx));
+      const targetCenterY = Math.min(b.maxY - margin, Math.max(b.minY + margin, u.at.y + dy));
+      const wp = marchWaypointForUnit(u, targetCenterX, targetCenterY, true);
       draft.set(u.id, {
         kind: "move",
         pace: "march",
-        path: [{ x: wx, y: wy }],
+        path: [wp],
         ...(reformMarch ? { reform: true } : {}),
       });
     }
   }
   function sendOrders() {
     if (!view || !allowed || !draft.size) return;
+    const requestId = crypto.randomUUID();
     const command: Command = {
       kind: "orders.submit",
-      requestId: crypto.randomUUID(),
+      requestId,
       turnId: view.head.turnId,
       expectedRevision: view.orders.revision,
       unitEdits: [...draft].map(([unitId, order]) => ({ unitId, order })),
     };
-    client?.submit(command);
+    if (client?.submit(command)) pendingOrdersRequestId = requestId;
   }
   function control(kind: "turn.close" | "turn.next" | "turn.retry") {
     if (!view || blocked || view.head.turnId !== current?.turnId) return;
@@ -421,6 +446,22 @@
             <h2>Battlefield</h2>
           </div>
           <div class="map-badges">
+            <label class="pill token-zoom-opt">
+              <input
+                type="checkbox"
+                data-zoom-out-unit-token
+                bind:checked={zoomOutUnitToken}
+              />
+              Unit tokens on zoom-out
+            </label>
+            <label class="pill token-zoom-opt">
+              <input
+                type="checkbox"
+                data-mute-fx-sound
+                bind:checked={muteFxSound}
+              />
+              Mute battle FX
+            </label>
             {#each view.factions as f (f.id)}
               <span class="pill" style:border-color={f.color} style:color={f.color}>
                 {f.name}: {view.markers.filter((m) => m.factionId === f.id).length} units
@@ -429,40 +470,46 @@
             <span class="pill">{view.markers.length} visible units</span>
           </div>
         </div>
-        <HostedMap
-          {view}
-          models={state.models}
-          orders={activeOrders}
-          {selected}
-          {target}
-          aim={aimPoint}
-          {spellPreview}
-          {region}
-          onRegion={(r) => {
-            region = r;
-            client?.selectRegion(r);
-          }}
-          onPoint={(p) => {
-            aimX = p.x;
-            aimY = p.y;
-          }}
-          onSelectUnit={(id) => {
-            selected = id;
-          }}
-          onSelectTarget={(id) => {
-            target = id;
-          }}
-          onToggleDoor={(wallId, door) => {
-            if (!state.busy) {
-              client?.submit({
-                kind: "scene.door",
-                requestId: crypto.randomUUID(),
-                wallId,
-                door,
-              });
-            }
-          }}
-        />
+        <div class="map-canvas-wrap">
+          <TurnProgress stage={state.progress} board />
+          <HostedMap
+            {view}
+            models={state.models}
+            orders={activeOrders}
+            {selected}
+            {target}
+            aim={aimPoint}
+            {spellPreview}
+            {zoomOutUnitToken}
+            {muteFxSound}
+            {region}
+            onRegion={(r) => {
+              region = r;
+              client?.selectRegion(r);
+            }}
+            onPoint={(p) => {
+              aimX = p.x;
+              aimY = p.y;
+              aimFromMap = true;
+            }}
+            onSelectUnit={(id) => {
+              selected = id;
+            }}
+            onSelectTarget={(id) => {
+              target = id;
+            }}
+            onToggleDoor={(wallId, door) => {
+              if (!state.busy) {
+                client?.submit({
+                  kind: "scene.door",
+                  requestId: crypto.randomUUID(),
+                  wallId,
+                  door,
+                });
+              }
+            }}
+          />
+        </div>
         {#if region}<p class="small" data-models={state.models.size}>
             Region {region.x}, {region.y} · {state.models.size} visible models{state.truncated
               ? " · detail capped"
@@ -659,7 +706,7 @@
                     client?.submit({
                       kind: "scene.template",
                       requestId: crypto.randomUUID(),
-                      op: "upsert",
+                      op: "put",
                       template: {
                         id: `tpl-${Date.now().toString(36)}`,
                         shape: tplShape,
@@ -694,6 +741,99 @@
                     </div>
                   {/each}
                 </div>
+              {/if}
+            </details>
+
+            <details open data-gm-autonomy>
+              <summary>Autonomous AI &amp; spatial combat</summary>
+              <label>
+                <input
+                  type="checkbox"
+                  data-gm-spatial-combat
+                  checked={view.autonomy?.spatialCombat === true}
+                  disabled={state.busy}
+                  onchange={(e) =>
+                    client?.submit({
+                      kind: "autonomy.configure",
+                      requestId: crypto.randomUUID(),
+                      spatialCombat: (e.currentTarget as HTMLInputElement).checked,
+                    })}
+                />
+                Per-model spatial melee/ranged (5-ft step, stride + AoO, volley cover)
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  data-gm-autonomy-global
+                  checked={view.autonomy?.global === true}
+                  disabled={state.busy}
+                  onchange={(e) =>
+                    client?.submit({
+                      kind: "autonomy.configure",
+                      requestId: crypto.randomUUID(),
+                      global: (e.currentTarget as HTMLInputElement).checked,
+                    })}
+                />
+                Global autonomous AI (unordered units advance &amp; engage)
+              </label>
+              <div class="vtt-sublist">
+                {#each view.factions as fac (fac.id)}
+                  {@const fVal = view.autonomy?.factions?.[fac.id]}
+                  <div class="vtt-row" data-gm-autonomy-faction={fac.id}>
+                    <span style:color={fac.color}>■ {fac.name}</span>
+                    <select
+                      aria-label="{fac.name} autonomy"
+                      disabled={state.busy}
+                      value={fVal === true ? "on" : fVal === false ? "off" : "inherit"}
+                      onchange={(e) => {
+                        const raw = (e.currentTarget as HTMLSelectElement).value;
+                        client?.submit({
+                          kind: "autonomy.configure",
+                          requestId: crypto.randomUUID(),
+                          factions: {
+                            [fac.id]: raw === "on" ? true : raw === "off" ? false : null,
+                          },
+                        });
+                      }}
+                    >
+                      <option value="inherit">Inherit global</option>
+                      <option value="on">Autonomous ON</option>
+                      <option value="off">Manual only</option>
+                    </select>
+                  </div>
+                {/each}
+              </div>
+              {#if selected && view.markers.some((m) => m.id === selected)}
+                {@const selMarker = view.markers.find((m) => m.id === selected)}
+                {@const uVal = view.autonomy?.units?.[selected] ?? "inherit"}
+                {#if selMarker}
+                  <div class="vtt-row" data-gm-autonomy-unit={selected}>
+                    <span>Unit: {selMarker.name}</span>
+                    <select
+                      aria-label="{selMarker.name} autonomy"
+                      disabled={state.busy}
+                      value={uVal}
+                      onchange={(e) => {
+                        const raw = (e.currentTarget as HTMLSelectElement).value;
+                        client?.submit({
+                          kind: "autonomy.configure",
+                          requestId: crypto.randomUUID(),
+                          units: {
+                            [selected]:
+                              raw === "advance" || raw === "hold" || raw === "off"
+                                ? raw
+                                : null,
+                          },
+                        });
+                      }}
+                    >
+                      <option value="inherit">Inherit faction/global</option>
+                      <option value="advance">Auto-advance &amp; engage</option>
+                      <option value="hold">Hold position</option>
+                      <option value="off">Manual only</option>
+                    </select>
+                  </div>
+                {/if}
               {/if}
             </details>
           {:else}
@@ -762,6 +902,9 @@
                 {#if unit.elevation}
                   <span class="cond-tag elev">+{unit.elevation} ft elev</span>
                 {/if}
+                {#if unit.modelStatsSummary}
+                  <span data-unit-model-stats>⚔ {unit.modelStatsSummary.kills} kills · {unit.modelStatsSummary.damageDealt} dmg{#if unit.modelStatsSummary.topVeteran} (Ace #{unit.modelStatsSummary.topVeteran.slot}: {unit.modelStatsSummary.topVeteran.kills}K/{unit.modelStatsSummary.topVeteran.damageDealt}D){/if}</span>
+                {/if}
                 {#each unit.conditions ?? [] as cond (cond)}
                   <span class="cond-tag">{cond}</span>
                 {/each}
@@ -818,12 +961,14 @@
                   type="number"
                   step="any"
                   bind:value={aimX}
+                  oninput={() => (aimFromMap = false)}
                 /></label
               ><label
                 >March Y <input
                   type="number"
                   step="any"
                   bind:value={aimY}
+                  oninput={() => (aimFromMap = false)}
                 /></label
               >
             </div>
@@ -847,7 +992,7 @@
                     add({
                       kind: "move",
                       pace: "march",
-                      path: [{ x: aimX, y: aimY }],
+                      path: [marchWaypointForUnit(unit, aimX, aimY, aimFromMap)],
                       ...(reformMarch ? { reform: true } : {}),
                     });
                 }}>Draft march</button
@@ -863,23 +1008,11 @@
                     add({
                       kind: "move",
                       pace: "charge",
-                      path: [{ x: aimX, y: aimY }],
+                      path: [marchWaypointForUnit(unit, aimX, aimY, aimFromMap)],
                     });
                 }}>Draft charge</button
               >
             </div>
-            {#if entangle}
-              <button
-                disabled={!allowed || !unit.alive || entangle.slots < 1 ||
-                  aimX === undefined || aimY === undefined}
-                onclick={() => {
-                  if (aimX !== undefined && aimY !== undefined)
-                    add({ kind: "cast", spellId: "entangle", itemId: entangle.itemId,
-                      origin: { x: aimX, y: aimY } });
-                }}
-                >Draft Entangle ({entangle.slots} slot{entangle.slots === 1 ? "" : "s"})</button
-              >
-            {/if}
             {#if unit?.spells && unit.spells.length > 0}
               <div class="vtt-box" data-spellbook>
                 <label>PF1e Spellbook
@@ -901,7 +1034,7 @@
                     onclick={() => {
                       if (aimX === undefined || aimY === undefined || !chosenSpell) return;
                       if (chosenSpell.shape === "cone" || chosenSpell.shape === "line") {
-                        const baseAt = unit.at ?? { x: aimX, y: aimY };
+                        const baseAt = unit.leadAt ?? unit.at ?? { x: aimX, y: aimY };
                         const dx = aimX - baseAt.x;
                         const dy = aimY - baseAt.y;
                         const len = Math.max(0.001, Math.hypot(dx, dy));
@@ -1075,13 +1208,15 @@
                     data-macro-disabled={!macro.executable ? "true" : undefined}
                     disabled={state.busy || !macro.executable}
                     title={macro.disabledReason ?? macro.name}
-                    onclick={() =>
+                    onclick={() => {
+                      if (selected) draft.delete(selected);
                       client?.submit({
                         kind: "macro.exec",
                         requestId: crypto.randomUUID(),
                         macroId: macro.id,
                         ...(selected ? { unitId: selected } : {}),
-                      })}
+                      });
+                    }}
                   >
                     {macro.name}{#if !macro.executable} (Script disabled){/if}
                   </button>
@@ -1436,6 +1571,19 @@
   }
   .panel-head {
     margin-bottom: 0.45rem;
+  }
+  .map-canvas-wrap {
+    position: relative;
+  }
+  .token-zoom-opt {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    cursor: pointer;
+    user-select: none;
+  }
+  .token-zoom-opt input {
+    margin: 0;
   }
   .unit-cards {
     display: grid;

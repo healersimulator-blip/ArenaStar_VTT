@@ -8,6 +8,7 @@ import type {
 import {
   integer,
   STRATEGIC_CODEC,
+  type StrategicModelStats,
 } from "../../../src/core/strategicRoom/protocol";
 import { deploySnapshot } from "../../../src/sim/deploy";
 import { canonicalPoolHash } from "../../../src/sim/codec";
@@ -126,6 +127,7 @@ export function rulesInput(
     live?: LiveRoomState;
     extras?: VersionExtras;
     turnId?: number;
+    unitPositions?: ReadonlyMap<string, { x: number; y: number } | null>;
   },
 ) {
   const factions: FactionDocument[] = scenario.factions.map(
@@ -178,8 +180,11 @@ export function rulesInput(
           stats.dexMod = (stats.dexMod ?? 0) - 1;
         }
       }
-      // Higher ground (+1 melee attack when anchored on elevated region, PF1e Table 8-6)
-      if (!stats.weaponIsRanged && unitElevationAt(scenario, u.anchor) > 0) {
+      // Higher ground (+1 melee attack when positioned on elevated region, PF1e Table 8-6)
+      const currentAt = options?.unitPositions?.has(u.id)
+        ? (options.unitPositions.get(u.id) ?? undefined)
+        : u.anchor;
+      if (!stats.weaponIsRanged && unitElevationAt(scenario, currentAt) > 0) {
         stats.bab = (stats.bab ?? 6) + 1;
       }
       return {
@@ -213,6 +218,20 @@ export function rulesInput(
   );
   const units = armies.flatMap((a) => a.units.map((u) => unitViewFor(a, u)));
   const walls = effectiveWallsFor(scenario, options?.live).typed;
+  const auto = options?.live?.autonomy;
+  const worldSettings: Record<string, Json> = {};
+  if (auto?.spatialCombat === true) {
+    worldSettings.strategicSpatialCombat = true;
+  }
+  if (auto?.global === true) {
+    worldSettings.strategicAutonomyGlobal = true;
+  }
+  if (auto?.factions && Object.keys(auto.factions).length > 0) {
+    worldSettings.strategicAutonomyFactions = auto.factions as unknown as Json;
+  }
+  if (auto?.units && Object.keys(auto.units).length > 0) {
+    worldSettings.strategicAutonomyUnits = auto.units as unknown as Json;
+  }
   const ctx: RulesContext = {
     sceneId: SCENE,
     grid: {
@@ -227,7 +246,7 @@ export function rulesInput(
     factions,
     armies,
     leaderActors: (scenario.leaderActors ?? {}) as Record<string, Json>,
-    worldSettings: {},
+    worldSettings,
     turnMode: "simultaneous",
   };
   return { ctx, armies, units };
@@ -306,9 +325,38 @@ export function deploy(scenario: Scenario): Published {
       throw new Error("Deployed formations overlap in the same square.");
     seen.add(key);
   }
+  const flatScenarioUnits = scenario.commanders.flatMap((c) => c.units);
+  const seededModelStats: Record<string, StrategicModelStats> = {};
   for (const [i, [, range]] of ranges.entries()) {
     const unit = units[i];
     if (unit) unit.range = range;
+    if (scenario.trackModelStats && range) {
+      const scenUnit = flatScenarioUnits[i];
+      const incoming = scenUnit?.modelStats;
+      if (incoming?.length) {
+        const [start, end] = range;
+        for (let slot = 0; start + slot < end && slot < incoming.length; slot++) {
+          const rec = incoming[slot];
+          const mid = pool.id[start + slot];
+          if (!rec || mid === undefined) continue;
+          if (
+            rec.kills > 0 ||
+            rec.damageDealt > 0 ||
+            (rec.damageTaken ?? 0) > 0 ||
+            (rec.damageReduced ?? 0) > 0 ||
+            (rec.healed ?? 0) > 0 ||
+            (rec.hits ?? 0) > 0 ||
+            (rec.misses ?? 0) > 0 ||
+            (rec.crits ?? 0) > 0
+          ) {
+            seededModelStats[String(mid)] = { ...rec };
+          }
+        }
+      }
+    }
+  }
+  if (Object.keys(seededModelStats).length > 0) {
+    state.extras = { ...(state.extras ?? {}), modelStats: seededModelStats };
   }
   state.hash = canonicalPoolHash(pool, PF1E_MODEL_SCHEMA, STRATEGIC_CODEC);
   return state;

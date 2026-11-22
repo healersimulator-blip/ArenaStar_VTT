@@ -27,14 +27,14 @@ import {
   type OwnUnit,
   type Point,
   type RoomOrder,
+  type StrategicModelStats,
   type StrategicSpellId,
   type UnitEdit,
   type UnitMarker,
+  type UnitModelStatsSummary,
 } from "../../../src/core/strategicRoom/protocol";
-import {
-  applyUnitConditionsToStride,
-  planPF1eStride,
-} from "../../../src/packages/pf1e/stride";
+import { planUnitModelMoves } from "../../../src/packages/pf1e/formationMovement";
+import { applyUnitConditionsToStride } from "../../../src/packages/pf1e/stride";
 import { createMassBattlePf1e } from "../../../src/packages/massBattlePf1e";
 import { deriveRoomKey } from "./invite";
 import {
@@ -124,6 +124,12 @@ export class BattleView {
   /** A missing control entry means the seat's own deployment (unrestricted). */
   private readonly defaultControl = new Map<string, Set<string>>();
   private readonly cohorts = new Map<string | null, Cohort>();
+  /** Precomputed difficult-terrain + active-hazard cell set for move validation (once per publication). */
+  private readonly moveDifficultCells: ReadonlySet<string>;
+  /** Precomputed active hazards for the upcoming turn (once per publication). */
+  private readonly nextTurnHazards: readonly SpellHazard[];
+  /** Cached HMAC marker IDs keyed by immutable `pool.id[i]` so consecutive publications reuse digests. */
+  private readonly markerIdByPoolId: Map<number, string>;
   live: LiveRoomState;
 
   constructor(
@@ -134,15 +140,38 @@ export class BattleView {
     live: LiveRoomState = {},
   ) {
     this.live = live;
+    this.markerIdByPoolId = previous
+      ? new Map(previous.markerIdByPoolId)
+      : new Map();
+    this.pool = checkpointPool(state);
+    const liveUnitPositions = new Map<string, Point | null>();
+    const allAuthoredUnits = scenario.commanders.flatMap((c) => c.units);
+    allAuthoredUnits.forEach((u, idx) => {
+      const r = state.units[idx]?.range;
+      if (!r) {
+        liveUnitPositions.set(u.id, null);
+        return;
+      }
+      let sx = 0,
+        sy = 0,
+        n = 0;
+      for (let i = r[0]; i < r[1] && i < this.pool.count; i++) {
+        if (((this.pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+        sx += this.pool.x[i] ?? 0;
+        sy += this.pool.y[i] ?? 0;
+        n++;
+      }
+      liveUnitPositions.set(u.id, n > 0 ? { x: sx / n, y: sy / n } : null);
+    });
     this.input = rulesInput(scenario, state.units, {
       live,
       ...(state.extras ? { extras: state.extras } : {}),
       turnId: state.version,
+      unitPositions: liveUnitPositions,
     });
-    this.pool = checkpointPool(state);
     const markerKey = deriveRoomKey(projectionKey, "marker");
     const defaultFacingByFaction = new Map<string, number>();
-    if (state.version === 0 && scenario.factions.length > 1) {
+    if (scenario.factions.length > 1) {
       const sumX = new Map<string, { x: number; n: number }>();
       let allX = 0,
         allN = 0;
@@ -240,20 +269,18 @@ export class BattleView {
           fList.push({ pt: at, lowLight: visionMode === "lowLight" });
           factionAnchors.set(army.factionId, fList);
 
-          if (this.input.armies.length <= 500) {
-            const edgeSeen = new Set<number>();
-            for (const idx of [minXIdx, maxXIdx, minYIdx, maxYIdx]) {
-              if (idx < 0 || edgeSeen.has(idx)) continue;
-              edgeSeen.add(idx);
-              const ex = this.pool.x[idx] ?? 0;
-              const ey = this.pool.y[idx] ?? 0;
-              if ((ex - at.x) ** 2 + (ey - at.y) ** 2 > (CELL_FEET * 2) ** 2) {
-                sources.push({
-                  anchor: { x: ex, y: ey },
-                  factionId: army.factionId,
-                  radius,
-                });
-              }
+          const edgeSeen = new Set<number>();
+          for (const idx of [minXIdx, maxXIdx, minYIdx, maxYIdx]) {
+            if (idx < 0 || edgeSeen.has(idx)) continue;
+            edgeSeen.add(idx);
+            const ex = this.pool.x[idx] ?? 0;
+            const ey = this.pool.y[idx] ?? 0;
+            if ((ex - at.x) ** 2 + (ey - at.y) ** 2 > (CELL_FEET * 2) ** 2) {
+              sources.push({
+                anchor: { x: ex, y: ey },
+                factionId: army.factionId,
+                radius,
+              });
             }
           }
         }
@@ -301,11 +328,37 @@ export class BattleView {
         const conditions = unitRes?.conditions ?? authored?.conditions;
         const elev = unitElevationAt(scenario, at ?? authored?.anchor);
 
+        let modelStatsSummary: UnitModelStatsSummary | undefined;
+        if (scenario.trackModelStats) {
+          const map = state.extras?.modelStats ?? {};
+          const unitRecords: StrategicModelStats[] = [];
+          for (let i = start; i < end; i++) {
+            if (((this.pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+            const rec = map[String(this.pool.id[i])];
+            unitRecords.push(rec ? { ...rec } : { kills: 0, damageDealt: 0 });
+          }
+          modelStatsSummary = summarizeUnitModelStats(unitRecords);
+        }
+
         const own: OwnUnit = {
           id: doc._id,
           name: doc.name,
           factionId: army.factionId,
           at,
+          leadAt:
+            alive > 0
+              ? ((): Point => {
+                  for (let i = start; i < end; i++) {
+                    if (((this.pool.status[i] ?? 0) & ModelStatus.dead) === 0) {
+                      return {
+                        x: this.pool.x[i] ?? 0,
+                        y: this.pool.y[i] ?? 0,
+                      };
+                    }
+                  }
+                  return at ?? { x: 0, y: 0 };
+                })()
+              : null,
           alive,
           weapon: doc.stats.weaponIsRanged ? "shot" : "melee",
           ...(facing !== undefined ? { facing } : {}),
@@ -317,6 +370,7 @@ export class BattleView {
             hp: Math.round(doc.stats.hp ?? 10),
             vision: visionMode,
           },
+          ...(modelStatsSummary ? { modelStatsSummary } : {}),
           ...(ownSpells.length ? { spells: ownSpells } : {}),
           ...(ownItems.length ? { items: ownItems } : {}),
         };
@@ -381,20 +435,47 @@ export class BattleView {
     this.grid = new DetectionGrid(detectionCellFeet);
     this.grid.reseed(sources, detectionBounds, this.input.ctx.walls);
 
+    const lightBounds = activeLights
+      .map((light) => {
+        const baseR = Math.max(light.bright, light.dim);
+        return { light, baseR, maxR: baseR * 2, maxR2: baseR * baseR * 4 };
+      })
+      .filter((entry) => entry.baseR > 0);
+    let lightsMinX = Infinity,
+      lightsMinY = Infinity,
+      lightsMaxX = -Infinity,
+      lightsMaxY = -Infinity;
+    for (const lb of lightBounds) {
+      if (lb.light.x - lb.maxR < lightsMinX) lightsMinX = lb.light.x - lb.maxR;
+      if (lb.light.y - lb.maxR < lightsMinY) lightsMinY = lb.light.y - lb.maxR;
+      if (lb.light.x + lb.maxR > lightsMaxX) lightsMaxX = lb.light.x + lb.maxR;
+      if (lb.light.y + lb.maxR > lightsMaxY) lightsMaxY = lb.light.y + lb.maxR;
+    }
+
     const isIlluminatedFor = (mx: number, my: number, factionId: string): boolean => {
-      if (activeLights.length === 0) return false;
+      if (
+        lightBounds.length === 0 ||
+        mx < lightsMinX ||
+        mx > lightsMaxX ||
+        my < lightsMinY ||
+        my > lightsMaxY
+      )
+        return false;
       const viewers = factionAnchors.get(factionId);
       if (!viewers?.length) return false;
-      for (const light of activeLights) {
-        const baseR = Math.max(light.bright, light.dim);
-        if (baseR <= 0) continue;
-        const dLight = Math.hypot(mx - light.x, my - light.y);
-        if (dLight > baseR * 2) continue;
+      for (const { light, baseR, maxR2 } of lightBounds) {
+        const dxL = mx - light.x;
+        const dyL = my - light.y;
+        const dLight2 = dxL * dxL + dyL * dyL;
+        if (dLight2 > maxR2) continue;
         if (!hasLineOfEffect(light.x, light.y, mx, my, this.input.ctx.walls)) continue;
+        const dLight = Math.sqrt(dLight2);
         for (const viewer of viewers) {
           const effRadius = viewer.lowLight ? baseR * 2 : baseR;
           if (dLight > effRadius) continue;
-          if (Math.hypot(mx - viewer.pt.x, my - viewer.pt.y) > 120) continue;
+          const dxV = mx - viewer.pt.x;
+          const dyV = my - viewer.pt.y;
+          if (dxV * dxV + dyV * dyV > 14_400) continue;
           if (hasLineOfEffect(viewer.pt.x, viewer.pt.y, mx, my, this.input.ctx.walls)) {
             return true;
           }
@@ -403,7 +484,6 @@ export class BattleView {
       return false;
     };
 
-    const ids = new Map<number, string>();
     for (const factionId of [null, ...scenario.factions.map((f) => f.id)]) {
       const bitmap =
         factionId === null
@@ -437,15 +517,20 @@ export class BattleView {
           let models = regions.get(key);
           if (!models) regions.set(key, (models = []));
           if (models.length > MAX_REGION_MODELS) continue;
-          let id = ids.get(i);
+          const poolModelId = this.pool.id[i] ?? i;
+          let id = this.markerIdByPoolId.get(poolModelId);
           if (!id) {
             id = createHmac("sha256", markerKey)
-              .update(String(this.pool.id[i]))
+              .update(String(poolModelId))
               .digest("base64url")
               .slice(0, 22);
-            ids.set(i, id);
+            this.markerIdByPoolId.set(poolModelId, id);
           }
           const rawRot = this.pool.rot[i] ?? 0;
+          const modelStat =
+            scenario.trackModelStats && (factionId === null || army.factionId === factionId)
+              ? state.extras?.modelStats?.[String(this.pool.id[i])]
+              : undefined;
           models.push({
             id,
             unitId: doc._id,
@@ -455,6 +540,7 @@ export class BattleView {
               rawRot === 0 && defaultFacingByFaction.has(army.factionId)
                 ? (defaultFacingByFaction.get(army.factionId) ?? 0)
                 : rawRot,
+            ...(modelStat ? { stats: modelStat } : {}),
           });
         }
         if (count > 0) {
@@ -482,6 +568,37 @@ export class BattleView {
         regions,
       });
     }
+
+    const nextTurn = state.version + 1;
+    const activeHazards = [
+      ...(scenario.hazards ?? []),
+      ...(state.hazards ?? []),
+    ].filter((h) => spellHazardActive(h, nextTurn));
+    this.nextTurnHazards = activeHazards;
+    const difficult = new Set<string>();
+    for (const cell of this.input.ctx.terrain?.difficultCells ?? []) {
+      difficult.add(`${cell.col},${cell.row}`);
+    }
+    for (const hazard of activeHazards) {
+      if (hazard.radius < CELL_FEET * 0.5) continue;
+      const minC = Math.floor((hazard.at.x - hazard.radius) / CELL_FEET);
+      const maxC = Math.floor((hazard.at.x + hazard.radius) / CELL_FEET);
+      const minR = Math.floor((hazard.at.y - hazard.radius) / CELL_FEET);
+      const maxR = Math.floor((hazard.at.y + hazard.radius) / CELL_FEET);
+      for (let c = minC; c <= maxC; c++) {
+        for (let r = minR; r <= maxR; r++) {
+          if (
+            pointInSpellHazard(hazard, {
+              x: (c + 0.5) * CELL_FEET,
+              y: (r + 0.5) * CELL_FEET,
+            })
+          ) {
+            difficult.add(`${c},${r}`);
+          }
+        }
+      }
+    }
+    this.moveDifficultCells = difficult;
   }
 
   private regionKey(x: number, y: number): string {
@@ -697,7 +814,16 @@ export class BattleView {
     const fxCues =
       member.role === "GM"
         ? fxCuesAll
-        : fxCuesAll.filter((cue) => this.areaDetectedBy(cue.at, Math.max(10, cue.radius), fids));
+        : fxCuesAll
+            .filter((cue) => this.areaDetectedBy(cue.at, Math.max(10, cue.radius), fids))
+            .map((cue) => {
+              if (!cue.from) return cue;
+              // Strip launch `from` if the origin is hidden in fog of war!
+              if (this.areaDetectedBy(cue.from, 10, fids)) return cue;
+              const copy: typeof cue = { ...cue };
+              delete copy.from;
+              return copy;
+            });
 
     const journals =
       member.role === "GM"
@@ -710,6 +836,7 @@ export class BattleView {
     const playlists = src?.playlists;
     const macros = src?.macros;
     const activeTrackId = this.live.activeTrackId ?? null;
+    const fxCoalescence = this.scenario.fxCoalescence;
 
     if (
       !journals?.length &&
@@ -717,7 +844,8 @@ export class BattleView {
       !playlists?.length &&
       !macros?.length &&
       !fxCues.length &&
-      activeTrackId === null
+      activeTrackId === null &&
+      !fxCoalescence
     ) {
       return undefined;
     }
@@ -728,6 +856,7 @@ export class BattleView {
       ...(playlists?.length || activeTrackId !== null ? { activeTrackId } : {}),
       ...(macros?.length ? { macros } : {}),
       ...(fxCues.length ? { fxCues } : {}),
+      ...(fxCoalescence ? { fxCoalescence } : {}),
     };
   }
 
@@ -891,14 +1020,6 @@ export class BattleView {
     return false;
   }
 
-  private activeHazardsForNextTurn(): SpellHazard[] {
-    const nextTurn = this.state.version + 1;
-    return [
-      ...(this.scenario.hazards ?? []),
-      ...(this.state.hazards ?? []),
-    ].filter((h) => spellHazardActive(h, nextTurn));
-  }
-
   private findUnitSpell(unitSlot: UnitSlot, spellId: StrategicSpellId) {
     const sp = unitSlot.authored?.spells?.find((s) => s.id === spellId);
     if (sp) return sp;
@@ -969,6 +1090,13 @@ export class BattleView {
       if (cat.shape === "cone" || cat.shape === "line") {
         if (!order.dir || Math.hypot(order.dir.x, order.dir.y) < 0.01) {
           return `${cat.name} requires a non-zero aim direction.`;
+        }
+        const centroid = unit.own.at ?? from;
+        if (
+          Math.hypot(order.origin.x - from.x, order.origin.y - from.y) > 35 &&
+          Math.hypot(order.origin.x - centroid.x, order.origin.y - centroid.y) > 35
+        ) {
+          return `${cat.name} originates at the casting unit (self-range ${cat.shape}, CRB p.214).`;
         }
       } else {
         const maxRange =
@@ -1074,83 +1202,93 @@ export class BattleView {
       const bounds = this.scenario.bounds;
       if (order.path.some(({ x, y }) => !inBounds(bounds, x, y)))
         return "Destination is outside the battlefield.";
-      const [start, end] = range;
-      const from = {
-        x: this.pool.x[firstLiving] ?? 0,
-        y: this.pool.y[firstLiving] ?? 0,
-      };
       const typeKey = (unit.view.type as keyof typeof rules.schema.unitTypes) || "infantry";
       const unitTypeBlock = (rules.schema.unitTypes[typeKey] ?? rules.schema.unitTypes.infantry) as { move: number };
-      const difficult = new Set<string>();
-      for (const cell of this.input.ctx.terrain?.difficultCells ?? [])
-        difficult.add(`${cell.col},${cell.row}`);
-      for (const hazard of this.activeHazardsForNextTurn()) {
-        const minC = Math.floor((hazard.at.x - hazard.radius) / CELL_FEET);
-        const maxC = Math.floor((hazard.at.x + hazard.radius) / CELL_FEET);
-        const minR = Math.floor((hazard.at.y - hazard.radius) / CELL_FEET);
-        const maxR = Math.floor((hazard.at.y + hazard.radius) / CELL_FEET);
-        for (let c = minC; c <= maxC; c++) {
-          for (let r = minR; r <= maxR; r++) {
-            if (
-              pointInSpellHazard(hazard, {
-                x: (c + 0.5) * CELL_FEET,
-                y: (r + 0.5) * CELL_FEET,
-              })
-            ) {
-              difficult.add(`${c},${r}`);
-            }
-          }
-        }
-      }
-      const rawStrideInput = {
-        from,
+      const planned = planUnitModelMoves({
+        pool: this.pool,
+        unit: unit.view,
         path: order.path,
         pace: order.pace,
-        movePoints: order.reform ? unitTypeBlock.move * 0.5 : unitTypeBlock.move,
+        movePoints: unitTypeBlock.move,
         cellFeet: CELL_FEET,
-        difficult,
-        blockAt: (fx: number, fy: number, tx: number, ty: number) =>
-          firstMoveBlock(fx, fy, tx, ty, this.input.ctx.walls),
+        reform: order.reform === true,
+        difficult: this.moveDifficultCells,
+        difficultIncludesHazards: true,
+        hazards: this.nextTurnHazards,
+        bounds,
+        strictBounds: true,
+        quantize: true,
+        ...(this.input.ctx.walls.x1.length > 0
+          ? {
+              blockAt: (fx: number, fy: number, tx: number, ty: number) =>
+                firstMoveBlock(fx, fy, tx, ty, this.input.ctx.walls),
+            }
+          : {}),
         blockEpsilon: MOVE_BLOCK_EPSILON,
-      };
-      const cond = applyUnitConditionsToStride(
-        rawStrideInput,
-        this.pool,
-        unit.view,
-      );
-      if (cond.refusal) return cond.refusal;
-      const stride = planPF1eStride(cond.input);
-      if (stride.refusal) return stride.refusal;
-      if (order.pace === "charge" && stride.hitWall)
-        return "charge: a charge requires a clear path unobstructed by walls (CRB p.188)";
-      const dx = stride.to.x - from.x,
-        dy = stride.to.y - from.y;
-      for (let i = start; i < end; i++) {
-        if (((this.pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
-        const mx = this.pool.x[i] ?? 0,
-          my = this.pool.y[i] ?? 0;
-        const x = Math.fround(mx + dx),
-          y = Math.fround(my + dy);
+      });
+      if (!planned.ok) return planned.refusal;
+      for (const o of planned.plan.outcomes) {
+        const fx = Math.fround(o.to.x);
+        const fy = Math.fround(o.to.y);
         if (
-          !simPositionFits(x, STRATEGIC_CODEC) ||
-          !simPositionFits(y, STRATEGIC_CODEC) ||
-          !inBounds(bounds, Math.round(x * 16) / 16, Math.round(y * 16) / 16)
-        )
+          !simPositionFits(fx, STRATEGIC_CODEC) ||
+          !simPositionFits(fy, STRATEGIC_CODEC) ||
+          !inBounds(bounds, Math.round(fx * 16) / 16, Math.round(fy * 16) / 16)
+        ) {
           return "Formation would extend outside the battlefield.";
-        if (order.pace === "charge") {
-          const fileStride = planPF1eStride({
-            ...cond.input,
-            from: { x: mx, y: my },
-            path: [{ x: mx + dx, y: my + dy }],
-          });
-          if (fileStride.refusal) return fileStride.refusal;
-          if (fileStride.hitWall)
-            return "charge: a charge requires a clear path unobstructed by walls (CRB p.188)";
         }
       }
     }
     return null;
   }
+}
+
+export function summarizeUnitModelStats(
+  records: readonly StrategicModelStats[],
+): UnitModelStatsSummary | undefined {
+  if (records.length === 0) return undefined;
+  let kills = 0,
+    damageDealt = 0,
+    damageTaken = 0,
+    damageReduced = 0,
+    healed = 0,
+    hits = 0,
+    misses = 0,
+    crits = 0,
+    veteranCount = 0;
+  let topVeteran: { slot: number; kills: number; damageDealt: number } | undefined;
+  records.forEach((r, slot) => {
+    kills += r.kills;
+    damageDealt += r.damageDealt;
+    damageTaken += r.damageTaken ?? 0;
+    damageReduced += r.damageReduced ?? 0;
+    healed += r.healed ?? 0;
+    hits += r.hits ?? 0;
+    misses += r.misses ?? 0;
+    crits += r.crits ?? 0;
+    if (r.kills > 0 || r.damageDealt > 0) {
+      veteranCount++;
+      if (
+        !topVeteran ||
+        r.kills > topVeteran.kills ||
+        (r.kills === topVeteran.kills && r.damageDealt > topVeteran.damageDealt)
+      ) {
+        topVeteran = { slot: slot + 1, kills: r.kills, damageDealt: r.damageDealt };
+      }
+    }
+  });
+  return {
+    kills,
+    damageDealt,
+    damageTaken,
+    damageReduced,
+    healed,
+    hits,
+    misses,
+    crits,
+    veteranCount,
+    ...(topVeteran ? { topVeteran } : {}),
+  };
 }
 
 export function diffRegion(
@@ -1167,7 +1305,10 @@ export function diffRegion(
       before.x !== model.x ||
       before.y !== model.y ||
       before.rotation !== model.rotation ||
-      before.unitId !== model.unitId
+      before.unitId !== model.unitId ||
+      before.stats?.kills !== model.stats?.kills ||
+      before.stats?.damageDealt !== model.stats?.damageDealt ||
+      before.stats?.damageTaken !== model.stats?.damageTaken
     )
       update.push(model);
   }

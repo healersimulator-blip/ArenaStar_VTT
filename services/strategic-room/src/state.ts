@@ -6,7 +6,9 @@ import {
   type HostedTemplate,
   type ReportRow,
   type RoomOrder,
+  type StrategicAutonomyConfig,
   type StrategicItemEffect,
+  type StrategicModelStats,
 } from "../../../src/core/strategicRoom/protocol";
 import { decodeSimSnapshot, poolFromSnapshot } from "../../../src/sim/codec";
 import { PF1E_MODEL_SCHEMA } from "../../../src/packages/pf1e/schema";
@@ -68,6 +70,8 @@ export type UnitRuntimeResources = {
 export type VersionExtras = {
   fxCues?: HostedFxCue[];
   unitResources?: Record<string, UnitRuntimeResources>;
+  /** Keyed by stringified `ModelPool.id[i]` when `scenario.trackModelStats === true`. */
+  modelStats?: Record<string, StrategicModelStats>;
 };
 
 export type LiveRoomState = {
@@ -77,6 +81,7 @@ export type LiveRoomState = {
   templates?: HostedTemplate[];
   activeTrackId?: string | null;
   chat?: HostedChatEntry[];
+  autonomy?: StrategicAutonomyConfig;
 };
 
 export type Published = {

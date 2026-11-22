@@ -19,6 +19,7 @@
     sourceArmies,
     sourceStrategicTokens,
     strategicActionCardPolicy,
+    strategicModelStatsEnabled,
     withScenarioBackground,
     withScenarioBackgroundTiles,
     withScenarioBadges,
@@ -66,6 +67,7 @@
   let actionCardsPlayerCharacters = $state(true),
     actionCardsUnits = $state(true),
     actionCardsModels = $state(false),
+    trackModelStats = $state(false),
     actionCardPolicyInitialized = false;
 
   // Force & token builder state
@@ -96,6 +98,7 @@
     actionCardsPlayerCharacters = initial.playerCharacters;
     actionCardsUnits = initial.units;
     actionCardsModels = initial.models;
+    trackModelStats = strategicModelStatsEnabled(scene);
     actionCardPolicyInitialized = true;
   });
 
@@ -641,7 +644,11 @@
         ...stored,
         flags: {
           ...stored.flags,
-          core: { ...stored.flags?.core, strategicActionCards: actionCards },
+          core: {
+            ...stored.flags?.core,
+            strategicActionCards: actionCards,
+            strategicModelStats: trackModelStats,
+          },
         },
       };
       let b = battleOf(stored, app.worldId);
@@ -677,6 +684,7 @@
         const r = app.host.commitBattleScene(current._id, {
           "flags.core.campaignBattle": b,
           "flags.core.strategicActionCards": actionCards,
+          "flags.core.strategicModelStats": trackModelStats,
         });
         if (!r.ok) throw new Error(r.error);
         fresh = true;
@@ -981,12 +989,13 @@
           {/if}
 
           <fieldset class="setup-card">
-            <legend>Action cards</legend>
-            <p class="muted">Choose which action classes may publish cards. Rules still resolve when a card class is disabled.</p>
+            <legend>Action cards &amp; soldier records</legend>
+            <p class="muted">Choose which action classes publish cards and whether individual soldiers carry persistent combat records across battles.</p>
             <div class="check-row">
               <label><input type="checkbox" bind:checked={actionCardsPlayerCharacters} /> Player characters and unit leaders</label>
               <label><input type="checkbox" bind:checked={actionCardsUnits} /> Formation/unit actions</label>
               <label><input type="checkbox" bind:checked={actionCardsModels} /> Individual model actions</label>
+              <label><input type="checkbox" data-campaign-model-stats bind:checked={trackModelStats} /> Persistent soldier stats (kills &amp; damage)</label>
             </div>
             {#if actionCardsModels}<p class="warning">Individual model cards can produce thousands of records. Leave off for large battles.</p>{/if}
           </fieldset>
@@ -1028,7 +1037,7 @@
             {#if reconcilePreview.analysis.conflicts.length > 0}
               <div class="warning" data-reconciliation-conflicts>
                 <strong>{reconcilePreview.analysis.conflicts.length} concurrent campaign conflict(s) detected:</strong>
-                {#each reconcilePreview.analysis.conflicts as cf (`${cf.coll}:${cf.id}`)}
+                {#each reconcilePreview.analysis.conflicts as cf, idx (`${cf.coll}:${cf.id}:${cf.name}:${cf.kind}:${idx}`)}
                   <div>{cf.coll}/{cf.id} ({cf.name}): {cf.reason}</div>
                 {/each}
                 <label style="margin-top:4px;flex-direction:row;align-items:center;gap:6px">
@@ -1040,7 +1049,7 @@
             <div style="max-height:11rem;overflow:auto;font-size:0.83rem;margin:6px 0">
               {#each reconcilePreview.payload.units ?? [] as u (u.id)}
                 <div data-reconcile-unit={u.id}>
-                  <strong>{u.name}</strong>: {u.initialStrength} → {u.alive} alive ({u.lost} lost){#if u.at} at ({u.at.x}, {u.at.y}){/if}{#if u.conditions?.length} · [{u.conditions.join(", ")}]{/if}
+                  <strong>{u.name}</strong>: {u.initialStrength} → {u.alive} alive ({u.lost} lost){#if u.at} at ({u.at.x}, {u.at.y}){/if}{#if u.modelStatsSummary && (u.modelStatsSummary.kills > 0 || u.modelStatsSummary.damageDealt > 0)} · {u.modelStatsSummary.kills} kills / {u.modelStatsSummary.damageDealt} dmg{/if}{#if u.conditions?.length} · [{u.conditions.join(", ")}]{/if}
                 </div>
               {/each}
               {#each Object.entries(reconcilePreview.payload.doorStates ?? {}) as [wallId, dState] (wallId)}

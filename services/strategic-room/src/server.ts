@@ -34,7 +34,7 @@ import {
 import { BulkReads } from "./bulkReads";
 import { StrategicAuthority } from "./authority";
 import { BattleView, diffRegion } from "./battle";
-import { PostgresRoom } from "./postgres";
+import type { PostgresRoom } from "./postgres";
 import { MAX_COMMANDERS } from "./scenario";
 import { publicHead, type Member } from "./state";
 import { viewPrefix } from "./viewEncoding";
@@ -77,7 +77,12 @@ const contentTypes: Record<string, string> = {
   css: "text/css; charset=utf-8",
 };
 async function webAssets() {
-  const base = new URL("../web/", import.meta.url);
+  let base = new URL("../dist/web/", import.meta.url);
+  try {
+    await readdir(new URL("assets/", base));
+  } catch {
+    base = new URL("../web/", import.meta.url);
+  }
   const files = new Map<string, { data: Buffer; type: string }>();
   files.set("/", {
     data: await readFile(new URL("index.html", base)),
@@ -774,6 +779,7 @@ export async function serve(
         ...(lights ? { lights } : {}),
         ...(current.scenario.regions?.length ? { regions: current.scenario.regions } : {}),
         ...(templates ? { templates } : {}),
+        ...(current.live.autonomy ? { autonomy: current.live.autonomy } : {}),
         ...(chat ? { chat } : {}),
         ...(content ? { content } : {}),
         ...(current.scenario.terrain?.difficultCells.length

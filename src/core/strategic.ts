@@ -79,7 +79,7 @@ export interface UnitDocument extends BaseDocument {
    * nearest living enemy and auto-engages on contact; "hold" pins it in
    * place. Absent ⇒ "advance" when the setting is on, inert when off.
    */
-  doctrine?: "advance" | "hold" | null;
+  doctrine?: "advance" | "hold" | "off" | null;
   /** G-04/D-223 — excess-frontage wrap manoeuvre; `false` disables it for this unit. */
   envelop?: boolean | null;
 }
