@@ -14,8 +14,10 @@ import {
   campaignProof,
   type BattleReconciliationPayload,
   type ReconciledUnitSummary,
+  type StrategicModelStats,
 } from "../../../src/core/strategicRoom/protocol";
 import { parseScenario, deploy, initialUnitResources, type Scenario, type UnitState } from "./scenario";
+import { summarizeUnitModelStats } from "./battle";
 import { digest, openInvite, sealInvite } from "./invite";
 import { PostgresRoom } from "./postgres";
 import { checkpointPool, type LiveRoomState, type Published, type VersionExtras } from "./state";
@@ -57,6 +59,8 @@ export function buildReconciliationPayload(
       sinSum = 0,
       cosSum = 0,
       alive = 0;
+    const statsMap = scenario.trackModelStats ? (state.extras?.modelStats ?? {}) : null;
+    const survivingModelStats: StrategicModelStats[] = [];
     for (let i = start; i < end && i < pool.count; i++) {
       if (((pool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
       sx += pool.x[i] ?? 0;
@@ -65,6 +69,10 @@ export function buildReconciliationPayload(
       sinSum += Math.sin(rot);
       cosSum += Math.cos(rot);
       alive++;
+      if (statsMap) {
+        const rec = statsMap[String(pool.id[i])];
+        survivingModelStats.push(rec ? { ...rec } : { kills: 0, damageDealt: 0 });
+      }
     }
     const at =
       alive > 0
@@ -108,6 +116,9 @@ export function buildReconciliationPayload(
     const launchConditions = baseRes[u.id]?.conditions ?? [];
     const conditions = curRes[u.id]?.conditions ?? u.conditions ?? [];
     const conditionsAdded = conditions.filter((c) => !launchConditions.includes(c));
+    const modelStatsSummary = statsMap
+      ? summarizeUnitModelStats(survivingModelStats)
+      : undefined;
     units.push({
       id: u.id,
       name: u.name,
@@ -122,6 +133,10 @@ export function buildReconciliationPayload(
       ...(Object.keys(itemsSpent).length ? { itemsSpent } : {}),
       ...(conditions.length ? { conditions: [...conditions] } : {}),
       ...(conditionsAdded.length ? { conditionsAdded } : {}),
+      ...(statsMap && survivingModelStats.length
+        ? { modelStats: survivingModelStats }
+        : {}),
+      ...(modelStatsSummary ? { modelStatsSummary } : {}),
     });
   });
 

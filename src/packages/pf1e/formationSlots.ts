@@ -302,6 +302,11 @@ export interface PerimeterEnvelopInput {
   defenderAnchor: Vec2;
   reachFt: number;
   cellFeet: number;
+  /**
+   * Optional per-round movement budget (feet) capping how far any wrapping model
+   * may step toward its flank/rear station in a single round (`combat_resolver_5` I1).
+   */
+  maxMoveFeet?: number;
   /** Quantize output coordinates to 1/16-ft codec grid when true. */
   quantize?: boolean;
   bounds?: FormationBounds;
@@ -342,6 +347,7 @@ export function applyPerimeterEnvelopment(
     defenderAnchor,
     reachFt,
     cellFeet,
+    maxMoveFeet,
     quantize = false,
     bounds,
     blockAt,
@@ -486,16 +492,28 @@ export function applyPerimeterEnvelopment(
       const fromX = pool.x[m] ?? 0;
       const fromY = pool.y[m] ?? 0;
       while (nextStation < maxSearchStations) {
-        const candidate = stationCoords(nextStation++);
-        if (bounds && !inBounds(bounds, candidate.x, candidate.y)) continue;
-        if (blockAt && blockAt(fromX, fromY, candidate.x, candidate.y) !== null) {
+        const station = stationCoords(nextStation++);
+        if (bounds && !inBounds(bounds, station.x, station.y)) continue;
+        const dx = station.x - fromX;
+        const dy = station.y - fromY;
+        const dist = Math.hypot(dx, dy);
+        if (dist <= 1e-4) break;
+        const stepRatio =
+          maxMoveFeet !== undefined && maxMoveFeet > 0 && dist > maxMoveFeet
+            ? maxMoveFeet / dist
+            : 1;
+        const targetX = stepRatio < 1 ? fmt(fromX + dx * stepRatio) : station.x;
+        const targetY = stepRatio < 1 ? fmt(fromY + dy * stepRatio) : station.y;
+        if (bounds && !inBounds(bounds, targetX, targetY)) continue;
+        if (blockAt && blockAt(fromX, fromY, targetX, targetY) !== null) {
           continue;
         }
-        if (tryClaimStation && !tryClaimStation(m, candidate.x, candidate.y)) {
+        if (tryClaimStation && !tryClaimStation(m, targetX, targetY)) {
           continue;
         }
-        pool.x[m] = candidate.x;
-        pool.y[m] = candidate.y;
+        pool.x[m] = targetX;
+        pool.y[m] = targetY;
+        pool.rot[m] = rotateToward(pool.rot[m] ?? 0, Math.atan2(dy, dx), 0.75);
         wrapped++;
         break;
       }

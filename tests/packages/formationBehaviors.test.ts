@@ -10,6 +10,12 @@ import {
   rotateToward,
   unitFrontSaturation,
 } from "../../src/packages/pf1e/formationSlots";
+import { createMassBattlePf1e } from "../../src/packages/massBattlePf1e";
+import { type OrderQueue } from "../../src/core/strategic";
+import type { RulesContext, UnitView } from "../../src/core/rules";
+import type { SimEvent } from "../../src/core/sim";
+import { allocModel, createModelPool } from "../../src/sim/pool";
+import { XoshiroPRNG } from "../../src/sim/prng";
 import { PF1E_MODEL_SCHEMA, PF1eCondition } from "../../src/packages/pf1e/schema";
 import {
   canonicalPoolHash,
@@ -586,5 +592,314 @@ describe("combat_resolver_5 large-unit formation mechanics", () => {
     expect(
       orderLabel({ kind: "custom", type: "reform", data: null }, nameOf),
     ).toBe("reform front");
+  });
+
+  test("Two-tier wheeling (I5/C23b): wide formation wheels gradually on long oblique marches with outer-arc budget lag", () => {
+    const scenario = parseScenario({
+      format: "arenastar-strategic-scenario-v1",
+      name: "Oblique Wheel",
+      seed: 404,
+      bounds: { minX: 0, minY: 0, maxX: 600, maxY: 600 },
+      factions: [
+        { id: "blue", name: "Blue", color: "#5599ff" },
+        { id: "red", name: "Red", color: "#ff6655" },
+      ],
+      commanders: [
+        {
+          id: "cmd-blue",
+          factionId: "blue",
+          units: [
+            {
+              id: "u-blue",
+              name: "Blue Phalanx",
+              strength: 10,
+              weapon: "melee",
+              anchor: { x: 100, y: 200 },
+            },
+          ],
+        },
+        {
+          id: "cmd-red",
+          factionId: "red",
+          units: [
+            {
+              id: "u-red",
+              name: "Red Watch",
+              strength: 4,
+              weapon: "melee",
+              anchor: { x: 500, y: 500 },
+            },
+          ],
+        },
+      ],
+    });
+    const start = deploy(scenario);
+    const startPool = checkpointPool(start);
+    const leadX = startPool.x[0] ?? 100;
+    const leadY = startPool.y[0] ?? 177.5;
+
+    // Order a long 90-degree southward wheel (> 60 ft order distance)
+    const turn1 = resolveFrozen({
+      turnId: 1,
+      seed: 404,
+      scenario,
+      start,
+      orders: [
+        {
+          memberId: "cmd-blue",
+          unitId: "u-blue",
+          order: {
+            kind: "move",
+            pace: "march",
+            path: [{ x: leadX, y: leadY + 120 }],
+          },
+        },
+      ],
+    });
+    const p1 = checkpointPool(turn1.state);
+
+    // Every soldier steps individually (NOT rigid translation: outer-arc file 0 at y=177.5
+    // has to swing forward+right, whereas inner-pivot file 9 at y=222.5 swings backward+right;
+    // their Δx displacements differ!).
+    const dxFile0 = (p1.x[0] ?? 0) - (startPool.x[0] ?? 0);
+    const dxFile9 = (p1.x[9] ?? 0) - (startPool.x[9] ?? 0);
+    expect(Math.abs(dxFile0 - dxFile9)).toBeGreaterThan(2);
+
+    // No model exceeds its 20-ft infantry march budget (with codec-2 1/16-ft quantization tolerance)
+    for (let i = 0; i < 10; i++) {
+      const dist = Math.hypot(
+        (p1.x[i] ?? 0) - (startPool.x[i] ?? 0),
+        (p1.y[i] ?? 0) - (startPool.y[i] ?? 0),
+      );
+      expect(dist).toBeLessThanOrEqual(20.15);
+    }
+
+    // All 10 living models settle in 10 distinct 5-ft squares (no cell stacking)
+    const cells = new Set<string>();
+    for (let i = 0; i < 10; i++) {
+      cells.add(`${Math.floor((p1.x[i] ?? 0) / 5)},${Math.floor((p1.y[i] ?? 0) / 5)}`);
+    }
+    expect(cells.size).toBe(10);
+  });
+
+  test("Per-soldier doorway micro-steering: open-aligned files advance through a wall gap while flanked files steer through the doorway", () => {
+    const scenario = parseScenario({
+      format: "arenastar-strategic-scenario-v1",
+      name: "Doorway Breach",
+      seed: 505,
+      bounds: { minX: 0, minY: 0, maxX: 400, maxY: 400 },
+      walls: [
+        // Vertical wall at x = 110 with a 15-ft doorway gap from y = 192.5 to y = 207.5
+        { id: "w-north", x1: 110, y1: 100, x2: 110, y2: 192.5, restriction: 1 },
+        { id: "w-south", x1: 110, y1: 207.5, x2: 110, y2: 300, restriction: 1 },
+      ],
+      factions: [
+        { id: "blue", name: "Blue", color: "#5599ff" },
+        { id: "red", name: "Red", color: "#ff6655" },
+      ],
+      commanders: [
+        {
+          id: "cmd-blue",
+          factionId: "blue",
+          units: [
+            {
+              id: "u-blue",
+              name: "Blue Assault",
+              strength: 6,
+              weapon: "melee",
+              anchor: { x: 100, y: 200 },
+            },
+          ],
+        },
+        {
+          id: "cmd-red",
+          factionId: "red",
+          units: [
+            {
+              id: "u-red",
+              name: "Red Garrison",
+              strength: 4,
+              weapon: "melee",
+              anchor: { x: 300, y: 200 },
+            },
+          ],
+        },
+      ],
+    });
+    const start = deploy(scenario);
+    const startPool = checkpointPool(start);
+    const leadY = startPool.y[0] ?? 187.5;
+
+    const res = resolveFrozen({
+      turnId: 1,
+      seed: 505,
+      scenario,
+      start,
+      orders: [
+        {
+          memberId: "cmd-blue",
+          unitId: "u-blue",
+          order: {
+            kind: "move",
+            pace: "march",
+            path: [{ x: 140, y: leadY }],
+          },
+        },
+      ],
+    });
+    const afterPool = checkpointPool(res.state);
+
+    // Center files aligned with the y ∈ [192.5, 207.5] doorway pass cleanly past x = 110!
+    // Under old rigid-block movement, a single wing hitting the wall clamped the ENTIRE unit short of x = 110.
+    const xs = Array.from({ length: 6 }, (_, i) => afterPool.x[i] ?? 0);
+    expect(xs.some((x) => x > 115)).toBe(true);
+    // And even wing soldiers at y = 187.5 / y = 212.5 steer diagonally toward the doorway opening!
+    expect(xs.filter((x) => x > 110).length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("Breach sliding (C17b/C39) & wing-model AoO: unengaged flank files slide into enemy gaps under doctrine and wing movement provokes AoOs", () => {
+    const pool = createModelPool(6, PF1E_MODEL_SCHEMA);
+    // Unit 0 (Blue, 4 models in line at x = 0, y = 0, 5, 10, 15)
+    for (let i = 0; i < 4; i++) {
+      allocModel(pool, {
+        id: i + 1,
+        unitIdx: 0,
+        x: 0,
+        y: i * 5,
+        hp: 20,
+        hpMax: 20,
+        file: i,
+        rank: 0,
+      });
+    }
+    // Unit 1 (Red, 1 defender at x = 20, y = 0 — facing only Blue file 0, leaving files 1..3 unopposed!)
+    allocModel(pool, { id: 5, unitIdx: 1, x: 20, y: 0, hp: 30, hpMax: 30 });
+    // Unit 2 (Red flank sentinel at x = 0, y = 20 — threatens (0, 15), which ONLY Blue wing model 3 starts in and leaves, NOT Blue's anchor at y = 0!)
+    allocModel(pool, { id: 6, unitIdx: 2, x: 0, y: 20, hp: 30, hpMax: 30 });
+
+    const units: UnitView[] = [
+      {
+        id: "u-blue",
+        armyId: "a-blue",
+        factionId: "blue",
+        name: "Blue Line",
+        type: "infantry",
+        formation: "line",
+        profile: {},
+        orders: null,
+        sceneId: "breach-aoo-test",
+        leaderTokenId: null,
+        envelop: true,
+        stats: { bab: 6, ac: 16, strMod: 3 },
+        modelRange: [0, 4],
+      },
+      {
+        id: "u-red-main",
+        armyId: "a-red",
+        factionId: "red",
+        name: "Red Center",
+        type: "infantry",
+        formation: "line",
+        profile: {},
+        orders: null,
+        sceneId: "breach-aoo-test",
+        leaderTokenId: null,
+        stats: { bab: 6, ac: 16, strMod: 3 },
+        modelRange: [4, 5],
+      },
+      {
+        id: "u-red-wing",
+        armyId: "a-red",
+        factionId: "red",
+        name: "Red Sentinel",
+        type: "infantry",
+        formation: "line",
+        profile: {},
+        orders: null,
+        sceneId: "breach-aoo-test",
+        leaderTokenId: null,
+        stats: { bab: 8, ac: 16, strMod: 4 },
+        modelRange: [5, 6],
+      },
+    ];
+
+    const ctx: RulesContext = {
+      sceneId: "breach-aoo-test",
+      turnMode: "stepwise",
+      grid: {
+        type: "square",
+        size: 100,
+        units: "ft",
+        distance: 5,
+        diagonals: "555",
+      },
+      walls: {
+        x1: new Float32Array(0),
+        y1: new Float32Array(0),
+        x2: new Float32Array(0),
+        y2: new Float32Array(0),
+        restriction: new Uint8Array(0),
+      },
+      terrain: { difficultCells: [] },
+      armies: [],
+      factions: [
+        {
+          _id: "blue",
+          type: "faction",
+          name: "Blue",
+          color: "#0000ff",
+          ownership: { default: 3 },
+          flags: {},
+          system: {},
+          allies: [],
+        },
+        {
+          _id: "red",
+          type: "faction",
+          name: "Red",
+          color: "#ff0000",
+          ownership: { default: 3 },
+          flags: {},
+          system: {},
+          allies: [],
+        },
+      ],
+      leaderActors: {},
+      worldSettings: { strategicDoctrine: true },
+    };
+
+    const moveOrd = {
+      kind: "move" as const,
+      pace: "march" as const,
+      path: [{ x: 15, y: 0 }],
+    };
+    const orders = new Map<string, OrderQueue>([
+      [
+        "u-blue",
+        {
+          issuedBy: "cmd-blue",
+          issuedTurn: 1,
+          pending: [moveOrd],
+          active: moveOrd,
+        },
+      ],
+    ]);
+
+    const events: SimEvent[] = [];
+    const mod = createMassBattlePf1e();
+    mod.resolveTurn(ctx, pool, units, orders, new XoshiroPRNG(77), (ev) =>
+      events.push(ev),
+    );
+
+    // 1. Wing AoO: Red Sentinel at (0, 20) only threatens y >= 15, which ONLY wing soldier #3
+    //    walked out of (anchor soldier #0 walked along y = 0, 20 ft away!). Verify AoO fired!
+    const aooEvents = events.filter(
+      (e) => e.type === "opportunity" && e.unitId === "u-red-wing",
+    );
+    expect(aooEvents.length).toBe(1);
+
+    // 2. Breach slide (C17b/C39): unopposed flank soldiers (#2 at y=10, #3 at y=15) slid
+    //    laterally toward Red Center at (20, 0) (`y < startY`) instead of marching blindly straight!
+    expect(pool.y[2] ?? 10).toBeLessThan(9.5);
   });
 });

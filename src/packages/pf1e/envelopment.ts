@@ -1,54 +1,20 @@
 /**
  * Strategic flanking — the mass battle's FLANKED bit, decided by AoN 183.
  *
- * The old module was an invented rule: "≥2 attackers in contact ⇒ flanked"
- * (Gap List §5 calls it out; R03/D-130 rejected the +4/flat-footed house rule it
- * came from). It is replaced here by the same rule the tactical scale uses —
- * `flanking.ts`'s `resolveFlanking`, AoN 183's centre-to-centre line test with
- * the threatening-ally requirement and the 0-ft-reach exclusion — applied to
- * the strategic layer's own geometry:
- *
- *   model position (feet) → `geometry.cellAt` with the **scene's** cell feet
- *   (P01) → one occupied square per model → `threatenedCells` per unit reach
- *   (Table 8-4, from the unit's bound leader actor, D-180) → `resolveFlanking`.
- *
- * A single pass per turn replaces the per-engagement heuristic: every living
- * model's FLANKED bit is cleared and recomputed from the current layout (M04's
- * "clear/recompute stale FLANKED bits each turn"), so the bit can no longer
- * linger, and a defender flanked by attackers from two different units is
- * flanked regardless of which engagement resolves first.
- *
- * **The prerequisite this landed with (P01):** the line test only means what
- * the rule says when models are one per square. `deploy.ts` used to space
- * formations 4 ft apart while the sim hashed on 5-ft cells, so several models
- * shared a square and a "flanker" could sit inside the space it flanks — the
- * degenerate collinear case `flanking.ts` documents. Deployment now rides the
- * scene's grid distance (one model per square) and the sim's spatial hash is
- * built at that same scale, which is what the Gap List §5 named as the
- * prerequisite for wiring this rule in.
- *
- * Enemy relation: two models are enemies when their units belong to different
- * factions — the strategic layer's own model of hostility. A caller with a
- * different relation (allies inside one faction, scripted truces) passes
- * `isEnemy`, exactly as the tactical seam takes it from its scene.
- *
- * Cost: one spatial query per living model plus an O(k²) pair test over the
- * models that actually threaten it (k is a handful — a creature's threat set is
- * its own square's neighbourhood), and each threat set is computed once per
- * pass. Positions are read, never written: only status bits change.
+ * Every living model's FLANKED bit is cleared and recomputed from the current layout
+ * using `flanking.ts`'s exact AoN 183 line test (`segmentFlanks`) and `geometry.ts`'s
+ * `squareDistance` reach test, backed by typed arrays (`Int32Array` / `Uint8Array`)
+ * so 50,000-model turns run with zero per-model `Set` or object allocations.
  */
 import type { ModelPool } from "../../core/strategic";
 import { ModelStatus } from "../../core/strategic";
 import type { SpatialGrid } from "../../core/spatialGrid";
 import type { PF1eCell } from "./targeting";
-import { canFlank, resolveFlanking, type PF1eFlankingParticipant } from "./flanking";
-import { cellAt, threatenedCells } from "./geometry";
+import { canFlank, segmentFlanks } from "./flanking";
+import { squareDistance } from "./geometry";
 
 /**
- * M03 — FLANKED now lives in the dedicated `pfCondition` column (u32), not in
- * `pool.status`. The bit value `1<<2` is kept (same as PF1eCondition.FLANKED)
- * but is now disjoint from `ModelStatus.pinned` (also 1<<2) which stays in
- * `pool.status`. Gap §2.13 collision closed; see `PF1E_MODEL_SCHEMA.pfCondition`.
+ * M03 — FLANKED lives in `pfCondition` (u32), disjoint from `ModelStatus.pinned` in `pool.status`.
  */
 export const PF1E_STATUS_FLANKED = 1 << 2;
 
@@ -84,161 +50,133 @@ export interface PF1eFlankingPassResult {
   pairs: PF1eFlankingPair[];
 }
 
-/** A model that can threaten, with its threat set computed once. */
-interface Threatening {
-  index: number;
-  unitIdx: number;
-  cells: PF1eCell[];
-  threatened: PF1eCell[];
-  /**
-   * The threatened set keyed numerically, so the per-defender membership test is
-   * a `Set.has` on a number.
-   *
-   * V07: this replaced `` `${c.col},${c.row}` === defenderKey ``, which built a
-   * template string for every threatened cell of every candidate for every
-   * living model — hundreds of thousands of throwaway strings per turn at 10 000
-   * models, and one of the two hot spots a CPU profile put at ~30% of a turn.
-   */
-  threatKeys: Set<number>;
-  participant: PF1eFlankingParticipant;
-}
-
-/**
- * Injective numeric key for a `(col, row)` cell pair.
- *
- * `col * 2^33 + row` is one-to-one for `|row| < 2^32` and `|col| < 2^20`; at the
- * 5 ft default cell that is ±5,242,880 columns of scene width, several orders of
- * magnitude past any arena `deploy.ts` can build, and the product stays exactly
- * representable (≪ 2^53). No string allocation, no collision, no Map boxing.
- */
-const cellKey = (col: number, row: number): number => col * 2 ** 33 + row;
-
 /**
  * Clear and recompute every living model's FLANKED bit from the current layout.
- * Dead models never flank and are never flanked (their bit is cleared too, so a
- * model killed while flanked cannot report a stale state).
+ * Dead models never flank and are never flanked (their bit is cleared too).
  */
 export function markPF1eFlanking(opts: PF1eFlankingPassOptions): PF1eFlankingPassResult {
   const { pool, grid, cellFeet } = opts;
+  const count = pool.count;
   const isEnemy =
     opts.isEnemy ??
     ((a: number, b: number) =>
       (opts.factionByUnitIdx[a] ?? null) !== (opts.factionByUnitIdx[b] ?? null));
-  const reachOf = (unitIdx: number): number => {
-    const reach = opts.reachSquaresByUnitIdx[unitIdx] ?? 1;
-    return Number.isFinite(reach) && reach > 0 ? Math.floor(reach) : 0;
-  };
 
-  // The largest threat radius on the field, in feet: one query per model finds
-  // every candidate that could possibly threaten it, whichever unit it is from.
-  //
-  // The radius is measured in *squares* by the rules, and AoN 102's threatened
-  // squares include the diagonals — so the Euclidean bound has to cover a
-  // diagonal stride of `reach`, i.e. `reach × √2` cells. (A 1-square reach
-  // threatens the four diagonal neighbours at 7.07 ft, half again the 5 ft a
-  // bounds-equal-to-reach query would return; that is how the first version of
-  // this pass missed every corner flank.) `Math.ceil` keeps the bound integral
-  // and generous; the exact test is still the threatened set, not the query.
+  const numUnits = Math.max(
+    opts.factionByUnitIdx.length,
+    opts.reachSquaresByUnitIdx.length,
+    opts.sizeByUnitIdx?.length ?? 0,
+  );
+  const unitReach = new Int32Array(Math.max(1, numUnits));
+  const unitCanFlank = new Uint8Array(Math.max(1, numUnits));
   let widestReachSquares = 0;
-  for (const reach of opts.reachSquaresByUnitIdx) {
-    if (Number.isFinite(reach) && reach > widestReachSquares) {
-      widestReachSquares = Math.floor(reach);
+
+  for (let u = 0; u < numUnits; u++) {
+    const raw = opts.reachSquaresByUnitIdx[u] ?? 1;
+    const r = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+    unitReach[u] = r;
+    if (r > widestReachSquares) widestReachSquares = r;
+    if (r > 0 && canFlank({ reachSquares: r, size: opts.sizeByUnitIdx?.[u] ?? null })) {
+      unitCanFlank[u] = 1;
     }
   }
-  const queryFeet = Math.ceil(widestReachSquares * Math.SQRT2) * cellFeet;
 
-  const living = (index: number): boolean =>
-    ((pool.status[index] ?? 0) & ModelStatus.dead) === 0;
-
-  const threatCache = new Map<number, Threatening | null>();
-  const threatening = (index: number): Threatening | null => {
-    const cached = threatCache.get(index);
-    if (cached !== undefined) return cached;
-    const unitIdx = pool.unitIdx[index] ?? 0;
-    const reachSquares = reachOf(unitIdx);
-    let entry: Threatening | null = null;
-    if (living(index) && reachSquares > 0) {
-      // `?? null` keeps `exactOptionalPropertyTypes` happy: an absent table row and an
-      // authored "no size" both mean "no exclusion to apply" to `canFlank`.
-      const size = opts.sizeByUnitIdx?.[unitIdx] ?? null;
-      if (canFlank({ reachSquares, size })) {
-        const cells = [cellAt(pool.x[index] ?? 0, pool.y[index] ?? 0, cellFeet)];
-        const threatened = threatenedCells({ footprint: cells, reachSquares });
-        const threatKeys = new Set<number>(threatened.map((c) => cellKey(c.col, c.row)));
-        entry = {
-          index,
-          unitIdx,
-          cells,
-          threatened,
-          threatKeys,
-          participant: {
-            id: String(pool.id[index] ?? index),
-            cells,
-            reachSquares,
-            size,
-            threatened,
-          },
-        };
-      }
-    }
-    threatCache.set(index, entry);
-    return entry;
-  };
-
+  const pfCol = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
   const flankedDefenders: number[] = [];
   const pairs: PF1eFlankingPair[] = [];
 
-  for (let d = 0; d < pool.count; d++) {
-    const pfCol = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
-    const pf = pfCol?.[d] ?? 0;
-    if ((pf & PF1E_STATUS_FLANKED) !== 0 && pfCol) pfCol[d] = pf & ~PF1E_STATUS_FLANKED;
-    if (!living(d)) continue;
-    const defenderUnitIdx = pool.unitIdx[d] ?? 0;
-    const defenderCell = cellAt(pool.x[d] ?? 0, pool.y[d] ?? 0, cellFeet);
-    const defenderKey = cellKey(defenderCell.col, defenderCell.row);
-
-    // Candidates: living enemies whose threatened set covers the defender's square.
-    // `visitPoint` (not `queryPoint`): the pass walks the hits without needing them
-    // nearest-first, so neither the result array nor the per-hit objects nor the
-    // sort are worth allocating 10 000 times per turn.
-    const candidates: Threatening[] = [];
-    grid.visitPoint(pool.x[d] ?? 0, pool.y[d] ?? 0, queryFeet, pool, (a) => {
-      // No `living(a)` here: `visitPoint` is given the pool, so it already skips
-      // dead and hidden slots — re-testing cost ~7% of a turn at 10 000 models
-      // (V07) for a guarantee the traversal just gave us.
-      if (a === d) return;
-      if (!isEnemy(pool.unitIdx[a] ?? 0, defenderUnitIdx)) return;
-      const attacker = threatening(a);
-      if (attacker === null) return;
-      if (!attacker.threatKeys.has(defenderKey)) return;
-      candidates.push(attacker);
-    });
-    if (candidates.length < 2) continue;
-
-    // AoN 183's pair test, through the shared rule — never a second copy of it.
-    let decided: PF1eFlankingPair | null = null;
-    for (let i = 0; i < candidates.length && decided === null; i++) {
-      const attacker = candidates[i];
-      if (attacker === undefined) continue;
-      const allies = candidates.filter((_, j) => j !== i).map((c) => c.participant);
-      const result = resolveFlanking({
-        defender: { id: String(d), cells: [defenderCell] },
-        attacker: attacker.participant,
-        allies,
-      });
-      if (!result.flanked) continue;
-      const flankerId = result.flankerIds[0];
-      const partner = candidates.find((c) => c.participant.id === flankerId);
-      if (partner === undefined) continue;
-      decided = { defender: d, flankers: [attacker.index, partner.index] };
+  if (widestReachSquares <= 0 || count === 0) {
+    if (pfCol) {
+      for (let d = 0; d < count; d++) {
+        const pf = pfCol[d] ?? 0;
+        if ((pf & PF1E_STATUS_FLANKED) !== 0) pfCol[d] = pf & ~PF1E_STATUS_FLANKED;
+      }
     }
-    if (decided === null) continue;
+    return { flankedDefenders, pairs };
+  }
+
+  const queryFeet = Math.ceil(widestReachSquares * Math.SQRT2) * cellFeet;
+  const invCell = 1 / cellFeet;
+  const modelCols = new Int32Array(count);
+  const modelRows = new Int32Array(count);
+  const xs = pool.x;
+  const ys = pool.y;
+  const status = pool.status;
+  const unitIdxArr = pool.unitIdx;
+
+  for (let i = 0; i < count; i++) {
+    if (pfCol) {
+      const pf = pfCol[i] ?? 0;
+      if ((pf & PF1E_STATUS_FLANKED) !== 0) pfCol[i] = pf & ~PF1E_STATUS_FLANKED;
+    }
+    if (((status[i] ?? 0) & ModelStatus.dead) === 0) {
+      modelCols[i] = Math.floor((xs[i] ?? 0) * invCell);
+      modelRows[i] = Math.floor((ys[i] ?? 0) * invCell);
+    }
+  }
+
+  const candBuf = new Int32Array(Math.min(count, 512));
+  const defSpace: [PF1eCell] = [{ col: 0, row: 0 }];
+  const cellA: PF1eCell = { col: 0, row: 0 };
+  const cellB: PF1eCell = { col: 0, row: 0 };
+
+  for (let d = 0; d < count; d++) {
+    if (((status[d] ?? 0) & ModelStatus.dead) !== 0) continue;
+    const defenderUnitIdx = unitIdxArr[d] ?? 0;
+    const dCol = modelCols[d] ?? 0;
+    const dRow = modelRows[d] ?? 0;
+    defSpace[0].col = dCol;
+    defSpace[0].row = dRow;
+
+    let candLen = 0;
+    let extraCands: number[] | null = null;
+
+    grid.visitPoint(xs[d] ?? 0, ys[d] ?? 0, queryFeet, pool, (a) => {
+      if (a === d) return;
+      const aUnit = unitIdxArr[a] ?? 0;
+      if (!isEnemy(aUnit, defenderUnitIdx)) return;
+      if ((unitCanFlank[aUnit] ?? 0) === 0) return;
+      const reach = unitReach[aUnit] ?? 0;
+      cellA.col = modelCols[a] ?? 0;
+      cellA.row = modelRows[a] ?? 0;
+      const distSq = squareDistance(cellA, defSpace[0]);
+      if (distSq <= 0 || distSq > reach) return;
+      if (candLen < candBuf.length) {
+        candBuf[candLen++] = a;
+      } else {
+        if (!extraCands) extraCands = Array.from(candBuf);
+        extraCands.push(a);
+        candLen++;
+      }
+    });
+
+    if (candLen < 2) continue;
+
+    let flanker0 = -1;
+    let flanker1 = -1;
+    for (let i = 0; i < candLen && flanker0 < 0; i++) {
+      const aIdx = extraCands ? (extraCands[i] ?? 0) : (candBuf[i] ?? 0);
+      cellA.col = modelCols[aIdx] ?? 0;
+      cellA.row = modelRows[aIdx] ?? 0;
+      for (let j = 0; j < candLen; j++) {
+        if (i === j) continue;
+        const bIdx = extraCands ? (extraCands[j] ?? 0) : (candBuf[j] ?? 0);
+        cellB.col = modelCols[bIdx] ?? 0;
+        cellB.row = modelRows[bIdx] ?? 0;
+        if (segmentFlanks(defSpace, cellA, cellB)) {
+          flanker0 = aIdx;
+          flanker1 = bIdx;
+          break;
+        }
+      }
+    }
+
+    if (flanker0 < 0) continue;
 
     flankedDefenders.push(d);
-    pairs.push(decided);
-    {
-      const pfCol2 = pool.sys.pfCondition as unknown as Uint32Array | Int32Array | undefined;
-      if (pfCol2) pfCol2[d] = (pfCol2[d] ?? 0) | PF1E_STATUS_FLANKED;
+    pairs.push({ defender: d, flankers: [flanker0, flanker1] });
+    if (pfCol) {
+      pfCol[d] = (pfCol[d] ?? 0) | PF1E_STATUS_FLANKED;
     }
   }
 

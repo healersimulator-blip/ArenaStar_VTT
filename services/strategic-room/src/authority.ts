@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 import {
   reject,
@@ -5,7 +6,8 @@ import {
   type Receipt,
 } from "../../../src/core/strategicRoom/protocol";
 import { BattleView } from "./battle";
-import { PostgresRoom, StaleAuthority } from "./postgres";
+import type { PostgresRoom } from "./postgres";
+import { StaleAuthority } from "./postgres";
 import type { Scenario } from "./scenario";
 import type { Control, Frozen, LiveRoomState, Member, Result, RoomRecord } from "./state";
 
@@ -16,7 +18,11 @@ export type ResolveJob = (job: Frozen, signal: AbortSignal) => Promise<Result>;
 export function runWorker(job: Frozen, signal: AbortSignal): Promise<Result> {
   return new Promise((resolve, reject) => {
     signal.throwIfAborted();
-    const worker = new Worker(new URL("./worker.mjs", import.meta.url), {
+    const localWorker = new URL("./worker.mjs", import.meta.url);
+    const workerUrl = existsSync(localWorker)
+      ? localWorker
+      : new URL("../dist/server/worker.mjs", import.meta.url);
+    const worker = new Worker(workerUrl, {
       workerData: job,
     });
     let settled = false;

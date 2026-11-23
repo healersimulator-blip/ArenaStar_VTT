@@ -393,23 +393,29 @@ export function compilePF1eProfile(id: number, raw: RawPF1eProfile): PF1eUnitPro
  * same numbers must produce the same key, so equal units share one registry slot.
  */
 export function pf1eProfileKey(raw: RawPF1eProfile): string {
-  const keys = Object.keys(raw)
-    .filter((k) => k !== "name")
-    .sort();
-  const parts: string[] = [];
-  for (const k of keys) {
-    const v = (raw as unknown as Record<string, unknown>)[k];
-    if (v === null || v === undefined || typeof v === "number" || typeof v === "boolean" || typeof v === "string") {
-      parts.push(`${k}=${String(v)}`);
-    } else {
-      const inner = Object.keys(v as object)
-        .sort()
-        .map((ik) => `${ik}=${String((v as Record<string, unknown>)[ik])}`)
-        .join(",");
-      parts.push(`${k}{${inner}}`);
-    }
-  }
-  return parts.join("|");
+  const w = raw.weapon;
+  const b = w?.bonusDice;
+  const dr = raw.dr;
+  return (
+    `${raw.bab ?? ""}|${raw.strMod ?? ""}|${raw.dexMod ?? ""}|${raw.conMod ?? ""}|` +
+    `${raw.intMod ?? ""}|${raw.wisMod ?? ""}|${raw.chaMod ?? ""}|${raw.sizeMod ?? ""}|` +
+    `${raw.specialSizeMod ?? ""}|${raw.ac ?? ""}|${raw.touchAc ?? ""}|${raw.flatFootedAc ?? ""}|` +
+    `${raw.armorBonus ?? ""}|${raw.shieldBonus ?? ""}|${raw.naturalArmor ?? ""}|` +
+    `${raw.dodgeBonus ?? ""}|${raw.miscAc ?? ""}|${raw.hp ?? ""}|${raw.cmd ?? ""}|${raw.cmb ?? ""}|` +
+    `${raw.fort ?? ""}|${raw.ref ?? ""}|${raw.will ?? ""}|${raw.sr ?? ""}|` +
+    `${dr ? `${dr.typeFlags},${dr.val}` : ""}|${raw.casterLevel ?? ""}|` +
+    `${raw.castingStatMod ?? ""}|${raw.spellPenetration ?? ""}|${raw.maxAoos ?? ""}|` +
+    `${raw.fastHealingVal ?? ""}|${raw.regenerationVal ?? ""}|${raw.regenerationSuppressFlags ?? ""}|` +
+    `${raw.hasTrample ?? ""}|${raw.trampleDc ?? ""}|${raw.trampleDamageDiceCount ?? ""}|${raw.trampleDamageDiceSides ?? ""}|` +
+    (w
+      ? `${w.damageDiceCount ?? ""},${w.damageDiceSides ?? ""},${w.damageMod ?? ""},` +
+        `${w.critThreatMin ?? ""},${w.critMultiplier ?? ""},${w.isFirearm ?? ""},${w.isEarlyFirearm ?? ""},` +
+        `${w.misfireMin ?? ""},${w.rangeIncrement ?? ""},${w.maxIncrements ?? ""},${w.enhancementBonus ?? ""},` +
+        `${w.material ?? ""},${w.damageType ?? ""},${w.elementalType ?? ""},${w.isMagic ?? ""},` +
+        `${w.isRanged ?? ""},${w.isThrown ?? ""},${w.handedness ?? ""},${w.improvedCritical ?? ""},` +
+        `${w.alignmentFlags ?? ""},${b ? `${b.count}:${b.sides}:${b.typeFlags ?? ""}:${b.precision ?? ""}` : ""}`
+      : "")
+  );
 }
 
 /**

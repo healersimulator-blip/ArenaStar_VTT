@@ -20,13 +20,15 @@ import {
   type HostedRollTable,
   type HostedTemplate,
   type Point,
+  type StrategicFxCoalescence,
   type StrategicItemEffect,
+  type StrategicModelStats,
   type StrategicSpellId,
 } from "./protocol";
 
 export const MAX_COMMANDERS = 500;
-export const MAX_UNITS_PER_COMMANDER = 25;
-export const MAX_UNITS = 5_000;
+export const MAX_UNITS_PER_COMMANDER = 100;
+export const MAX_UNITS = 50_000;
 export const MAX_MODELS = 50_000;
 /** Supports up to 5,000 × 5,000 five-foot grid squares (25,000 × 25,000 ft). */
 export const MAP_SPAN = 25_000;
@@ -80,6 +82,9 @@ const ALLOWED_STAT_KEYS = new Set([
   "weaponMisfireMin",
   "weaponRangeIncrement",
   "weaponMaxIncrements",
+  "weaponReachFt",
+  "preciseShot",
+  "holdFire1st",
   "weaponHandedness",
   "weaponImprovedCritical",
   "weaponDamageDiceCount",
@@ -156,6 +161,8 @@ export type ScenarioUnit = {
   items?: ScenarioUnitItem[];
   /** Canonical PF1e conditions active on the unit at launch. */
   conditions?: string[];
+  /** Veteran per-soldier C45 combat statistics carried into this battle (indexed by initial slot). */
+  modelStats?: StrategicModelStats[];
   /** Legacy projected regular PF1e Entangle spell resource; preserved for compatibility. */
   spellcasting?: {
     actorId: string;
@@ -267,6 +274,10 @@ export type Scenario = {
   content?: ScenarioContent;
   /** Which action classes may be published as cards; per-model cards default off for scale. */
   actionCards?: { playerCharacters: boolean; units: boolean; models: boolean };
+  /** Opt-in C45 per-model combat statistics tracking & cross-battle persistence for this scene. */
+  trackModelStats?: boolean;
+  /** Scene-level VFX & spatial audio coalescence aggressiveness (`extreme` default when omitted). */
+  fxCoalescence?: StrategicFxCoalescence;
   /** Active persistent spell areas that influence hosted movement. */
   hazards?: SpellHazard[];
   factions: Array<{ id: string; name: string; color: string }>;
@@ -313,12 +324,17 @@ export function parseScenario(raw: unknown): Scenario {
       "content",
       "hazards",
       "actionCards",
+      "trackModelStats",
+      "fxCoalescence",
       "factions",
       "commanders",
     ) ||
     raw.format !== "arenastar-strategic-scenario-v1" ||
     !idName(raw.name) ||
-    !integer(raw.seed, 0, 0xffff_ffff)
+    !integer(raw.seed, 0, 0xffff_ffff) ||
+    (raw.trackModelStats !== undefined && typeof raw.trackModelStats !== "boolean") ||
+    (raw.fxCoalescence !== undefined &&
+      !["none", "low", "balanced", "high", "extreme"].includes(String(raw.fxCoalescence)))
   ) {
     throw new Error(
       "Expected an arenastar-strategic-scenario-v1 export; see the supported fields in the room README.",
@@ -1138,6 +1154,46 @@ export function parseScenario(raw: unknown): Scenario {
           throw new Error("Invalid projected unit conditions.");
         conditions = u.conditions.map((cond) => cond.trim());
       }
+      let modelStats: StrategicModelStats[] | undefined;
+      if (record(u) && u.modelStats !== undefined) {
+        if (!Array.isArray(u.modelStats) || u.modelStats.length > 120)
+          throw new Error("Invalid projected soldier combat statistics.");
+        modelStats = u.modelStats.map((ms): StrategicModelStats => {
+          if (
+            !record(ms) ||
+            !only(
+              ms,
+              "kills",
+              "damageDealt",
+              "damageTaken",
+              "damageReduced",
+              "healed",
+              "hits",
+              "misses",
+              "crits",
+            ) ||
+            !integer(ms.kills, 0, 1_000_000) ||
+            !integer(ms.damageDealt, 0, 100_000_000) ||
+            (ms.damageTaken !== undefined && !integer(ms.damageTaken, 0, 100_000_000)) ||
+            (ms.damageReduced !== undefined && !integer(ms.damageReduced, 0, 100_000_000)) ||
+            (ms.healed !== undefined && !integer(ms.healed, 0, 100_000_000)) ||
+            (ms.hits !== undefined && !integer(ms.hits, 0, 10_000_000)) ||
+            (ms.misses !== undefined && !integer(ms.misses, 0, 10_000_000)) ||
+            (ms.crits !== undefined && !integer(ms.crits, 0, 10_000_000))
+          )
+            throw new Error("Invalid projected soldier combat record.");
+          return {
+            kills: ms.kills,
+            damageDealt: ms.damageDealt,
+            ...(ms.damageTaken ? { damageTaken: ms.damageTaken } : {}),
+            ...(ms.damageReduced ? { damageReduced: ms.damageReduced } : {}),
+            ...(ms.healed ? { healed: ms.healed } : {}),
+            ...(ms.hits ? { hits: ms.hits } : {}),
+            ...(ms.misses ? { misses: ms.misses } : {}),
+            ...(ms.crits ? { crits: ms.crits } : {}),
+          };
+        });
+      }
       if (
         !record(u) ||
         !only(
@@ -1156,6 +1212,7 @@ export function parseScenario(raw: unknown): Scenario {
           "spells",
           "items",
           "conditions",
+          "modelStats",
           "spellcasting",
         ) ||
         !textId(u.id) ||
@@ -1191,6 +1248,7 @@ export function parseScenario(raw: unknown): Scenario {
         ...(spells?.length ? { spells } : {}),
         ...(items?.length ? { items } : {}),
         ...(conditions?.length ? { conditions } : {}),
+        ...(modelStats?.length ? { modelStats } : {}),
         ...(spellcasting ? { spellcasting } : {}),
       };
     });
@@ -1246,6 +1304,10 @@ export function parseScenario(raw: unknown): Scenario {
     ...(content ? { content } : {}),
     ...(hazards?.length ? { hazards } : {}),
     ...(actionCards ? { actionCards } : {}),
+    ...(raw.trackModelStats === true ? { trackModelStats: true } : {}),
+    ...(raw.fxCoalescence !== undefined && raw.fxCoalescence !== "extreme"
+      ? { fxCoalescence: raw.fxCoalescence as StrategicFxCoalescence }
+      : {}),
     factions,
     commanders,
   };

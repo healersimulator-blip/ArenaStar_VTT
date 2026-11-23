@@ -15,6 +15,7 @@
   import type { ClientEvents } from "../../client/sync";
   import type { EventBus } from "../../core/events";
   import type { SceneDocument, SceneGrid, UserDocument } from "../../core/documents";
+  import type { FactionDocument } from "../../core/strategic";
   import {
     defaultOpeningSightPolicy,
     openingSightPolicyError,
@@ -146,6 +147,10 @@
     strategicSimultaneous: boolean;
     /** G-04/D-223 — Combat_Resolver_5 fidelity: units without orders march & engage. */
     strategicDoctrine: boolean;
+    strategicSpatialCombat: boolean;
+    strategicAutonomyGlobal: boolean;
+    strategicAutonomyFactions: Record<string, boolean>;
+    strategicUnitZoomOutTokens: boolean;
     /** G-04/D-223 — Combat_Resolver_5 fidelity: wide fronts wrap enemy flanks. */
     strategicEnvelop: boolean;
     /** G-04/D-223 — Combat_Resolver_5 fidelity: B12 army initiative (d20 + modifier). */
@@ -169,6 +174,10 @@
     autoResolveAoos: true,
     strategicSimultaneous: false,
     strategicDoctrine: false,
+    strategicSpatialCombat: false,
+    strategicAutonomyGlobal: false,
+    strategicAutonomyFactions: {},
+    strategicUnitZoomOutTokens: false,
     strategicEnvelop: false,
     strategicArmyInitiative: false,
     rollHighlightFadeSec: 4,
@@ -201,6 +210,7 @@
   let sceneTokens = $state<Array<{ id: string; name: string; party: boolean }>>([]);
   /** §2.3/G-25 (D-262): the players this GM can preview the table as. */
   let viewAsChoices = $state<{ id: string; name: string }[]>([]);
+  let factions = $state<Array<{ id: string; name: string }>>([]);
   /** §3.2 the agent rows (re-read on every op, because the grant is a document). */
   let agentRows = $state<ReturnType<AgentManager["list"]>>([]);
   let agentAudit = $state<AgentAuditEntry[]>([]);
@@ -247,6 +257,17 @@
       party:
         (t.flags as { core?: { party?: unknown } } | undefined)?.core?.party === true,
     }));
+    factions = (client.store.getAll("factions") as readonly FactionDocument[]).map((f) => ({
+      id: f._id,
+      name: f.name || f._id,
+    }));
+    const rawAutoFactions = settings["strategicAutonomyFactions"];
+    const cleanAutoFactions: Record<string, boolean> = {};
+    if (typeof rawAutoFactions === "object" && rawAutoFactions !== null && !Array.isArray(rawAutoFactions)) {
+      for (const [fk, fv] of Object.entries(rawAutoFactions as Record<string, unknown>)) {
+        if (typeof fv === "boolean") cleanAutoFactions[fk] = fv;
+      }
+    }
     rules = {
       secondsPerRound: secondsPerRoundOf(settings),
       detectionMultiplier:
@@ -258,6 +279,10 @@
       autoResolveAoos: autoResolveAoosOf(settings),
       strategicSimultaneous: strategicSimultaneousOf(settings),
       strategicDoctrine: settings.strategicDoctrine === true,
+      strategicSpatialCombat: settings.strategicSpatialCombat === true,
+      strategicAutonomyGlobal: settings.strategicAutonomyGlobal === true,
+      strategicAutonomyFactions: cleanAutoFactions,
+      strategicUnitZoomOutTokens: settings.strategicUnitZoomOutTokens === true,
       strategicEnvelop: settings.strategicEnvelop === true,
       strategicArmyInitiative: settings.strategicArmyInitiative === true,
       rollHighlightFadeSec: rollHighlightFadeSecOf(settings),
@@ -1024,6 +1049,80 @@
         }}
       />
       Combat_Resolver_5 doctrine (units without orders march &amp; engage)
+    </label>
+    <label>
+      <input
+        data-world-strategic-spatial-combat
+        type="checkbox"
+        checked={rules.strategicSpatialCombat}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            strategicSpatialCombat: (e.target as HTMLInputElement).checked,
+          };
+          applyRules({ strategicSpatialCombat: rules.strategicSpatialCombat });
+        }}
+      />
+      Per-model spatial melee/ranged (5-ft step, stride + AoO, volley cover)
+    </label>
+    <label>
+      <input
+        data-world-strategic-autonomy-global
+        type="checkbox"
+        checked={rules.strategicAutonomyGlobal}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            strategicAutonomyGlobal: (e.target as HTMLInputElement).checked,
+          };
+          applyRules({ strategicAutonomyGlobal: rules.strategicAutonomyGlobal });
+        }}
+      />
+      Global unit autonomy (idle formations act automatically)
+    </label>
+    {#if factions.length > 0}
+      <div class="faction-autonomy" data-world-strategic-autonomy-factions>
+        {#each factions as f (f.id)}
+          {@const fVal = rules.strategicAutonomyFactions[f.id]}
+          <label>
+            Faction autonomy ({f.name})
+            <select
+              data-world-strategic-autonomy-faction={f.id}
+              value={fVal === true ? "on" : fVal === false ? "off" : "inherit"}
+              onchange={(e) => {
+                const v = (e.target as HTMLSelectElement).value;
+                const next: Record<string, boolean> = {};
+                for (const [k, b] of Object.entries(rules.strategicAutonomyFactions)) {
+                  if (k !== f.id) next[k] = b;
+                }
+                if (v === "on") next[f.id] = true;
+                else if (v === "off") next[f.id] = false;
+                rules = { ...rules, strategicAutonomyFactions: next };
+                applyRules({ strategicAutonomyFactions: next });
+              }}
+            >
+              <option value="inherit">inherit global</option>
+              <option value="on">autonomous</option>
+              <option value="off">manual only</option>
+            </select>
+          </label>
+        {/each}
+      </div>
+    {/if}
+    <label>
+      <input
+        data-world-strategic-unit-zoom-out-tokens
+        type="checkbox"
+        checked={rules.strategicUnitZoomOutTokens}
+        onchange={(e) => {
+          rules = {
+            ...rules,
+            strategicUnitZoomOutTokens: (e.target as HTMLInputElement).checked,
+          };
+          applyRules({ strategicUnitZoomOutTokens: rules.strategicUnitZoomOutTokens });
+        }}
+      />
+      Show unit-sized token portrait when zoomed out (if unit has token art)
     </label>
     <label>
       <input

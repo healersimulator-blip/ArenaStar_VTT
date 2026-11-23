@@ -325,9 +325,40 @@
           </select>
         </label>
       </div>
-      {#if scene.flags?.core?.scale === "strategic" && onOpenCampaignBattle}
+      {#if scene.flags?.core?.scale === "strategic"}
         <div class="row">
-          <button type="button" data-scene-open-campaign onclick={() => scene && onOpenCampaignBattle(scene._id)}>Multiplayer battle…</button>
+          <label class="checkbox">
+            <input
+              type="checkbox"
+              data-scene-strategic-model-stats
+              checked={scene.flags?.core?.strategicModelStats === true}
+              onchange={(e) =>
+                submit({
+                  "flags.core.strategicModelStats": (e.target as HTMLInputElement).checked,
+                })}
+            />
+            Persistent soldier stats (kills &amp; damage across battles)
+          </label>
+          <label>
+            VFX coalescence
+            <select
+              data-scene-strategic-fx-coalescence
+              value={scene.flags?.core?.strategicFxCoalescence ?? "extreme"}
+              onchange={(e) =>
+                submit({
+                  "flags.core.strategicFxCoalescence": (e.target as HTMLSelectElement).value,
+                })}
+            >
+              <option value="none">None (1:1)</option>
+              <option value="low">Low (4×)</option>
+              <option value="balanced">Balanced (16×)</option>
+              <option value="high">High (64×)</option>
+              <option value="extreme">Extreme (500:1)</option>
+            </select>
+          </label>
+          {#if onOpenCampaignBattle}
+            <button type="button" data-scene-open-campaign onclick={() => scene && onOpenCampaignBattle(scene._id)}>Multiplayer battle…</button>
+          {/if}
         </div>
       {/if}
       <label class="slider">

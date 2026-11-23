@@ -1,14 +1,16 @@
 import { MarchReservation } from "./marchReservation";
 import { gzipSync } from "node:zlib";
-import { firstMoveBlock } from "../../../src/core/detection";
+import { firstMoveBlock, hasLineOfEffect } from "../../../src/core/detection";
 import { ModelStatus, type Order } from "../../../src/core/strategic";
 import {
   STRATEGIC_CODEC,
   STRATEGIC_SPELL_CATALOG,
   type HostedFxCue,
   type Point,
+  type StrategicModelStats,
   type StrategicSpellId,
 } from "../../../src/core/strategicRoom/protocol";
+import type { PF1eModelStatsObserver } from "../../../src/packages/pf1e/combatEngine";
 import {
   frozenBlastSpellAction,
   frozenItemUseAction,
@@ -17,7 +19,16 @@ import {
   projectSpellHazardAction,
 } from "../../../src/core/strategicRoom/pf1eActionProjection";
 import { createMassBattlePf1e } from "../../../src/packages/massBattlePf1e";
+import { planUnitModelMoves } from "../../../src/packages/pf1e/formationMovement";
 import { PF1E_MODEL_SCHEMA } from "../../../src/packages/pf1e/schema";
+import {
+  pointInSpellHazard,
+  spellHazardActive,
+} from "../../../src/core/strategicRoom/hazardAvoidance";
+import {
+  aggregateStrategicFxCues,
+  type RawSimCombatEvent,
+} from "../../../src/core/strategicRoom/strategicFx";
 import {
   canonicalPoolHash,
   decodeSimSnapshot,
@@ -72,6 +83,20 @@ function findUnitSpell(unit: ScenarioUnit | undefined, spellId: StrategicSpellId
       castingAbilityMod: unit.spellcasting.castingAbilityMod,
       slots: unit.spellcasting.entangleSlots,
     };
+  }
+  return null;
+}
+
+function unitLeadFromPool(
+  pool: ReturnType<typeof checkpointPool>,
+  range: [number, number] | null | undefined,
+): Point | null {
+  if (!range) return null;
+  const [start, end] = range;
+  for (let i = start; i < end && i < pool.count; i++) {
+    if (((pool.status[i] ?? 0) & ModelStatus.dead) === 0) {
+      return { x: pool.x[i] ?? 0, y: pool.y[i] ?? 0 };
+    }
   }
   return null;
 }
@@ -184,8 +209,11 @@ export function resolveFrozen(job: Frozen): Result {
 
   const startPool = checkpointPool(job.start);
   const startCentroids = new Map<string, Point | null>();
+  const startLeads = new Map<string, Point | null>();
   scenarioUnits.forEach((u, idx) => {
-    startCentroids.set(u.id, unitCentroidFromPool(startPool, job.start.units[idx]?.range));
+    const r = job.start.units[idx]?.range;
+    startCentroids.set(u.id, unitCentroidFromPool(startPool, r));
+    startLeads.set(u.id, unitLeadFromPool(startPool, r));
   });
 
   const fxCues: HostedFxCue[] = [];
@@ -269,6 +297,7 @@ export function resolveFrozen(job: Frozen): Result {
     ...(job.live ? { live: job.live } : {}),
     extras: { unitResources: nextResources },
     turnId: job.turnId,
+    unitPositions: startCentroids,
   });
 
   const carriedHazards = (job.start.hazards ?? []).filter(
@@ -313,12 +342,16 @@ export function resolveFrozen(job: Frozen): Result {
     spellsMap[order.spellId] = Math.max(0, availSlots - 1);
 
     const catalog = STRATEGIC_SPELL_CATALOG[order.spellId];
+    const effectiveOrigin =
+      catalog.shape === "cone" || catalog.shape === "line"
+        ? (startLeads.get(unitId) ?? startCentroids.get(unitId) ?? order.origin)
+        : order.origin;
     const saveDc = 10 + catalog.level + caster.castingAbilityMod;
     fxCues.push({
       id: `fx-spell-${job.turnId}-${unitId}`,
       turnId: job.turnId,
       preset: order.spellId,
-      at: order.origin,
+      at: effectiveOrigin,
       ...(order.dir ? { dir: order.dir } : {}),
       radius: catalog.radius,
       soundCue: catalog.kind === "blast" ? "blast" : "vines",
@@ -336,7 +369,7 @@ export function resolveFrozen(job: Frozen): Result {
         itemId: caster.itemId,
         unitId,
         spellId: order.spellId,
-        originFeet: order.origin,
+        originFeet: effectiveOrigin,
         saveDc,
         startsTurn: job.turnId,
         casterLevel: caster.casterLevel,
@@ -357,11 +390,81 @@ export function resolveFrozen(job: Frozen): Result {
         actorId: caster.actorId ?? unitId,
         itemId: caster.itemId,
         spellId: order.spellId,
-        origin: order.origin,
+        origin: effectiveOrigin,
         ...(order.dir ? { dir: order.dir } : {}),
         saveDc,
       });
     }
+  }
+
+  // Precompute post-move centroids for move orders via two-tier `planUnitModelMoves`
+  // so readied reactions check actual wheeled/micro-steered reach and line of effect.
+  const difficultSet = new Set<string>();
+  for (const c of ctx.terrain?.difficultCells ?? []) {
+    difficultSet.add(`${c.col},${c.row}`);
+  }
+  const activeHazardsForPreview = [
+    ...(job.scenario.hazards ?? []),
+    ...carriedHazards,
+    ...hazardCasts.map((c) => c.hazard),
+  ].filter((h) => spellHazardActive(h, job.turnId));
+  for (const hazard of activeHazardsForPreview) {
+    if (hazard.radius < 2.5) continue;
+    const minC = Math.floor((hazard.at.x - hazard.radius) / 5);
+    const maxC = Math.floor((hazard.at.x + hazard.radius) / 5);
+    const minR = Math.floor((hazard.at.y - hazard.radius) / 5);
+    const maxR = Math.floor((hazard.at.y + hazard.radius) / 5);
+    for (let c = minC; c <= maxC; c++) {
+      for (let r = minR; r <= maxR; r++) {
+        if (pointInSpellHazard(hazard, { x: (c + 0.5) * 5, y: (r + 0.5) * 5 })) {
+          difficultSet.add(`${c},${r}`);
+        }
+      }
+    }
+  }
+  const unitViewById = new Map(units.map((u) => [u.id, u]));
+  const resolvedMoveCentroids = new Map<string, Point>();
+  for (const { unitId, order } of job.orders) {
+    if (order.kind !== "move") continue;
+    const uView = unitViewById.get(unitId);
+    const startCenter = startCentroids.get(unitId);
+    const startLead = startLeads.get(unitId);
+    if (!uView || !startCenter || !startLead) continue;
+    const movePts = uView.type === "cavalry" ? 8 : uView.type === "artillery" ? 2 : uView.type === "hero" ? 6 : 4;
+    const preview = planUnitModelMoves({
+      pool: startPool,
+      unit: uView,
+      path: order.path,
+      pace: order.pace,
+      movePoints: movePts,
+      cellFeet: 5,
+      reform: order.reform === true,
+      difficult: difficultSet,
+      difficultIncludesHazards: true,
+      hazards: activeHazardsForPreview,
+      bounds: job.scenario.bounds,
+      quantize: true,
+      ...(ctx.walls.x1.length > 0
+        ? {
+            blockAt: (fx: number, fy: number, tx: number, ty: number) =>
+              firstMoveBlock(fx, fy, tx, ty, ctx.walls),
+          }
+        : {}),
+    });
+    if (!preview.ok || preview.plan.outcomes.length === 0) {
+      resolvedMoveCentroids.set(unitId, startCenter);
+      continue;
+    }
+    let sx = 0;
+    let sy = 0;
+    for (const o of preview.plan.outcomes) {
+      sx += o.to.x;
+      sy += o.to.y;
+    }
+    resolvedMoveCentroids.set(unitId, {
+      x: sx / preview.plan.outcomes.length,
+      y: sy / preview.plan.outcomes.length,
+    });
   }
 
   // 3. Convert orders (including readied reactions!) into RulesModule `Order`s
@@ -387,7 +490,8 @@ export function resolveFrozen(job: Frozen): Result {
           if (
             order.trigger === "enemyCasts" &&
             other.order.kind === "cast" &&
-            dist <= Math.max(rangeLimit, 120)
+            dist <= Math.max(rangeLimit, 120) &&
+            hasLineOfEffect(myAt.x, myAt.y, otherAt.x, otherAt.y, ctx.walls)
           ) {
             triggeredTarget = { id: other.unitId, name: otherScen.name, at: otherAt };
             break;
@@ -398,9 +502,12 @@ export function resolveFrozen(job: Frozen): Result {
           ) {
             const endPt =
               other.order.kind === "move"
-                ? (other.order.path[other.order.path.length - 1] ?? otherAt)
+                ? (resolvedMoveCentroids.get(other.unitId) ?? otherAt)
                 : otherAt;
-            if (Math.hypot(endPt.x - myAt.x, endPt.y - myAt.y) <= rangeLimit) {
+            if (
+              Math.hypot(endPt.x - myAt.x, endPt.y - myAt.y) <= rangeLimit &&
+              hasLineOfEffect(myAt.x, myAt.y, endPt.x, endPt.y, ctx.walls)
+            ) {
               triggeredTarget = { id: other.unitId, name: otherScen.name, at: endPt };
               break;
             }
@@ -409,7 +516,8 @@ export function resolveFrozen(job: Frozen): Result {
             order.trigger === "allyAttacked" &&
             other.order.kind === "attack" &&
             unitFactionMap.get(other.order.targetUnitId) === myFaction &&
-            dist <= Math.max(rangeLimit, 80)
+            dist <= Math.max(rangeLimit, 80) &&
+            hasLineOfEffect(myAt.x, myAt.y, otherAt.x, otherAt.y, ctx.walls)
           ) {
             triggeredTarget = { id: other.unitId, name: otherScen.name, at: otherAt };
             break;
@@ -530,6 +638,54 @@ export function resolveFrozen(job: Frozen): Result {
     ...carriedHazards,
     ...castHazards,
   ];
+  const nextModelStats: Record<string, StrategicModelStats> | undefined =
+    job.scenario.trackModelStats
+      ? Object.fromEntries(
+          Object.entries(job.start.extras?.modelStats ?? {}).map(([k, v]) => [k, { ...v }]),
+        )
+      : undefined;
+  const ensureModelStat = (modelId: number): StrategicModelStats => {
+    const key = String(modelId);
+    let entry = nextModelStats?.[key];
+    if (!entry) {
+      entry = { kills: 0, damageDealt: 0 };
+      if (nextModelStats) nextModelStats[key] = entry;
+    }
+    return entry;
+  };
+  const modelStatsObserver: PF1eModelStatsObserver | undefined = nextModelStats
+    ? {
+        onAttackRoll(attackerModelId, hit, critConfirmed) {
+          const rec = ensureModelStat(attackerModelId);
+          if (hit) {
+            rec.hits = (rec.hits ?? 0) + 1;
+            if (critConfirmed) rec.crits = (rec.crits ?? 0) + 1;
+          } else {
+            rec.misses = (rec.misses ?? 0) + 1;
+          }
+        },
+        onDamage(attackerModelId, defenderModelId, netDamage, drAbsorbed, killed) {
+          if (attackerModelId !== null) {
+            const atk = ensureModelStat(attackerModelId);
+            if (netDamage > 0) atk.damageDealt += Math.round(netDamage);
+            if (killed) atk.kills += 1;
+          }
+          if (netDamage > 0 || drAbsorbed > 0) {
+            const def = ensureModelStat(defenderModelId);
+            if (netDamage > 0) def.damageTaken = (def.damageTaken ?? 0) + Math.round(netDamage);
+            if (drAbsorbed > 0)
+              def.damageReduced = (def.damageReduced ?? 0) + Math.round(drAbsorbed);
+          }
+        },
+        onHeal(modelId, healedHp) {
+          if (healedHp > 0) {
+            const rec = ensureModelStat(modelId);
+            rec.healed = (rec.healed ?? 0) + Math.round(healedHp);
+          }
+        },
+      }
+    : undefined;
+
   const march = new MarchReservation(job.scenario.bounds, hazards, job.turnId);
   const wallBlock =
     ctx.walls.x1.length > 0
@@ -538,11 +694,13 @@ export function resolveFrozen(job: Frozen): Result {
       : undefined;
   const rules = createMassBattlePf1e({
     resolvedTurns: job.turnId - 1,
-    simultaneousStride: march.plan.bind(march),
+    planFormationMove: march.planFormation.bind(march),
     reformUnit: (pool, unit, stepBudgetFeet) =>
       march.reformUnit(pool, unit, stepBudgetFeet, wallBlock),
     envelopUnit: (input) => march.envelopUnit(input, wallBlock),
+    stepModel5Ft: march.stepModel5Ft.bind(march),
     ...(hazards.length ? { spellHazards: hazards } : {}),
+    ...(modelStatsObserver ? { modelStatsObserver } : {}),
   });
   let rulesMs = 0;
   const runner = new SimRunnerCore(
@@ -599,8 +757,10 @@ export function resolveFrozen(job: Frozen): Result {
         const curHp = pool.hp[i] ?? maxHp;
         if (curHp < maxHp) {
           const nextHp = Math.min(maxHp, curHp + heal.potency);
+          const deltaHp = nextHp - curHp;
           pool.hp[i] = nextHp;
           if (lethalDmg) lethalDmg[i] = Math.max(0, maxHp - nextHp);
+          if (deltaHp > 0) modelStatsObserver?.onHeal?.(pool.id[i] ?? i, deltaHp);
         }
       }
     }
@@ -661,19 +821,20 @@ export function resolveFrozen(job: Frozen): Result {
     let damageDealt = 0;
     let kills = 0;
     for (const ev of events) {
-      if (ev.kind === "spell_aoe" && ev.unitId === bc.unitId) {
-        targeted = typeof ev.modelsTargeted === "number" ? ev.modelsTargeted : 0;
-        damageDealt = typeof ev.damageDealt === "number" ? ev.damageDealt : 0;
-        kills = typeof ev.kills === "number" ? ev.kills : 0;
-      }
-    }
-    if (targeted === 0) {
-      // Fallback estimate from enemy casualties near blast area if event shape varied
-      for (const r of rows) {
-        if (unitFactionMap.get(r.unitId) !== unitFactionMap.get(bc.unitId) && r.lost > 0) {
-          kills += r.lost;
-          targeted += r.lost;
-          damageDealt += r.lost * 10;
+      if (ev.type === "spell" && ev.unitId === bc.unitId) {
+        const data =
+          typeof ev.data === "object" && ev.data !== null && !Array.isArray(ev.data)
+            ? (ev.data as Record<string, unknown>)
+            : ev;
+        if (data.spellId === undefined || data.spellId === bc.spellId) {
+          targeted = typeof data.modelsTargeted === "number" ? data.modelsTargeted : 0;
+          damageDealt = typeof data.damageDealt === "number" ? data.damageDealt : 0;
+          kills =
+            typeof data.killsCount === "number"
+              ? data.killsCount
+              : typeof data.kills === "number"
+                ? data.kills
+                : 0;
         }
       }
     }
@@ -696,28 +857,51 @@ export function resolveFrozen(job: Frozen): Result {
     });
   });
 
-  // Record hazard-induced conditions on affected units so UI & reconciliation reflect them
-  const activeHazardsNow = [...(job.scenario.hazards ?? []), ...carriedHazards, ...castHazards];
-  if (activeHazardsNow.length > 0) {
-    const endPool = poolFromSnapshot(
-      decodeSimSnapshot(checkpointBytes, STRATEGIC_CODEC).snapshot,
-      checkpointMaxHpMax,
-      PF1E_MODEL_SCHEMA,
-    );
-    units.forEach((unit, idx) => {
-      const at = unitCentroidFromPool(endPool, state[idx]?.range);
-      if (!at) return;
-      for (const hz of activeHazardsNow) {
-        if ((hz.expiresAfterTurn ?? Number.MAX_SAFE_INTEGER) < job.turnId) continue;
-        if (Math.hypot(at.x - hz.at.x, at.y - hz.at.y) <= hz.radius) {
-          const condName = hz.spell === "blackTentacles" ? "Grappled" : "Entangled";
-          const res = nextResources[unit.id] ?? (nextResources[unit.id] = {});
-          const list = res.conditions ?? (res.conditions = []);
-          if (!list.includes(condName)) list.push(condName);
-        }
+  // Recompute hazard-induced conditions from current post-turn positions so exited or expired
+  // hazards clear cleanly while preserving authored launch conditions.
+  const activeHazardsNow = [...(job.scenario.hazards ?? []), ...carriedHazards, ...castHazards].filter(
+    (hz) => (hz.expiresAfterTurn ?? Number.MAX_SAFE_INTEGER) >= job.turnId,
+  );
+  const endPool = poolFromSnapshot(
+    decodeSimSnapshot(checkpointBytes, STRATEGIC_CODEC).snapshot,
+    checkpointMaxHpMax,
+    PF1E_MODEL_SCHEMA,
+  );
+  const endCentroids = new Map<string, Point | null>();
+  units.forEach((unit, idx) => {
+    const scenUnit = scenarioUnits[idx];
+    const authoredConds = new Set(scenUnit?.conditions ?? []);
+    const res = nextResources[unit.id];
+    if (res?.conditions) {
+      res.conditions = res.conditions.filter(
+        (c) => authoredConds.has(c) || (c !== "Entangled" && c !== "Grappled"),
+      );
+    }
+    const at = unitCentroidFromPool(endPool, state[idx]?.range);
+    endCentroids.set(unit.id, at);
+    if (!at) {
+      if (res?.conditions?.length === 0) delete res.conditions;
+      return;
+    }
+    for (const hz of activeHazardsNow) {
+      if (Math.hypot(at.x - hz.at.x, at.y - hz.at.y) <= hz.radius) {
+        const condName = hz.spell === "blackTentacles" ? "Grappled" : "Entangled";
+        const targetRes = res ?? (nextResources[unit.id] = {});
+        const list = targetRes.conditions ?? (targetRes.conditions = []);
+        if (!list.includes(condName)) list.push(condName);
       }
-    });
-  }
+    }
+    if (res?.conditions?.length === 0) delete res.conditions;
+  });
+
+  const aggregatedFxCues = aggregateStrategicFxCues({
+    turnId: job.turnId,
+    explicitCues: fxCues,
+    simEvents: (result.report?.events ?? []) as unknown as readonly RawSimCombatEvent[],
+    startCentroids,
+    endCentroids,
+    ...(job.scenario.fxCoalescence ? { coalescence: job.scenario.fxCoalescence } : {}),
+  });
 
   const publishLeaderActions = job.scenario.actionCards?.playerCharacters !== false;
   const publishUnitActions = job.scenario.actionCards?.units !== false;
@@ -726,11 +910,26 @@ export function resolveFrozen(job: Frozen): Result {
     ...(publishUnitActions ? reactionActions : []),
   ];
 
+  let survivingModelStats: Record<string, StrategicModelStats> | undefined;
+  if (nextModelStats) {
+    survivingModelStats = {};
+    for (let i = 0; i < endPool.count; i++) {
+      if (((endPool.status[i] ?? 0) & ModelStatus.dead) !== 0) continue;
+      const key = String(endPool.id[i]);
+      const rec = nextModelStats[key];
+      if (rec) survivingModelStats[key] = rec;
+    }
+    if (Object.keys(survivingModelStats).length === 0) survivingModelStats = undefined;
+  }
+
   const nextExtras: VersionExtras | undefined =
-    fxCues.length > 0 || Object.keys(nextResources).length > 0
+    aggregatedFxCues.length > 0 ||
+    Object.keys(nextResources).length > 0 ||
+    survivingModelStats !== undefined
       ? {
-          ...(fxCues.length > 0 ? { fxCues } : {}),
+          ...(aggregatedFxCues.length > 0 ? { fxCues: aggregatedFxCues } : {}),
           ...(Object.keys(nextResources).length > 0 ? { unitResources: nextResources } : {}),
+          ...(survivingModelStats ? { modelStats: survivingModelStats } : {}),
         }
       : undefined;
 

@@ -28,7 +28,9 @@ export async function detailRenderer(element: HTMLElement) {
       models: ReadonlyMap<string, ModelMarker>,
       camera: Camera,
       viewport: Viewport,
+      zoomOutUnitToken = false,
     ) {
+      layer.setZoomOutUnitToken(zoomOutUnitToken);
       if (!cached || view !== previousView || models !== previousModels) {
         cached = detailLayer(view, models);
         previousView = view;

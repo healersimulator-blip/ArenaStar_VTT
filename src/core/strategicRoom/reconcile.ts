@@ -89,7 +89,10 @@ export function analyzeBattleReconciliation(
   // Missing deployment pieces (not an edit-after-launch conflict — the doc is gone):
   // units reference armies and scene tokens; record a conflict per missing piece so
   // the preview and the reconciliation audit can show why those writes cannot happen.
-  const missingRecordKeys = new Set<string>();
+  const missingRecordKeys = new Set(
+    conflicts.filter((c) => c.kind === "missing").map((c) => `${c.coll}:${c.id}`),
+  );
+  const currentScene = store.get("scenes", sceneId);
   for (const u of payload.units ?? []) {
     const src = u.source;
     if (!src) continue;
@@ -122,8 +125,7 @@ export function analyzeBattleReconciliation(
       }
     }
     if (src.tokenId) {
-      const scene = store.get("scenes", sceneId);
-      if (scene && !scene.tokens.some((t) => t._id === src.tokenId)) {
+      if (currentScene && !currentScene.tokens.some((t) => t._id === src.tokenId)) {
         const key = `tokens:${src.tokenId}`;
         if (!missingRecordKeys.has(key)) {
           missingRecordKeys.add(key);
@@ -139,23 +141,50 @@ export function analyzeBattleReconciliation(
     }
   }
 
-  // Count real deltas, not "any living unit": a unit "changed" only when the battle
-  // removed models or consumed resources. Conditions are only recounted when the
-  // payload carries the launch-to-finish delta (`conditionsAdded`); a raw
-  // `conditions` list is launch-time truth and can't distinguish a battle-added
-  // condition from a pre-battle one, so it never counts as a change by itself.
+  // Count real deltas against current store state where available.
   let unitChanges = 0;
   let actorResourceChanges = 0;
   for (const u of payload.units ?? []) {
     const spellsSpentTotal = Object.values(u.spellsSpent ?? {}).reduce((sum, n) => sum + n, 0);
     const itemsSpentTotal = Object.values(u.itemsSpent ?? {}).reduce((sum, n) => sum + n, 0);
     const conditionsAdded = u.conditionsAdded?.length ?? 0;
+    let moved = false;
+    const src = u.source;
+    if (u.at && src?.kind === "armyUnit" && src.armyId && src.unitId) {
+      const armyUnit = store.get("armies", src.armyId)?.units.find((cand) => cand._id === src.unitId);
+      const prevAnchor = armyUnit?.profile.anchor as { x?: number; y?: number } | undefined;
+      if (
+        prevAnchor &&
+        typeof prevAnchor.x === "number" &&
+        typeof prevAnchor.y === "number" &&
+        (Math.abs(prevAnchor.x - u.at.x) > 0.05 || Math.abs(prevAnchor.y - u.at.y) > 0.05)
+      ) {
+        moved = true;
+      }
+    } else if (u.at && src?.tokenId && currentScene) {
+      const tok = currentScene.tokens.find((t) => t._id === src.tokenId);
+      if (tok) {
+        const g = Math.max(1, currentScene.grid.size);
+        const nextPxX = Math.round((u.at.x / 5) * g);
+        const nextPxY = Math.round((u.at.y / 5) * g);
+        if (tok.x !== nextPxX || tok.y !== nextPxY) moved = true;
+      }
+    }
+    const hasModelStatsDelta = Boolean(
+      u.modelStatsSummary &&
+        (u.modelStatsSummary.kills > 0 ||
+          u.modelStatsSummary.damageDealt > 0 ||
+          u.modelStatsSummary.damageTaken > 0 ||
+          u.modelStatsSummary.healed > 0),
+    );
     if (
       u.lost > 0 ||
       u.alive !== u.initialStrength ||
+      moved ||
       spellsSpentTotal > 0 ||
       itemsSpentTotal > 0 ||
-      conditionsAdded > 0
+      conditionsAdded > 0 ||
+      hasModelStatsDelta
     ) {
       unitChanges++;
     }
@@ -163,9 +192,17 @@ export function analyzeBattleReconciliation(
       actorResourceChanges++;
     }
   }
-  const sceneChanges =
-    Object.keys(payload.doorStates ?? {}).length +
-    (payload.darkness !== undefined ? 1 : 0);
+  let sceneChanges = 0;
+  for (const [wallId, doorState] of Object.entries(payload.doorStates ?? {})) {
+    const wall = currentScene?.walls.find((w) => w._id === wallId);
+    if (!currentScene || (wall && wall.door !== doorState)) sceneChanges++;
+  }
+  if (
+    payload.darkness !== undefined &&
+    (!currentScene || Math.abs(currentScene.darkness - payload.darkness) > 0.001)
+  ) {
+    sceneChanges++;
+  }
 
   return { conflicts, unitChanges, actorResourceChanges, sceneChanges };
 }
@@ -243,6 +280,12 @@ export function buildBattleReconciliationOps(
               y: Math.round(u.at.y * 100) / 100,
             } as unknown as Json;
           }
+          if (u.modelStats !== undefined) {
+            unitDiff["profile.modelStats"] = u.modelStats as unknown as Json;
+          }
+          if (u.modelStatsSummary !== undefined) {
+            unitDiff["profile.modelStatsSummary"] = u.modelStatsSummary as unknown as Json;
+          }
           const entangleSpent = u.spellsSpent?.["entangle"] ?? 0;
           if (entangleSpent > 0 && typeof armyUnit.stats.entangleSlots === "number") {
             unitDiff["stats.entangleSlots"] = Math.max(0, armyUnit.stats.entangleSlots - entangleSpent);
@@ -258,16 +301,48 @@ export function buildBattleReconciliationOps(
     }
 
     // A token that does not exist in the scene is a missing piece: record it once.
-    if (src?.tokenId && !scene.tokens.some((t) => t._id === src.tokenId)) {
+    const tokenMissing = Boolean(
+      src?.tokenId && !scene.tokens.some((t) => t._id === src.tokenId),
+    );
+    if (tokenMissing && src?.tokenId) {
       bumpMissing(`token:${src.tokenId}`);
+    }
+    if (src?.kind === "token") {
+      if (tokenMissing) {
+        skipUnit = true;
+      } else if (isBlocked("scenes", sceneId)) {
+        skippedConflicts++;
+        skipUnit = true;
+      }
     }
 
     if (!skipUnit && src?.tokenId && !isBlocked("scenes", sceneId)) {
       const token = scene.tokens.find((t) => t._id === src.tokenId);
       if (token) {
         const tokDiff: FlatDiff = record(token.flags?.core)
-          ? { "flags.core.strategicStrength": Math.max(0, u.alive) }
-          : { "flags.core": { strategicStrength: Math.max(0, u.alive) } as unknown as Json };
+          ? {
+              "flags.core.strategicStrength": Math.max(0, u.alive),
+              ...(u.modelStats !== undefined
+                ? { "flags.core.strategicModelStats": u.modelStats as unknown as Json }
+                : {}),
+              ...(u.modelStatsSummary !== undefined
+                ? {
+                    "flags.core.strategicModelStatsSummary":
+                      u.modelStatsSummary as unknown as Json,
+                  }
+                : {}),
+            }
+          : {
+              "flags.core": {
+                strategicStrength: Math.max(0, u.alive),
+                ...(u.modelStats !== undefined
+                  ? { strategicModelStats: u.modelStats }
+                  : {}),
+                ...(u.modelStatsSummary !== undefined
+                  ? { strategicModelStatsSummary: u.modelStatsSummary }
+                  : {}),
+              } as unknown as Json,
+            };
         if (u.alive <= 0) {
           tokDiff.hidden = true;
         } else if (u.at) {

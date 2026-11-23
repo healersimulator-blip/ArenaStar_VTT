@@ -803,17 +803,18 @@
               Doctrine
               <select
                 value={unit.doctrine ?? "advance"}
-                onchange={(ev) =>
+                onchange={(ev) => {
+                  const val = (ev.currentTarget as HTMLSelectElement).value;
                   setDoctrine(
                     unit,
-                    (ev.currentTarget as HTMLSelectElement).value === "hold"
-                      ? "hold"
-                      : "advance",
-                  )}
+                    val === "hold" ? "hold" : val === "off" ? "off" : "advance",
+                  );
+                }}
                 data-doctrine-select={unit._id}
               >
                 <option value="advance">advance (auto-march & engage)</option>
-                <option value="hold">hold (orders only)</option>
+                <option value="hold">hold (defend position)</option>
+                <option value="off">off (manual orders only)</option>
               </select>
             </label>
             <label>

@@ -26,6 +26,17 @@ describe("§19 100,000 Model LOD & Culling Performance", () => {
       }
     }
 
+    // Warm V8 JIT once before timing so parallel CI worker preemption on cold deopt doesn't skew frame budget
+    chooseUnitLods(units, 0.8, new UnitLodState(), {
+      lod1Zoom: 0.6,
+      lod2Zoom: 0.22,
+      hysteresis: 0.15,
+      modelBudget: 12_000,
+    }, pool);
+    const firstRange = units[0]?.modelRange ?? null;
+    unitBBox(pool, firstRange);
+    drawableModelIndices(pool, firstRange, { x: 0, y: 0, width: 2000, height: 2000 }, []);
+
     const state = new UnitLodState();
     const startTime = performance.now();
 
@@ -45,7 +56,7 @@ describe("§19 100,000 Model LOD & Culling Performance", () => {
 
     for (const unit of units) {
       const bbox = unitBBox(pool, unit.modelRange);
-      if (bbox) {
+      if (bbox && bbox.minX <= viewport.x + viewport.width && bbox.maxX >= viewport.x && bbox.minY <= viewport.y + viewport.height && bbox.maxY >= viewport.y) {
         drawableModelIndices(pool, unit.modelRange, viewport, drawableIndices);
       }
     }

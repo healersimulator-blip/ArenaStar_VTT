@@ -95,6 +95,14 @@ export class ModelSpatialHash {
     this.my[idx] = Number.NaN;
   }
 
+  /** Relocate a single model index to `(x, y)` in `O(1)`. */
+  moveModel(idx: number, x: number, y: number): void {
+    this.grow(idx + 1);
+    this.remove(idx);
+    this.insert(idx, x, y);
+    this.version++;
+  }
+
   /** Full rebuild from a pool (snapshot install, scene load, undo resync). */
   rebuild(pool: ModelPool): void {
     this.cells.clear();

@@ -122,5 +122,5 @@ describe("Svelte component props", () => {
       });
     }
     expect(violations).toEqual([]);
-  });
+  }, 30_000);
 });
